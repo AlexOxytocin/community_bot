@@ -1,0 +1,55 @@
+schema_version: 1
+project:
+  id: community_bot
+  documentation_language: ru
+  code_language: en
+
+tracker:
+  provider: jira_cloud
+  transport: atlassian_rovo_mcp
+  site_resolution: connector_discovered
+  project_key: CB
+  board_id: 3
+  credentials_storage: connector_managed
+  transition_rule: discover_exact_transitions_per_issue
+
+repository:
+  remote: https://github.com/alexgoodman53/community_bot
+  stable_branch: main
+  pull_request_base: main
+  task_branch_pattern: task/{issue_key}
+
+memory:
+  provider: mempalace
+  palace: C:\Users\User\.mempalace\palaces\community_bot
+  wing: community_bot
+  canonical_source: git_documentation
+
+roles:
+  developer:
+    enabled: true
+    default: true
+    path: developer
+    idempotency: mutating-with-guard
+    output_schema: community_bot.developer.handoff.v1
+  analyst-architect:
+    enabled: true
+    default: false
+    activation: explicit_user_request
+    path: analyst-architect
+    idempotency: idempotent
+    output_schema: community_bot.analyst_architect.solution.v1
+  plan-reviewer:
+    enabled: true
+    default: false
+    activation: required_for_process_level_3_plan
+    path: plan-reviewer
+    idempotency: idempotent
+    output_schema: community_bot.plan_review.verdict.v1
+  final-review:
+    enabled: true
+    default: false
+    activation: required_after_implementation_report_for_levels_2_and_3_optional_for_level_1
+    path: final-review
+    idempotency: idempotent
+    output_schema: community_bot.final_review.verdict.v1

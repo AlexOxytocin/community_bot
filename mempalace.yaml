@@ -1,20 +1,33 @@
 wing: community_bot
 rooms:
 - name: documentation
-  description: Files from docs/
+  description: Файлы из docs/
   keywords:
   - documentation
   - docs
 - name: src
-  description: Files from src/
+  description: Файлы из src/
   keywords:
   - src
-  - src
+  - source
 - name: testing
-  description: Files from tests/
+  description: Файлы из tests/
   keywords:
   - testing
   - tests
+- name: agents
+  description: Роли агентов, инструкции, процессы и шаблоны
+  keywords:
+  - agents
+  - roles
+  - workflow
+- name: tasks
+  description: Артефакты задач Jira
+  keywords:
+  - tasks
+  - jira
+  - plan
+  - report
 - name: general
-  description: Files that don't fit other rooms
+  description: Файлы, не относящиеся к другим разделам
   keywords: []

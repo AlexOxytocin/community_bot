@@ -1,50 +1,60 @@
-# Community Bot Workspace Instructions
+# Инструкции рабочего пространства Community Bot
 
-## Project purpose
+## Канонические документы
 
-- This workspace contains the Telegram bot for the user's community.
-- Keep product decisions, architecture, and operational knowledge in `docs/`.
-- Update `docs/PROJECT_CONTEXT.md` when a durable requirement or constraint is established.
-- Record meaningful architectural choices in `docs/DECISIONS.md`.
+Перед работой с проектом прочитать и соблюдать:
 
-## Language
+- `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md` — обязательные правила и ограничения;
+- `docs/AGENT_WORKFLOW.md` — жизненный цикл Jira-задачи;
+- `docs/JIRA_WORKFLOW.md` — настройки Jira проекта `CB`;
+- `agents/README.md` — роли агентов и правила их активации.
 
-- Write user-facing reports and project documentation in Russian unless the user asks otherwise.
-- Code identifiers, configuration keys, logs, and runtime error messages must be in English.
+Если документы расходятся, приоритет имеет `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md`, затем актуальная Jira-задача, затем остальные документы проекта.
 
-## Telegram
+## Язык
 
-- Reuse the canonical Telegram tooling from `C:\Users\User\jarvis`; do not create another user-session store.
-- Use `C:\Users\User\.codex\tools\telegram.ps1` for Telegram operations.
-- The canonical connector is `C:\Users\User\jarvis\integrations\telegram`.
-- The canonical shared GramJS session is managed outside this repository.
-- Never copy Telegram credentials, session contents, phone numbers, or pending authentication data into this workspace.
-- Do not read chats, download media, or send messages unless the user explicitly requests that specific action.
-- Before retrying a possibly completed send, check recent messages and avoid duplicates.
-- Bot API credentials, once introduced, must be supplied through local environment variables or a secrets manager and never committed.
+- Русский — обязательный язык всей смысловой документации, Jira-комментариев, планов, отчётов, проверок и пользовательских сообщений.
+- Английский используется для кода, идентификаторов, полей API и базы данных, ключей конфигурации, переменных окружения, логов, сообщений об ошибках во время выполнения, путей, команд и точных названий внешних сущностей.
+- Неполный перевод смыслового артефакта является дефектом и блокирует публикацию в Jira.
 
-## Memory
+## Главные правила
 
-- This project has a dedicated MemPalace at `C:\Users\User\.mempalace\palaces\community_bot`.
-- Use the `community_bot` wing for project knowledge.
-- Do not mix this project's memory with the existing `flatscanner` palace.
-- Mine durable project files only. Never mine `.env`, credentials, Telegram sessions, raw private chats, build output, or temporary files.
-- Treat repository documentation as the source of truth; MemPalace is a retrieval index, not the canonical store.
+- Jira `CB` — источник задач, статусов, приоритетов, связей, блокирующих зависимостей и критериев приёмки.
+- Git-документация — источник долговременных продуктовых, архитектурных и процессных решений.
+- Не использовать ключ Jira в именах, работающих во время выполнения. Допустимо: `task/CB-12`, запрос на слияние и артефакты задачи. Недопустимо: `Cb12Handler`, `CB12_TOKEN`, `test_cb_12.py`.
+- Одна Jira-задача — одна ветка `task/<ISSUE-KEY>`. Не выполнять коммиты задачи напрямую в `main`.
+- Изменения должны соответствовать утверждённой области и сохранять несвязанные пользовательские правки.
+- Не утверждать, что работа завершена, пока не закрыты критерии приёмки, проверки, документация и обязательная финальная проверка.
+- Не хранить секреты, токены, куки, данные сессий или приватные учётные данные в git, Jira, документации, артефактах задач и MemPalace.
+- Внешние изменения выполняются только при ясном намерении пользователя. Перед повтором потенциально частично выполненной операции проверить внешнее состояние и исключить дубликат.
 
 ## Jira
 
-- Use the installed Atlassian Rovo MCP connector for Jira operations; do not introduce local API tokens while MCP access is available.
-- Jira site: `https://alexgoodmanalexgoodman.atlassian.net`.
-- Project key: `CB`; project name: `Community_Bot`.
-- Board URL: `https://alexgoodmanalexgoodman.atlassian.net/jira/software/projects/CB/boards/3`.
-- Read and analyze issues without additional confirmation when requested.
-- Creating, editing, transitioning, linking, commenting on, or logging work against Jira issues requires clear user intent for that change.
-- Never store Atlassian access tokens, account identifiers, or personal profile data in this repository or MemPalace.
+- Канонический доступ: Atlassian Rovo MCP; локальные токены Jira API не создавать.
+- Адрес сайта получать через установленное подключение Atlassian и не дублировать в публичной документации.
+- Проект: `CB` (`Community_Bot`), доска `3`.
+- Анализ без изменений выполняется по запросу без дополнительного подтверждения.
+- Перед переходом получать доступные переходы конкретной задачи и использовать только точные названия, возвращённые Jira.
+- Создание, редактирование, комментирование, связывание и переходы задач требуют ясного пользовательского намерения на соответствующее изменение.
 
-## Development
+## Telegram
 
-- Do not select a framework, database, hosting platform, or bot library until requirements justify the choice.
-- Prefer a small modular monolith for the first production version.
-- Separate Telegram transport, application use cases, domain rules, and infrastructure integrations.
-- Add automated tests for business rules and update documentation with every material behavior change.
-- Preserve unrelated user changes and never commit secrets.
+- Для операций с пользовательским аккаунтом использовать `C:\Users\User\.codex\tools\telegram.ps1` и каноническое подключение `C:\Users\User\jarvis\integrations\telegram`.
+- Не копировать пользовательскую сессию Telegram или учётные данные в этот проект.
+- Не читать чаты, не скачивать медиафайлы и не отправлять сообщения без явного запроса на конкретное действие.
+- Перед повторной отправкой проверять последние сообщения и исключать дубликат.
+- Будущий токен Bot API должен поступать через переменные окружения или хранилище секретов и никогда не попадать в коммиты.
+
+## Память
+
+- Отдельный MemPalace проекта: `C:\Users\User\.mempalace\palaces\community_bot`, область `community_bot`.
+- Документация в git является источником истины; MemPalace — только поисковый индекс.
+- Индексировать долговременные несекретные выводы. Не индексировать `.env`, учётные данные, сессии, необработанные приватные чаты, результаты сборки и временные файлы.
+
+## Разработка
+
+- До появления требований не выбирать язык, библиотеку Telegram, базу данных или размещение по аналогии с другим проектом.
+- Для первой версии предпочитать небольшой модульный монолит и явные границы транспортного, прикладного, доменного и инфраструктурного слоёв.
+- Детерминированные операции, валидацию, права и вычисления реализовывать кодом; LLM применять только там, где нужна работа с естественным языком или неоднозначностью.
+- Для изменяющих операций разделять предварительную проверку, предпросмотр и применение, обеспечивать идемпотентность и защиту от повторной обработки обновлений Telegram.
+- Тесты и документация изменяются вместе с поведением.
