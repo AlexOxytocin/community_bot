@@ -31,6 +31,16 @@
 - Mine durable project files only. Never mine `.env`, credentials, Telegram sessions, raw private chats, build output, or temporary files.
 - Treat repository documentation as the source of truth; MemPalace is a retrieval index, not the canonical store.
 
+## Jira
+
+- Use the installed Atlassian Rovo MCP connector for Jira operations; do not introduce local API tokens while MCP access is available.
+- Jira site: `https://alexgoodmanalexgoodman.atlassian.net`.
+- Project key: `CB`; project name: `Community_Bot`.
+- Board URL: `https://alexgoodmanalexgoodman.atlassian.net/jira/software/projects/CB/boards/3`.
+- Read and analyze issues without additional confirmation when requested.
+- Creating, editing, transitioning, linking, commenting on, or logging work against Jira issues requires clear user intent for that change.
+- Never store Atlassian access tokens, account identifiers, or personal profile data in this repository or MemPalace.
+
 ## Development
 
 - Do not select a framework, database, hosting platform, or bot library until requirements justify the choice.
