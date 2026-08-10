@@ -8,6 +8,7 @@ dependencies = [
     "aiogram>=3,<4",
     "alembic>=1.16,<2",
     "asyncpg>=0.30,<1",
+    "jsonschema>=4,<5",
     "pydantic>=2,<3",
     "pydantic-settings>=2,<3",
     "sqlalchemy[asyncio]>=2,<3",
@@ -74,6 +75,7 @@ ignore = [
     "PLR0915",
     "RUF001",
 ]
+"src/community_bot/transport/telegram/catalog.py" = ["C901", "RUF001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["community_bot"]

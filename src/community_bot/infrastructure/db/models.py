@@ -185,6 +185,77 @@ class ConversationStateModel(Base):
     )
 
 
+class TaskCategoryModel(Base):
+    """Immutable catalog category with an administrative visibility switch."""
+
+    __tablename__ = "task_categories"
+    __table_args__ = (CheckConstraint("sort_order >= 0", name="ck_task_categories_sort_order"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    code: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    icon: Mapped[str | None] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class TaskTemplateModel(Base):
+    """One immutable task template version with a mutable catalog switch."""
+
+    __tablename__ = "task_templates"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_task_templates_code_version"),
+        CheckConstraint("version > 0", name="ck_task_templates_version"),
+        CheckConstraint("credit_reward BETWEEN 1 AND 4", name="ck_task_templates_reward"),
+        CheckConstraint("estimated_minutes BETWEEN 1 AND 120", name="ck_task_templates_minutes"),
+        CheckConstraint("format IN ('online', 'offline', 'any')", name="ck_task_templates_format"),
+        CheckConstraint("minimum_level > 0", name="ck_task_templates_minimum_level"),
+        CheckConstraint("maximum_performers BETWEEN 1 AND 10", name="ck_task_templates_performers"),
+        Index(
+            "uq_task_templates_active_code",
+            "code",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
+        Index(
+            "ix_task_templates_catalog",
+            "category_id",
+            "is_active",
+            "minimum_level",
+            "code",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_categories.id"), nullable=False
+    )
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    creator_instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    performer_instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    completion_criteria: Mapped[str] = mapped_column(Text, nullable=False)
+    input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    result_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    credit_reward: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    format: Mapped[str] = mapped_column(Text, nullable=False)
+    minimum_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    maximum_performers: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    moderation_required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AuditEventModel(Base):
     """Append-only audit record."""
 
