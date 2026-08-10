@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "config_version": 2,
+  "levels": [
+    {"level_number": 1, "experience_required": 0, "display_name": "Первый шаг", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 2, "experience_required": 10, "display_name": "Добрый импульс", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 3, "experience_required": 25, "display_name": "Полезный вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 4, "experience_required": 50, "display_name": "Уверенный вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 5, "experience_required": 100, "display_name": "Весомый вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 6, "experience_required": 180, "display_name": "Сильный вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 7, "experience_required": 300, "display_name": "Значимый вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 8, "experience_required": 450, "display_name": "Большой вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 9, "experience_required": 650, "display_name": "Выдающийся вклад", "description": null, "level_up_message": null, "permissions": {}},
+    {"level_number": 10, "experience_required": 1000, "display_name": "Легенда", "description": null, "level_up_message": null, "permissions": {}}
+  ],
+  "interaction_alert_threshold": 3,
+  "interaction_alert_window_days": 7,
+  "assignment_policy": {
+    "maximum_active_assignments": 3
+  }
+}

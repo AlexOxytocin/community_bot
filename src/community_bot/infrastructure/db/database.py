@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 
 from community_bot.application.member_foundation import FoundationUnitOfWork, UpdateReceipt
 from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.infrastructure.db import assignments as assignment_store
 from community_bot.infrastructure.db import catalog as catalog_store
 from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db import tasks as task_store
@@ -57,6 +58,12 @@ if TYPE_CHECKING:
         RegistrationContext,
     )
     from community_bot.application.tasks import PublishedTask, TaskDraft
+    from community_bot.domain.assignments import (
+        Assignment,
+        AssignmentStatus,
+        ResultVersion,
+        SubmissionDraft,
+    )
     from community_bot.domain.catalog import TemplateDraft
     from community_bot.domain.economy import ProductConfigCandidate, ResolvedLevel
     from community_bot.domain.registration import (
@@ -84,6 +91,10 @@ class Database:
         after_task_inserted: Callable[[], None] | None = None,
         after_task_outbox_staged: Callable[[], None] | None = None,
         after_task_receipt_staged: Callable[[], None] | None = None,
+        after_assignment_inserted: Callable[[], None] | None = None,
+        after_assignment_result_staged: Callable[[], None] | None = None,
+        after_assignment_outbox_staged: Callable[[], None] | None = None,
+        after_assignment_receipt_staged: Callable[[], None] | None = None,
     ) -> SqlAlchemyUnitOfWork:
         """Create a fresh transactional unit of work."""
         return SqlAlchemyUnitOfWork(
@@ -94,6 +105,10 @@ class Database:
             after_task_inserted=after_task_inserted,
             after_task_outbox_staged=after_task_outbox_staged,
             after_task_receipt_staged=after_task_receipt_staged,
+            after_assignment_inserted=after_assignment_inserted,
+            after_assignment_result_staged=after_assignment_result_staged,
+            after_assignment_outbox_staged=after_assignment_outbox_staged,
+            after_assignment_receipt_staged=after_assignment_receipt_staged,
         )
 
     async def dispose(self) -> None:
@@ -114,6 +129,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         after_task_inserted: Callable[[], None] | None = None,
         after_task_outbox_staged: Callable[[], None] | None = None,
         after_task_receipt_staged: Callable[[], None] | None = None,
+        after_assignment_inserted: Callable[[], None] | None = None,
+        after_assignment_result_staged: Callable[[], None] | None = None,
+        after_assignment_outbox_staged: Callable[[], None] | None = None,
+        after_assignment_receipt_staged: Callable[[], None] | None = None,
     ) -> None:
         """Configure an isolated session factory."""
         self._sessions = sessions
@@ -123,6 +142,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         self._after_task_inserted = after_task_inserted
         self._after_task_outbox_staged = after_task_outbox_staged
         self._after_task_receipt_staged = after_task_receipt_staged
+        self._after_assignment_inserted = after_assignment_inserted
+        self._after_assignment_result_staged = after_assignment_result_staged
+        self._after_assignment_outbox_staged = after_assignment_outbox_staged
+        self._after_assignment_receipt_staged = after_assignment_receipt_staged
         self._session: AsyncSession | None = None
         self._committed = False
 
@@ -182,6 +205,179 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     async def acquire_task_command_gate(self, command_id: UUID) -> None:
         """Serialize one task publication or cancellation command."""
         await task_store.acquire_task_command_gate(self._require_session(), command_id)
+
+    async def acquire_assignment_task_gate(self, task_id: UUID) -> None:
+        """Serialize assignment mutations of one task aggregate."""
+        await assignment_store.acquire_task_gate(self._require_session(), task_id)
+
+    async def acquire_assignment_limit_gate(self, member_id: UUID) -> None:
+        """Serialize active-limit decisions for one performer."""
+        await assignment_store.acquire_active_limit_gate(self._require_session(), member_id)
+
+    async def count_active_assignments(self, performer_id: UUID) -> int:
+        """Count assignments occupying the active limit."""
+        return await assignment_store.count_active(self._require_session(), performer_id)
+
+    async def create_assignment(
+        self, *, task_id: UUID, performer_id: UUID, slots: int
+    ) -> Assignment:
+        """Claim the lowest free task slot."""
+        assignment = await assignment_store.create_assignment(
+            self._require_session(), task_id=task_id, performer_id=performer_id, slots=slots
+        )
+        if self._after_assignment_inserted is not None:
+            self._after_assignment_inserted()
+        return assignment
+
+    async def lock_assignment(self, assignment_id: UUID) -> Assignment | None:
+        """Lock one assignment."""
+        return await assignment_store.lock_assignment(self._require_session(), assignment_id)
+
+    async def get_assignment(self, assignment_id: UUID) -> Assignment | None:
+        """Read one assignment without locking it."""
+        return await assignment_store.get_assignment(self._require_session(), assignment_id)
+
+    async def list_assignments(self, performer_id: UUID) -> tuple[Assignment, ...]:
+        """List one performer's assignments."""
+        return await assignment_store.list_assignments(self._require_session(), performer_id)
+
+    async def list_task_assignments(
+        self, task_id: UUID, *, for_update: bool = False
+    ) -> tuple[Assignment, ...]:
+        """List or lock all assignment history of one task."""
+        return await assignment_store.list_task_assignments(
+            self._require_session(), task_id, for_update=for_update
+        )
+
+    async def cancel_assignment(self, assignment_id: UUID, reason: str) -> Assignment:
+        """Cancel an accepted assignment."""
+        return await assignment_store.cancel_assignment(
+            self._require_session(), assignment_id, reason
+        )
+
+    async def append_assignment_result(
+        self,
+        *,
+        assignment_id: UUID,
+        command_id: UUID,
+        payload: dict[str, object],
+        now: datetime.datetime,
+    ) -> ResultVersion:
+        """Append one immutable result version."""
+        result = await assignment_store.append_result(
+            self._require_session(),
+            assignment_id=assignment_id,
+            command_id=command_id,
+            payload=payload,
+            now=now,
+        )
+        if self._after_assignment_result_staged is not None:
+            self._after_assignment_result_staged()
+        return result
+
+    async def get_assignment_result(self, result_id: UUID) -> ResultVersion | None:
+        """Read one immutable assignment result."""
+        return await assignment_store.get_result(self._require_session(), result_id)
+
+    async def get_submission_draft(
+        self, draft_id: UUID, *, for_update: bool = False
+    ) -> SubmissionDraft | None:
+        """Read or lock one durable result-input draft."""
+        return await assignment_store.get_submission_draft(
+            self._require_session(), draft_id, for_update=for_update
+        )
+
+    async def create_or_get_submission_draft(
+        self, *, assignment_id: UUID, performer_id: UUID
+    ) -> SubmissionDraft:
+        """Create or resume one assignment result-input draft."""
+        return await assignment_store.create_or_get_submission_draft(
+            self._require_session(), assignment_id=assignment_id, performer_id=performer_id
+        )
+
+    async def save_submission_draft_payload(
+        self,
+        *,
+        draft_id: UUID,
+        expected_revision: int,
+        payload: dict[str, object],
+    ) -> SubmissionDraft:
+        """Persist a validated preview payload."""
+        return await assignment_store.save_submission_draft_payload(
+            self._require_session(),
+            draft_id=draft_id,
+            expected_revision=expected_revision,
+            payload=payload,
+        )
+
+    async def complete_submission_draft(
+        self, *, draft_id: UUID, result_id: UUID
+    ) -> SubmissionDraft:
+        """Mark a result-input draft as confirmed."""
+        return await assignment_store.complete_submission_draft(
+            self._require_session(), draft_id=draft_id, result_id=result_id
+        )
+
+    async def set_assignment_decision(
+        self,
+        *,
+        assignment_id: UUID,
+        status: AssignmentStatus,
+        command_id: UUID,
+        outcome: str,
+        now: datetime.datetime,
+    ) -> Assignment:
+        """Persist one assignment review transition."""
+        return await assignment_store.set_decision(
+            self._require_session(),
+            assignment_id=assignment_id,
+            status=status,
+            command_id=command_id,
+            outcome=outcome,
+            now=now,
+        )
+
+    async def open_assignment_dispute(
+        self,
+        *,
+        assignment_id: UUID,
+        performer_id: UUID,
+        command_id: UUID,
+        comment: str,
+    ) -> UUID:
+        """Insert one immutable private dispute opening."""
+        return await assignment_store.open_dispute(
+            self._require_session(),
+            assignment_id=assignment_id,
+            performer_id=performer_id,
+            command_id=command_id,
+            comment=comment,
+        )
+
+    async def append_assignment_reliability(
+        self,
+        assignment_id: UUID,
+        event_type: str,
+        actor_id: UUID | None,
+        reason: str | None,
+    ) -> None:
+        """Append an assignment reliability fact."""
+        await assignment_store.append_reliability(
+            self._require_session(), assignment_id, event_type, actor_id, reason
+        )
+
+    async def add_assignment_outbox(
+        self, *, assignment: Assignment, event_type: str, business_key: str
+    ) -> None:
+        """Stage a privacy-minimal assignment event."""
+        await assignment_store.add_outbox(
+            self._require_session(),
+            assignment=assignment,
+            event_type=event_type,
+            business_key=business_key,
+        )
+        if self._after_assignment_outbox_staged is not None:
+            self._after_assignment_outbox_staged()
 
     async def catalog_page(self, *, query: CatalogQuery, level: int) -> CatalogPage:
         """Return one level-aware keyset catalog page."""
@@ -668,6 +864,11 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         await self._require_session().flush()
         if update_type == "task_workflow" and self._after_task_receipt_staged is not None:
             self._after_task_receipt_staged()
+        if (
+            update_type == "assignment_workflow"
+            and self._after_assignment_receipt_staged is not None
+        ):
+            self._after_assignment_receipt_staged()
 
     async def commit(self) -> None:
         """Commit all staged effects and mark the context complete."""

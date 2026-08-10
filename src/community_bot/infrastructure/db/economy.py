@@ -280,6 +280,8 @@ def _stage_economy_batch(
                 credit_delta=command.credit_delta,
                 experience_delta=command.experience_delta,
                 replayed=False,
+                task_id=command.task_id,
+                assignment_id=command.assignment_id,
             )
         )
     return _StagedEconomyBatch(
@@ -339,6 +341,8 @@ def _transaction_model(command: EconomyCommand, transaction_id: UUID) -> Account
         reason=command.reason,
         comment=command.comment,
         reversed_transaction_id=command.reversed_transaction_id,
+        task_id=command.task_id,
+        assignment_id=command.assignment_id,
     )
 
 
@@ -722,6 +726,9 @@ async def _get_active_snapshot(session: AsyncSession) -> _ActiveConfigSnapshot |
             version=model.version,
             content_hash=model.content_hash,
             levels=levels,
+            maximum_active_assignments=int(
+                model.payload_json.get("assignment_policy", {}).get("maximum_active_assignments", 3)
+            ),
         ),
         model=model,
     )
@@ -756,6 +763,9 @@ async def _to_product_config_version(
         version=model.version,
         content_hash=model.content_hash,
         levels=await _load_levels(session, model.id),
+        maximum_active_assignments=int(
+            model.payload_json.get("assignment_policy", {}).get("maximum_active_assignments", 3)
+        ),
     )
 
 
@@ -767,6 +777,7 @@ def _candidate_version(
         version=model.version,
         content_hash=model.content_hash,
         levels=candidate.levels,
+        maximum_active_assignments=candidate.maximum_active_assignments,
     )
 
 
@@ -841,6 +852,8 @@ def _stored_result(
         credit_delta=model.credit_delta,
         experience_delta=model.experience_delta,
         replayed=True,
+        task_id=model.task_id,
+        assignment_id=model.assignment_id,
     )
 
 

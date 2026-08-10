@@ -241,6 +241,7 @@ CB-10 записывает `task.published` и `task.cancelled`. Доставк�
 id PK
 task_id FK
 performer_id FK
+slot_number INTEGER NOT NULL
 status TEXT NOT NULL
 accepted_at TIMESTAMP NOT NULL
 cancelled_at TIMESTAMP NULL
@@ -248,15 +249,11 @@ submitted_at TIMESTAMP NULL
 review_deadline_at TIMESTAMP NULL
 rejected_at TIMESTAMP NULL
 reject_dispute_deadline_at TIMESTAMP NULL
-reviewer_replacement_generation INTEGER NOT NULL DEFAULT 0
-approved_at TIMESTAMP NULL
-result_payload_json NULL
-creator_decision TEXT NULL
-creator_comment TEXT NULL
-idempotency_key UNIQUE NOT NULL
-created_at TIMESTAMP NOT NULL
-updated_at TIMESTAMP NOT NULL
+terminal_command_id UUID UNIQUE NULL
+terminal_outcome TEXT NULL
+cancellation_reason TEXT NULL
 UNIQUE(task_id, performer_id)
+UNIQUE(task_id, slot_number) WHERE status занимает слот
 ```
 
 ### `assignment_result_versions`
@@ -268,7 +265,48 @@ version INTEGER NOT NULL
 payload_json NOT NULL
 submitted_at TIMESTAMP NOT NULL
 UNIQUE(assignment_id, version)
+submit_command_id UUID UNIQUE NOT NULL
 ```
+
+Любая строка назначения сохраняется как история. Только состояние `cancelled`
+освобождает slot и разрешает replacement новой строкой; частичный уникальный
+индекс защищает все остальные состояния. В частности, оплаченный `approved` или
+`partially_approved` slot остаётся занятым и не назначается повторно, пока другой
+slot задачи свободен.
+
+### `assignment_submission_drafts`
+
+```text
+id UUID PK
+assignment_id FK NOT NULL
+performer_id FK NOT NULL
+submit_command_id UUID UNIQUE NOT NULL
+revision INTEGER NOT NULL
+payload_json JSONB NULL
+submitted_result_id FK NULL
+created_at TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+Это сохраняемый Telegram-диалог отправки одной версии результата.
+`submit_command_id` создаётся один раз при начале ввода, предпросмотр изменяется
+только по точной `revision`, а подтверждение связывает черновик с одной
+append-only версией. Для v2 создаётся следующий черновик с новой command identity;
+состояние процесса не хранится в памяти бота.
+
+### `assignment_disputes`
+
+```text
+id UUID PK
+assignment_id FK UNIQUE NOT NULL
+performer_id FK NOT NULL
+comment TEXT NOT NULL
+open_command_id UUID UNIQUE NOT NULL
+opened_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+Запись открытия спора неизменяема. Приватный комментарий не копируется в outbox
+и логи; административное решение добавит CB-13.
 
 ## 5. Экономика
 
@@ -286,6 +324,8 @@ created_by_member_id UUID FK NULL
 reason TEXT NULL
 comment TEXT NULL
 reversed_transaction_id UUID FK UNIQUE NULL
+task_id UUID FK NULL
+assignment_id UUID FK NULL
 created_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
@@ -299,9 +339,8 @@ created_at TIMESTAMP WITH TIME ZONE NOT NULL
 - один участник получает не более одного `starting_grant`;
 - `fraud_reversal` является точной обратной записью и может быть создана для
   исходной операции только один раз;
-- поля `task_id`, `assignment_id` и `interaction_alert_id` появятся вместе с
-  соответствующими таблицами и настоящими внешними ключами, а не как висячие
-  UUID.
+- поля `task_id` и `assignment_id` добавлены CB-11 с настоящими внешними ключами;
+  `interaction_alert_id` появится вместе с таблицей алертов, а не как висячий UUID.
 
 ## 6. Продуктовая конфигурация и уровни
 

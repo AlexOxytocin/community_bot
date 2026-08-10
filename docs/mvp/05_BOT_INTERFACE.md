@@ -52,7 +52,23 @@
 /task_preview               проверить карточку перед публикацией
 /task_cancel <draft_or_task_id>
                             удалить черновик или отменить своё задание
+/my_assignments             мои принятые задания и их состояния
+/assignment_cancel <assignment_id> <причина>
+                            освободить слот до отправки результата
+/assignment_submit <assignment_id>
+                            начать или возобновить сохраняемый ввод результата
+/assignment_result <draft_id> <revision> <result_json>
+                            сохранить предпросмотр перед подтверждением callback
+/assignment_dispute <assignment_id> <комментарий>
+                            открыть приватный спор в доступном окне
 ```
+
+Кнопка принятия использует callback `task:accept:<task_id>`. Решение автора
+передаётся callback `assign:review:<assignment_id>:full|partial|reject`.
+Черновик, его revision и стабильный идентификатор отправки хранятся в
+PostgreSQL, поэтому callback работает после перезапуска процесса. Повтор одного
+Telegram update возвращает сохранённый результат без второй выплаты, версии,
+outbox-события или receipt.
 
 ## 3. Главное меню
 

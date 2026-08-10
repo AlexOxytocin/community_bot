@@ -33,6 +33,7 @@ class ProductConfigVersion:
     version: int
     content_hash: str
     levels: tuple[LevelDefinition, ...]
+    maximum_active_assignments: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class ActiveProductConfig:
     version: int
     content_hash: str
     levels: tuple[LevelDefinition, ...]
+    maximum_active_assignments: int = 3
 
 
 @dataclass(frozen=True, slots=True)
