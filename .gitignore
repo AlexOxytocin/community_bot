@@ -19,3 +19,8 @@ tmp/
 temp/
 logs/
 *.log
+local-secrets/
+.tmp/
+*.session*
+*.pem
+*.key

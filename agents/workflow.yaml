@@ -1,0 +1,219 @@
+schema_version: 1
+workflow_id: community_bot.jira_development.v1
+language: ru
+
+applicability:
+  default_process_levels:
+    - 2
+    - 3
+  level_1: follow_adr_0004_without_jira_or_task_artifact_requirements
+
+source_of_truth:
+  current_work: jira_CB
+  durable_knowledge: git_docs
+  retrieval_index: mempalace_community_bot
+
+phases:
+  - id: intake
+    owner: developer
+    inputs:
+      - jira_issue
+      - comments
+      - links_and_blockers
+      - parent_or_epic
+      - acceptance_criteria
+    gate: issue_context_read
+
+  - id: validation
+    owner: developer
+    outputs:
+      - plan_or_needs_info
+    gate: goal_scope_acceptance_and_verification_are_clear
+    blocked_paths:
+      needs_info:
+        trigger: specific_human_answer_required
+        action: prepare_needs_info_and_stop
+      blocked:
+        trigger: external_dependency_or_technical_gate
+        action: record_blocker_and_stop
+
+  - id: planning_start
+    owner: developer
+    checks:
+      - discover_exact_jira_transitions
+      - clear_user_intent_before_status_change
+      - propose_real_planning_equivalent_when_available
+
+  - id: planning
+    owner: developer
+    required_outputs:
+      - plan.md
+    conditional_outputs:
+      - plan-source-context.md
+      - plan-review.md
+      - test-plan.md
+      - architecture-decision-record
+    gate: plan_is_specific_and_source_grounded
+
+  - id: plan_review
+    owner: plan-reviewer
+    activation: required_for_process_level_3_plan
+    required_inputs:
+      - plan.md
+      - plan-source-context.md
+    conditional_inputs:
+      - proposed_architecture_decision_record
+    outputs:
+      - plan-review.md
+    allowed_statuses:
+      - approved
+      - changes_requested
+      - blocked
+    gate: status_is_approved
+
+  - id: plan_publication
+    owner: developer
+    checks:
+      - show_plan_to_user
+      - show_plan_review_to_user_when_required
+      - show_proposed_adr_to_owner_when_required
+      - record_owner_adr_acceptance_before_implementation
+      - clear_user_intent_before_jira_comment
+      - discover_exact_transition_before_status_change
+      - plan_publication_does_not_start_implementation
+
+  - id: git_preparation
+    owner: developer
+    checks:
+      - preserve_user_changes
+      - refresh_origin_main
+      - create_task_branch_before_edits
+    branch: task/{issue_key}
+
+  - id: implementation_start
+    owner: developer
+    checks:
+      - clear_user_intent_to_start_implementation
+      - discover_exact_jira_transition
+      - move_to_real_in_progress_equivalent_when_available
+      - required_adr_status_is_accepted
+
+  - id: implementation
+    owner: developer
+    checks:
+      - scoped_change
+      - deterministic_rules_in_code
+      - idempotency_for_mutations
+      - tests_updated_with_behavior
+      - documentation_updated
+
+  - id: verification
+    owner: developer
+    checks:
+      - targeted_tests
+      - full_available_regression_suite
+      - key_scenario_smoke
+      - control_recheck
+      - secret_scan
+      - telegram_gates_when_applicable
+
+  - id: report
+    owner: developer
+    required_outputs:
+      - implementation-report.md
+    gate: each_acceptance_and_test_item_has_evidence
+
+  - id: final_review
+    owner: final-review
+    required_inputs:
+      - work_request_or_jira_issue
+      - repository_diff
+      - repository_state
+      - verification_evidence
+      - relevant_documentation
+    level_required_inputs:
+      level_1:
+        - exact_change_description
+      level_2:
+        - jira_issue
+        - plan.md
+        - implementation-report.md
+      level_3:
+        - jira_issue
+        - plan.md
+        - implementation-report.md
+        - plan-source-context.md
+        - plan-review.md
+    conditional_level_3_inputs:
+      - test-plan.md
+      - architecture-decision-record
+    level_outputs:
+      level_1:
+        - direct_verdict
+      level_2:
+        - final-review.md
+      level_3:
+        - final-review.md
+    checks:
+      - determine_process_level_from_adr_0004
+      - verify_all_conditional_gates_for_process_level
+      - require_approved_plan_review_for_level_3
+    allowed_statuses:
+      - approved
+      - changes_requested
+      - blocked
+    gate: status_is_approved
+
+  - id: handoff
+    owner: developer
+    checks:
+      - clear_user_intent_before_remote_mutation
+      - jira_comment_states_exact_external_state
+      - no_automatic_final_transition
+
+  - id: pull_request_validation
+    owner: developer
+    checks:
+      - wait_for_ci_and_code_review
+      - fixes_require_tests_report_update_and_new_final_review
+      - merge_to_main_is_separate_explicit_action
+
+  - id: memory
+    owner: developer
+    checks:
+      - durable_docs_updated
+      - only_non_secret_conclusions_indexed
+
+mutation_policy:
+  jira_read: allowed_when_requested
+  jira_write: clear_user_intent_required
+  telegram_read: explicit_specific_request_required
+  telegram_write: explicit_recipient_and_content_required
+  git_push: clear_user_intent_required
+  pull_request: clear_user_intent_required
+  merge: explicit_user_request_required
+
+branching:
+  task_flow: task/{issue_key} -> main
+  direct_task_changes_to_main: forbidden
+  pull_request_base: main
+  dev_branch_rule: introduce_only_by_accepted_adr_when_parallel_integration_is_needed
+
+artifacts:
+  root: tasks/{issue_key}
+  required_before_code:
+    - plan.md
+  conditional_before_code:
+    - plan-source-context.md
+    - plan-review.md
+    - test-plan.md
+    - implementation-plan.md
+    - architecture-decision-record
+  required_after_code:
+    - implementation-report.md
+    - final-review.md
+  optional_after_code:
+    - implementation-review.md
+  blocking_or_escalation:
+    - needs-info.md
+    - problem-escalation.md

@@ -1,0 +1,33 @@
+schema_version: 1
+role_id: developer
+version: 1.0.0
+enabled: true
+default: true
+idempotency: mutating-with-guard
+output_schema: community_bot.developer.handoff.v1
+language: ru
+inputs:
+  required:
+    - issue_key_or_explicit_work_request
+  optional:
+    - target_scope
+    - manual_qa_required
+    - source_hints
+artifacts:
+  required_before_code:
+    - plan.md
+  conditional_before_code:
+    - plan-source-context.md
+    - plan-review.md
+    - test-plan.md
+    - implementation-plan.md
+    - architecture-decision-record
+  required_after_code:
+    - implementation-report.md
+    - final-review.md
+  optional_after_code:
+    - implementation-review.md
+  blocking_or_escalation:
+    - needs-info.md
+    - problem-escalation.md
+remote_mutations: clear_user_intent_required
