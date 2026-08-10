@@ -123,6 +123,7 @@ async def complete_preview(
     member: MemberModel,
     selected_template_id: UUID,
     update_base: int,
+    performer_slots: int = 1,
 ) -> tuple[UUID, int]:
     draft = await service.start(
         update_id=update_base,
@@ -139,7 +140,7 @@ async def complete_preview(
         datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1),
         (TaskFormat.ONLINE, None),
         {"url": "https://example.com/item"},
-        1,
+        performer_slots,
     ]
     steps = [
         TaskDraftStep.INPUT,

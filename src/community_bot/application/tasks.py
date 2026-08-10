@@ -69,7 +69,8 @@ class PublishedTask:
     """Immutable public task snapshot plus creation-owned lifecycle state."""
 
     id: UUID
-    creator_id: UUID
+    creator_id: UUID | None
+    origin: str
     template_id: UUID
     template_version: int
     title: str
@@ -124,6 +125,7 @@ class TaskUnitOfWork(Protocol):
     async def get_receipt_outcome(self, update_id: int) -> str | None: ...
     async def acquire_task_identity_gate(self, telegram_user_id: int) -> None: ...
     async def acquire_task_command_gate(self, command_id: UUID) -> None: ...
+    async def acquire_assignment_task_gate(self, task_id: UUID) -> None: ...
     async def acquire_catalog_mutation_gate(self) -> None: ...
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
     async def lock_members(self, member_ids: Sequence[UUID]) -> dict[UUID, Member]: ...
@@ -145,6 +147,9 @@ class TaskUnitOfWork(Protocol):
     ) -> PublishedTask: ...
     async def get_task(self, task_id: UUID) -> PublishedTask | None: ...
     async def lock_task(self, task_id: UUID) -> PublishedTask | None: ...
+    async def list_task_assignments(
+        self, task_id: UUID, *, for_update: bool = False
+    ) -> tuple[object, ...]: ...
     async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask: ...
     async def list_owned_tasks(
         self,
@@ -436,7 +441,20 @@ class TaskService:
             preliminary = await uow.get_task(task_id)
             if preliminary is None:
                 raise TaskError("Task does not exist.")
+            if preliminary.creator_id is None:
+                raise PermissionError("Community tasks are managed only by administrators.")
+            await uow.acquire_assignment_task_gate(task_id)
             await uow.acquire_task_command_gate(task_id)
+            task = await uow.lock_task(task_id)
+            if task is None:
+                raise TaskError("Task does not exist.")
+            if task.status is TaskStatus.CANCELLED:
+                raise TaskError("Task is already cancelled.")
+            if task.status is not TaskStatus.PUBLISHED:
+                raise TaskError("Task cannot be cancelled from its current state.")
+            assignments = await uow.list_task_assignments(task.id, for_update=True)
+            if assignments:
+                raise TaskError("Task with assignment history cannot be cancelled.")
             prepared = await uow.economy.prepare_batch(
                 (
                     refund_reward(
@@ -450,13 +468,6 @@ class TaskService:
             if actor.telegram_user_id != actor_telegram_user_id:
                 raise PermissionError("Only the task creator can cancel this task.")
             _require_active(actor)
-            task = await uow.lock_task(task_id)
-            if task is None:
-                raise TaskError("Task does not exist.")
-            if task.status is TaskStatus.CANCELLED:
-                raise TaskError("Task is already cancelled.")
-            if task.status is not TaskStatus.PUBLISHED:
-                raise TaskError("Task cannot be cancelled from its current state.")
             await prepared.apply()
             task = await uow.save_task_status(task_id=task.id, status=TaskStatus.CANCELLED)
             await uow.append_audit_event(

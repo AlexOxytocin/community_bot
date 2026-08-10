@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _CYRILLIC_PATTERN = re.compile("[\u0410-\u044f\u0401\u0451]")
+_ASSIGNMENT_POLICY_CONFIG_VERSION = 2
 
 
 class LevelCandidateModel(BaseModel):
@@ -53,6 +54,14 @@ class LevelCandidateModel(BaseModel):
         return normalized or None
 
 
+class AssignmentPolicyModel(BaseModel):
+    """Strict assignment concurrency policy."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    maximum_active_assignments: int = Field(ge=1)
+
+
 class ProductConfigCandidateModel(BaseModel):
     """Strict schema-v1 product configuration candidate."""
 
@@ -63,6 +72,7 @@ class ProductConfigCandidateModel(BaseModel):
     levels: list[LevelCandidateModel]
     interaction_alert_threshold: int = Field(ge=0)
     interaction_alert_window_days: int = Field(gt=0)
+    assignment_policy: AssignmentPolicyModel | None = None
 
     @model_validator(mode="after")
     def validate_level_scale(self) -> ProductConfigCandidateModel:
@@ -77,6 +87,12 @@ class ProductConfigCandidateModel(BaseModel):
             raise ValueError(message)
         if any(current >= following for current, following in pairwise(thresholds)):
             message = "Level experience thresholds must be strictly increasing."
+            raise ValueError(message)
+        if (
+            self.config_version >= _ASSIGNMENT_POLICY_CONFIG_VERSION
+            and self.assignment_policy is None
+        ):
+            message = "Product configuration v2 requires assignment_policy."
             raise ValueError(message)
         return self
 
@@ -98,6 +114,12 @@ class ProductConfigCandidateModel(BaseModel):
             ),
             interaction_alert_threshold=self.interaction_alert_threshold,
             interaction_alert_window_days=self.interaction_alert_window_days,
+            maximum_active_assignments=(
+                3
+                if self.assignment_policy is None
+                else self.assignment_policy.maximum_active_assignments
+            ),
+            assignment_policy_in_payload=self.assignment_policy is not None,
         )
 
 

@@ -318,7 +318,11 @@ class TaskModel(Base):
     __tablename__ = "tasks"
     __table_args__ = (
         CheckConstraint("origin IN ('member', 'community')", name="ck_tasks_origin"),
-        CheckConstraint("status IN ('published', 'cancelled')", name="ck_tasks_status"),
+        CheckConstraint(
+            "status IN ('published', 'settling', 'expired', 'partially_completed', "
+            "'completed', 'cancelled')",
+            name="ck_tasks_status",
+        ),
         CheckConstraint("credit_reward_per_performer > 0", name="ck_tasks_reward"),
         CheckConstraint("performer_slots BETWEEN 1 AND 10", name="ck_tasks_slots"),
         CheckConstraint("reserved_credit_total >= 0", name="ck_tasks_reserved_nonnegative"),
@@ -397,6 +401,163 @@ class OutboxEventModel(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     published_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AssignmentModel(Base):
+    """One immutable acceptance identity with a mutable lifecycle."""
+
+    __tablename__ = "assignments"
+    __table_args__ = (
+        UniqueConstraint("task_id", "performer_id", name="uq_assignments_task_performer"),
+        CheckConstraint("slot_number > 0", name="ck_assignments_slot_positive"),
+        CheckConstraint(
+            "status IN ('accepted', 'submitted', 'rejected_pending_dispute', 'disputed', "
+            "'approved', 'partially_approved', 'rejected', 'cancelled', 'no_show', "
+            "'reviewer_required')",
+            name="ck_assignments_status",
+        ),
+        Index(
+            "uq_assignments_occupied_slot",
+            "task_id",
+            "slot_number",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('accepted', 'submitted', 'rejected_pending_dispute', "
+                "'disputed', 'reviewer_required', 'approved', 'partially_approved', "
+                "'rejected', 'no_show')"
+            ),
+        ),
+        Index("ix_assignments_performer_status", "performer_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False
+    )
+    performer_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    slot_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="accepted")
+    accepted_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    cancelled_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    review_deadline_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    reject_dispute_deadline_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    reviewed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_command_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True
+    )
+    terminal_outcome: Mapped[str | None] = mapped_column(Text)
+    cancellation_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentResultVersionModel(Base):
+    """Append-only result version submitted by a performer."""
+
+    __tablename__ = "assignment_result_versions"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "version", name="uq_assignment_result_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    submit_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AssignmentSubmissionDraftModel(Base):
+    """Durable Telegram result input and confirmation identity."""
+
+    __tablename__ = "assignment_submission_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False, index=True
+    )
+    performer_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    submit_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    submitted_result_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignment_result_versions.id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AssignmentDisputeModel(Base):
+    """Immutable private dispute opening handed to future moderation."""
+
+    __tablename__ = "assignment_disputes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), unique=True, nullable=False
+    )
+    performer_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    open_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    opened_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ReliabilityEventModel(Base):
+    """Append-only assignment reliability fact."""
+
+    __tablename__ = "reliability_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    supersedes_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("reliability_events.id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class AuditEventModel(Base):
@@ -501,6 +662,10 @@ class AccountTransactionModel(Base):
     comment: Mapped[str | None] = mapped_column(Text)
     reversed_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("account_transactions.id"), unique=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("tasks.id"))
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id")
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

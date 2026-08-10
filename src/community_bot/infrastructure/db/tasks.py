@@ -304,11 +304,10 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
 
 
 def _task(model: TaskModel) -> PublishedTask:
-    if model.creator_id is None:
-        raise TaskError("Community task is outside the member task workflow.")
     return PublishedTask(
         id=model.id,
         creator_id=model.creator_id,
+        origin=model.origin,
         template_id=model.template_id,
         template_version=model.template_version,
         title=model.title,

@@ -715,7 +715,13 @@ async def test_bootstrap_and_standalone_ingest_share_one_gate(
     assert await count(database, ProductConfigVersionModel) == 1
     assert await count(database, ActiveProductConfigModel) == 1
 
-    second_candidate = replace(candidate, config_version=2, interaction_alert_threshold=4)
+    second_candidate = replace(
+        candidate,
+        config_version=2,
+        interaction_alert_threshold=4,
+        maximum_active_assignments=3,
+        assignment_policy_in_payload=True,
+    )
     second_path = tmp_path / "product-config.v2.json"
     second_path.write_text(
         json.dumps(second_candidate.payload(), ensure_ascii=False), encoding="utf-8"

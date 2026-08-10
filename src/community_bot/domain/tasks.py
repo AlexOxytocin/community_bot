@@ -44,6 +44,10 @@ class TaskStatus(StrEnum):
     """Task states owned by the creation workflow."""
 
     PUBLISHED = "published"
+    SETTLING = "settling"
+    EXPIRED = "expired"
+    PARTIALLY_COMPLETED = "partially_completed"
+    COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 
@@ -51,7 +55,7 @@ class TaskStatus(StrEnum):
 class AcceptanceTaskSnapshot:
     """Minimal locked task snapshot used by future assignment composition."""
 
-    creator_id: UUID
+    creator_id: UUID | None
     status: TaskStatus
     minimum_level: int
 

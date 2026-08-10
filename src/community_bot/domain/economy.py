@@ -1,3 +1,4 @@
+# ruff: noqa: PLR0913
 """Economic ledger and product-level domain rules."""
 
 from __future__ import annotations
@@ -59,6 +60,8 @@ class EconomyCommand:
     reason: str | None = None
     comment: str | None = None
     reversed_transaction_id: UUID | None = None
+    task_id: UUID | None = None
+    assignment_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,8 @@ class EconomyMutationResult:
     credit_delta: int
     experience_delta: int
     replayed: bool
+    task_id: UUID | None = None
+    assignment_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +144,8 @@ class ProductConfigCandidate:
     levels: tuple[LevelDefinition, ...]
     interaction_alert_threshold: int
     interaction_alert_window_days: int
+    maximum_active_assignments: int = 3
+    assignment_policy_in_payload: bool = False
 
     @property
     def content_hash(self) -> str:
@@ -159,11 +166,15 @@ class ProductConfigCandidate:
             "interaction_alert_threshold": self.interaction_alert_threshold,
             "interaction_alert_window_days": self.interaction_alert_window_days,
         }
+        if self.assignment_policy_in_payload:
+            projection["assignment_policy"] = {
+                "maximum_active_assignments": self.maximum_active_assignments
+            }
         return _sha256_json(projection)
 
     def payload(self) -> dict[str, Any]:
         """Return the complete immutable payload stored in PostgreSQL."""
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "config_version": self.config_version,
             "levels": [
@@ -180,6 +191,11 @@ class ProductConfigCandidate:
             "interaction_alert_threshold": self.interaction_alert_threshold,
             "interaction_alert_window_days": self.interaction_alert_window_days,
         }
+        if self.assignment_policy_in_payload:
+            payload["assignment_policy"] = {
+                "maximum_active_assignments": self.maximum_active_assignments
+            }
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +237,13 @@ def reserve_reward(
 
 
 def earn_reward(
-    *, member_id: UUID, amount: int, idempotency_key: str, comment: str | None = None
+    *,
+    member_id: UUID,
+    amount: int,
+    idempotency_key: str,
+    comment: str | None = None,
+    task_id: UUID | None = None,
+    assignment_id: UUID | None = None,
 ) -> EconomyCommand:
     """Build a full task reward."""
     return _amount_command(
@@ -234,11 +256,19 @@ def earn_reward(
         amount=amount,
         idempotency_key=idempotency_key,
         metadata=_command_metadata(comment=comment),
+        task_id=task_id,
+        assignment_id=assignment_id,
     )
 
 
 def refund_reward(
-    *, member_id: UUID, amount: int, idempotency_key: str, comment: str | None = None
+    *,
+    member_id: UUID,
+    amount: int,
+    idempotency_key: str,
+    comment: str | None = None,
+    task_id: UUID | None = None,
+    assignment_id: UUID | None = None,
 ) -> EconomyCommand:
     """Build a task reward refund."""
     return _amount_command(
@@ -251,11 +281,19 @@ def refund_reward(
         amount=amount,
         idempotency_key=idempotency_key,
         metadata=_command_metadata(comment=comment),
+        task_id=task_id,
+        assignment_id=assignment_id,
     )
 
 
 def earn_partial_reward(
-    *, member_id: UUID, amount: int, idempotency_key: str, comment: str | None = None
+    *,
+    member_id: UUID,
+    amount: int,
+    idempotency_key: str,
+    comment: str | None = None,
+    task_id: UUID | None = None,
+    assignment_id: UUID | None = None,
 ) -> EconomyCommand:
     """Build the actual partial payout selected by a task workflow."""
     return _amount_command(
@@ -268,11 +306,19 @@ def earn_partial_reward(
         amount=amount,
         idempotency_key=idempotency_key,
         metadata=_command_metadata(comment=comment),
+        task_id=task_id,
+        assignment_id=assignment_id,
     )
 
 
 def earn_community_reward(
-    *, member_id: UUID, amount: int, idempotency_key: str, comment: str | None = None
+    *,
+    member_id: UUID,
+    amount: int,
+    idempotency_key: str,
+    comment: str | None = None,
+    task_id: UUID | None = None,
+    assignment_id: UUID | None = None,
 ) -> EconomyCommand:
     """Build a system-issued community task payout."""
     return _amount_command(
@@ -285,6 +331,8 @@ def earn_community_reward(
         amount=amount,
         idempotency_key=idempotency_key,
         metadata=_command_metadata(comment=comment),
+        task_id=task_id,
+        assignment_id=assignment_id,
     )
 
 
@@ -368,6 +416,8 @@ def normalize_economy_command(command: EconomyCommand) -> EconomyCommand:
         reason=None if command.reason is None else command.reason.strip(),
         comment=None if command.comment is None else command.comment.strip(),
         reversed_transaction_id=command.reversed_transaction_id,
+        task_id=command.task_id,
+        assignment_id=command.assignment_id,
     )
 
 
@@ -391,6 +441,11 @@ def economy_payload_hash(command: EconomyCommand) -> str:
             else str(normalized.reversed_transaction_id)
         ),
     }
+    if normalized.task_id is not None or normalized.assignment_id is not None:
+        projection["task_id"] = None if normalized.task_id is None else str(normalized.task_id)
+        projection["assignment_id"] = (
+            None if normalized.assignment_id is None else str(normalized.assignment_id)
+        )
     return _sha256_json(projection)
 
 
@@ -443,6 +498,8 @@ def _amount_command(
     amount: int,
     idempotency_key: str,
     metadata: _CommandMetadata,
+    task_id: UUID | None = None,
+    assignment_id: UUID | None = None,
 ) -> EconomyCommand:
     if amount <= 0:
         message = "Operation amount must be positive."
@@ -457,6 +514,8 @@ def _amount_command(
         actor_member_id=metadata.actor_member_id,
         reason=metadata.reason,
         comment=metadata.comment,
+        task_id=task_id,
+        assignment_id=assignment_id,
     )
     validate_economy_command(command)
     return normalize_economy_command(command)
