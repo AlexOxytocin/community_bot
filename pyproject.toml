@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2,<3",
     "sqlalchemy[asyncio]>=2,<3",
     "structlog>=25,<26",
+    "tzdata>=2025,<2027",
 ]
 
 [project.scripts]
@@ -67,6 +68,12 @@ ignore = [
     "INP001",
 ]
 "src/community_bot/bootstrap/settings.py" = ["TC002"]
+"src/community_bot/transport/telegram/registration.py" = [
+    "C901",
+    "PLR0911",
+    "PLR0915",
+    "RUF001",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["community_bot"]

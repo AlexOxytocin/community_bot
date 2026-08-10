@@ -35,6 +35,9 @@
 /interaction_alerts
 /product_config
 /audit
+/invite_create [лимит] [дни] [telegram_id]
+/invite_revoke <invitation_id>
+/registration_reject <member_id> <причина>
 ```
 
 ## 3. Главное меню
@@ -179,5 +182,9 @@ payload_json
 expires_at
 updated_at
 ```
+
+Каждое изменяющее сообщение содержит ожидаемый шаг прикладной команды. Сервер
+сначала сериализует update и Telegram user ID, затем повторно читает состояние:
+запоздавший ответ на предыдущий вопрос не применяется к следующему полю.
 
 Просроченный черновик можно восстановить или удалить по выбору пользователя.

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 
 from community_bot.application.member_foundation import FoundationUnitOfWork, UpdateReceipt
 from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db.economy import (
     SqlAlchemyEconomyMutation,
     acquire_product_config_mutation_gate,
@@ -33,6 +34,7 @@ from community_bot.infrastructure.db.models import (
 _UPDATE_LOCK_NAMESPACE = "telegram_update"
 
 if TYPE_CHECKING:
+    import datetime
     from collections.abc import Callable, Sequence
     from types import TracebackType
     from uuid import UUID
@@ -46,7 +48,17 @@ if TYPE_CHECKING:
         ProductConfigVersion,
         ReconciliationMismatch,
     )
+    from community_bot.application.registration import (
+        InvitationSnapshot,
+        ProfileData,
+        RegistrationContext,
+    )
     from community_bot.domain.economy import ProductConfigCandidate, ResolvedLevel
+    from community_bot.domain.registration import (
+        ModerationDecision,
+        ProfileField,
+        RegistrationStep,
+    )
 
 
 class Database:
@@ -121,6 +133,13 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             {"namespace": _UPDATE_LOCK_NAMESPACE, "update_id": update_id},
         )
 
+    async def acquire_registration_identity_gate(self, telegram_user_id: int) -> None:
+        """Serialize registration and profile mutations for one Telegram identity."""
+        await registration_store.acquire_registration_identity_gate(
+            self._require_session(),
+            telegram_user_id,
+        )
+
     @property
     def economy(self) -> SqlAlchemyEconomyMutation:
         """Return the economy adapter bound to this transaction."""
@@ -140,6 +159,190 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         if model is None:
             return None
         return UpdateReceipt(update_id=model.update_id, outcome_code=model.outcome_code)
+
+    async def get_receipt_outcome(self, update_id: int) -> str | None:
+        """Return the exact stored outcome for one Telegram update."""
+        receipt = await self.get_receipt(update_id)
+        return None if receipt is None else receipt.outcome_code
+
+    async def add_registration_receipt(
+        self,
+        *,
+        update_id: int,
+        update_type: str,
+        actor_id: UUID | None,
+        outcome_code: str,
+    ) -> None:
+        """Stage a complete receipt for a registration transport update."""
+        await self.add_receipt(
+            update_id=update_id,
+            update_type=update_type,
+            actor_id=actor_id,
+            outcome_code=outcome_code,
+        )
+
+    async def create_invitation(
+        self,
+        *,
+        code_hash: str,
+        created_by_member_id: UUID,
+        intended_telegram_user_id: int | None,
+        max_uses: int,
+        expires_at: datetime.datetime | None,
+    ) -> UUID:
+        """Insert one hashed invitation."""
+        return await registration_store.create_invitation(
+            self._require_session(),
+            code_hash=code_hash,
+            created_by_member_id=created_by_member_id,
+            intended_telegram_user_id=intended_telegram_user_id,
+            max_uses=max_uses,
+            expires_at=expires_at,
+        )
+
+    async def revoke_invitation(self, invitation_id: UUID) -> bool:
+        """Revoke one invitation under row lock."""
+        return await registration_store.revoke_invitation(self._require_session(), invitation_id)
+
+    async def lock_invitation_by_hash(self, code_hash: str) -> InvitationSnapshot | None:
+        """Lock one invitation by its irreversible token hash."""
+        return await registration_store.lock_invitation_by_hash(self._require_session(), code_hash)
+
+    async def get_registration_context(
+        self,
+        telegram_user_id: int,
+        *,
+        for_update: bool,
+    ) -> RegistrationContext | None:
+        """Read one complete registration context."""
+        return await registration_store.get_registration_context(
+            self._require_session(),
+            telegram_user_id,
+            for_update=for_update,
+        )
+
+    async def create_pending_registration(
+        self,
+        *,
+        invitation: InvitationSnapshot,
+        telegram_user_id: int,
+        telegram_username: str | None,
+        telegram_display_name: str,
+    ) -> RegistrationContext:
+        """Consume an invitation and create a pending registration."""
+        return await registration_store.create_pending_registration(
+            self._require_session(),
+            invitation=invitation,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+            telegram_display_name=telegram_display_name,
+        )
+
+    async def update_registration_username(
+        self,
+        *,
+        member_id: UUID,
+        telegram_username: str | None,
+    ) -> None:
+        """Update a member's mutable Telegram username."""
+        await registration_store.update_registration_username(
+            self._require_session(),
+            member_id=member_id,
+            telegram_username=telegram_username,
+        )
+
+    async def resume_registration_conversation(self, member_id: UUID) -> None:
+        """Resume a registration draft paused by the Telegram user."""
+        await registration_store.resume_registration_conversation(
+            self._require_session(), member_id
+        )
+
+    async def cancel_conversation(self, member_id: UUID) -> bool:
+        """Pause or discard the current conversation without deleting profile data."""
+        return await registration_store.cancel_conversation(self._require_session(), member_id)
+
+    async def save_registration_answer(
+        self,
+        *,
+        member_id: UUID,
+        field: str,
+        value: object,
+        next_step: RegistrationStep,
+    ) -> RegistrationContext:
+        """Save one registration answer and advance the state."""
+        return await registration_store.save_registration_answer(
+            self._require_session(),
+            member_id=member_id,
+            field=field,
+            value=value,
+            next_step=next_step,
+        )
+
+    async def submit_registration(self, member_id: UUID) -> RegistrationContext:
+        """Submit one complete registration draft."""
+        return await registration_store.submit_registration(self._require_session(), member_id)
+
+    async def reopen_rejected_registration(self, member_id: UUID) -> RegistrationContext:
+        """Reopen one rejected registration."""
+        return await registration_store.reopen_rejected_registration(
+            self._require_session(), member_id
+        )
+
+    async def lock_registration_application(self, member_id: UUID) -> RegistrationContext:
+        """Lock one complete registration application."""
+        return await registration_store.lock_registration_application(
+            self._require_session(), member_id
+        )
+
+    async def decide_registration(
+        self,
+        *,
+        member_id: UUID,
+        actor_member_id: UUID,
+        decision: ModerationDecision,
+        comment: str | None,
+    ) -> RegistrationContext:
+        """Persist one registration moderation decision."""
+        return await registration_store.decide_registration(
+            self._require_session(),
+            member_id=member_id,
+            actor_member_id=actor_member_id,
+            decision=decision,
+            comment=comment,
+        )
+
+    async def list_submitted_registrations(self, limit: int) -> tuple[RegistrationContext, ...]:
+        """Return submitted registrations for the moderation queue."""
+        return await registration_store.list_submitted_registrations(self._require_session(), limit)
+
+    async def get_own_profile(self, telegram_user_id: int) -> ProfileData | None:
+        """Return one active member's own profile."""
+        return await registration_store.get_own_profile(self._require_session(), telegram_user_id)
+
+    async def get_conversation_expectation(self, telegram_user_id: int) -> tuple[str, str] | None:
+        """Return the flow and step expected from the next text update."""
+        return await registration_store.get_conversation_expectation(
+            self._require_session(), telegram_user_id
+        )
+
+    async def begin_profile_edit(self, member_id: UUID, field: ProfileField) -> None:
+        """Persist the expected profile edit field."""
+        await registration_store.begin_profile_edit(self._require_session(), member_id, field)
+
+    async def save_profile_edit(
+        self,
+        *,
+        member_id: UUID,
+        expected_field: ProfileField,
+        value: object,
+    ) -> None:
+        """Save one owned profile field through the expected-step gate."""
+        await registration_store.save_profile_edit(
+            self._require_session(),
+            member_id=member_id,
+            expected_field=expected_field,
+            value=value,
+        )
 
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None:
         """Resolve a member by the immutable Telegram identity."""

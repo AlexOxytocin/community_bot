@@ -57,6 +57,12 @@ class MemberModel(Base):
     short_bio: Mapped[str | None] = mapped_column(Text)
     current_goal: Mapped[str | None] = mapped_column(Text)
     availability: Mapped[str | None] = mapped_column(Text)
+    help_categories_json: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    skill_tags_json: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     role: Mapped[str] = mapped_column(Text, nullable=False, default=MemberRole.MEMBER.value)
     status: Mapped[str] = mapped_column(Text, nullable=False, default=MemberStatus.PENDING.value)
     level_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -76,6 +82,104 @@ class MemberModel(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class InvitationModel(Base):
+    """Hashed invitation with an atomic usage allowance."""
+
+    __tablename__ = "invitations"
+    __table_args__ = (
+        CheckConstraint("max_uses > 0", name="ck_invitations_max_uses"),
+        CheckConstraint(
+            "uses_count >= 0 AND uses_count <= max_uses",
+            name="ck_invitations_uses_count",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    code_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    created_by_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    intended_telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    uses_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class InvitationRedemptionModel(Base):
+    """One member account created through one invitation."""
+
+    __tablename__ = "invitation_redemptions"
+    __table_args__ = (
+        UniqueConstraint("invitation_id", "member_id", name="uq_invitation_redemption_pair"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    invitation_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("invitations.id"), nullable=False
+    )
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), unique=True, nullable=False
+    )
+    redeemed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RegistrationApplicationModel(Base):
+    """Current moderation state of a member registration."""
+
+    __tablename__ = "registration_applications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'submitted', 'approved', 'rejected')",
+            name="ck_registration_applications_status",
+        ),
+    )
+
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    consented_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    review_comment: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConversationStateModel(Base):
+    """Persistent resumable Telegram conversation state."""
+
+    __tablename__ = "conversation_states"
+
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), primary_key=True
+    )
+    flow_type: Mapped[str] = mapped_column(Text, nullable=False)
+    current_step: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )

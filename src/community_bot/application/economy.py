@@ -17,7 +17,7 @@ from community_bot.domain.members import AuthorizationError, Member, MemberRole,
 
 if TYPE_CHECKING:
     import datetime
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
     from uuid import UUID
@@ -116,6 +116,28 @@ class EconomyMutationPort(Protocol):
 
     async def apply_one(self, command: EconomyMutationCommand) -> EconomyMutationResult:
         """Apply a single command through the same batch protocol."""
+        ...
+
+    async def prepare_batch(
+        self,
+        commands: Sequence[EconomyMutationCommand],
+        *,
+        additional_member_ids: Sequence[UUID] = (),
+    ) -> PreparedEconomyBatch:
+        """Acquire economy gates and member locks without applying effects."""
+        ...
+
+
+class PreparedEconomyBatch(Protocol):
+    """Economy batch whose gates and complete member lock scope are held."""
+
+    @property
+    def members(self) -> Mapping[UUID, Member]:
+        """Return immutable snapshots of every locked member."""
+        ...
+
+    async def apply(self) -> tuple[EconomyMutationResult, ...]:
+        """Apply or replay the batch inside the caller-owned transaction."""
         ...
 
 
