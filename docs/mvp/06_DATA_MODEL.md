@@ -96,7 +96,6 @@ estimated_minutes INTEGER NOT NULL
 format TEXT NOT NULL
 minimum_level INTEGER NOT NULL
 maximum_performers INTEGER NOT NULL DEFAULT 1
-repeat_limit_per_pair INTEGER NOT NULL
 moderation_required BOOLEAN NOT NULL
 is_active BOOLEAN NOT NULL
 created_at NOT NULL
@@ -109,19 +108,31 @@ UNIQUE(code, version)
 
 ```text
 id PK
-template_id FK
-template_version INTEGER NOT NULL
-creator_id FK
+origin TEXT NOT NULL CHECK(origin IN ('member', 'community'))
+template_id FK NULL
+template_version INTEGER NULL
+creator_id FK NULL
+created_by_admin_id FK NULL
+reviewer_admin_id FK NULL
+author_display_name TEXT NOT NULL
+category_id FK NOT NULL
 title NOT NULL
 description NOT NULL
+completion_criteria NOT NULL
+materials_json NOT NULL
 input_payload_json NOT NULL
 credit_reward_per_performer INTEGER NOT NULL
 performer_slots INTEGER NOT NULL
 reserved_credit_total INTEGER NOT NULL
+estimated_minutes INTEGER NOT NULL
+minimum_level INTEGER NOT NULL
 format TEXT NOT NULL
 city NULL
 deadline_at TIMESTAMP NOT NULL
 status TEXT NOT NULL
+safety_snapshot_json JSON NOT NULL
+high_reward_justification TEXT NULL
+high_reward_confirmed_by_admin_id FK NULL
 published_at TIMESTAMP NULL
 created_at TIMESTAMP NOT NULL
 updated_at TIMESTAMP NOT NULL
@@ -137,6 +148,10 @@ status TEXT NOT NULL
 accepted_at TIMESTAMP NOT NULL
 cancelled_at TIMESTAMP NULL
 submitted_at TIMESTAMP NULL
+review_deadline_at TIMESTAMP NULL
+rejected_at TIMESTAMP NULL
+reject_dispute_deadline_at TIMESTAMP NULL
+reviewer_replacement_generation INTEGER NOT NULL DEFAULT 0
 approved_at TIMESTAMP NULL
 result_payload_json NULL
 creator_decision TEXT NULL
@@ -174,6 +189,7 @@ idempotency_key UNIQUE NOT NULL
 created_by_member_id FK NULL
 comment TEXT NULL
 reversed_transaction_id FK NULL
+interaction_alert_id FK NULL
 created_at TIMESTAMP NOT NULL
 ```
 
@@ -184,19 +200,60 @@ created_at TIMESTAMP NOT NULL
 - кэш баланса и опыта обновляется в той же транзакции;
 - периодическая сверка сравнивает кэш с суммой журнала.
 
-## 6. Уровни
+## 6. Продуктовая конфигурация и уровни
+
+### `product_config_versions`
+
+```text
+id PK
+version INTEGER UNIQUE NOT NULL
+config_hash TEXT UNIQUE NOT NULL
+payload_json JSON NOT NULL
+created_by_member_id FK NOT NULL
+created_at TIMESTAMP NOT NULL
+```
+
+Версия неизменяема. Повторная загрузка той же пары `version + config_hash`
+идемпотентна; коллизия номера или повтор снимка под новым номером отклоняется.
+
+### `product_config_activations`
+
+```text
+id PK
+activation_command_id UUID UNIQUE NOT NULL
+product_config_version_id FK NOT NULL
+activated_by_member_id FK NOT NULL
+activated_at TIMESTAMP NOT NULL
+```
+
+### `active_product_config`
+
+```text
+singleton_key BOOLEAN PK CHECK(singleton_key)
+product_config_version_id FK NOT NULL
+activation_id FK NOT NULL
+updated_at TIMESTAMP NOT NULL
+```
+
+Активация одной транзакцией создаёт историю команды и переключает единственную
+строку-указатель. Откат — новая строка активации к старой неизменяемой версии.
 
 ### `levels`
 
 ```text
-level_number INTEGER PK
-experience_required INTEGER UNIQUE NOT NULL
+product_config_version_id FK NOT NULL
+level_number INTEGER NOT NULL
+experience_required INTEGER NOT NULL
 display_name TEXT NOT NULL
 description TEXT NULL
 level_up_message TEXT NULL
 permissions_json NOT NULL
-is_active BOOLEAN NOT NULL
+PRIMARY KEY(product_config_version_id, level_number)
+UNIQUE(product_config_version_id, experience_required)
 ```
+
+`members.level_number` — восстанавливаемый кэш. Все проверки доступа сверяют
+активную версию через `LevelResolver`; backfill после активации идемпотентен.
 
 ## 7. Карма
 
@@ -261,6 +318,68 @@ ends_at TIMESTAMP NULL
 created_by_member_id FK NOT NULL
 revoked_at TIMESTAMP NULL
 ```
+
+### `interaction_alerts`
+
+```text
+id PK
+pair_member_low_id FK NOT NULL
+pair_member_high_id FK NOT NULL
+episode_number INTEGER NOT NULL
+status TEXT NOT NULL
+opened_at TIMESTAMP NOT NULL
+closed_at TIMESTAMP NULL
+count_at_open INTEGER NOT NULL
+latest_count INTEGER NOT NULL
+window_seconds INTEGER NOT NULL
+threshold INTEGER NOT NULL
+opening_config_version_id FK NOT NULL
+latest_config_version_id FK NOT NULL
+outcome TEXT NULL
+private_meeting_notes TEXT NULL
+resolved_by_member_id FK NULL
+UNIQUE(pair_member_low_id, pair_member_high_id, episode_number)
+```
+
+Частичный уникальный индекс разрешает не более одного открытого алерта на
+неупорядоченную пару. Создание и обновление сериализуются блокировкой пары.
+
+### `interaction_alert_assignments`
+
+```text
+interaction_alert_id FK NOT NULL
+assignment_id FK NOT NULL
+counted_at TIMESTAMP NOT NULL
+PRIMARY KEY(interaction_alert_id, assignment_id)
+```
+
+### `interaction_alert_penalties`
+
+```text
+interaction_alert_id FK NOT NULL
+member_id FK NOT NULL
+account_transaction_id FK UNIQUE NOT NULL
+idempotency_key TEXT UNIQUE NOT NULL
+created_at TIMESTAMP NOT NULL
+PRIMARY KEY(interaction_alert_id, member_id)
+```
+
+Приватные заметки доступны только активным администраторам с правом
+`interaction_review` и исключаются из прикладных логов и уведомлений.
+
+### `reliability_events`
+
+```text
+id PK
+assignment_id FK NOT NULL
+event_type TEXT NOT NULL
+supersedes_event_id FK NULL
+reason TEXT NULL
+created_by_member_id FK NULL
+created_at TIMESTAMP NOT NULL
+```
+
+Коррекция `no_show` добавляет событие, а не изменяет или удаляет исходное.
 
 ## 9. Уведомления и диалоги
 
@@ -341,8 +460,33 @@ processed_at TIMESTAMP WITH TIME ZONE NOT NULL
 Минимально необходимы индексы:
 
 - задания по `status`, `deadline_at`, `template_id`;
+- задания по `origin`, `status`, `reviewer_admin_id`;
 - выполнения по `performer_id`, `status`;
+- выполнения по `review_deadline_at`, `reject_dispute_deadline_at`;
 - транзакции по `member_id`, `created_at`;
 - участники по `status`, `experience_total_cached`;
 - уведомления по `status`, `scheduled_at`;
 - споры по `status`, `opened_at`.
+- алерты по неупорядоченной паре и частичный уникальный индекс открытого статуса;
+- версии конфигурации по `version` и `config_hash`, активации по идентификатору команды.
+
+## 13. Миграционные последствия принятых решений
+
+CB-4 фиксирует концептуальную модель и не добавляет миграции. Будущие задачи
+реализации должны атомарно и обратно совместимо добавить:
+
+1. Неизменяемые версии продуктовой конфигурации, историю активаций, единственный
+   активный указатель и привязанные к версии уровни с backfill кэша участников.
+2. `origin`, nullable-связи пользовательского шаблона и автора, снимок требований
+   безопасности, независимого проверяющего и подтверждение большой награды для
+   задания сообщества.
+3. Пер-слотовые сроки проверки и отклонения, состояние `reviewer_required`,
+   поколения замены проверяющего и append-only коррекции надёжности.
+4. Алерты пары, связи с оплаченными слотами, исход встречи, приватные заметки и
+   уникальные идемпотентные штрафы.
+5. Тип `community_task_reward` и ссылки операций `penalty` на алерт без изменения
+   существующих записей журнала.
+
+До переключения чтения миграция должна заполнить `origin=member` для текущих
+заданий и создать первую валидную активную версию конфигурации. Ни один backfill
+не должен переписывать append-only журналы или историю аудита.
