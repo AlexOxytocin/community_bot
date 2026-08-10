@@ -1,76 +1,62 @@
-# CB-4 — третье ревью плана
+# CB-4 — независимое повторное ревью плана
 
 Status: approved
 
 ## Проверенные источники
 
-- Актуальная Jira `CB-4`: описание, критерии приёмки, статус `К выполнению`, отсутствие комментариев, родитель `CB-2`, связи `Blocks` с `CB-7` и `CB-9`.
-- Актуальная Jira `CB-2`: описание эпика, статус `В работе`, область и критерии успеха.
-- `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md`.
-- `docs/AGENT_WORKFLOW.md`.
-- `docs/JIRA_WORKFLOW.md`.
-- ADR-0001–ADR-0006, включая ADR-0004 о процессе уровня 3.
-- `docs/mvp/README.md`.
-- `docs/mvp/01_PRODUCT_REQUIREMENTS.md`.
-- `docs/mvp/02_DOMAIN_RULES.md`.
-- `docs/mvp/03_USER_FLOWS.md`.
-- `docs/mvp/04_TASK_CATALOG.md`.
-- `docs/mvp/05_BOT_INTERFACE.md`.
-- `docs/mvp/06_DATA_MODEL.md`.
-- `docs/mvp/08_MODERATION_AND_ABUSE.md`.
-- `docs/mvp/09_IMPLEMENTATION_PLAN.md`.
-- `docs/mvp/10_TEST_PLAN.md`.
-- `docs/mvp/11_DECISIONS_AND_OPEN_QUESTIONS.md`.
-- `docs/mvp/TECH_STACK.md`.
-- `agents/README.md`, инструкция, README и шаблон роли `plan-reviewer`.
-- Актуальные `tasks/CB-4/plan-source-context.md`, `plan.md`, `test-plan.md` и `needs-info.md`.
+- Актуальная Jira `CB-4`: описание и критерии приёмки, статус `К выполнению`, приоритет `Medium`, родитель `CB-2`, связи `Blocks` с `CB-7` и `CB-9`, отсутствие вложений и исторический комментарий `10026`.
+- Актуальная Jira `CB-2`: область эпика, статус `В работе` и критерии успеха.
+- `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md`, `docs/AGENT_WORKFLOW.md`, `docs/JIRA_WORKFLOW.md`.
+- ADR-0001–ADR-0006, включая обязательный для уровня 3 ADR-0004, а также ADR-0005 и ADR-0006.
+- Полный пакет MVP, перечисленный в `plan-source-context.md`: `README.md`, `01_PRODUCT_REQUIREMENTS.md`, `02_DOMAIN_RULES.md`, `03_USER_FLOWS.md`, `04_TASK_CATALOG.md`, `05_BOT_INTERFACE.md`, `06_DATA_MODEL.md`, `08_MODERATION_AND_ABUSE.md`, `09_IMPLEMENTATION_PLAN.md`, `10_TEST_PLAN.md`, `11_DECISIONS_AND_OPEN_QUESTIONS.md`, `TECH_STACK.md`.
+- `agents/README.md` и контракт роли `plan-reviewer`.
+- Актуальные `tasks/CB-4/plan-source-context.md`, `plan.md`, `test-plan.md`, `needs-info.md` и предыдущий verdict.
 
-Все обязательные источники перечитаны. Непрочитанных барьеров, конфликтов источников и секретов в пакете не обнаружено.
+Все обязательные источники перечитаны на текущем snapshot. Jira snapshot в `plan-source-context.md` соответствует данным API. Секретов, непрочитанных вложений и внешних информационных барьеров нет.
 
-## Область задачи
+## Вердикт
 
-План соответствует Jira и уровню 3 по ADR-0004. В область входят только выбор владельцем восьми продуктовых правил и последующая синхронизация документации. Python-код, реальные миграции, seed, Telegram runtime и worker не выполняются в CB-4; их последствия сформулированы как проверяемые требования к следующим Jira-задачам.
+План соответствует документационной области CB-4 и уровню 3 по ADR-0004. Новый ADR не требуется: решения конкретизируют продуктовые и доменные правила внутри уже принятого модульного монолита, PostgreSQL, ledger/outbox и idempotency-модели.
 
-Новый ADR не требуется. Пакет выбирает продуктовые значения и доменные инварианты внутри уже принятых ADR-0005 и ADR-0006. `LevelResolver`, версионирование шкалы и snapshot антифарм-политики не создают нового сервиса, хранилища или внешней интеграции.
+Предыдущее `changes_requested` полностью снято:
 
-## Логика решения
+1. Immutable config ingest имеет идентичность `product_config_version:{config_version}:{payload_hash}`, а команда переключения — отдельную идентичность `activate_product_config:{activation_command_id}`. Rollback является новой командой активации уже существующей версии; retry, конфликт target и already-active no-op определены без повторного backfill.
+2. `reject` заменяет обычную review/autoconfirm-ветку состоянием `rejected_pending_dispute`. Его отдельное полуоткрытое окно допускает dispute и после исходного review deadline, а dispute и finalizer сериализуются одним assignment lock и дают ровно один финансовый исход.
+3. После потери независимого reviewer назначение валидной замены немедленно разрешает manual review и открывает новое полуоткрытое 72-часовое окно с напоминаниями через 24/48 часов и autoconfirm на границе. Добровольная замена всё ещё валидного reviewer исходный срок не продлевает.
 
-- Q-002/Q-003 задают десять уровней, точные строго возрастающие пороги и несубъектные названия уровней 1–9; `Легенда` сохранена из D-006. Одна active scale и version-aware `LevelResolver` исключают влияние stale cache на профиль, `minimum_level`, acceptance, leaderboard, notifications и будущие level-dependent решения. Перекалибровка не изменяет ledger.
-- Q-004 однозначно задаёт 5 кредитов после первого одобрения, нулевой опыт и уникальность гранта по участнику при разных Telegram updates, callback и restart.
-- Q-007 разделяет reserve slices мест, точную границу дедлайна, `settling`, итоговые агрегатные состояния и append-only коррекцию `no_show` без переписывания assignment, audit или скрытой выплаты.
-- Q-008 задаёт полуоткрытое review-окно, точную границу ручного решения и autoconfirm, сериализацию dispute/autoconfirm, неизменяемый первый `submitted_at`, append-only дополнения и подавление напоминаний.
-- Q-009 применяет детерминированную целочисленную формулу к резерву одного assignment; выплаты 2→1, 3→2, 4→2 и инвариант `paid + refund = reserved` согласованы.
-- Q-010 задаёт неупорядоченную пару, стабильный `template.code`, якорь `accepted_at`, окно `(T - 30 суток, T)`, полный набор учитываемых и исключаемых исходов, конкурентную блокировку и policy snapshot без сброса истории.
-- Q-012 закрывает свободный `community_bonus`, направляет общественные действия через фиксированный каталог и ограничивает идемпотентный `admin_adjustment` активным администратором с отдельным правом, причиной и аудитом.
+План теперь задаёт один непротиворечивый результат для конкурентных операций, точных временных границ, retry, rollback и отказов. Обязательных исправлений нет.
 
-Формулы, временные границы и переходы внутренне непротиворечивы и реализуемы на PostgreSQL с принятыми транзакционными правилами.
+## Проверка решений Q-002–Q-012
 
-## Альтернативы и риски
+| Вопрос | Результат независимой проверки |
+|---|---|
+| Q-002/Q-003 | Десять уровней, названия и пороги согласованы с D-006. Единственный runtime source of truth — immutable DB versions и atomic active pointer; внешний config является только кандидатом ingest. Version-aware `LevelResolver`, activation/backfill и stale-cache правила покрывают profile, `minimum_level`, acceptance, leaderboard и notifications без ручной миграции опыта. |
+| Q-004 | Однократный грант 5 кредитов после первого approval, 0 опыта и business-idempotency на участника заданы точно. |
+| Q-007 | UTC-граница `now >= deadline`, per-slot reserve только для member origin, отсутствие reserve для community origin, `settling` и terminal aggregates, а также append-only коррекция `no_show` согласованы. |
+| Q-008 | Обычное окно `[submitted_at, review_deadline_at)`, границы manual/autoconfirm, result versions, suppression напоминаний и отдельная reject/dispute-ветка определены без временной или финансовой коллизии. |
+| Q-009 | `ceil(reward × 50 / 100)`, запрет partial при reward 1 и примеры для 2/3/4/5/11 точны. Member payout/refund исчерпывает reserve slice одного assignment; community issuance выпускает только фактическую выплату; опыт равен ей. |
+| Q-010 | Жёсткого лимита нет. Окно `(T-window,T]`, crossing, pair lock, один глобальный open alert, policy switch, close/disarm/re-arm, privacy и dedup определены точно. Meeting outcome и допустимые penalties выполняются одной атомарной идемпотентной командой, не затрагивая reserve и опыт. |
+| Q-012 | `origin=community`, immutable admin-authored card, общий catalog с сохранением safety guardrails, override reward выше 4, независимый reviewer, lifecycle cancel/review/reject/dispute/autoconfirm и `community_task_reward` без личного admin balance/reserve описаны полностью. |
 
-Для каждого Q указаны причина, выбранное правило и отклонённые варианты. План не подменяет решение владельца: пороги, названия, 5 кредитов, 72 часа, 50%, лимит 2 и окно 30 суток остаются предлагаемым единым пакетом до явного подтверждения.
+Формулировка `needs-info.md` о новом «минимальном 24-часовом окне» является кратким нижним ограничением, а не альтернативной нормой: файл явно направляет за полными правилами к `plan.md`, где фиксировано ровно новое окно 72 часа, immediate manual review и напоминания 24/48. Для исполнителя вариативности не остаётся.
 
-Риски ускоренного роста, автоподтверждения, округления partial, обхода антифарма, скрытой инфляции и рассинхронизации документации сопоставлены с конкретными мерами. Необоснованного расширения MVP нет.
+## Совместимость и последствия
 
-## Стратегия проверки
+- D-007 сохранён как правило authoring для member-task и датированно дополняется ограниченным `community` origin. Все остальные catalog safety guardrails продолжают действовать.
+- D-008 сохраняет append-only journal и дополняется типами `community_task_reward` и `penalty`; прямого редактирования баланса, отрицательного баланса, скрытого reserve или изменения опыта нет.
+- Q-007/Q-009 используют разные финансовые источники строго по origin: member reserve slice против system issuance. Lifecycle matrix не допускает одновременно refund и payout/issuance.
+- Миграционные последствия перечисляют config versions, activation commands/outcomes, active pointer/backfill, review/reject deadlines, reviewer-required transition, origin-specific constraints, alert episode/pair indexes и уникальные business keys. Они достаточны для последующего планирования реализации и не проектируют миграции вне области CB-4.
+- Docs-impact охватывает журнал решений, PRD, domain rules, flows, catalog, interface, data model, moderation, implementation/test plans и ADR index; старые противоположные гипотезы должны быть удалены в заданном порядке.
 
-`test-plan.md` покрывает все критерии Jira:
+## Проверки и критерии Jira
 
-- отсутствие восьми закрываемых Q в разделе открытых вопросов и наличие датированных решений;
-- каждую пару `threshold - 1`/`threshold`, верхнюю границу уровня 10 и конкурентное переключение active scale;
-- конкурентный `starting_grant` при разных transport updates и restart;
-- многоместное истечение, submission/expiration race и append-only коррекцию `no_show`;
-- точные границы review, dispute/autoconfirm, result versions и напоминания;
-- partial одного reserve slice и duplicate concurrency;
-- состав, временную границу, направление, версию и конкурентность антифарм-лимита;
-- отсутствие `community_bonus`, авторизацию, аудит и идемпотентность `admin_adjustment`;
-- миграционные последствия, будущие тесты, консистентность десяти документов, Markdown-ссылки, `git diff --check`, язык и секреты.
+Все критерии Jira проверяемы будущим исполнителем:
 
-Проверки различают обе стороны значимых границ и доказывают ожидаемый результат, а не только наличие чисел в Markdown.
-
-## Обязательные исправления
-
-Нет.
+- Q-002/Q-003/Q-004/Q-007/Q-008/Q-009/Q-010/Q-012 имеют выбранное решение, причину, отклонённые варианты и точные границы.
+- 23 сценария покрывают все threshold boundaries, concurrent starting grant, submission/expiration, admin adjustment, ingest/activation/rollback, ordinary и reject deadlines, partial, alert policy episodes, privacy/penalty, полный community lifecycle и reviewer replacement.
+- Сценарии 2, 7 и 17 прямо доказывают закрытие трёх последних замечаний, включая retry после rollback, dispute за исходным review deadline и обе стороны нового replacement window.
+- Сценарии 19–23 покрывают синхронизацию документов, миграционные последствия, ссылки, `git diff --check`, язык и отсутствие секретов.
 
 ## Остаточные риски
 
-Остаётся только продуктовый риск выбранных значений и названий. Его должен явно принять либо изменить владелец. `Status: approved` разрешает показать пакет владельцу, но не принимает решения за него, не разрешает менять Jira и не запускает синхронизацию канонической документации автоматически.
+Остаются только уже признанные риски пилота: темп роста уровней, инфляция community rewards, злоупотребление autoconfirm и нагрузка от alert episodes. План не маскирует их: параметры версионируются, выплаты и штрафы журналируются, community issuance требует карточку и подтверждённый assignment, а alert не является автоматическим доказательством нарушения. Эти риски требуют наблюдения после реализации, но не дополнительного продуктового решения для утверждения плана CB-4.
