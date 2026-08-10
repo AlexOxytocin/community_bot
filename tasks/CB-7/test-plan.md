@@ -50,16 +50,16 @@
 | 17 | Concurrent first activation | На пустом pointer одновременно разные commands/targets; отдельно concurrent retry одной command | Fixed gate создаёт один pointer и последовательную history; каждый command имеет детерминированный stored outcome, без IntegrityError | concurrent PostgreSQL test |
 | 18 | Activation authorization/invalid | Member, moderator, inactive admin и active admin с неизвестной version | Все invalid/unauthorized случаи без activation/audit/pointer/cache mutation | unit + integration |
 | 19 | Bootstrap coordinator | Existing active без candidate; invalid candidate при active; first bootstrap без candidate; valid candidate с active admin; valid candidate без/с inactive/non-admin actor; retry stable command ID | Ровно четыре контрактных исхода; нет hidden role grant/auto-generated retry ID; unauthorized/invalid ничего не записывают | application + PostgreSQL integration |
-| 20 | Единый config lock order | Concurrent bootstrap coordinator против standalone ingest и activation с тем же actor и разными command IDs/targets | Все пути берут `product_config_mutation → actor`; завершаются без deadlock/сырого IntegrityError, history последовательна, pointer согласован | concurrent PostgreSQL test с timeout |
+| 20 | Единый config/member lock order | Concurrent bootstrap coordinator против standalone ingest/activation с тем же actor; отдельно activation/backfill против economy batch на участниках с обратным входным UUID-порядком | Ingest берёт `product_config_mutation → actor`; activation/bootstrap берут `product_config_mutation → all members by UUID` и проверяют actor из набора; economy берёт members by UUID. Все завершаются без deadlock/сырого IntegrityError, history/pointer/SUM/cache согласованы | concurrent PostgreSQL test с timeout |
 | 21 | Level boundaries | Для каждого порога `threshold-1/threshold`, отдельно `0`, `1001`, большое `BIGINT` | Соседние уровни корректны; выше 1000 level 10 | parameterized unit/property test |
-| 22 | Stale cache и atomic scale | Cache v1, activation v2; параллельно resolver read и earning | Query видит целиком v1 или v2; stale cache не определяет result; commit ставит active version | concurrent PostgreSQL integration |
+| 22 | Stale cache и atomic scale | Cache v1, activation v2; параллельно resolver read и earning на members по обе стороны actor UUID | Query видит целиком v1 или v2; stale cache не определяет result; commit ставит active version; UUID lock order не даёт deadlock | concurrent PostgreSQL integration с timeout |
 | 23 | Backfill/no ledger/fault/immutability | Activate v2 на members, retry/no-op, fault после pointer switch; затем SQL mutate run | Один completed run на switch, нет ledger/notifications; fault откатывает pointer/cache/run/audit; history immutable | PostgreSQL integration test |
 | 24 | История и cursor | Создать > page size rows с одинаковым timestamp; пройти pages | Стабильный `(created_at DESC,id DESC)`, без пропусков/дублей, только target | integration test |
 | 25 | Публичная batch composition | Test-only `TaskLikeUnitOfWork` публично предоставляет `save_marker`, `economy.apply_batch`, один `commit`; проверить marker + несколько entries rollback/commit, all-stored retry и mixed stored/new reject; затем два concurrent batch получают одинаковые author/performer entries в обратном input order | Test не читает `_session`; nested commit отсутствует; общий prelock сортирует все gates/member UUID до append; оба workflow завершаются без deadlock, SUM=cache, mixed/fault/retry не оставляет части | concurrent integration через application/UoW API с timeout |
 | 26 | Restart persistence | Создать ledger/config, dispose Database, новый instance, прочитать cache/history/active и retry | Committed state/outcomes сохранены, дублей нет | integration test |
 | 27 | Baseline-дефект CB-17 | Уточнить callback до `Connection`; запустить ty и реальный Alembic async migration | `ty` exit 0, runtime migration не изменилась | type check + migration tests |
 | 28 | Полный Compose regression | Весь `uv run pytest` с Compose `DATABASE_URL` | Все passed, `0 skipped/deselected`, coverage >=80% | implementation report |
-| 29 | Testcontainers fallback | Без `DATABASE_URL` полный economy integration-файл | PostgreSQL 18 стартует, все passed, `0 skipped/deselected` | implementation report |
+| 29 | Testcontainers fallback | Без `DATABASE_URL` запустить три economy integration-файла с `--no-cov`; coverage отдельно обязан пройти на полном Compose regression | PostgreSQL 18 стартует, targeted functional run завершается exit `0`, все passed, `0 skipped/deselected`; общий coverage не маскируется узким subset | implementation report |
 | 30 | Quality/build/runtime | Ruff format/check, ty, build, bot/worker `--check`, architecture boundaries | Все exit 0; package/entrypoints работают | command logs |
 | 31 | Docs/diff/secrets | Markdown links, full/staged diff-check, secret scan, русский язык | Нет broken links, whitespace, credentials или непереведённого текста | scripts/rg + review evidence |
 
@@ -93,11 +93,14 @@ uv build
 uv run community-bot --check
 uv run community-worker --check
 Remove-Item Env:DATABASE_URL
-uv run pytest tests/integration/test_economy.py
+uv run pytest -ra --no-cov tests/integration/test_economy.py tests/integration/test_economy_extended.py tests/integration/test_economy_property.py
 ```
 
-Последняя команда обязана реально поднять PostgreSQL 18 через Testcontainers.
-Если Docker недоступен, проверка падает; пропуск не разрешён.
+Последняя команда обязана реально поднять PostgreSQL 18 через Testcontainers и
+завершиться exit `0`. `--no-cov` отключает только нерепрезентативный глобальный
+coverage для targeted subset; обязательный порог `80%` проверяется предыдущим
+полным Compose-прогоном. Если Docker недоступен, проверка падает; пропуск не
+разрешён.
 
 ## Очистка тестовых данных
 

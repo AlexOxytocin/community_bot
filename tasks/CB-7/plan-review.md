@@ -1,4 +1,4 @@
-# CB-7 — третье независимое ревью плана
+# CB-7 — четвёртое независимое ревью плана
 
 `community_bot.plan_review.verdict.v1`
 
@@ -17,8 +17,8 @@ Status: approved
 - Jira `CB-17` заново прочитана через Atlassian Rovo API: описание ty defect,
   критерии, статус и комментарий владельца о включении исправления в ветку
   CB-7 без отдельной bugfix-ветки.
-- С нуля полностью прочитаны актуальные `tasks/CB-7/plan.md`,
-  `plan-source-context.md`, `test-plan.md` и предыдущие два verdict.
+- Для четвёртого ревью заново прочитаны актуальные `tasks/CB-7/plan.md`,
+  `plan-source-context.md`, `test-plan.md` и предыдущие verdict.
 - Повторно сверены правила роли/процесса, ADR-0004–0006, требования к
   credits/experience/config/reconciliation из документов MVP, принятый пакет
   CB-4 и фактические `MemberModel`, `SqlAlchemyUnitOfWork`, migration `0002`,
@@ -39,11 +39,11 @@ config, `LevelResolver`, bootstrap coordinator и точечная аннота�
 
 ### Закрытие M-001–M-010
 
-| Замечание | Итог третьего ревью |
+| Замечание | Итог четвёртого ревью |
 |---|---|
 | M-001 | `content_hash` строится без `config_version`; canonical projection и DB-монотонность определены и тестируются |
 | M-002 | schema v1 включает levels и top-level interaction policy `threshold=3/window=7` |
-| M-003 | первая activation и ingest collisions сериализованы общим config gate; exact retry/conflict outcomes заданы |
+| M-003 | первая activation и ingest collisions сериализованы общим config gate; activation блокирует полный member set по canonical UUID и проверяет actor из него; exact retry/conflict outcomes заданы |
 | M-004 | ledger, cache и thresholds согласованы как `BIGINT`; legacy upgrade и destructive downgrade имеют явные preconditions |
 | M-005 | cross-row reversal trigger проверяет source/member/deltas/chaining; history tables append-only и покрыты direct-SQL тестами |
 | M-006 | admin adjustment опыта имеет active-admin authorization, reason, audit, idempotency, неотрицательный итог и level recalc |
@@ -59,17 +59,29 @@ migration, Ruff, полный pytest и migration cycle. Статус Jira-ба�
 
 ### Закрытие N-001
 
-Все config mutations теперь используют один
-`product_config_mutation` transaction-scoped advisory gate до actor row.
-Standalone ingest/activation и bootstrap подчиняются одному порядку.
-`ingest_locked`/`activate_locked` получают уже захваченный guard и actor и не
-берут повторные gates/rows. Поэтому прежний цикл `actor ↔ activation gate`
-устранён конструктивно, а не retry-политикой.
+Все config mutations сначала используют один `product_config_mutation`
+transaction-scoped advisory gate. После него standalone ingest блокирует только
+actor row. Activation и bootstrap не делают отдельный actor prelock: они сразу
+блокируют полный набор member rows в canonical UUID order и валидируют actor из
+уже заблокированного набора. `ingest_locked`/`activate_locked` получают готовые
+guard/rows и повторно ничего не блокируют. Поэтому между config-путями нет
+инверсии `actor ↔ lower UUID member`, а gate сериализует ingest, activation и
+bootstrap до их member locks.
 
-Сценарий 20 одновременно запускает coordinator против standalone ingest и
-activation с тем же actor, разными command IDs/targets и жёстким timeout. Он
-требует последовательную history, согласованный pointer, отсутствие deadlock,
-сырого `IntegrityError` и частичного эффекта.
+Economy batch получает свои idempotency gates, затем те же member rows в
+canonical UUID order и reversal sources; `product_config_mutation` ему не нужен
+и после member lock он его не ожидает. Следовательно, activation/backfill может
+ждать member, удерживаемого economy batch, но economy batch не ждёт ресурс,
+удерживаемый activation: цикла wait-for graph нет. При пересечении нескольких
+members обе стороны используют одинаковый UUID order.
+
+Сценарий 20 проверяет coordinator против standalone ingest/activation с тем же
+actor, а отдельно activation/backfill против economy batch с обратным входным
+UUID-порядком. Жёсткий timeout, согласованные history/pointer/SUM/cache,
+отсутствие raw `IntegrityError`, deadlock и частичного эффекта делают проверку
+воспроизводимой. Сценарий 22 добавляет параллельные activation v2, resolver read
+и earning на members по обе стороны actor UUID; он также имеет timeout и
+проверяет целостный v1/v2 snapshot вместе с тем же lock order.
 
 ### Закрытие N-002
 

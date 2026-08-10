@@ -19,8 +19,9 @@ availability TEXT NULL
 role TEXT NOT NULL
 status TEXT NOT NULL
 level_number INTEGER NOT NULL
-credit_balance_cached INTEGER NOT NULL DEFAULT 0
-experience_total_cached INTEGER NOT NULL DEFAULT 0
+credit_balance_cached BIGINT NOT NULL DEFAULT 0
+experience_total_cached BIGINT NOT NULL DEFAULT 0
+level_config_version_id UUID FK NULL
 invited_by_member_id FK NULL
 registered_at TIMESTAMP NOT NULL
 approved_at TIMESTAMP NULL
@@ -178,19 +179,18 @@ UNIQUE(assignment_id, version)
 ### `account_transactions`
 
 ```text
-id PK
-member_id FK
-credit_delta INTEGER NOT NULL
-experience_delta INTEGER NOT NULL DEFAULT 0
+id UUID PK
+member_id UUID FK
+credit_delta BIGINT NOT NULL
+experience_delta BIGINT NOT NULL DEFAULT 0
 transaction_type TEXT NOT NULL
-task_id FK NULL
-assignment_id FK NULL
 idempotency_key UNIQUE NOT NULL
-created_by_member_id FK NULL
+payload_hash TEXT NOT NULL
+created_by_member_id UUID FK NULL
+reason TEXT NULL
 comment TEXT NULL
-reversed_transaction_id FK NULL
-interaction_alert_id FK NULL
-created_at TIMESTAMP NOT NULL
+reversed_transaction_id UUID FK UNIQUE NULL
+created_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
 Ограничения:
@@ -199,40 +199,50 @@ created_at TIMESTAMP NOT NULL
 - коррекция создаёт новую обратную запись;
 - кэш баланса и опыта обновляется в той же транзакции;
 - периодическая сверка сравнивает кэш с суммой журнала.
+- допустимые типы и соотношения дельт ограничены PostgreSQL CHECK;
+- один участник получает не более одного `starting_grant`;
+- `fraud_reversal` является точной обратной записью и может быть создана для
+  исходной операции только один раз;
+- поля `task_id`, `assignment_id` и `interaction_alert_id` появятся вместе с
+  соответствующими таблицами и настоящими внешними ключами, а не как висячие
+  UUID.
 
 ## 6. Продуктовая конфигурация и уровни
 
 ### `product_config_versions`
 
 ```text
-id PK
-version INTEGER UNIQUE NOT NULL
-config_hash TEXT UNIQUE NOT NULL
-payload_json JSON NOT NULL
-created_by_member_id FK NOT NULL
-created_at TIMESTAMP NOT NULL
+id UUID PK
+version BIGINT UNIQUE NOT NULL
+schema_version INTEGER NOT NULL
+content_hash TEXT UNIQUE NOT NULL
+payload_json JSONB NOT NULL
+created_by_member_id UUID FK NOT NULL
+created_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
-Версия неизменяема. Повторная загрузка той же пары `version + config_hash`
+Версия неизменяема. Повторная загрузка той же пары `version + content_hash`
 идемпотентна; коллизия номера или повтор снимка под новым номером отклоняется.
 
 ### `product_config_activations`
 
 ```text
-id PK
+id UUID PK
 activation_command_id UUID UNIQUE NOT NULL
-product_config_version_id FK NOT NULL
-activated_by_member_id FK NOT NULL
-activated_at TIMESTAMP NOT NULL
+product_config_version_id UUID FK NOT NULL
+activated_by_member_id UUID FK NOT NULL
+outcome_code TEXT NOT NULL
+reason TEXT NOT NULL
+activated_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
 ### `active_product_config`
 
 ```text
 singleton_key BOOLEAN PK CHECK(singleton_key)
-product_config_version_id FK NOT NULL
-activation_id FK NOT NULL
-updated_at TIMESTAMP NOT NULL
+product_config_version_id UUID FK NOT NULL
+activation_id UUID FK NOT NULL
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
 Активация одной транзакцией создаёт историю команды и переключает единственную
@@ -241,19 +251,34 @@ updated_at TIMESTAMP NOT NULL
 ### `levels`
 
 ```text
-product_config_version_id FK NOT NULL
+product_config_version_id UUID FK NOT NULL
 level_number INTEGER NOT NULL
-experience_required INTEGER NOT NULL
+experience_required BIGINT NOT NULL
 display_name TEXT NOT NULL
 description TEXT NULL
 level_up_message TEXT NULL
-permissions_json NOT NULL
+permissions_json JSONB NOT NULL
 PRIMARY KEY(product_config_version_id, level_number)
 UNIQUE(product_config_version_id, experience_required)
 ```
 
 `members.level_number` — восстанавливаемый кэш. Все проверки доступа сверяют
 активную версию через `LevelResolver`; backfill после активации идемпотентен.
+
+### `level_backfill_runs`
+
+```text
+id UUID PK
+activation_id UUID FK UNIQUE NOT NULL
+product_config_version_id UUID FK NOT NULL
+processed_members INTEGER NOT NULL
+outcome_code TEXT NOT NULL
+completed_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+История версий, уровней, активаций и завершённых backfill является append-only.
+Активный указатель нельзя удалить или сменить его singleton key; разрешено
+только атомарно переключить его на сохранённую версию через новую активацию.
 
 ## 7. Карма
 
@@ -468,7 +493,7 @@ processed_at TIMESTAMP WITH TIME ZONE NOT NULL
 - уведомления по `status`, `scheduled_at`;
 - споры по `status`, `opened_at`.
 - алерты по неупорядоченной паре и частичный уникальный индекс открытого статуса;
-- версии конфигурации по `version` и `config_hash`, активации по идентификатору команды.
+- версии конфигурации по `version` и `content_hash`, активации по идентификатору команды.
 
 ## 13. Миграционные последствия принятых решений
 

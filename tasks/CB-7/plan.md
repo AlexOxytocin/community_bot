@@ -246,19 +246,23 @@ Pydantic loader до открытия изменяющей транзакции 
 
 Любая config mutation — standalone ingest, standalone activation или composite
 bootstrap — сначала берёт один общий fixed transaction-scoped advisory gate
-`product_config_mutation`, и только затем блокирует actor row. Внутренние
-`ingest_locked`/`activate_locked` принимают уже полученный guard и сами gates или
-actor row повторно не получают. Bootstrap получает общий gate один раз,
-блокирует/проверяет actor один раз и последовательно вызывает обе locked
-primitives в том же UoW. Другого допустимого порядка config locks нет.
+`product_config_mutation`, и только затем блокирует member rows. Standalone
+ingest затрагивает только actor и блокирует его одну строку. Activation и
+bootstrap затрагивают backfill всех участников, поэтому **сразу** блокируют все
+member rows в canonical UUID order и проверяют actor уже в этом наборе; actor
+никогда не блокируется отдельно перед остальными. Внутренние
+`ingest_locked`/`activate_locked` принимают уже полученный guard и набор rows и
+сами gates/member rows повторно не получают. Bootstrap получает общий gate и
+полный набор rows один раз, затем вызывает обе locked primitives в том же UoW.
+Другого допустимого порядка config/member locks нет.
 
 После общего gate ingest повторно читает известные versions/hashes и проверяет
 монотонность. Это сериализует same-version/different-hash,
 same-content/different-version и coordinator против standalone commands без
 deadlock или необработанного `IntegrityError`.
 
-Новый ingest выполняет только active administrator: после gate строка actor
-блокируется и серверно проверяется до любой вставки, а созданная version получает
+Новый ingest выполняет только active administrator: после gate actor либо
+полный activation-набор блокируется и серверно проверяется до любой вставки, а созданная version получает
 `created_by_member_id` и audit. Idempotent retry существующей той же пары
 возвращает stored result без второго audit. Отсутствующий, inactive или
 non-admin actor не создаёт version/levels/audit.
@@ -276,7 +280,7 @@ command id и target возвращает сохранённый outcome; тот
 target отклоняется. Новая команда может вернуть указатель к старой версии.
 Target, который уже active, создаёт activation outcome и audit, но не backfill.
 
-После общего `product_config_mutation` gate и actor check activation выполняет
+После общего `product_config_mutation` gate, canonical lock всех members и actor check activation выполняет
 exact command lookup, target validation и `SELECT ... FOR UPDATE` существующего
 pointer. Поэтому две первые команды при отсутствующей singleton row, команды
 разных targets, конкурентные retry и composite bootstrap сериализованы;
@@ -307,8 +311,9 @@ retry. Coordinator работает так:
   прежний pointer сохранён;
 - active version отсутствует, candidate отсутствует — config error;
 - candidate валиден — actor ID и activation command ID обязательны; в одном UoW
-  actor повторно читается и блокируется, обязан быть active administrator, затем
-  выполняются ingest и activation с их отдельными identities и одним commit;
+  все members читаются и блокируются в canonical UUID order, actor из этого
+  набора обязан быть active administrator, затем выполняются ingest и activation
+  с их отдельными identities и одним commit;
 - отсутствующий/inactive/non-admin actor отклоняется без ingest, activation,
   audit или pointer mutation.
 
@@ -397,8 +402,10 @@ administrator — любого участника. Пагинация испол
 - **Double spend при конкуренции.** Advisory gate не заменяет row lock;
   отрицательные операции всегда блокируют member и проверяют баланс после lock.
 - **Deadlock составных операций.** Product config использует один общий gate до
-  actor; economy batch заранее сортирует объединённые idempotency/member/source
-  locks. Конкурентные обратные input orders проверяются с жёстким timeout.
+  member rows; activation/bootstrap сразу блокируют всех members по UUID, а не
+  actor отдельно. Economy batch заранее сортирует объединённые
+  idempotency/member/source locks. Конкурентные обратные input orders и backfill
+  против economy batch проверяются с жёстким timeout.
 - **Дубль с изменённым payload.** Сохранённый SHA-256 сравнивается при каждом
   retry; конфликт не возвращается как успех.
 - **Расхождение ledger/cache.** Append и cache update находятся в одной

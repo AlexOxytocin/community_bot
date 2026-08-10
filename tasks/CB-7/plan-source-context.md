@@ -126,7 +126,8 @@ tests; коррекция выполняется обратной записью
 - Один active pointer; ingest и activation — разные identities. Rollback — новая
   activation command, а не повтор старой identity.
 - Все config mutations получают единый `product_config_mutation` advisory gate
-  до actor row; bootstrap не вкладывает standalone orchestrators.
+  до member rows; activation/bootstrap сразу блокируют всех members по UUID и
+  проверяют actor из этого набора, не удерживая actor раньше lower UUID rows.
 - Составной расчёт передаёт полный набор ledger entries одному публичному batch,
   который заранее сортирует все idempotency/member/source locks; последовательные
   одиночные apply внутри settlement запрещены.
