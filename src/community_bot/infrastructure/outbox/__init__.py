@@ -1,0 +1,1 @@
+"""PostgreSQL outbox adapter boundary."""
