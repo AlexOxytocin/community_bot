@@ -14,6 +14,16 @@ from sqlalchemy.ext.asyncio import (
 
 from community_bot.application.member_foundation import FoundationUnitOfWork, UpdateReceipt
 from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.infrastructure.db.economy import (
+    SqlAlchemyEconomyMutation,
+    acquire_product_config_mutation_gate,
+    activate_product_config_locked,
+    get_active_product_config,
+    ingest_product_config_locked,
+    read_ledger_history,
+    reconcile_economy,
+    resolve_member_level,
+)
 from community_bot.infrastructure.db.models import (
     AuditEventModel,
     MemberModel,
@@ -23,9 +33,20 @@ from community_bot.infrastructure.db.models import (
 _UPDATE_LOCK_NAMESPACE = "telegram_update"
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from types import TracebackType
     from uuid import UUID
+
+    from community_bot.application.economy import (
+        ActiveProductConfig,
+        LedgerHistoryCursor,
+        LedgerHistoryPage,
+        ProductConfigActivationCommand,
+        ProductConfigActivationResult,
+        ProductConfigVersion,
+        ReconciliationMismatch,
+    )
+    from community_bot.domain.economy import ProductConfigCandidate, ResolvedLevel
 
 
 class Database:
@@ -36,9 +57,20 @@ class Database:
         self.engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
-    def unit_of_work(self) -> SqlAlchemyUnitOfWork:
+    def unit_of_work(
+        self,
+        *,
+        after_ledger_flushed: Callable[[], None] | None = None,
+        after_economy_cache_flushed: Callable[[], None] | None = None,
+        after_product_config_pointer_switched: Callable[[], None] | None = None,
+    ) -> SqlAlchemyUnitOfWork:
         """Create a fresh transactional unit of work."""
-        return SqlAlchemyUnitOfWork(self._sessions)
+        return SqlAlchemyUnitOfWork(
+            self._sessions,
+            after_ledger_flushed=after_ledger_flushed,
+            after_economy_cache_flushed=after_economy_cache_flushed,
+            after_product_config_pointer_switched=after_product_config_pointer_switched,
+        )
 
     async def dispose(self) -> None:
         """Release all engine resources."""
@@ -48,9 +80,19 @@ class Database:
 class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     """PostgreSQL implementation of the member-foundation transaction."""
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        after_ledger_flushed: Callable[[], None] | None = None,
+        after_economy_cache_flushed: Callable[[], None] | None = None,
+        after_product_config_pointer_switched: Callable[[], None] | None = None,
+    ) -> None:
         """Configure an isolated session factory."""
         self._sessions = sessions
+        self._after_ledger_flushed = after_ledger_flushed
+        self._after_economy_cache_flushed = after_economy_cache_flushed
+        self._after_product_config_pointer_switched = after_product_config_pointer_switched
         self._session: AsyncSession | None = None
         self._committed = False
 
@@ -78,6 +120,19 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             text("SELECT pg_advisory_xact_lock(hashtextextended(:namespace, :update_id))"),
             {"namespace": _UPDATE_LOCK_NAMESPACE, "update_id": update_id},
         )
+
+    @property
+    def economy(self) -> SqlAlchemyEconomyMutation:
+        """Return the economy adapter bound to this transaction."""
+        return SqlAlchemyEconomyMutation(
+            self._require_session(),
+            after_ledger_flushed=self._after_ledger_flushed,
+            after_cache_flushed=self._after_economy_cache_flushed,
+        )
+
+    async def acquire_product_config_mutation_gate(self) -> None:
+        """Serialize every product configuration mutation."""
+        await acquire_product_config_mutation_gate(self._require_session())
 
     async def get_receipt(self, update_id: int) -> UpdateReceipt | None:
         """Read a complete receipt by exact update ID."""
@@ -110,6 +165,85 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             msg = "One or more member records do not exist."
             raise LookupError(msg)
         return members
+
+    async def lock_all_members(self) -> dict[UUID, Member]:
+        """Lock all members in deterministic UUID order."""
+        models = (
+            await self._require_session().scalars(
+                select(MemberModel).order_by(MemberModel.id).with_for_update()
+            )
+        ).all()
+        return {model.id: _to_domain(model) for model in models}
+
+    async def get_active_product_config(self) -> ActiveProductConfig | None:
+        """Read the complete active product configuration."""
+        return await get_active_product_config(self._require_session())
+
+    async def ingest_product_config_locked(
+        self, *, candidate: ProductConfigCandidate, actor_id: UUID
+    ) -> ProductConfigVersion:
+        """Persist a candidate after application-level locking and authorization."""
+        return await ingest_product_config_locked(
+            self._require_session(), candidate=candidate, actor_id=actor_id
+        )
+
+    async def activate_product_config_locked(
+        self, command: ProductConfigActivationCommand
+    ) -> ProductConfigActivationResult:
+        """Activate a stored configuration inside this transaction."""
+        return await activate_product_config_locked(
+            self._require_session(),
+            command,
+            after_pointer_switched=self._after_product_config_pointer_switched,
+        )
+
+    async def read_ledger_history(
+        self,
+        *,
+        member_id: UUID,
+        limit: int,
+        cursor: LedgerHistoryCursor | None,
+    ) -> LedgerHistoryPage:
+        """Read an immutable ledger page."""
+        return await read_ledger_history(
+            self._require_session(), member_id=member_id, limit=limit, cursor=cursor
+        )
+
+    async def set_repeatable_read(self) -> None:
+        """Set repeatable-read isolation before the first transaction query."""
+        await self._require_session().execute(
+            text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        )
+
+    async def reconcile_economy(self) -> tuple[ReconciliationMismatch, ...]:
+        """Return cache-to-ledger mismatches without modifying state."""
+        return await reconcile_economy(self._require_session())
+
+    async def resolve_member_level(self, member_id: UUID) -> ResolvedLevel:
+        """Resolve a member against the current product configuration."""
+        return await resolve_member_level(self._require_session(), member_id)
+
+    async def append_audit_event(
+        self,
+        *,
+        actor_member_id: UUID | None,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        reason: str | None,
+    ) -> None:
+        """Append a workflow marker without exposing the SQLAlchemy session."""
+        self._require_session().add(
+            AuditEventModel(
+                actor_member_id=actor_member_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                before_json=None,
+                after_json=None,
+                reason=reason,
+            )
+        )
 
     async def save_member(self, member: Member) -> None:
         """Persist the member role and status in the locked row."""

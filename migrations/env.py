@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import os
 from logging.config import fileConfig
+from typing import TYPE_CHECKING
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from community_bot.infrastructure.db.models import Base
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
 
 config = context.config
 
@@ -42,7 +46,7 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def do_run_migrations(connection: object) -> None:
+def do_run_migrations(connection: Connection) -> None:
     """Run migrations with an established synchronous facade connection."""
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
