@@ -58,6 +58,9 @@ phases:
   - id: plan_review
     owner: plan-reviewer
     activation: required_for_process_level_3_plan
+    checks:
+      - complete_plan_package_only
+      - no_partial_slice_reviews
     required_inputs:
       - plan.md
       - plan-source-context.md
@@ -111,7 +114,7 @@ phases:
     owner: developer
     checks:
       - targeted_tests
-      - full_available_regression_suite
+      - required_task_scope_integration_tests
       - key_scenario_smoke
       - control_recheck
       - secret_scan
@@ -158,6 +161,8 @@ phases:
       - determine_process_level_from_adr_0004
       - verify_all_conditional_gates_for_process_level
       - require_approved_plan_review_for_level_3
+      - complete_implemented_scope_only
+      - full_product_regression_is_not_a_per_task_gate
     allowed_statuses:
       - approved
       - changes_requested
@@ -198,6 +203,34 @@ branching:
   direct_task_changes_to_main: forbidden
   pull_request_base: main
   dev_branch_rule: introduce_only_by_accepted_adr_when_parallel_integration_is_needed
+
+task_sizing:
+  default: one_complete_observable_result_with_shared_acceptance
+  do_not_split_by:
+    - application_layer
+    - database_field
+    - individual_test
+    - current_review_finding
+  small_task_exceptions:
+    - independent_blocker
+    - infrastructure_result_with_own_acceptance
+    - bug_first_found_during_full_mvp_regression
+
+review_retry_policy:
+  first_failed_review: fix_all_findings_in_one_cycle_then_one_recheck
+  second_failed_review: preserve_both_attempts_create_problem_escalation_and_make_one_consolidated_fix
+  failed_review_after_escalation: stop_for_owner_decision
+  technical_attempts_threshold: 3
+  failed_reviews_threshold_per_phase: 2
+
+regression_policy:
+  per_task: targeted_required_integration_and_smoke_only
+  full_product_regression: separate_large_jira_task_after_all_planned_mvp_functionality_is_merged
+  bugs_first_found_in_full_regression: separate_jira_bug_and_branch
+
+process_budget:
+  normal_task_planning_verification_and_review_target_percent: 25
+  action_when_exceeded: consolidate_checks_or_escalate
 
 artifacts:
   root: tasks/{issue_key}

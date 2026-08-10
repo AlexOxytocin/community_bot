@@ -39,5 +39,5 @@ allowed_statuses:
 risk_gate_policy:
   source: docs/adr/0004-risk-tiered-development-workflow.md
   level_1: language_links_formatting_secret_scan_and_exact_change_description
-  level_2: jira_plan_branch_tests_regression_smoke_report_and_final_review
+  level_2: jira_plan_branch_targeted_and_required_integration_tests_smoke_report_and_final_review
   level_3: level_2_plus_source_context_approved_plan_review_conditional_adr_test_plan_and_domain_checks
