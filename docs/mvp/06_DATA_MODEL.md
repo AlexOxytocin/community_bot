@@ -305,7 +305,38 @@ reason TEXT NULL
 created_at TIMESTAMP NOT NULL
 ```
 
-## 11. Индексы
+## 11. Обработанные Telegram updates
+
+### `processed_telegram_updates`
+
+```text
+update_id BIGINT PK
+update_type TEXT NOT NULL
+actor_member_id UUID FK NULL
+outcome_code TEXT NOT NULL
+received_at TIMESTAMP WITH TIME ZONE NOT NULL
+processed_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+Инварианты этапа фундамента участников:
+
+- receipt создаётся для каждого принятого transport update, включая read-only `/start`; update без пригодного `from_user` отбрасывается до транзакции;
+- первая операция транзакции получает advisory lock по детерминированному 64-битному хешу namespace `telegram_update` и полного `BIGINT update_id`, после чего duplicate подтверждается точным чтением первичного ключа;
+- запись добавляется только полностью заполненной в конце успешной транзакции; `outcome_code` и `processed_at` не могут быть `NULL`;
+- receipt, доменное изменение и audit event фиксируются одним commit; rollback не оставляет ни одного из этих эффектов;
+- сохранённый `outcome_code` является результатом для повторной обработки и не зависит от повторно переданного payload;
+- гарантия «не более одного эффекта» относится к PostgreSQL. Ответ Bot API выполняется после commit и до появления outbox может безопасно повториться или потеряться;
+- политика удаления старых receipts должна быть определена до пилота и не должна разрешать повторную обработку updates в пределах окна доставки Telegram.
+
+### Точные ограничения реализованного этапа
+
+- `members.id`, `audit_events.id` и внешние ключи участников используют UUID;
+- `members.role` ограничен значениями `member`, `moderator`, `administrator`;
+- `members.status` ограничен значениями `pending`, `active`, `paused`, `restricted`, `suspended`, `left`, `banned`;
+- `audit_events` является append-only: PostgreSQL trigger отклоняет row-level `UPDATE` и `DELETE`;
+- все временные поля этапа сохраняются как UTC-aware `TIMESTAMP WITH TIME ZONE`.
+
+## 12. Индексы
 
 Минимально необходимы индексы:
 
