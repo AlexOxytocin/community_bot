@@ -36,7 +36,7 @@ from community_bot.domain.economy import (
     resolve_level,
     validate_economy_command,
 )
-from community_bot.domain.members import AuthorizationError, MemberRole, MemberStatus
+from community_bot.domain.members import AuthorizationError, Member, MemberRole, MemberStatus
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
     ActiveProductConfigModel,
@@ -96,6 +96,16 @@ class SqlAlchemyEconomyMutation:
         self, commands: Sequence[EconomyMutationCommand]
     ) -> tuple[EconomyMutationResult, ...]:
         """Apply an all-new batch or replay an all-stored batch atomically."""
+        prepared = await self.prepare_batch(commands)
+        return await prepared.apply()
+
+    async def prepare_batch(
+        self,
+        commands: Sequence[EconomyMutationCommand],
+        *,
+        additional_member_ids: Sequence[UUID] = (),
+    ) -> _SqlAlchemyPreparedEconomyBatch:
+        """Acquire all economy gates and member locks before any ledger effect."""
         if not commands:
             message = "Economy batch must not be empty."
             raise EconomyError(message)
@@ -108,37 +118,25 @@ class SqlAlchemyEconomyMutation:
         await self._lock_idempotency_keys(keys)
         stored = await self._stored_by_key(keys)
         replayed = _replay_batch(resolved, stored)
-        if replayed is not None:
-            return replayed
-
         member_ids = {
             member_id
             for command in resolved
             for member_id in (command.member_id, command.actor_member_id)
             if member_id is not None
         }
+        member_ids.update(additional_member_ids)
         members = await _lock_member_models(self._session, member_ids)
-        await self._lock_and_validate_reversal_sources(resolved)
-        _authorize_administrative_commands(resolved, members)
-
-        active = None
-        if any(command.experience_delta for command in resolved):
-            active = await _get_active_snapshot(self._session)
-            if active is None:
-                message = "Experience mutations require an active product configuration."
-                raise ProductConfigError(message)
-
-        staged = _stage_economy_batch(self._session, resolved, members)
-        await self._session.flush()
-        if self._after_ledger_flushed is not None:
-            self._after_ledger_flushed()
-        _apply_member_caches(staged, members, active)
-        await self._session.flush()
-        if self._after_cache_flushed is not None:
-            self._after_cache_flushed()
-        _append_economy_audit(self._session, staged)
-        await self._session.flush()
-        return staged.results
+        if replayed is None:
+            await self._lock_and_validate_reversal_sources(resolved)
+            _authorize_administrative_commands(resolved, members)
+        return _SqlAlchemyPreparedEconomyBatch(
+            session=self._session,
+            commands=resolved,
+            stored=stored,
+            member_models=members,
+            after_ledger_flushed=self._after_ledger_flushed,
+            after_cache_flushed=self._after_cache_flushed,
+        )
 
     async def _resolve_commands(
         self, commands: Sequence[EconomyMutationCommand]
@@ -342,6 +340,74 @@ def _transaction_model(command: EconomyCommand, transaction_id: UUID) -> Account
         comment=command.comment,
         reversed_transaction_id=command.reversed_transaction_id,
     )
+
+
+class _SqlAlchemyPreparedEconomyBatch:
+    """Prepared SQLAlchemy batch retaining transaction-scoped locks."""
+
+    def __init__(  # noqa: PLR0913 - prepared state is explicit and immutable.
+        self,
+        *,
+        session: AsyncSession,
+        commands: Sequence[EconomyCommand],
+        stored: dict[str, AccountTransactionModel],
+        member_models: dict[UUID, MemberModel],
+        after_ledger_flushed: Callable[[], None] | None,
+        after_cache_flushed: Callable[[], None] | None,
+    ) -> None:
+        self._session = session
+        self._commands = tuple(commands)
+        self._stored = stored
+        self._member_models = member_models
+        self._after_ledger_flushed = after_ledger_flushed
+        self._after_cache_flushed = after_cache_flushed
+        self._applied: tuple[EconomyMutationResult, ...] | None = None
+
+    @property
+    def members(self) -> dict[UUID, Member]:
+        """Return security snapshots for every member in the lock scope."""
+        return {
+            member_id: Member(
+                id=model.id,
+                telegram_user_id=model.telegram_user_id,
+                role=MemberRole(model.role),
+                status=MemberStatus(model.status),
+            )
+            for member_id, model in self._member_models.items()
+        }
+
+    async def apply(self) -> tuple[EconomyMutationResult, ...]:
+        """Apply new rows or return stored results without releasing locks."""
+        if self._applied is not None:
+            return self._applied
+        replayed = _replay_batch(self._commands, self._stored)
+        if replayed is not None:
+            self._applied = replayed
+            return replayed
+
+        active = None
+        if any(command.experience_delta for command in self._commands):
+            active = await _get_active_snapshot(self._session)
+            if active is None:
+                message = "Experience mutations require an active product configuration."
+                raise ProductConfigError(message)
+
+        staged = _stage_economy_batch(
+            self._session,
+            self._commands,
+            self._member_models,
+        )
+        await self._session.flush()
+        if self._after_ledger_flushed is not None:
+            self._after_ledger_flushed()
+        _apply_member_caches(staged, self._member_models, active)
+        await self._session.flush()
+        if self._after_cache_flushed is not None:
+            self._after_cache_flushed()
+        _append_economy_audit(self._session, staged)
+        await self._session.flush()
+        self._applied = staged.results
+        return staged.results
 
 
 async def acquire_product_config_mutation_gate(session: AsyncSession) -> None:

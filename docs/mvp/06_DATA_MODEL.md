@@ -16,6 +16,8 @@ timezone TEXT NOT NULL
 short_bio TEXT NULL
 current_goal TEXT NULL
 availability TEXT NULL
+help_categories_json JSONB NOT NULL DEFAULT []
+skill_tags_json JSONB NOT NULL DEFAULT []
 role TEXT NOT NULL
 status TEXT NOT NULL
 level_number INTEGER NOT NULL
@@ -46,6 +48,11 @@ category_id FK
 PRIMARY KEY(member_id, category_id)
 ```
 
+До реализации управляемого каталога CB-9 регистрация хранит введённые категории
+помощи и теги навыков как нормализованные JSON-массивы в `members`. CB-9 должна
+перенести эти значения в справочники без потери пользовательского текста; JSON-
+снимки не используются для решений о доступе.
+
 ## 2. Приглашения
 
 ### `invitations`
@@ -63,6 +70,33 @@ created_at TIMESTAMP NOT NULL
 ```
 
 В базе хранится хеш кода, а не открытый код.
+
+### `invitation_redemptions`
+
+```text
+id UUID PK
+invitation_id UUID FK NOT NULL
+member_id UUID FK UNIQUE NOT NULL
+redeemed_at TIMESTAMP NOT NULL
+UNIQUE(invitation_id, member_id)
+```
+
+### `registration_applications`
+
+```text
+member_id UUID PK/FK
+status TEXT NOT NULL  # draft/submitted/approved/rejected
+consented_at TIMESTAMP NULL
+submitted_at TIMESTAMP NULL
+reviewed_at TIMESTAMP NULL
+reviewed_by_member_id UUID FK NULL
+review_comment TEXT NULL
+created_at TIMESTAMP NOT NULL
+updated_at TIMESTAMP NOT NULL
+```
+
+Отклонение не создаёт скрытый статус аккаунта: `members.status` остаётся
+`pending`, а заявка возвращается из `rejected` в `draft` при исправлении.
 
 ## 3. Каталог
 
@@ -432,6 +466,13 @@ payload_json NOT NULL
 expires_at TIMESTAMP NULL
 updated_at TIMESTAMP NOT NULL
 ```
+
+Для регистрации и редактирования профиля mutation-протокол использует порядок
+`update gate → telegram identity gate → locked state → expected_step`.
+Команда `/cancel` переводит регистрационный flow в `registration_paused`, не
+удаляя шаг и payload; следующий `/start` возвращает flow в `registration`.
+Незавершённое редактирование профиля при отмене удаляется без изменения уже
+подтверждённых полей карточки.
 
 ## 10. Аудит
 

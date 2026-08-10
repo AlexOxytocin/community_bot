@@ -24,6 +24,7 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://community_bot:community_bot@localhost:5432/community_bot"
     )
     bot_token: SecretStr | None = None
+    invite_token_secret: SecretStr | None = None
 
 
 @lru_cache(maxsize=1)
