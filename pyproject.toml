@@ -76,6 +76,22 @@ ignore = [
     "RUF001",
 ]
 "src/community_bot/transport/telegram/catalog.py" = ["C901", "RUF001"]
+"src/community_bot/transport/telegram/tasks.py" = [
+    "C901",
+    "EM101",
+    "PLR0915",
+    "RUF001",
+    "TRY003",
+    "TRY301",
+]
+"src/community_bot/application/tasks.py" = [
+    "C901",
+    "D102",
+    "EM101",
+    "PLR0912",
+    "TRY003",
+]
+"src/community_bot/infrastructure/db/tasks.py" = ["EM101", "TRY003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["community_bot"]
