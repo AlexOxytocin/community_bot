@@ -32,7 +32,7 @@ jobs:
       - name: Type check
         run: uv run ty check src tests
       - name: Test without PostgreSQL
-        run: uv run pytest -m "not integration"
+        run: uv run pytest -m "not integration" --no-cov
 
   postgresql:
     name: PostgreSQL and Alembic

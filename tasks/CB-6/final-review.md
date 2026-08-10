@@ -10,10 +10,10 @@ Status: approved
 
 ## reviewed_scope
 
-- Jira `CB-6` заново прочитана через Atlassian Rovo API: описание, критерии приёмки, статус `В работе`, родитель `CB-2`, комментарии и актуальные связи. Входящая зависимость `CB-3` имеет статус `Готово`; внешнего блокера нет.
+- Jira `CB-6` заново прочитана через Atlassian Rovo API: описание, критерии приёмки, статус `На проверке`, родитель `CB-2`, комментарии и актуальные связи. Входящая зависимость `CB-3` имеет статус `Готово`; внешнего блокера нет.
 - Подтверждён уровень процесса 3 по ADR-0004: задача затрагивает Telegram/PostgreSQL, авторизацию, аудит, конкурентность и сквозную идемпотентность.
 - Повторно прочитаны обязательные правила проекта, Jira/Git workflow, продуктовые документы MVP, ADR-0005, принятый ADR-0006, `plan-source-context.md`, `plan.md`, `test-plan.md`, `plan-review.md` с точным `Status: approved` и актуальный `implementation-report.md`.
-- Проверены ветка `task/CB-6`, база `origin/main` на `605c3d0790bd451c80e36ac63dcd1850d4efb8f5`, планирующий commit `fc2ef37f85aafaea62affed95dec8777d799e28b`, полный diff ветки и актуальный staged implementation snapshot.
+- Проверены ветка `task/CB-6`, база `origin/main` на `605c3d0790bd451c80e36ac63dcd1850d4efb8f5`, планирующий commit `fc2ef37f85aafaea62affed95dec8777d799e28b`, implementation commit `f0944c391debe3d044e7217846ab5b52e340a9fd`, полный diff ветки и актуальный staged CI-fix из двух файлов.
 - Независимо проверены домен, application/UoW, SQLAlchemy-модели, миграция `0002`, aiogram transport, локальный PostgreSQL/Testcontainers-контур, CI, документация и все добавленные тесты. Реальные Telegram-запросы не выполнялись.
 
 ## Уровень процесса и условные барьеры
@@ -29,6 +29,15 @@ Status: approved
 | Полная регрессия и ключевой сценарий | да | пройден | 152 passed, 0 skipped, 0 deselected; полный Testcontainers integration-файл — 15 passed |
 | Соответствие утверждённой области | да | пройден | long polling отсутствует в diff; модель данных и отчёт обновлены |
 | Отсутствие секретов и реальных Telegram-эффектов | да | пройден | staged secret scan чист; synthetic updates и fake session; реальных отправок не было |
+
+## Проверка исправления CI
+
+- PR #3 открыт, mergeable, head `f0944c3`. Логи исходного GitHub Actions run `31387994014` подтверждают: `PostgreSQL and Alembic` выполнил полный `uv run pytest`, получил `152 passed`, coverage `93.72%` и `SUCCESS`; единственный `FAILURE` был в `Quality`, где `136 passed` и 16 integration-тестов были намеренно исключены, но ошибочно применился глобальный порог к coverage `68.18%`.
+- Актуальный staged diff меняет ровно `.github/workflows/ci.yml` и `tasks/CB-6/implementation-report.md`: Quality-команда получила `--no-cov`, а отчёт явно фиксирует разделение барьеров. `git diff --cached --check` успешен.
+- Точная локальная последовательность Quality (`uv sync --locked --all-groups`, Ruff format/check, ty, `uv run pytest -m "not integration" --no-cov -ra`) завершилась с exit code 0: `136 passed`, `16 deselected` намеренно.
+- Полный PostgreSQL job не содержит `--no-cov`: после миграционного цикла он по-прежнему выполняет `uv run pytest`. Глобальные параметры `pyproject.toml` сохраняют `--cov=community_bot`, branch coverage и `--cov-fail-under=80`.
+- Независимый локальный полный прогон той же команды против healthy PostgreSQL 18 собрал все 152 теста: `152 passed`, без skip/deselect, coverage `93.72%`, порог 80% применён. Следовательно, однострочное исправление устраняет ложный барьер быстрого среза и не ослабляет обязательный полный coverage-gate.
+- Удалённый CI отражает ещё не опубликованный staged fix: его прежний красный Quality не является доказательством результата нового снимка. До слияния исправление должно быть committed/pushed, после чего оба job должны завершиться успешно.
 
 ## Проверка исправлений первого ревью
 
@@ -72,6 +81,7 @@ Status: approved
 - `uv run ruff format --check .`: успешно, 108 файлов соответствуют формату.
 - `uv run ruff check .`: успешно.
 - `uv run ty check src tests`: успешно.
+- Быстрый Quality-срез `uv run pytest -m "not integration" --no-cov -ra`: 136 passed, 16 integration-тестов намеренно deselected, exit code 0.
 - Полный Compose-backed `uv run pytest -ra`: 152 passed, 0 skipped, 0 deselected, coverage 93.72%.
 - Без `DATABASE_URL`, через Testcontainers `postgres:18`, полный `tests/integration/test_member_foundation.py`: 15 passed, без skip/deselect.
 - Независимый цикл `upgrade head -> downgrade 0001 -> upgrade head`: итоговая ревизия `0002`; после upgrade присутствуют три таблицы, два CHECK constraint, индекс и audit trigger; после downgrade до `0001` таблицы и trigger function отсутствуют; повторный upgrade всё восстанавливает.
@@ -91,14 +101,14 @@ Status: approved
 ## workflow_result
 
 - Jira-first, ветка задачи, завершённая входящая зависимость, Level-3 package, независимый approved plan review и принятие ADR подтверждены.
-- Ветка не опубликована, PR не создан, Jira остаётся `В работе`; для текущей фазы это корректно.
+- PR #3 открыт и mergeable; Jira находится `На проверке`. Удалённый PostgreSQL/Alembic job успешен, а единственный красный Quality относится к commit до текущего staged CI-fix.
 - Diff ограничен фундаментом участника, доступа, аудита, receipt, минимального transport, тестового контура, CI и относящейся документации. Несвязанных изменений и случайных сгенерированных файлов в отслеживаемой разнице нет.
 - Long polling, реальный Telegram token, production provisioning administrator, регистрация, экономика, outbox и другие исключённые сценарии не реализованы.
-- После этого `Status: approved` developer может продолжить только предусмотренную передачу: commit, push, PR, CI и Jira-переходы в соответствии с уже выраженным намерением пользователя и актуальными переходами Jira. Само ревью внешних изменений не выполняло.
+- После этого `Status: approved` developer может продолжить предусмотренную передачу: commit и push CI-fix, повторный CI, merge и Jira-переходы в соответствии с уже выраженным намерением пользователя и актуальными переходами Jira. Само ревью внешних изменений не выполняло.
 
 ## required_actions
 
-Обязательных исправлений до передачи ветки и CI нет.
+Обязательных исправлений в коде и текущем CI-fix нет. До merge остаётся процессный барьер: опубликовать staged fix и получить успешный повтор обоих GitHub Actions jobs.
 
 ## residual_risks
 

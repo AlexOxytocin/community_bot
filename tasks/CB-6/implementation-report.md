@@ -15,6 +15,7 @@
 - Long polling не подключался: обе точки запуска сохраняют безопасный stub, а transport проверяется synthetic aiogram updates и fake Bot API session.
 - Integration fixture использует заданный `DATABASE_URL` либо автоматически поднимает `postgres:18` через Testcontainers. Каждый тест создаёт отдельную временную database, применяет миграции и удаляет database целиком.
 - DB-job GitHub Actions запускает полный pytest с PostgreSQL 18, а не узкий smoke-набор.
+- Quality job запускает быстрый non-integration набор с `--no-cov`; обязательный coverage threshold проверяется полным PostgreSQL job, где исполняется инфраструктурный код.
 - README, архитектурная документация и каноническая модель данных MVP приведены к реализованному состоянию и принятому ADR-0006.
 
 ## Отклонения от плана
@@ -40,6 +41,7 @@
 | Линтер | `uv run ruff check .` | Успешно |
 | Типы | `uv run ty check src tests` | Успешно |
 | Полная локальная регрессия | `DATABASE_URL=postgresql+asyncpg://... uv run pytest` | `152 passed`, без skip/deselect, coverage `93.72%` |
+| Быстрый CI-срез без PostgreSQL | `uv run pytest -m "not integration" --no-cov` | `136 passed`, integration-тесты исключены намеренно, coverage оценивает полный DB-job |
 | Автономный integration server | без `DATABASE_URL`: `uv run pytest tests/integration/test_member_foundation.py --no-cov -q` | Testcontainers `postgres:18`, `15 passed`, без skip |
 | Compose | `docker compose config --quiet` и `docker compose exec ... SHOW server_version` | Конфигурация валидна, PostgreSQL `18.4` |
 | Миграции | `upgrade head → downgrade 0001 → upgrade head` | Успешно, итоговая ревизия `0002` |
