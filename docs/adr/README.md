@@ -20,3 +20,4 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0003 — Роли агентов вокруг ограниченных способностей](0003-capability-shaped-agents.md)
 - [ADR-0004 — Пропорциональный процесс разработки и работа с Git](0004-risk-tiered-development-workflow.md)
 - [ADR-0005 — Технологический стек MVP](0005-mvp-technology-stack.md)
+- [ADR-0006 — Транзакционная граница обработки Telegram updates](0006-telegram-update-transaction-boundary.md)
