@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 
 from community_bot.application.member_foundation import FoundationUnitOfWork, UpdateReceipt
 from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.infrastructure.db import catalog as catalog_store
 from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db.economy import (
     SqlAlchemyEconomyMutation,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from types import TracebackType
     from uuid import UUID
 
+    from community_bot.application.catalog import CatalogPage, CatalogQuery, CatalogTemplate
     from community_bot.application.economy import (
         ActiveProductConfig,
         LedgerHistoryCursor,
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
         ProfileData,
         RegistrationContext,
     )
+    from community_bot.domain.catalog import TemplateDraft
     from community_bot.domain.economy import ProductConfigCandidate, ResolvedLevel
     from community_bot.domain.registration import (
         ModerationDecision,
@@ -152,6 +155,50 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     async def acquire_product_config_mutation_gate(self) -> None:
         """Serialize every product configuration mutation."""
         await acquire_product_config_mutation_gate(self._require_session())
+
+    async def acquire_catalog_mutation_gate(self) -> None:
+        """Serialize catalog mutations after the exact update gate."""
+        await catalog_store.acquire_catalog_mutation_gate(self._require_session())
+
+    async def catalog_page(self, *, query: CatalogQuery, level: int) -> CatalogPage:
+        """Return one level-aware keyset catalog page."""
+        return await catalog_store.catalog_page(self._require_session(), query=query, level=level)
+
+    async def catalog_template(self, template_id: UUID) -> CatalogTemplate | None:
+        """Read one exact historical template version."""
+        return await catalog_store.catalog_template(self._require_session(), template_id)
+
+    async def template_for_creation(
+        self, *, template_id: UUID, level: int
+    ) -> CatalogTemplate | None:
+        """Read one currently available exact template version."""
+        return await catalog_store.template_for_creation(
+            self._require_session(), template_id=template_id, level=level
+        )
+
+    async def lock_template_versions(self, code: str) -> tuple[CatalogTemplate, ...]:
+        """Lock all versions of a logical template."""
+        return await catalog_store.lock_template_versions(self._require_session(), code)
+
+    async def insert_template_version(
+        self, *, draft: TemplateDraft, version: int
+    ) -> CatalogTemplate:
+        """Insert one immutable active template version."""
+        return await catalog_store.insert_template_version(
+            self._require_session(), draft=draft, version=version
+        )
+
+    async def set_catalog_category_active(self, *, code: str, enabled: bool) -> UUID:
+        """Toggle one catalog category."""
+        return await catalog_store.set_catalog_category_active(
+            self._require_session(), code=code, enabled=enabled
+        )
+
+    async def set_catalog_template_active(self, *, code: str, enabled: bool) -> CatalogTemplate:
+        """Toggle the latest version of one logical template."""
+        return await catalog_store.set_catalog_template_active(
+            self._require_session(), code=code, enabled=enabled
+        )
 
     async def get_receipt(self, update_id: int) -> UpdateReceipt | None:
         """Read a complete receipt by exact update ID."""

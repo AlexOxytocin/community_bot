@@ -35,6 +35,10 @@
 /interaction_alerts
 /product_config
 /audit
+/catalog [category_code] [online|offline]
+/catalog_category <code> <on|off>
+/catalog_template <code> <on|off>
+/catalog_template_reward <code> <1..4>
 /invite_create [лимит] [дни] [telegram_id]
 /invite_revoke <invitation_id>
 /registration_reject <member_id> <причина>

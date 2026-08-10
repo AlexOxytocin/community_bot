@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "schemas": {
+    "standard_input": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "context": {"type": "string", "minLength": 10, "maxLength": 2000},
+        "materials": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "constraints": {"type": "string", "minLength": 1, "maxLength": 1000}
+      },
+      "required": ["context", "materials", "constraints"],
+      "additionalProperties": false
+    },
+    "standard_result": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "summary": {"type": "string", "minLength": 10, "maxLength": 2000},
+        "findings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {"type": "string", "minLength": 2, "maxLength": 500}
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      },
+      "required": ["summary", "findings", "evidence"],
+      "additionalProperties": false
+    }
+  },
+  "categories": [
+    {"id": "10000000-0000-4000-8000-000000000001", "code": "development", "name": "Разработка и GitHub", "description": "Проверка репозиториев, документации и небольших технических изменений.", "icon": "code", "sort_order": 10},
+    {"id": "10000000-0000-4000-8000-000000000002", "code": "product_testing", "name": "Тестирование продукта", "description": "Проверка пользовательских сценариев и качества цифровых продуктов.", "icon": "test", "sort_order": 20},
+    {"id": "10000000-0000-4000-8000-000000000003", "code": "career", "name": "Карьера", "description": "Практическая помощь с резюме, портфолио и собеседованиями.", "icon": "career", "sort_order": 30},
+    {"id": "10000000-0000-4000-8000-000000000004", "code": "content_marketing", "name": "Контент и продвижение", "description": "Проверяемая обратная связь по контенту, офферам и продвижению.", "icon": "content", "sort_order": 40},
+    {"id": "10000000-0000-4000-8000-000000000005", "code": "networking", "name": "Связи и репутация", "description": "Достоверная проверка профилей и добровольные профессиональные связи.", "icon": "network", "sort_order": 50},
+    {"id": "10000000-0000-4000-8000-000000000006", "code": "learning", "name": "Обучение", "description": "Практические консультации, объяснения и проверка навыков.", "icon": "learning", "sort_order": 60},
+    {"id": "10000000-0000-4000-8000-000000000007", "code": "accountability", "name": "Продуктивность", "description": "Ограниченные совместные сессии и проверяемая помощь с планированием.", "icon": "focus", "sort_order": 70},
+    {"id": "10000000-0000-4000-8000-000000000008", "code": "social_help", "name": "Социальная и практическая помощь", "description": "Добровольная ограниченная помощь без медицинских или кризисных обещаний.", "icon": "help", "sort_order": 80}
+  ],
+  "templates": [
+    {"id": "20000000-0000-4000-8000-000000000001", "category_code": "development", "code": "repository_first_impression", "name": "Первое впечатление от репозитория", "description": "Структурированная проверка первого знакомства с репозиторием.", "creator_instructions": "Передайте ссылку, цель репозитория и важные ограничения. Не требуйте звезду или положительный отзыв.", "performer_instructions": "Пройдите путь нового пользователя и зафиксируйте понятные и непонятные места.", "completion_criteria": "Есть краткое резюме, список наблюдений и конкретные подтверждения.", "credit_reward": 2, "estimated_minutes": 30, "format": "online", "minimum_level": 1, "maximum_performers": 1, "moderation_required": false, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000002", "category_code": "product_testing", "code": "registration_screen_recording", "name": "Регистрация с записью экрана", "description": "Проверка регистрации с фиксацией препятствий и ошибок.", "creator_instructions": "Опишите тестовый контур и правила безопасной работы с данными.", "performer_instructions": "Пройдите регистрацию, не показывая секреты и персональные данные в записи.", "completion_criteria": "Есть запись или безопасные таймкоды, резюме и список воспроизводимых наблюдений.", "credit_reward": 2, "estimated_minutes": 30, "format": "online", "minimum_level": 1, "maximum_performers": 1, "moderation_required": false, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000003", "category_code": "career", "code": "resume_review", "name": "Проверка резюме", "description": "Структурированная проверка резюме под указанную цель.", "creator_instructions": "Удалите лишние персональные данные и укажите роль или тип вакансии.", "performer_instructions": "Проверьте структуру, ясность и соответствие цели без обещаний трудоустройства.", "completion_criteria": "Есть приоритетный список правок с объяснениями и примерами.", "credit_reward": 3, "estimated_minutes": 60, "format": "online", "minimum_level": 1, "maximum_performers": 1, "moderation_required": false, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000004", "category_code": "content_marketing", "code": "landing_review", "name": "Проверка лендинга", "description": "Проверка ясности оффера и пользовательского пути лендинга.", "creator_instructions": "Передайте ссылку, аудиторию и ожидаемое действие пользователя.", "performer_instructions": "Дайте честную обратную связь; не обещайте конверсию и не требуйте публичной реакции.", "completion_criteria": "Есть оценка первого экрана, пути пользователя и список улучшений.", "credit_reward": 2, "estimated_minutes": 30, "format": "online", "minimum_level": 1, "maximum_performers": 1, "moderation_required": false, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000005", "category_code": "networking", "code": "linkedin_audit", "name": "Аудит LinkedIn", "description": "Проверка профессионального профиля без обязательных endorsements или рекомендаций.", "creator_instructions": "Передайте цель профиля и безопасную ссылку. Не требуйте endorsement, подписку или положительный отзыв.", "performer_instructions": "Проверьте профиль и дайте достоверную обратную связь без публичных обещаний.", "completion_criteria": "Есть наблюдения по позиционированию, доказательствам опыта и ясности профиля.", "credit_reward": 2, "estimated_minutes": 30, "format": "online", "minimum_level": 2, "maximum_performers": 1, "moderation_required": true, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000006", "category_code": "learning", "code": "practical_consultation", "name": "Практическая консультация", "description": "Ограниченная консультация по конкретному инструменту или навыку.", "creator_instructions": "Сформулируйте один практический вопрос и желаемый результат встречи.", "performer_instructions": "Объясните подход и дайте проверяемый следующий шаг без гарантии результата.", "completion_criteria": "Вопрос разобран, следующий шаг сформулирован, материалы перечислены.", "credit_reward": 2, "estimated_minutes": 30, "format": "any", "minimum_level": 1, "maximum_performers": 1, "moderation_required": false, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000007", "category_code": "accountability", "code": "coworking_session", "name": "Совместная рабочая сессия", "description": "Одна ограниченная рабочая сессия с заранее сформулированным результатом.", "creator_instructions": "Укажите задачу, длительность и безопасный способ связи.", "performer_instructions": "Проведите сессию без давления и зафиксируйте фактический результат.", "completion_criteria": "Сессия проведена, выполненный шаг и оставшиеся действия зафиксированы.", "credit_reward": 3, "estimated_minutes": 60, "format": "online", "minimum_level": 1, "maximum_performers": 1, "moderation_required": false, "input_schema": "standard_input", "result_schema": "standard_result"},
+    {"id": "20000000-0000-4000-8000-000000000008", "category_code": "social_help", "code": "supportive_conversation", "name": "Ограниченный поддерживающий разговор", "description": "Добровольный ограниченный разговор без медицинской или кризисной помощи.", "creator_instructions": "Укажите бытовой контекст и границы. Для кризисной ситуации используйте профильные службы.", "performer_instructions": "Соблюдайте границы, не ставьте диагнозы и не обещайте профессиональную помощь.", "completion_criteria": "Разговор проведён в согласованных границах, результат кратко зафиксирован.", "credit_reward": 2, "estimated_minutes": 30, "format": "any", "minimum_level": 1, "maximum_performers": 1, "moderation_required": true, "input_schema": "standard_input", "result_schema": "standard_result"}
+  ]
+}

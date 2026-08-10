@@ -18,6 +18,7 @@
 | Драйвер БД | asyncpg | асинхронный доступ к PostgreSQL |
 | Миграции | Alembic | версионирование схемы и seed-миграции |
 | Конфигурация | Pydantic 2 + pydantic-settings | проверяемые настройки из окружения |
+| Контракты шаблонов | JSON Schema Draft 2020-12 + jsonschema | локальная проверка input/result без сетевых ссылок |
 | Часовые пояса | zoneinfo + tzdata | проверка IANA timezone одинаково на Linux и Windows |
 | Зависимости | uv | виртуальное окружение, зависимости и lock-файл |
 | Формат проекта | `pyproject.toml` + `uv.lock` | единая воспроизводимая конфигурация |
