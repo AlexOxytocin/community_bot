@@ -1,0 +1,1 @@
+"""Telegram transport adapter package."""

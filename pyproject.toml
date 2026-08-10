@@ -1,0 +1,113 @@
+[project]
+name = "community-bot"
+version = "0.1.0"
+description = "Modular monolith foundation for the Community Bot MVP"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "aiogram>=3,<4",
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<1",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "sqlalchemy[asyncio]>=2,<3",
+    "structlog>=25,<26",
+]
+
+[project.scripts]
+community-bot = "community_bot.bootstrap.bot:main"
+community-worker = "community_bot.worker.entrypoint:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+lint = [
+    "ruff>=0.16.2",
+    "ty>=0.0.69",
+]
+test = [
+    "hypothesis>=6.165.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "testcontainers[postgres]>=4,<5",
+]
+
+[tool.uv]
+default-groups = ["lint", "test"]
+python-preference = "managed"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "CPY001",
+    "D203",
+    "D213",
+    "ISC001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "D100",
+    "D103",
+    "PLR2004",
+    "S101",
+]
+"tests/smoke/**/*.py" = ["S603"]
+"migrations/**/*.py" = [
+    "D",
+    "INP001",
+]
+"src/community_bot/bootstrap/settings.py" = ["TC002"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["community_bot"]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.format]
+docstring-code-format = true
+line-ending = "lf"
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.pytest.ini_options]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+    "--cov=community_bot",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=80",
+]
+asyncio_mode = "strict"
+filterwarnings = ["error"]
+markers = [
+    "integration: requires a running PostgreSQL instance",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/community_bot"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "pragma: no cover",
+]
+fail_under = 80
+show_missing = true
