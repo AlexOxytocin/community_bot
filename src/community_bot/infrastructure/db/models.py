@@ -256,6 +256,149 @@ class TaskTemplateModel(Base):
     )
 
 
+class TaskCreationDraftModel(Base):
+    """Persistent resumable member task creation draft."""
+
+    __tablename__ = "task_creation_drafts"
+    __table_args__ = (
+        CheckConstraint(
+            "current_step IN ('input', 'deadline', 'format', 'materials', "
+            "'slots', 'preview', 'published')",
+            name="ck_task_creation_drafts_step",
+        ),
+        CheckConstraint("revision >= 0", name="ck_task_creation_drafts_revision"),
+        CheckConstraint(
+            "format IS NULL OR format IN ('online', 'offline')",
+            name="ck_task_creation_drafts_format",
+        ),
+        CheckConstraint(
+            "performer_slots IS NULL OR performer_slots BETWEEN 1 AND 10",
+            name="ck_task_creation_drafts_slots",
+        ),
+        Index(
+            "uq_task_creation_drafts_current_creator",
+            "creator_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    creator_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
+    )
+    input_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    deadline_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    format: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(Text)
+    materials_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    performer_slots: Mapped[int | None] = mapped_column(Integer)
+    current_step: Mapped[str] = mapped_column(Text, nullable=False, default="input")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    publish_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TaskModel(Base):
+    """Immutable published task snapshot with a small creation-owned lifecycle."""
+
+    __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint("origin IN ('member', 'community')", name="ck_tasks_origin"),
+        CheckConstraint("status IN ('published', 'cancelled')", name="ck_tasks_status"),
+        CheckConstraint("credit_reward_per_performer > 0", name="ck_tasks_reward"),
+        CheckConstraint("performer_slots BETWEEN 1 AND 10", name="ck_tasks_slots"),
+        CheckConstraint("reserved_credit_total >= 0", name="ck_tasks_reserved_nonnegative"),
+        CheckConstraint("minimum_level > 0", name="ck_tasks_minimum_level"),
+        CheckConstraint("format IN ('online', 'offline')", name="ck_tasks_format"),
+        CheckConstraint("deadline_at > published_at", name="ck_tasks_future_deadline"),
+        CheckConstraint(
+            "(origin = 'member' AND creator_id IS NOT NULL "
+            "AND reserved_credit_total = credit_reward_per_performer * performer_slots) "
+            "OR (origin = 'community' AND creator_id IS NULL AND reserved_credit_total = 0)",
+            name="ck_tasks_origin_reserve",
+        ),
+        Index("ix_tasks_creator_created", "creator_id", "created_at", "id"),
+        Index("ix_tasks_status_deadline", "status", "deadline_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
+    )
+    template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    creator_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    author_display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_categories.id"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    completion_criteria: Mapped[str] = mapped_column(Text, nullable=False)
+    materials_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    input_payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    credit_reward_per_performer: Mapped[int] = mapped_column(Integer, nullable=False)
+    performer_slots: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved_credit_total: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    minimum_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    format: Mapped[str] = mapped_column(Text, nullable=False)
+    city: Mapped[str | None] = mapped_column(Text)
+    deadline_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="published")
+    safety_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    publish_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    published_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    cancelled_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OutboxEventModel(Base):
+    """Durable internal event awaiting a future delivery worker."""
+
+    __tablename__ = "outbox_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    business_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    published_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AuditEventModel(Base):
     """Append-only audit record."""
 

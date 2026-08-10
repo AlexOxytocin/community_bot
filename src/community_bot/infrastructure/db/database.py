@@ -16,6 +16,7 @@ from community_bot.application.member_foundation import FoundationUnitOfWork, Up
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.infrastructure.db import catalog as catalog_store
 from community_bot.infrastructure.db import registration as registration_store
+from community_bot.infrastructure.db import tasks as task_store
 from community_bot.infrastructure.db.economy import (
     SqlAlchemyEconomyMutation,
     acquire_product_config_mutation_gate,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
         ProfileData,
         RegistrationContext,
     )
+    from community_bot.application.tasks import PublishedTask, TaskDraft
     from community_bot.domain.catalog import TemplateDraft
     from community_bot.domain.economy import ProductConfigCandidate, ResolvedLevel
     from community_bot.domain.registration import (
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
         ProfileField,
         RegistrationStep,
     )
+    from community_bot.domain.tasks import TaskStatus
 
 
 class Database:
@@ -72,12 +75,15 @@ class Database:
         self.engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
-    def unit_of_work(
+    def unit_of_work(  # noqa: PLR0913 - explicit fault checkpoints stay independently injectable.
         self,
         *,
         after_ledger_flushed: Callable[[], None] | None = None,
         after_economy_cache_flushed: Callable[[], None] | None = None,
         after_product_config_pointer_switched: Callable[[], None] | None = None,
+        after_task_inserted: Callable[[], None] | None = None,
+        after_task_outbox_staged: Callable[[], None] | None = None,
+        after_task_receipt_staged: Callable[[], None] | None = None,
     ) -> SqlAlchemyUnitOfWork:
         """Create a fresh transactional unit of work."""
         return SqlAlchemyUnitOfWork(
@@ -85,6 +91,9 @@ class Database:
             after_ledger_flushed=after_ledger_flushed,
             after_economy_cache_flushed=after_economy_cache_flushed,
             after_product_config_pointer_switched=after_product_config_pointer_switched,
+            after_task_inserted=after_task_inserted,
+            after_task_outbox_staged=after_task_outbox_staged,
+            after_task_receipt_staged=after_task_receipt_staged,
         )
 
     async def dispose(self) -> None:
@@ -95,19 +104,25 @@ class Database:
 class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     """PostgreSQL implementation of the member-foundation transaction."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - mirrors the explicit unit-of-work fault checkpoints.
         self,
         sessions: async_sessionmaker[AsyncSession],
         *,
         after_ledger_flushed: Callable[[], None] | None = None,
         after_economy_cache_flushed: Callable[[], None] | None = None,
         after_product_config_pointer_switched: Callable[[], None] | None = None,
+        after_task_inserted: Callable[[], None] | None = None,
+        after_task_outbox_staged: Callable[[], None] | None = None,
+        after_task_receipt_staged: Callable[[], None] | None = None,
     ) -> None:
         """Configure an isolated session factory."""
         self._sessions = sessions
         self._after_ledger_flushed = after_ledger_flushed
         self._after_economy_cache_flushed = after_economy_cache_flushed
         self._after_product_config_pointer_switched = after_product_config_pointer_switched
+        self._after_task_inserted = after_task_inserted
+        self._after_task_outbox_staged = after_task_outbox_staged
+        self._after_task_receipt_staged = after_task_receipt_staged
         self._session: AsyncSession | None = None
         self._committed = False
 
@@ -160,6 +175,14 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Serialize catalog mutations after the exact update gate."""
         await catalog_store.acquire_catalog_mutation_gate(self._require_session())
 
+    async def acquire_task_identity_gate(self, telegram_user_id: int) -> None:
+        """Serialize task mutations for one Telegram identity."""
+        await task_store.acquire_task_identity_gate(self._require_session(), telegram_user_id)
+
+    async def acquire_task_command_gate(self, command_id: UUID) -> None:
+        """Serialize one task publication or cancellation command."""
+        await task_store.acquire_task_command_gate(self._require_session(), command_id)
+
     async def catalog_page(self, *, query: CatalogQuery, level: int) -> CatalogPage:
         """Return one level-aware keyset catalog page."""
         return await catalog_store.catalog_page(self._require_session(), query=query, level=level)
@@ -199,6 +222,100 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await catalog_store.set_catalog_template_active(
             self._require_session(), code=code, enabled=enabled
         )
+
+    async def create_task_draft(self, *, creator_id: UUID, template_id: UUID) -> TaskDraft:
+        """Create a new current persistent task draft."""
+        return await task_store.create_task_draft(
+            self._require_session(), creator_id=creator_id, template_id=template_id
+        )
+
+    async def get_current_task_draft(self, creator_id: UUID) -> TaskDraft | None:
+        """Read the selected unfinished task draft."""
+        return await task_store.get_current_task_draft(self._require_session(), creator_id)
+
+    async def get_task_draft(self, draft_id: UUID) -> TaskDraft | None:
+        """Read one persistent task draft."""
+        return await task_store.get_task_draft(self._require_session(), draft_id)
+
+    async def lock_task_draft(self, draft_id: UUID) -> TaskDraft | None:
+        """Lock one task draft."""
+        return await task_store.lock_task_draft(self._require_session(), draft_id)
+
+    async def select_task_draft(self, *, creator_id: UUID, draft_id: UUID) -> TaskDraft:
+        """Select one owned unfinished draft as current."""
+        return await task_store.select_task_draft(
+            self._require_session(), creator_id=creator_id, draft_id=draft_id
+        )
+
+    async def save_task_draft(self, draft: TaskDraft) -> TaskDraft:
+        """Persist one validated task draft snapshot."""
+        return await task_store.save_task_draft(self._require_session(), draft)
+
+    async def delete_task_draft(self, draft_id: UUID) -> None:
+        """Delete one unfinished task creation draft."""
+        await task_store.delete_task_draft(self._require_session(), draft_id)
+
+    async def task_by_publish_command(self, command_id: UUID) -> PublishedTask | None:
+        """Read the task created by one publish command."""
+        return await task_store.task_by_publish_command(self._require_session(), command_id)
+
+    async def insert_published_task(
+        self, *, draft: TaskDraft, template: CatalogTemplate
+    ) -> PublishedTask:
+        """Insert one immutable member task snapshot."""
+        task = await task_store.insert_published_task(
+            self._require_session(), draft=draft, template=template
+        )
+        if self._after_task_inserted is not None:
+            self._after_task_inserted()
+        return task
+
+    async def get_task(self, task_id: UUID) -> PublishedTask | None:
+        """Read one task snapshot."""
+        return await task_store.get_task(self._require_session(), task_id)
+
+    async def lock_task(self, task_id: UUID) -> PublishedTask | None:
+        """Lock one task snapshot."""
+        return await task_store.lock_task(self._require_session(), task_id)
+
+    async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask:
+        """Persist a creation-owned task status transition."""
+        return await task_store.save_task_status(
+            self._require_session(), task_id=task_id, status=status
+        )
+
+    async def list_owned_tasks(
+        self,
+        *,
+        creator_id: UUID,
+        limit: int,
+        status: TaskStatus | None,
+        before_created_at: datetime.datetime | None,
+        before_id: UUID | None,
+    ) -> tuple[PublishedTask, ...]:
+        """Return only tasks created by one member."""
+        return await task_store.list_owned_tasks(
+            self._require_session(),
+            creator_id=creator_id,
+            limit=limit,
+            status=status,
+            before_created_at=before_created_at,
+            before_id=before_id,
+        )
+
+    async def add_task_outbox(
+        self, *, event_type: str, task: PublishedTask, business_key: str
+    ) -> None:
+        """Stage one task lifecycle outbox event."""
+        await task_store.add_task_outbox(
+            self._require_session(),
+            event_type=event_type,
+            task=task,
+            business_key=business_key,
+        )
+        await self._require_session().flush()
+        if self._after_task_outbox_staged is not None:
+            self._after_task_outbox_staged()
 
     async def get_receipt(self, update_id: int) -> UpdateReceipt | None:
         """Read a complete receipt by exact update ID."""
@@ -494,6 +611,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
                 reason=reason,
             )
         )
+        await self._require_session().flush()
 
     async def save_member(self, member: Member) -> None:
         """Persist the member role and status in the locked row."""
@@ -528,6 +646,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
                 reason=reason,
             )
         )
+        await self._require_session().flush()
 
     async def add_receipt(
         self,
@@ -546,6 +665,9 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
                 outcome_code=outcome_code,
             )
         )
+        await self._require_session().flush()
+        if update_type == "task_workflow" and self._after_task_receipt_staged is not None:
+            self._after_task_receipt_staged()
 
     async def commit(self) -> None:
         """Commit all staged effects and mark the context complete."""

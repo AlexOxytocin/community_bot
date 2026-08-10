@@ -150,6 +150,31 @@ JSON Schema Draft 2020-12 без удалённых `$ref`. Input проверя
 
 ## 4. Задания
 
+### `task_creation_drafts`
+
+```text
+id UUID PK
+creator_id FK NOT NULL
+template_id FK NOT NULL
+input_payload_json JSON NULL
+deadline_at TIMESTAMP WITH TIME ZONE NULL
+format TEXT NULL
+city TEXT NULL
+materials_json JSON NULL
+performer_slots INTEGER NULL
+current_step TEXT NOT NULL
+revision INTEGER NOT NULL
+is_current BOOLEAN NOT NULL
+publish_command_id UUID UNIQUE NOT NULL
+created_at TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+У участника может быть несколько незавершённых черновиков, но только один
+текущий. Каждый ответ сверяет ожидаемые шаг и revision. После публикации
+черновик остаётся исторической связью с заданием, получает terminal-шаг и
+перестаёт быть текущим.
+
 ### `tasks`
 
 ```text
@@ -179,10 +204,36 @@ status TEXT NOT NULL
 safety_snapshot_json JSON NOT NULL
 high_reward_justification TEXT NULL
 high_reward_confirmed_by_admin_id FK NULL
+publish_command_id UUID UNIQUE NOT NULL
 published_at TIMESTAMP NULL
+cancelled_at TIMESTAMP NULL
 created_at TIMESTAMP NOT NULL
 updated_at TIMESTAMP NOT NULL
 ```
+
+Для задания участника `creator_id` обязателен, а
+`reserved_credit_total = credit_reward_per_performer * performer_slots`.
+Поля карточки являются снимком точной версии шаблона и после публикации не
+редактируются; до появления assignments CB-10 разрешает только переход
+`published → cancelled`. Публикация и отмена имеют уникальные command ID и
+выполняются в одной транзакции с ledger, audit, outbox и Telegram receipt.
+
+### `outbox_events`
+
+```text
+id UUID PK
+event_type TEXT NOT NULL
+aggregate_type TEXT NOT NULL
+aggregate_id UUID NOT NULL
+payload_json JSON NOT NULL
+business_key TEXT UNIQUE NOT NULL
+created_at TIMESTAMP WITH TIME ZONE NOT NULL
+published_at TIMESTAMP WITH TIME ZONE NULL
+```
+
+CB-10 записывает `task.published` и `task.cancelled`. Доставка outbox является
+отдельной ответственностью worker; приватные input и материалы в payload не
+копируются.
 
 ### `assignments`
 
