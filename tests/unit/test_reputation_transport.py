@@ -158,7 +158,7 @@ async def test_reputation_router_safely_handles_all_synthetic_updates() -> None:
         )
 
     updates = [
-        message_update(91_001, "/profile"),
+        message_update(91_001, f"/profile {target_id}"),
         message_update(91_002, "/stats"),
         message_update(91_003, "/members"),
         message_update(91_004, "/leaderboard"),

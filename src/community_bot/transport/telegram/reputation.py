@@ -164,7 +164,11 @@ def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injecte
             return
         raise SkipHandler
 
-    router.message.register(profile, Command("profile"))
+    router.message.register(
+        profile,
+        Command("profile"),
+        F.text.regexp(r"^/profile(?:@\w+)?\s+\S+"),
+    )
     router.message.register(statistics, Command("stats"))
     router.message.register(members, Command("members"))
     router.message.register(leaderboard, Command("leaderboard"))
