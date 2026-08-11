@@ -6,12 +6,14 @@ import datetime
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, select, text, tuple_, update
+from sqlalchemy import delete, exists, func, select, text, tuple_, update
 
 from community_bot.application.tasks import PublishedTask, TaskDraft
+from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import TaskDraftStep, TaskError, TaskStatus
 from community_bot.infrastructure.db.models import (
+    AssignmentModel,
     MemberModel,
     OutboxEventModel,
     TaskCreationDraftModel,
@@ -254,6 +256,55 @@ async def list_owned_tasks(  # noqa: PLR0913 - explicit keyset fields keep the q
         statement = statement.where(
             tuple_(TaskModel.created_at, TaskModel.id) < (before_created_at, before_id)
         )
+    models = (
+        await session.scalars(
+            statement.order_by(TaskModel.created_at.desc(), TaskModel.id.desc()).limit(limit)
+        )
+    ).all()
+    return tuple(_task(model) for model in models)
+
+
+async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inputs.
+    session: AsyncSession,
+    *,
+    performer_id: uuid.UUID,
+    level: int,
+    limit: int,
+    cursor_task_id: uuid.UUID | None,
+    now: datetime.datetime,
+) -> tuple[PublishedTask, ...]:
+    """Return discoverable tasks while leaving final authorization to acceptance."""
+    occupied = (
+        select(func.count(AssignmentModel.id))
+        .where(
+            AssignmentModel.task_id == TaskModel.id,
+            AssignmentModel.status != AssignmentStatus.CANCELLED.value,
+        )
+        .correlate(TaskModel)
+        .scalar_subquery()
+    )
+    already_assigned = exists().where(
+        AssignmentModel.task_id == TaskModel.id,
+        AssignmentModel.performer_id == performer_id,
+        AssignmentModel.status != AssignmentStatus.CANCELLED.value,
+    )
+    availability = (
+        TaskModel.status == TaskStatus.PUBLISHED.value,
+        TaskModel.deadline_at > now,
+        TaskModel.minimum_level <= level,
+        (TaskModel.creator_id.is_(None) | (TaskModel.creator_id != performer_id)),
+        occupied < TaskModel.performer_slots,
+        ~already_assigned,
+    )
+    statement = select(TaskModel).where(*availability)
+    if cursor_task_id is not None:
+        cursor = await session.scalar(
+            select(TaskModel).where(TaskModel.id == cursor_task_id, *availability)
+        )
+        if cursor is not None:
+            statement = statement.where(
+                tuple_(TaskModel.created_at, TaskModel.id) < (cursor.created_at, cursor.id)
+            )
     models = (
         await session.scalars(
             statement.order_by(TaskModel.created_at.desc(), TaskModel.id.desc()).limit(limit)

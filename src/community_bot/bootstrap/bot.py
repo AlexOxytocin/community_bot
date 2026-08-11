@@ -13,7 +13,9 @@ from aiogram import Bot, Dispatcher
 
 from community_bot.application.assignments import AssignmentService
 from community_bot.application.catalog import CatalogService
+from community_bot.application.economy import EconomyQueryService
 from community_bot.application.moderation import ModerationService
+from community_bot.application.navigation import NavigationService
 from community_bot.application.registration import InviteTokenCodec, RegistrationService
 from community_bot.application.reputation import ReputationService
 from community_bot.application.tasks import TaskService
@@ -24,6 +26,7 @@ from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.transport.telegram.assignments import build_assignment_router
 from community_bot.transport.telegram.catalog import build_catalog_router
 from community_bot.transport.telegram.moderation import build_moderation_router
+from community_bot.transport.telegram.navigation import build_navigation_router
 from community_bot.transport.telegram.registration import build_registration_router
 from community_bot.transport.telegram.reputation import build_reputation_router
 from community_bot.transport.telegram.tasks import build_task_router
@@ -92,16 +95,28 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
     """Compose all implemented Telegram transport routers."""
     unit_of_work = database.unit_of_work
     dispatcher = Dispatcher()
-    dispatcher.include_router(build_catalog_router(CatalogService(unit_of_work)))
-    dispatcher.include_router(build_assignment_router(AssignmentService(unit_of_work)))
-    dispatcher.include_router(build_moderation_router(ModerationService(unit_of_work)))
-    dispatcher.include_router(build_reputation_router(ReputationService(unit_of_work)))
-    dispatcher.include_router(build_task_router(TaskService(unit_of_work)))
+    catalog = CatalogService(unit_of_work)
+    moderation = ModerationService(unit_of_work)
+    registration = RegistrationService(unit_of_work, InviteTokenCodec(invite_token_secret))
+    reputation = ReputationService(unit_of_work)
+    tasks = TaskService(unit_of_work)
     dispatcher.include_router(
-        build_registration_router(
-            RegistrationService(unit_of_work, InviteTokenCodec(invite_token_secret))
+        build_navigation_router(
+            navigation=NavigationService(unit_of_work),
+            catalog=catalog,
+            tasks=tasks,
+            economy=EconomyQueryService(unit_of_work),
+            registration=registration,
+            reputation=reputation,
+            moderation=moderation,
         )
     )
+    dispatcher.include_router(build_catalog_router(catalog))
+    dispatcher.include_router(build_assignment_router(AssignmentService(unit_of_work)))
+    dispatcher.include_router(build_moderation_router(moderation))
+    dispatcher.include_router(build_reputation_router(reputation))
+    dispatcher.include_router(build_task_router(tasks))
+    dispatcher.include_router(build_registration_router(registration))
     return dispatcher
 
 

@@ -554,6 +554,25 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             before_id=before_id,
         )
 
+    async def list_available_tasks(
+        self,
+        *,
+        performer_id: UUID,
+        level: int,
+        limit: int,
+        cursor_task_id: UUID | None,
+        now: datetime.datetime,
+    ) -> tuple[PublishedTask, ...]:
+        """Return the stable discovery page for one performer."""
+        return await task_store.list_available_tasks(
+            self._require_session(),
+            performer_id=performer_id,
+            level=level,
+            limit=limit,
+            cursor_task_id=cursor_task_id,
+            now=now,
+        )
+
     async def add_task_outbox(
         self, *, event_type: str, task: PublishedTask, business_key: str
     ) -> None:
