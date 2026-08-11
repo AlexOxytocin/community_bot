@@ -117,16 +117,16 @@ Migration, reconciliation, real Telegram и production readiness выполня�
 
 ## Безопасная production-граница
 
-- Без отдельного нового поручения: только `/start`, help/menu, read-only profile,
-  balance, statistics, leaderboard, members, catalog и admin queues.
-- Real Telegram smoke останавливается до первого durable-write действия: не нажимает
-  `Создать приглашение` (оно пишет сразу, без confirm) и не выбирает task template
-  (выбор создаёт durable draft); чужие approval/reject, settlement, dispute, karma
-  и moderation не выполняются.
-- Собственная mutation требует заранее названную disposable entity и только
-  штатный `revoke`/`cancel`; после него проверяются ledger/domain эффекты.
-- Нет product cleanup — smoke останавливается до первого durable-write действия.
-  SQL cleanup и удаление audit/receipts запрещены.
+- По явному решению владельца от 11 августа 2026 года вся текущая серверная база
+  считается тестовой. Разрешены синтетические участники, полные registration/task/
+  settlement/dispute/karma/moderation цепочки и проверка их взаимодействий.
+- Для поведения используется production application/transport path. Прямые DB
+  fixtures допустимы только для синтетической роли или чтобы продолжить сбор после
+  уже зафиксированного blocker; такая операция отдельно отмечается в evidence.
+- Не читать несвязанные Telegram-чаты, не изменять несинтетические данные и не
+  удалять immutable audit/receipts. Секреты и raw private payload не сохраняются.
+- Перед повтором mutation сначала проверяется receipt/business state, чтобы не
+  создать дубликат после прерванного запуска.
 
 ## Jira reconciliation
 
