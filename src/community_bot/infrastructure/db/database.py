@@ -30,6 +30,9 @@ from community_bot.infrastructure.db.economy import (
     reconcile_economy,
     resolve_member_level,
 )
+from community_bot.infrastructure.db.initial_admin import (
+    SqlAlchemyInitialAdministratorUnitOfWork,
+)
 from community_bot.infrastructure.db.models import (
     AuditEventModel,
     MemberModel,
@@ -126,6 +129,19 @@ class Database:
             after_assignment_result_staged=after_assignment_result_staged,
             after_assignment_outbox_staged=after_assignment_outbox_staged,
             after_assignment_receipt_staged=after_assignment_receipt_staged,
+        )
+
+    def initial_administrator_unit_of_work(
+        self,
+        *,
+        after_member_flushed: Callable[[], None] | None = None,
+        after_audit_flushed: Callable[[], None] | None = None,
+    ) -> SqlAlchemyInitialAdministratorUnitOfWork:
+        """Create a fresh transaction for one-time administrator bootstrap."""
+        return SqlAlchemyInitialAdministratorUnitOfWork(
+            self._sessions,
+            after_member_flushed=after_member_flushed,
+            after_audit_flushed=after_audit_flushed,
         )
 
     @property
@@ -536,6 +552,25 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             status=status,
             before_created_at=before_created_at,
             before_id=before_id,
+        )
+
+    async def list_available_tasks(
+        self,
+        *,
+        performer_id: UUID,
+        level: int,
+        limit: int,
+        cursor_task_id: UUID | None,
+        now: datetime.datetime,
+    ) -> tuple[PublishedTask, ...]:
+        """Return the stable discovery page for one performer."""
+        return await task_store.list_available_tasks(
+            self._require_session(),
+            performer_id=performer_id,
+            level=level,
+            limit=limit,
+            cursor_task_id=cursor_task_id,
+            now=now,
         )
 
     async def add_task_outbox(

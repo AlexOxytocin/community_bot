@@ -28,6 +28,7 @@ MVP не должен доказывать, что можно построить
 - [11_DECISIONS_AND_OPEN_QUESTIONS.md](11_DECISIONS_AND_OPEN_QUESTIONS.md) — принятые решения и вопросы `TBD`.
 - [TECH_STACK.md](TECH_STACK.md) — утверждённый стек, модульные границы и эксплуатационная модель.
 - [HANDOFF.md](HANDOFF.md) — инструкция для продолжения работы в репозитории `community_bot`.
+- [Краткая инструкция HumanQuestBot](../operations/USER_GUIDE.md) — быстрый старт участника и администратора.
 
 ## Приоритет источников
 
