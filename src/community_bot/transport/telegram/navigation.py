@@ -48,6 +48,7 @@ STATISTICS_TEXT = "Статистика"
 LEADERBOARD_TEXT = "Лидерборд"
 MEMBERS_TEXT = "Участники"
 HELP_TEXT = "Помощь"
+ADMIN_TEXT = "Администрирование"
 _TASK_PAGE_PREFIX = "nav:tasks:"
 _CREATE_PREFIX = "nav:create:"
 _ADMIN_PREFIX = "nav:admin:"
@@ -61,7 +62,7 @@ def main_menu_markup() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=MY_TASKS_TEXT), KeyboardButton(text=PROFILE_TEXT)],
             [KeyboardButton(text=BALANCE_TEXT), KeyboardButton(text=STATISTICS_TEXT)],
             [KeyboardButton(text=LEADERBOARD_TEXT), KeyboardButton(text=MEMBERS_TEXT)],
-            [KeyboardButton(text=HELP_TEXT)],
+            [KeyboardButton(text=HELP_TEXT), KeyboardButton(text=ADMIN_TEXT)],
         ],
         resize_keyboard=True,
     )
@@ -301,6 +302,7 @@ def build_navigation_router(  # noqa: PLR0913
     router.message.register(show_leaderboard, F.text == LEADERBOARD_TEXT)
     router.message.register(show_members, F.text == MEMBERS_TEXT)
     router.message.register(show_admin, Command("admin"))
+    router.message.register(show_admin, F.text == ADMIN_TEXT)
     router.callback_query.register(admin_action, F.data.startswith(_ADMIN_PREFIX))
     return router
 
@@ -360,7 +362,7 @@ def _admin_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Создать приглашение", callback_data="nav:admin:invite")],
-            [InlineKeyboardButton(text="Заявки", callback_data="nav:admin:registrations")],
+            [InlineKeyboardButton(text="Заявки", callback_data="registration:list")],
             [InlineKeyboardButton(text="Модерация", callback_data="nav:admin:moderation")],
         ]
     )

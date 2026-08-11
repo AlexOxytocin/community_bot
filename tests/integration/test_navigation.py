@@ -30,14 +30,18 @@ from community_bot.domain.members import MemberRole
 from community_bot.domain.tasks import TaskDraftStep
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.models import (
+    AccountTransactionModel,
     AssignmentModel,
+    ConversationStateModel,
     InvitationModel,
     MemberModel,
     MemberSanctionModel,
+    RegistrationApplicationModel,
     TaskCreationDraftModel,
     TaskModel,
     TaskTemplateModel,
 )
+from community_bot.transport.telegram.navigation import ADMIN_TEXT
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -142,6 +146,55 @@ async def _member(
     return model
 
 
+async def _submitted_member(database: Database, telegram_user_id: int) -> MemberModel:
+    model = MemberModel(
+        id=uuid4(),
+        telegram_user_id=telegram_user_id,
+        display_name="Pending member",
+        city="Buenos Aires",
+        timezone="America/Argentina/Buenos_Aires",
+        short_bio="Помогаю проверять цифровые продукты.",
+        current_goal="Делать сообщество полезнее.",
+        availability="Два часа в неделю",
+        help_categories_json=["Тестирование"],
+        skill_tags_json=["Python"],
+        role="member",
+        status="pending",
+        level_number=1,
+        permissions_json=[],
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add(model)
+        await session.flush()
+        session.add_all(
+            [
+                RegistrationApplicationModel(
+                    member_id=model.id,
+                    status="submitted",
+                    consented_at=datetime.datetime.now(datetime.UTC),
+                    submitted_at=datetime.datetime.now(datetime.UTC),
+                ),
+                ConversationStateModel(
+                    member_id=model.id,
+                    flow_type="registration",
+                    current_step="submitted",
+                    payload_json={
+                        "display_name": model.display_name,
+                        "city": model.city,
+                        "timezone": model.timezone,
+                        "short_bio": model.short_bio,
+                        "current_goal": model.current_goal,
+                        "help_categories": model.help_categories_json,
+                        "skill_tags": model.skill_tags_json,
+                        "availability": model.availability,
+                    },
+                ),
+            ]
+        )
+    return model
+
+
 async def _published_task(
     database: Database, author: MemberModel, template_id: UUID
 ) -> PublishedTask:
@@ -212,6 +265,7 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
         actor_member_id=admin.id,
         activation_command_id=uuid4(),
     )
+    pending = await _submitted_member(database, 7_005)
     economy = EconomyService(database.unit_of_work)
     await economy.apply_one(starting_grant(author.id))
     await economy.apply_one(starting_grant(performer.id))
@@ -319,14 +373,27 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     await dispatcher.feed_update(bot, message_update(70_009, 7_003, "/balance"))
     await dispatcher.feed_update(bot, message_update(70_010, 7_003, "/help"))
 
-    await dispatcher.feed_update(bot, message_update(70_011, 7_003, "/admin"))
+    await dispatcher.feed_update(bot, message_update(70_011, 7_003, ADMIN_TEXT))
     await dispatcher.feed_update(bot, message_update(70_012, 7_004, "/admin"))
     await dispatcher.feed_update(bot, callback_update(70_013, 7_004, "nav:admin:invite"))
-    await dispatcher.feed_update(bot, message_update(70_014, 7_001, "/admin"))
-    await dispatcher.feed_update(bot, callback_update(70_015, 7_001, "nav:admin:invite"))
-    await dispatcher.feed_update(bot, callback_update(70_015, 7_001, "nav:admin:invite"))
-    await dispatcher.feed_update(bot, callback_update(70_016, 7_001, "nav:admin:registrations"))
-    await dispatcher.feed_update(bot, callback_update(70_017, 7_001, "nav:admin:moderation"))
+    session.reply_buttons.clear()
+    session.callbacks.clear()
+    await dispatcher.feed_update(bot, message_update(70_014, 7_001, "/start"))
+    admin_button = next(value for value in session.reply_buttons if value == ADMIN_TEXT)
+    await dispatcher.feed_update(bot, message_update(70_015, 7_001, admin_button))
+    registration_list_callback = next(
+        value for value in session.callbacks if value == "registration:list"
+    )
+    await dispatcher.feed_update(bot, callback_update(70_016, 7_001, registration_list_callback))
+    approval_callback = next(
+        value for value in session.callbacks if value == f"registration:approve:{pending.id}"
+    )
+    await dispatcher.feed_update(bot, callback_update(70_017, 7_001, approval_callback))
+    await dispatcher.feed_update(bot, callback_update(70_017, 7_001, approval_callback))
+    await dispatcher.feed_update(bot, message_update(70_018, 7_001, "/admin"))
+    await dispatcher.feed_update(bot, callback_update(70_019, 7_001, "nav:admin:invite"))
+    await dispatcher.feed_update(bot, callback_update(70_019, 7_001, "nav:admin:invite"))
+    await dispatcher.feed_update(bot, callback_update(70_020, 7_001, "nav:admin:moderation"))
 
     async with sessions() as db_session:
         assignment_count = await db_session.scalar(
@@ -336,11 +403,23 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
         performer_draft = await db_session.scalar(
             select(TaskCreationDraftModel).where(TaskCreationDraftModel.creator_id == performer.id)
         )
+        approved_member = await db_session.get(MemberModel, pending.id)
+        grant_count = await db_session.scalar(
+            select(func.count())
+            .select_from(AccountTransactionModel)
+            .where(
+                AccountTransactionModel.member_id == pending.id,
+                AccountTransactionModel.transaction_type == "starting_grant",
+            )
+        )
     assert assignment_count == 1
     assert invite_count == 1
     assert performer_draft is not None
     assert performer_draft.template_id == UUID(hex=create_callback.removeprefix("nav:create:"))
     assert performer_draft.current_step == "deadline"
+    assert approved_member is not None
+    assert approved_member.status == "active"
+    assert grant_count == 1
     assert sum("Административное меню недоступно." in text for text in session.texts) == 2
     assert any("Баланс: 5 кредитов" in text for text in session.texts)
     assert any("Как пользоваться ботом" in text for text in session.texts)
