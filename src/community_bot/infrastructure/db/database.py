@@ -16,6 +16,7 @@ from community_bot.application.member_foundation import FoundationUnitOfWork, Up
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.infrastructure.db import assignments as assignment_store
 from community_bot.infrastructure.db import catalog as catalog_store
+from community_bot.infrastructure.db import moderation as moderation_store
 from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db import reputation as reputation_store
 from community_bot.infrastructure.db import tasks as task_store
@@ -34,6 +35,7 @@ from community_bot.infrastructure.db.models import (
     MemberModel,
     ProcessedTelegramUpdateModel,
 )
+from community_bot.infrastructure.db.moderation import SqlAlchemyModerationMutation
 
 _UPDATE_LOCK_NAMESPACE = "telegram_update"
 
@@ -79,6 +81,7 @@ if TYPE_CHECKING:
     )
     from community_bot.domain.catalog import TemplateDraft
     from community_bot.domain.economy import ProductConfigCandidate, ResolvedLevel
+    from community_bot.domain.moderation import RestrictedAction
     from community_bot.domain.registration import (
         ModerationDecision,
         ProfileField,
@@ -203,6 +206,15 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     def economy(self) -> SqlAlchemyEconomyMutation:
         """Return the economy adapter bound to this transaction."""
         return SqlAlchemyEconomyMutation(
+            self._require_session(),
+            after_ledger_flushed=self._after_ledger_flushed,
+            after_cache_flushed=self._after_economy_cache_flushed,
+        )
+
+    @property
+    def moderation(self) -> SqlAlchemyModerationMutation:
+        """Return the moderation adapter bound to this transaction."""
+        return SqlAlchemyModerationMutation(
             self._require_session(),
             after_ledger_flushed=self._after_ledger_flushed,
             after_cache_flushed=self._after_economy_cache_flushed,
@@ -383,6 +395,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         await assignment_store.append_reliability(
             self._require_session(), assignment_id, event_type, actor_id, reason
         )
+
+    async def recompute_interaction_alert(self, assignment_id: UUID) -> None:
+        """Refresh one pair alert after a settlement effect."""
+        await moderation_store.recompute_interaction_alert(self._require_session(), assignment_id)
 
     async def add_assignment_outbox(
         self, *, assignment: Assignment, event_type: str, business_key: str
@@ -727,12 +743,28 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         model = await self._require_session().scalar(
             select(MemberModel).where(MemberModel.telegram_user_id == telegram_user_id)
         )
-        return None if model is None else _to_domain(model)
+        if model is None:
+            return None
+        status = await moderation_store.effective_member_status(
+            self._require_session(), model, materialize=True
+        )
+        return _to_domain(model, status=status)
 
     async def get_member(self, member_id: UUID) -> Member | None:
         """Read one security snapshot by member UUID."""
         model = await self._require_session().get(MemberModel, member_id)
-        return None if model is None else _to_domain(model)
+        if model is None:
+            return None
+        status = await moderation_store.effective_member_status(
+            self._require_session(), model, materialize=True
+        )
+        return _to_domain(model, status=status)
+
+    async def ensure_moderation_action_allowed(
+        self, member_id: UUID, action: RestrictedAction
+    ) -> None:
+        """Enforce current action restrictions under the member sanction gate."""
+        await moderation_store.ensure_action_allowed(self._require_session(), member_id, action)
 
     async def karma_eligible(self, first_id: UUID, second_id: UUID) -> bool:
         """Return permanent eligibility derived from paid member work."""
@@ -789,6 +821,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             comment=comment,
             command_id=command_id,
         )
+
+    async def generate_karma_signals(self, vote_id: UUID) -> None:
+        """Create idempotent private signals after one vote revision."""
+        await moderation_store.generate_karma_signals(self._require_session(), vote_id)
 
     async def karma_vote_by_command(self, command_id: UUID) -> KarmaVoteResult | None:
         """Read a vote revision by immutable command identity."""
@@ -995,12 +1031,12 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return self._session
 
 
-def _to_domain(model: MemberModel) -> Member:
+def _to_domain(model: MemberModel, *, status: MemberStatus | None = None) -> Member:
     return Member(
         id=model.id,
         telegram_user_id=model.telegram_user_id,
         role=MemberRole(model.role),
-        status=MemberStatus(model.status),
+        status=status or MemberStatus(model.status),
         permissions=frozenset(model.permissions_json),
     )
 

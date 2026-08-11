@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections import defaultdict
 from dataclasses import replace
@@ -32,8 +33,11 @@ from community_bot.infrastructure.db.models import (
     ConversationStateModel,
     KarmaVoteHistoryModel,
     KarmaVoteModel,
+    KarmaVoteModerationModel,
     MemberModel,
+    MemberSanctionModel,
     ReliabilityEventModel,
+    ReliabilityOutcomeCorrectionModel,
     TaskCategoryModel,
     TaskModel,
 )
@@ -291,7 +295,24 @@ async def karma_aggregate(session: AsyncSession, target_id: UUID) -> KarmaAggreg
         await session.execute(
             select(
                 func.coalesce(func.sum(KarmaVoteModel.value), 0), func.count(KarmaVoteModel.id)
-            ).where(KarmaVoteModel.target_id == target_id)
+            ).where(
+                KarmaVoteModel.target_id == target_id,
+                func.coalesce(
+                    select(KarmaVoteModerationModel.state)
+                    .where(
+                        KarmaVoteModerationModel.karma_vote_id == KarmaVoteModel.id,
+                        KarmaVoteModerationModel.vote_revision == KarmaVoteModel.revision,
+                    )
+                    .order_by(
+                        KarmaVoteModerationModel.created_at.desc(),
+                        KarmaVoteModerationModel.id.desc(),
+                    )
+                    .limit(1)
+                    .scalar_subquery(),
+                    "included",
+                )
+                != "excluded",
+            )
         )
     ).one()
     return KarmaAggregate(score=int(row[0]), count=int(row[1]))
@@ -384,14 +405,26 @@ async def reliability(  # noqa: C901 - chain folding is kept together as one ora
         leaf = root
         while leaf.id in children:
             leaf = children[leaf.id]
-        if root.event_type == "cancelled_creator" or leaf.event_type == "responsibility_excused":
+        correction = await session.scalar(
+            select(ReliabilityOutcomeCorrectionModel)
+            .where(ReliabilityOutcomeCorrectionModel.assignment_id == root.assignment_id)
+            .order_by(
+                ReliabilityOutcomeCorrectionModel.resolution_version.desc(),
+                ReliabilityOutcomeCorrectionModel.created_at.desc(),
+            )
+            .limit(1)
+        )
+        effective_outcome = root.event_type if correction is None else correction.new_outcome
+        if effective_outcome in {"cancelled_creator", "responsibility_excused"} or (
+            leaf.event_type == "responsibility_excused"
+        ):
             continue
         accepted += 1
-        if root.event_type == "approved":
+        if effective_outcome == "approved":
             approved_weight += Decimal(1)
-        elif root.event_type == "partially_approved":
+        elif effective_outcome == "partially_approved":
             approved_weight += Decimal("0.5")
-        elif root.event_type == "no_show":
+        elif effective_outcome == "no_show":
             no_show += 1
     return _reliability_view(ReliabilityFacts(accepted, approved_weight, no_show))
 
@@ -425,7 +458,7 @@ async def safe_profiles(
 ) -> MemberCatalogPage:
     """Return an active-profile keyset page in stable name/UUID order."""
     normalized_name = func.lower(MemberModel.display_name)
-    query = select(MemberModel.id).where(MemberModel.status == "active")
+    query = select(MemberModel.id).where(_effectively_active_clause())
     if cursor is not None:
         query = query.where(
             or_(
@@ -509,7 +542,7 @@ async def leaderboard(
     """Return a stable ledger-authoritative leaderboard page."""
     members = (
         await session.scalars(
-            select(MemberModel).where(MemberModel.status == "active").order_by(MemberModel.id)
+            select(MemberModel).where(_effectively_active_clause()).order_by(MemberModel.id)
         )
     ).all()
     ranked: list[tuple[tuple[Any, ...], int, MemberModel, int, ReliabilityView, int, datetime]] = []
@@ -647,4 +680,34 @@ def _cursor_sort_key(cursor: LeaderboardCursor) -> tuple[Any, ...]:
         cursor.no_show,
         cursor.reached_at,
         str(cursor.member_id),
+    )
+
+
+def _effectively_active_clause():  # noqa: ANN202 - SQLAlchemy boolean expression.
+    """Treat an elapsed suspension as active even before the expiry worker runs."""
+    now = dt.datetime.now(dt.UTC)
+    has_expired = (
+        select(MemberSanctionModel.id)
+        .where(
+            MemberSanctionModel.target_member_id == MemberModel.id,
+            MemberSanctionModel.state == "active",
+            MemberSanctionModel.applied_status == "suspended",
+            MemberSanctionModel.ends_at <= now,
+            MemberSanctionModel.previous_status == "active",
+        )
+        .exists()
+    )
+    has_live = (
+        select(MemberSanctionModel.id)
+        .where(
+            MemberSanctionModel.target_member_id == MemberModel.id,
+            MemberSanctionModel.state == "active",
+            MemberSanctionModel.applied_status == "suspended",
+            MemberSanctionModel.ends_at > now,
+        )
+        .exists()
+    )
+    return or_(
+        MemberModel.status == "active",
+        and_(MemberModel.status == "suspended", has_expired, ~has_live),
     )

@@ -27,6 +27,7 @@ from community_bot.domain.economy import (
     refund_reward,
 )
 from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import TaskStatus
 
 if TYPE_CHECKING:
@@ -111,6 +112,9 @@ class AssignmentUnitOfWork(Protocol):
     async def acquire_assignment_task_gate(self, task_id: UUID) -> None: ...
     async def acquire_assignment_limit_gate(self, member_id: UUID) -> None: ...
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
+    async def ensure_moderation_action_allowed(
+        self, member_id: UUID, action: RestrictedAction
+    ) -> None: ...
     async def lock_members(self, member_ids: Sequence[UUID]) -> dict[UUID, Member]: ...
     async def resolve_member_level(self, member_id: UUID) -> ResolvedLevel: ...
     async def get_active_product_config(self) -> ActiveProductConfig | None: ...
@@ -167,6 +171,7 @@ class AssignmentUnitOfWork(Protocol):
     async def append_assignment_reliability(
         self, assignment_id: UUID, event_type: str, actor_id: UUID | None, reason: str | None
     ) -> None: ...
+    async def recompute_interaction_alert(self, assignment_id: UUID) -> None: ...
     async def add_assignment_outbox(
         self, *, assignment: Assignment, event_type: str, business_key: str
     ) -> None: ...
@@ -197,6 +202,7 @@ class AssignmentService:
                 return await _assignment_replay(uow, replay)
             await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
             actor = await _actor(uow, command.actor_telegram_user_id)
+            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.ACCEPT_TASK)
             await uow.acquire_assignment_limit_gate(actor.id)
             await uow.acquire_assignment_task_gate(command.task_id)
             task = await uow.lock_task(command.task_id)
@@ -534,6 +540,7 @@ class AssignmentService:
                 await prepared.apply()
             if status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}:
                 await uow.append_assignment_reliability(assignment.id, status.value, actor.id, None)
+                await uow.recompute_interaction_alert(assignment.id)
             await uow.add_assignment_outbox(
                 assignment=updated,
                 event_type="assignment_reviewed",
@@ -630,6 +637,7 @@ class AssignmentService:
             await uow.append_assignment_reliability(
                 assignment.id, "approved", None, "review_deadline"
             )
+            await uow.recompute_interaction_alert(assignment.id)
             await uow.add_assignment_outbox(
                 assignment=updated,
                 event_type="assignment_autoconfirmed",

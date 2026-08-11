@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from community_bot.domain.members import MemberStatus
+from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.reputation import (
     KarmaStep,
     ProfileUnavailableError,
@@ -186,6 +187,9 @@ class ReputationUnitOfWork(Protocol):
     async def get_receipt(self, update_id: int) -> UpdateReceipt | None: ...
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
     async def get_member(self, member_id: UUID) -> Member | None: ...
+    async def ensure_moderation_action_allowed(
+        self, member_id: UUID, action: RestrictedAction
+    ) -> None: ...
     async def lock_members(self, member_ids: tuple[UUID, ...]) -> dict[UUID, Member]: ...
     async def karma_eligible(self, first_id: UUID, second_id: UUID) -> bool: ...
     async def get_karma_draft(self, member_id: UUID, *, for_update: bool) -> KarmaDraft | None: ...
@@ -209,6 +213,8 @@ class ReputationUnitOfWork(Protocol):
         comment: str,
         command_id: UUID,
     ) -> KarmaVoteResult: ...
+
+    async def generate_karma_signals(self, vote_id: UUID) -> None: ...
     async def karma_vote_by_command(self, command_id: UUID) -> KarmaVoteResult | None: ...
     async def karma_aggregate(self, target_id: UUID) -> KarmaAggregate: ...
     async def safe_profile(self, member_id: UUID) -> SafeProfile | None: ...
@@ -262,6 +268,7 @@ class ReputationService:
             await uow.acquire_update_gate(update_id)
             await uow.acquire_registration_identity_gate(telegram_user_id)
             actor = await self._active_actor(uow, telegram_user_id)
+            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.KARMA_VOTE)
             if await uow.get_receipt(update_id) is not None:
                 draft = await uow.get_karma_draft(actor.id, for_update=False)
                 if draft is None:
@@ -363,6 +370,7 @@ class ReputationService:
                 comment=comment,
                 command_id=command_id,
             )
+            await uow.generate_karma_signals(result.vote_id)
             await uow.delete_karma_draft(actor.id, expected_revision)
             await uow.append_audit_event(
                 actor_member_id=actor.id,
