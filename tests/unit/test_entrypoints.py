@@ -23,11 +23,11 @@ def test_entrypoint_check_mode_returns_success(
 
 
 @pytest.mark.parametrize("entrypoint", [bot_main, worker_main])
-def test_entrypoint_runtime_mode_returns_safe_failure(
+def test_entrypoint_runtime_mode_rejects_missing_secrets(
     entrypoint: EntryPoint,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     get_settings.cache_clear()
 
     assert entrypoint([]) == 2
-    assert "runtime_not_implemented" in capsys.readouterr().err
+    assert "configuration_invalid" in capsys.readouterr().err

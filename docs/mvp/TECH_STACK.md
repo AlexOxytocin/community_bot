@@ -79,24 +79,28 @@ src/community_bot/
 
 На локальной машине все зависимости поднимаются через Docker Compose. Сам бот может запускаться через `uv run` либо внутри контейнера.
 
-Пилот размещается в одном project/region Render Pro:
+Пилот размещается на одном собственном сервере под Ubuntu 24.04 через Docker
+Compose:
 
-- `bot` и `worker` — два image-backed background workers;
-- PostgreSQL 18 — платный managed Render PostgreSQL с private URL и PITR;
-- GitHub Actions публикует один reviewed `linux/amd64` image в GHCR, а release
-  использует его SHA-256 digest без mutable tags;
-- единственный pre-deploy migration gate принадлежит `worker`; после
-  `alembic upgrade head` переключается `worker`, затем `bot`;
-- release-миграции expand-only и совместимы с предыдущим digest; при частичном
-  сбое процесс откатывается без автоматического downgrade схемы;
-- Render хранит структурированные JSON-логи 14 дней, Sentry — очищенные error
+- `bot`, `worker`, одноразовый `migrate` и PostgreSQL 18 работают в отдельном
+  Compose project и внутренней сети;
+- PostgreSQL не публикует порт, а long polling не требует входящего HTTP-порта;
+- GitHub Actions публикует один reviewed `linux/arm64` image в GHCR под архитектуру
+  пилотного сервера, штатный
+  release использует его SHA-256 digest без mutable tags;
+- deployment запускает PostgreSQL, migration gate, `worker` + readiness и лишь
+  затем `bot` + readiness;
+- release-миграции expand-only и совместимы с предыдущим image; частичный сбой
+  откатывает процессы без автоматического schema downgrade;
+- Docker ограничивает размер локальных JSON-логов, Sentry хранит очищенные error
   events не более 30 дней;
-- process liveness дополняется прикладными DB readiness и heartbeat обоих
-  процессов.
+- ежедневный root-only logical backup хранится локально семь суток, restore
+  drill выполняется до пилота и каждые четыре недели.
 
-Предыдущий GHCR digest хранится минимум 30 дней и до успешного следующего
-release. Полный эксплуатационный контракт зафиксирован в
-[ADR-0008](../adr/0008-pilot-runtime-and-operations.md).
+External backup, application object storage и webhook не входят в MVP. Полный
+эксплуатационный контракт зафиксирован в
+[ADR-0009](../adr/0009-self-hosted-pilot-runtime.md); он заменяет hosting,
+release и backup-положения ADR-0008.
 
 ## 7. Контроль качества
 

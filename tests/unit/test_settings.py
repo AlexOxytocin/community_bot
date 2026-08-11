@@ -15,6 +15,9 @@ def test_settings_have_safe_development_defaults() -> None:
     assert settings.log_level == "INFO"
     assert settings.bot_token is None
     assert settings.database_url.startswith("postgresql+asyncpg://")
+    assert settings.notification_window_start_local.hour == 9
+    assert settings.notification_window_end_local.hour == 21
+    assert settings.worker_batch_size == 25
 
 
 def test_settings_read_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -25,3 +28,12 @@ def test_settings_read_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.environment == "test"
     assert settings.log_level == "DEBUG"
+
+
+def test_settings_normalize_render_postgresql_urls() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgres://user:password@private-host/database",
+    )
+
+    assert settings.database_url.startswith("postgresql+asyncpg://")

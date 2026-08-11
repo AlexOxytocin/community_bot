@@ -1,0 +1,80 @@
+name: community-bot
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "14"
+
+  migrate:
+    image: ${COMMUNITY_BOT_IMAGE}
+    command: community-migrate
+    restart: "no"
+    env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    logging: *logging
+
+  worker:
+    image: ${COMMUNITY_BOT_IMAGE}
+    command: community-worker
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "community-health", "--process", "community-worker"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [internal, egress]
+    logging: *logging
+
+  bot:
+    image: ${COMMUNITY_BOT_IMAGE}
+    command: community-bot
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "community-health", "--process", "community-bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [internal, egress]
+    logging: *logging
+
+volumes:
+  postgres-data:
+
+networks:
+  internal:
+    internal: true
+  egress: {}

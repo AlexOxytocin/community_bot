@@ -29,7 +29,8 @@
 ## Ближайший результат
 
 Эксплуатационный этап CB-15: outbox worker, уведомления, heartbeat/readiness,
-очищенные логи/Sentry, Render release flow и проверяемое PITR-восстановление.
+очищенные логи/Sentry, self-hosted release flow и проверяемое восстановление
+локального PostgreSQL backup.
 
 ## Источники управления проектом
 

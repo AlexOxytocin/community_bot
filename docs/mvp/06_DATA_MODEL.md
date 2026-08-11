@@ -229,11 +229,60 @@ payload_json JSON NOT NULL
 business_key TEXT UNIQUE NOT NULL
 created_at TIMESTAMP WITH TIME ZONE NOT NULL
 published_at TIMESTAMP WITH TIME ZONE NULL
+status TEXT NOT NULL
+attempt_count INTEGER NOT NULL
+next_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL
+lease_token UUID NULL
+lease_expires_at TIMESTAMP WITH TIME ZONE NULL
+last_error_code TEXT NULL
 ```
 
 CB-10 записывает `task.published` и `task.cancelled`. Доставка outbox является
 отдельной ответственностью worker; приватные input и материалы в payload не
 копируются.
+
+`pending` и истёкший `processing` доступны для claim через `FOR UPDATE SKIP
+LOCKED`. Актуальный `lease_token` ограждает завершение от старой копии worker.
+Materialization одним commit создаёт адресные записи и переводит событие в
+`materialized`; после пяти неуспешных попыток poison event становится `failed`.
+
+### `notifications`
+
+```text
+id UUID PK
+member_id UUID FK NOT NULL
+notification_type TEXT NOT NULL
+payload_json JSON NOT NULL
+status TEXT NOT NULL
+scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL
+attempt_count INTEGER NOT NULL
+next_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL
+lease_token UUID NULL
+lease_expires_at TIMESTAMP WITH TIME ZONE NULL
+sent_at TIMESTAMP WITH TIME ZONE NULL
+last_error_code TEXT NULL
+deduplication_key TEXT UNIQUE NOT NULL
+created_at TIMESTAMP WITH TIME ZONE NOT NULL
+updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+Payload строится по allowlist и не копирует input, материалы, комментарии,
+доказательства или токены. Успешная отправка сохраняет `sent`; временная ошибка
+использует ограниченный backoff, permanent error или пятая попытка — `failed`.
+Окно доставки участника по умолчанию `[09:00,21:00)` в его IANA timezone.
+
+### `process_heartbeats`
+
+```text
+process_name TEXT PK
+release TEXT NOT NULL
+migration_revision TEXT NOT NULL
+observed_at TIMESTAMP WITH TIME ZONE NOT NULL
+```
+
+Readiness сверяет PostgreSQL, Alembic head, свежий heartbeat и отсутствие
+terminal failed outbox events. Таблица не содержит секретов или пользовательских
+данных.
 
 ### `assignments`
 

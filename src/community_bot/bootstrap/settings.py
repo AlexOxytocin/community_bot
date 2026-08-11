@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +26,24 @@ class Settings(BaseSettings):
     )
     bot_token: SecretStr | None = None
     invite_token_secret: SecretStr | None = None
+    sentry_dsn: SecretStr | None = None
+    release: str = "local"
+    notification_window_start_local: datetime.time = datetime.time(hour=9)
+    notification_window_end_local: datetime.time = datetime.time(hour=21)
+    worker_batch_size: int = 25
+    worker_poll_interval_seconds: float = 2.0
+    worker_lease_seconds: int = 120
+    heartbeat_max_age_seconds: int = 180
+
+    @field_validator("database_url")
+    @classmethod
+    def normalize_database_driver(cls, value: str) -> str:
+        """Use asyncpg for common PostgreSQL connection strings."""
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql+asyncpg://", 1)
+        return value
 
 
 @lru_cache(maxsize=1)

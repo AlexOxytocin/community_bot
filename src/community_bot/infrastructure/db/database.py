@@ -128,6 +128,11 @@ class Database:
             after_assignment_receipt_staged=after_assignment_receipt_staged,
         )
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """Expose isolated sessions to infrastructure adapters in the same process."""
+        return self._sessions
+
     async def dispose(self) -> None:
         """Release all engine resources."""
         await self.engine.dispose()

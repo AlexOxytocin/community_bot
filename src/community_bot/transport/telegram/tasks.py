@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
@@ -63,7 +64,7 @@ def build_task_router(service: TaskService) -> Router:
         try:
             draft = await service.current(actor_telegram_user_id=message.from_user.id)
             if draft is None:
-                return
+                raise SkipHandler
             value = _parse_step_value(draft.current_step, message.text)
             updated = await service.advance(
                 AdvanceDraftCommand(

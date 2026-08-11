@@ -360,12 +360,13 @@ karma/fraud/interaction signal сам по себе не списывает кр
 **Отклонено:** автоматические наказания по сигналу, апелляция без срока и доступ
 moderator к raw-карме или денежным взысканиям.
 
-### D-024. Ниша и эксплуатационный профиль пилота
+### D-024. Ниша и эксплуатационный профиль пилота — заменено частично
 
 **Закрывает:** `Q-001`, hosting, error reporting/log retention и PostgreSQL
 backup/restore.
 
-**Дата:** 2026-08-11.
+**Дата:** 2026-08-11. Hosting, release и backup-профиль заменены D-025 и
+ADR-0009; ниша пилота и privacy/exclusion решения сохраняются.
 
 **Причина:** CB-15 нужен один исполнимый профиль небольшой когорты, release,
 наблюдаемости и восстановления без инфраструктуры «на всякий случай».
@@ -395,6 +396,30 @@ Application object storage и webhook явно исключены владель
 несовместимые destructive migration в одном release, provider dashboard без
 Sentry и непроверенное восстановление. Полный контракт:
 [ADR-0008](../adr/0008-pilot-runtime-and-operations.md).
+
+### D-025. Самостоятельное размещение пилота
+
+**Закрывает:** замену hosting/release/backup части D-024.
+
+**Дата:** 2026-08-11.
+
+**Причина:** до provisioning Render владелец выбрал собственный сервер и поручил
+развернуть весь runtime на нём.
+
+**Выбрано:** один Ubuntu 24.04 host и отдельный Docker Compose project с
+`postgres`, `migrate`, `worker`, `bot`. База доступна только во внутренней сети;
+новые публичные порты не открываются. Штатный release использует один
+`linux/arm64` GHCR SHA-256 digest под архитектуру пилотного сервера и порядок
+`migration → worker readiness → bot readiness`.
+
+Секреты хранятся только в root-owned environment file. Локальный ежедневный
+logical backup хранится семь суток; restore drill выполняется в отдельную БД до
+пилота и каждые четыре недели. Для логического сбоя действуют `RPO <= 24h` и
+`RTO <= 4h`. Полная потеря хоста не покрыта: external backup, R2, application
+object storage и webhook не входят в MVP.
+
+**Заменено:** Render Pro, managed PITR и Render-specific release из D-024.
+Полный контракт: [ADR-0009](../adr/0009-self-hosted-pilot-runtime.md).
 
 ## Открытые продуктовые вопросы
 

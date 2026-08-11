@@ -41,9 +41,13 @@ uv run python --version
 ```powershell
 uv run community-bot --check
 uv run community-worker --check
+uv run community-health --process community-worker
 ```
 
-Запуск без `--check` намеренно возвращает код 2 и событие `runtime_not_implemented`. Подключение long polling и реального Bot API остаётся отдельной задачей; маршрутизатор CB-6 проверяется synthetic updates и fake session без внешней сети.
+Запуск без `--check` поднимает long polling bot либо долговечный notification
+worker. Для него нужны `BOT_TOKEN`, `INVITE_TOKEN_SECRET` и доступный PostgreSQL с
+актуальной миграцией. Одноразовый безопасный проход выполняется командой
+`uv run community-worker --once`.
 
 ## Конфигурация
 
@@ -74,6 +78,12 @@ trigger, запрещающий изменение и удаление audit eve
 неизменяемые снимки опубликованных заданий и transactional outbox. Публикация
 одной транзакцией резервирует полную награду, фиксирует задание, аудит,
 уведомление и receipt Telegram; повтор команды не создаёт второй эффект.
+
+Миграция `0010` добавляет fenced lease и bounded retry для transactional outbox,
+адресные `notifications` и heartbeat процессов. Worker фиксирует claim до Bot API,
+не держит транзакцию во время сети и после рестарта забирает только истёкшие
+lease. Порядок self-hosted релиза и backup-восстановления описан в
+[`docs/operations/PILOT_RUNBOOK.md`](docs/operations/PILOT_RUNBOOK.md).
 
 Редактируемый снимок уровней и порогов находится в
 `config/product-config.v1.json`. После проверки и активации runtime-источником

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -261,7 +262,7 @@ def build_registration_router(service: RegistrationService) -> Router:
             return
         expectation = await service.expected_input(message.from_user.id)
         if expectation is None:
-            return
+            raise SkipHandler
         flow_type, raw_step = expectation
         try:
             if flow_type == "registration":

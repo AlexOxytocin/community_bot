@@ -1,0 +1,53 @@
+name: Release image
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out reviewed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish linux/arm64 image
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.event.workflow_run.head_sha }}
+          build-args: RELEASE=${{ github.event.workflow_run.head_sha }}
+      - name: Record immutable image reference
+        run: >-
+          echo "ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}"
+          > community-bot-image.txt
+      - name: Upload release reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-bot-image-${{ github.event.workflow_run.head_sha }}
+          path: community-bot-image.txt
+          retention-days: 30
