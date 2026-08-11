@@ -79,15 +79,24 @@ src/community_bot/
 
 На локальной машине все зависимости поднимаются через Docker Compose. Сам бот может запускаться через `uv run` либо внутри контейнера.
 
-Для пилота нужен хостинг, который поддерживает:
+Пилот размещается в одном project/region Render Pro:
 
-- постоянно работающие процессы `bot` и `worker`;
-- управляемый PostgreSQL или надёжный PostgreSQL-контейнер с резервным копированием;
-- переменные окружения и секреты;
-- сбор JSON-логов;
-- health check и автоматический перезапуск.
+- `bot` и `worker` — два image-backed background workers;
+- PostgreSQL 18 — платный managed Render PostgreSQL с private URL и PITR;
+- GitHub Actions публикует один reviewed `linux/amd64` image в GHCR, а release
+  использует его SHA-256 digest без mutable tags;
+- единственный pre-deploy migration gate принадлежит `worker`; после
+  `alembic upgrade head` переключается `worker`, затем `bot`;
+- release-миграции expand-only и совместимы с предыдущим digest; при частичном
+  сбое процесс откатывается без автоматического downgrade схемы;
+- Render хранит структурированные JSON-логи 14 дней, Sentry — очищенные error
+  events не более 30 дней;
+- process liveness дополняется прикладными DB readiness и heartbeat обоих
+  процессов.
 
-Конкретный провайдер размещения остаётся открытым решением. Long polling выбран для MVP; webhook рассматривается только при появлении эксплуатационной необходимости.
+Предыдущий GHCR digest хранится минимум 30 дней и до успешного следующего
+release. Полный эксплуатационный контракт зафиксирован в
+[ADR-0008](../adr/0008-pilot-runtime-and-operations.md).
 
 ## 7. Контроль качества
 
