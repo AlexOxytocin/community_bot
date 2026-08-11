@@ -1,4 +1,4 @@
-# CB-13 — повторное финальное ревью
+# CB-13 — финальное ревью после CI-fix
 
 Status: approved
 
@@ -14,12 +14,21 @@ Status: approved
   полный staged diff.
 - Проверен консолидированный delta после первого final review: миграция `0009`,
   domain/persistence/UoW, implementation report и targeted integration tests.
+- Отдельно проверен CI-fix поверх commit
+  `f09b570423cf19f677dada7aa262897999f791b2`: staged delta содержит только
+  синхронизацию одного migration assertion с правом `interaction_review` из
+  `0009` и фактическое дополнение implementation report данными CI run
+  `31480039435`.
 - До и после проверки `git write-tree` равен frozen snapshot
-  `851ba8076c95b10de12e9e0e11e412f8c99975ab`.
+  `2cd6690932491524b42fc97b1fba2cf0aa1a8362`.
 - Независимо повторён только утверждённый moderation gate:
   `uv run pytest -q --no-cov tests/unit/test_moderation_domain.py tests/integration/test_moderation.py`
   — `17 passed` за `26.19s`, без skip/deselect. Полная регрессия MVP не
   запускалась и остаётся `CB-16`.
+- Принято доказательство первого полного CI run `31480039435`: quality gate и
+  `308` PostgreSQL-тестов прошли, единственным падением было устаревшее ожидание
+  набора прав после migration `0009`. Независимо повторён только этот тест:
+  `test_migration_backfills_only_active_administrators` — `1 passed` за `6.85s`.
 
 ## critical_findings
 
@@ -46,6 +55,11 @@ Status: approved
   границы. Downgrade с существующим `resolution_reversal` теперь останавливается
   явным preflight barrier до любых DDL-изменений, исключая потерю или неверную
   переклассификацию ledger history.
+
+CI-fix не меняет runtime-код, миграцию или authorization policy. Assertion
+по-прежнему точный: active administrator обязан получить ровно
+`interaction_review|karma_review|member_read`, paused administrator и member —
+пустой набор. Барьер не ослаблен, а приведён в соответствие с проверяемым head.
 
 ## minor_findings
 
@@ -78,6 +92,9 @@ Status: approved
   interaction alert/penalty и durable preview/restart/foreign callback закрыты.
 - Общий targeted gate: `17 passed`, `0 skip/deselect`; приняты зафиксированные
   успешные Alembic cycle, Ruff, ty, build, entrypoints и diff-check.
+- CI-перепроверка: полный run дал `308 passed` до одного stale assertion; после
+  точной синхронизации сфокусированный migration test дал `1 passed`. Новых
+  поведенческих ветвей или оснований повторять локально полную регрессию нет.
 
 Итог: риск-ориентированный MVP gate достаточен для CB-13. Необоснованного
 утверждения о полном переборе всех комбинаций в отчёте больше нет.
@@ -96,13 +113,15 @@ Status: approved
 - Level 3 пакет полон, контрольный plan review имеет точный
   `Status: approved`; новый ADR не нужен, реализация остаётся внутри
   ADR-0005/0006.
-- Ветка `task/CB-13` основана на актуальном `origin/main`: `HEAD`, `origin/main`
-  и merge-base равны `794b6fc77e7711837132de3c2d97cc5456211b40`.
+- Проверяемый CI-fix staged поверх commit
+  `f09b570423cf19f677dada7aa262897999f791b2` в ветке `task/CB-13`; delta строго
+  ограничен одним test expectation и implementation report.
 - Staged scope соответствует CB-13, несвязанных/generated файлов нет. Jira,
   staged index, Git remote и Telegram не менялись; этот `final-review.md`
   оставлен единственным unstaged артефактом.
-- Это повторное final review после одного консолидированного исправления.
-  Обязательных findings не осталось, поэтому final-review escalation не нужна.
+- Предыдущее `Status: approved` перепроверено на новом snapshot и остаётся
+  применимо: CI-fix не изменяет принятые M-001–M-004 границы. Обязательных
+  findings нет, final-review escalation не нужна.
 
 ## required_actions
 
