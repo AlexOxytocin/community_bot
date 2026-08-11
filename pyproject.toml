@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 community-bot = "community_bot.bootstrap.bot:main"
+community-bootstrap-admin = "community_bot.bootstrap.initial_admin:main"
 community-health = "community_bot.bootstrap.health:main"
 community-migrate = "community_bot.bootstrap.migrate:main"
 community-worker = "community_bot.worker.entrypoint:main"
