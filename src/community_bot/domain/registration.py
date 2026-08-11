@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from functools import lru_cache
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 
@@ -19,6 +21,10 @@ class InvitationError(RegistrationError):
 
 class StaleRegistrationStepError(RegistrationError):
     """Raised when a delayed answer targets an obsolete registration step."""
+
+
+class TimezoneResolutionError(RegistrationError):
+    """Raised when a human location cannot be resolved without guessing."""
 
 
 class RegistrationStep(StrEnum):
@@ -93,6 +99,15 @@ _STEP_FLOW: dict[RegistrationStep, tuple[ProfileField | str, RegistrationStep]] 
     RegistrationStep.AVAILABILITY: (ProfileField.AVAILABILITY, RegistrationStep.PREVIEW),
 }
 
+_PILOT_CITY_TIMEZONES: dict[str, str] = {
+    "Buenos Aires": "America/Argentina/Buenos_Aires",
+    "буэнос айрес": "America/Argentina/Buenos_Aires",
+    "екатеринбург": "Asia/Yekaterinburg",
+    "казань": "Europe/Moscow",
+    "москва": "Europe/Moscow",
+    "санкт петербург": "Europe/Moscow",
+}
+
 
 def normalize_registration_answer(
     step: RegistrationStep,
@@ -128,12 +143,11 @@ def normalize_profile_value(  # noqa: PLR0911 - explicit field rules stay readab
         return _bounded_text(raw_value, minimum=2, maximum=80, label="city")
     if field is ProfileField.TIMEZONE:
         value = _bounded_text(raw_value, minimum=3, maximum=64, label="timezone")
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as error:
-            message = "Timezone must be a valid IANA timezone."
-            raise RegistrationError(message) from error
-        return value
+        timezone_name = resolve_timezone(value)
+        if timezone_name is None:
+            message = "Timezone cannot be resolved from this location without guessing."
+            raise TimezoneResolutionError(message)
+        return timezone_name
     if field is ProfileField.SHORT_BIO:
         return _bounded_text(raw_value, minimum=10, maximum=500, label="short bio")
     if field is ProfileField.CURRENT_GOAL:
@@ -143,6 +157,48 @@ def normalize_profile_value(  # noqa: PLR0911 - explicit field rules stay readab
     if field is ProfileField.HELP_CATEGORIES:
         return _normalized_list(raw_value, maximum_items=10, maximum_item_length=50)
     return _normalized_list(raw_value, maximum_items=20, maximum_item_length=50)
+
+
+def resolve_timezone(raw_location: str) -> str | None:
+    """Resolve an exact IANA name or an unambiguous human city name."""
+    value = " ".join(raw_location.split())
+    try:
+        return ZoneInfo(value).key
+    except (ValueError, ZoneInfoNotFoundError):
+        pass
+
+    location_key = _location_key(value)
+    explicit = _pilot_city_timezone_index().get(location_key)
+    if explicit is not None:
+        return explicit
+    candidates = _timezone_city_index().get(location_key, ())
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _location_key(raw_location: str) -> str:
+    city = raw_location.rsplit("/", maxsplit=1)[-1].split(",", maxsplit=1)[0]
+    decomposed = unicodedata.normalize("NFKD", city)
+    characters = (character for character in decomposed if not unicodedata.combining(character))
+    normalized = "".join(
+        character.casefold() if character.isalnum() else " " for character in characters
+    )
+    return " ".join(normalized.split())
+
+
+@lru_cache(maxsize=1)
+def _timezone_city_index() -> dict[str, tuple[str, ...]]:
+    indexed: dict[str, list[str]] = {}
+    for timezone_name in available_timezones():
+        key = _location_key(timezone_name)
+        indexed.setdefault(key, []).append(timezone_name)
+    return {key: tuple(sorted(values)) for key, values in indexed.items()}
+
+
+@lru_cache(maxsize=1)
+def _pilot_city_timezone_index() -> dict[str, str]:
+    return {_location_key(city): timezone for city, timezone in _PILOT_CITY_TIMEZONES.items()}
 
 
 def require_invitation_manager(actor: Member) -> None:

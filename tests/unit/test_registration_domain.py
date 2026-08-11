@@ -13,6 +13,7 @@ from community_bot.domain.registration import (
     normalize_registration_answer,
     require_invitation_manager,
     require_registration_moderator,
+    resolve_timezone,
 )
 
 
@@ -73,6 +74,28 @@ def test_profile_lists_are_trimmed_deduplicated_and_bounded() -> None:
         normalize_profile_value(ProfileField.HELP_CATEGORIES, "")
     with pytest.raises(RegistrationError):
         normalize_profile_value(ProfileField.TIMEZONE, "Mars/Olympus")
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("Москва", "Europe/Moscow"),
+        ("Буэнос-Айрес", "America/Argentina/Buenos_Aires"),
+        ("Buenos Aires", "America/Argentina/Buenos_Aires"),
+        ("South America/Buenos-Aires", "America/Argentina/Buenos_Aires"),
+        ("Europe/Moscow", "Europe/Moscow"),
+    ],
+)
+def test_timezone_resolver_accepts_human_city_names(location: str, expected: str) -> None:
+    assert resolve_timezone(location) == expected
+    assert normalize_profile_value(ProfileField.TIMEZONE, location) == expected
+
+
+def test_timezone_resolver_does_not_guess_unknown_or_ambiguous_locations() -> None:
+    assert resolve_timezone("Совсем Неизвестный Город") is None
+    assert resolve_timezone("Mountain") is None
+    assert resolve_timezone("Eastern") is None
+    assert resolve_timezone("West") is None
 
 
 def test_invitation_and_moderation_authorization_are_distinct() -> None:

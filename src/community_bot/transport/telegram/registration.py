@@ -31,6 +31,7 @@ from community_bot.domain.registration import (
     ProfileField,
     RegistrationError,
     RegistrationStep,
+    TimezoneResolutionError,
 )
 from community_bot.transport.telegram.navigation import main_menu_markup
 from community_bot.transport.telegram.profile import own_profile_card, profile_edit_keyboard
@@ -42,7 +43,10 @@ _STEP_PROMPTS: dict[RegistrationStep, str] = {
     RegistrationStep.CONSENT: "Подтвердите согласие с правилами и обработкой данных.",
     RegistrationStep.DISPLAY_NAME: "Как вас называть в сообществе?",
     RegistrationStep.CITY: "В каком городе вы живёте?",
-    RegistrationStep.TIMEZONE: "Укажите часовой пояс, например Europe/Moscow.",
+    RegistrationStep.TIMEZONE: (
+        "Не удалось однозначно определить часовой пояс по городу. "
+        "Напишите ближайший крупный город, например Москва или Buenos Aires."
+    ),
     RegistrationStep.SHORT_BIO: "Коротко расскажите о себе — от 10 до 500 символов.",
     RegistrationStep.CURRENT_GOAL: "Какая у вас сейчас основная цель?",
     RegistrationStep.HELP_CATEGORIES: "В чём вы можете помогать? Перечислите через запятую.",
@@ -473,6 +477,11 @@ def _joined(value: object) -> str:
 
 
 def _friendly_error(error: Exception) -> str:
+    if isinstance(error, TimezoneResolutionError):
+        return (
+            "Не удалось определить часовой пояс. Напишите ближайший крупный город, "
+            "например Москва или Buenos Aires."
+        )
     if isinstance(error, PermissionError):
         return "Это действие вам недоступно."
     if isinstance(error, LookupError):
