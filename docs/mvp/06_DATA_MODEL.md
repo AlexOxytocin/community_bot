@@ -463,56 +463,43 @@ Append-only ledger сохраняет этот факт навсегда даж�
 
 ## 8. Споры и санкции
 
-### `disputes`
+### `assignment_disputes` и `moderation_cases`
 
 ```text
-id PK
-assignment_id FK UNIQUE NOT NULL
-opened_by_member_id FK NOT NULL
-reason_code TEXT NOT NULL
-description TEXT NOT NULL
-evidence_json NULL
-status TEXT NOT NULL
-resolved_by_member_id FK NULL
-resolution_code TEXT NULL
-resolution_comment TEXT NULL
-opened_at TIMESTAMP NOT NULL
-resolved_at TIMESTAMP NULL
+assignment_disputes: immutable opening comment/performer/command/opened_at
+moderation_cases: assignment_id, case_type, mutable status/current_resolution/revision
+dispute_evidence: append-only safe reference metadata
+dispute_resolutions: append-only version 1|2, code, actor, payload hash, effect links
+dispute_appeals: не более одной append-only appeal на case
+moderation_decision_drafts: restart-safe Telegram preview/confirm identity
 ```
+
+`reliability_outcome_corrections` хранит append-only смену effective terminal
+outcome при appeal. `assignments.slot_ever_paid=true` необратим и сохраняет
+занятость оплаченного слота независимо от последующего статуса.
 
 ### `member_sanctions`
 
 ```text
-id PK
-member_id FK NOT NULL
-type TEXT NOT NULL
-reason TEXT NOT NULL
-starts_at TIMESTAMP NOT NULL
-ends_at TIMESTAMP NULL
-created_by_member_id FK NOT NULL
-revoked_at TIMESTAMP NULL
+member_sanctions: target/author/type/actions/reason/start/end/previous+applied status/state/command
+sanction_events: append-only issued|revoked|expired с actor/reason/command
 ```
 
 ### `interaction_alerts`
 
 ```text
 id PK
-pair_member_low_id FK NOT NULL
-pair_member_high_id FK NOT NULL
-episode_number INTEGER NOT NULL
-status TEXT NOT NULL
+first_member_id FK NOT NULL
+second_member_id FK NOT NULL
+state TEXT NOT NULL
 opened_at TIMESTAMP NOT NULL
 closed_at TIMESTAMP NULL
-count_at_open INTEGER NOT NULL
-latest_count INTEGER NOT NULL
-window_seconds INTEGER NOT NULL
+interaction_count INTEGER NOT NULL
+window_days INTEGER NOT NULL
 threshold INTEGER NOT NULL
-opening_config_version_id FK NOT NULL
-latest_config_version_id FK NOT NULL
+config_version_id FK NOT NULL
 outcome TEXT NULL
-private_meeting_notes TEXT NULL
-resolved_by_member_id FK NULL
-UNIQUE(pair_member_low_id, pair_member_high_id, episode_number)
+meeting_notes TEXT NULL
 ```
 
 Частичный уникальный индекс разрешает не более одного открытого алерта на
@@ -523,20 +510,18 @@ UNIQUE(pair_member_low_id, pair_member_high_id, episode_number)
 ```text
 interaction_alert_id FK NOT NULL
 assignment_id FK NOT NULL
-counted_at TIMESTAMP NOT NULL
 PRIMARY KEY(interaction_alert_id, assignment_id)
 ```
 
-### `interaction_alert_penalties`
+Penalty хранится в общем immutable ledger с idempotency key
+`interaction-alert:{alert_id}:penalty:{member_id}` и audit-ссылкой на alert.
 
-```text
-interaction_alert_id FK NOT NULL
-member_id FK NOT NULL
-account_transaction_id FK UNIQUE NOT NULL
-idempotency_key TEXT UNIQUE NOT NULL
-created_at TIMESTAMP NOT NULL
-PRIMARY KEY(interaction_alert_id, member_id)
-```
+### `moderation_risk_signals` и `karma_vote_moderation`
+
+Risk signal содержит приватный тип, target, нормализованный entity key, UTC
+bucket idempotency key и безопасные details без raw comment. Karma moderation —
+append-only `excluded|restored` события для exact `karma_vote_id + revision`;
+aggregate использует последнее событие только для текущей revision.
 
 Приватные заметки доступны только активным администраторам с правом
 `interaction_review` и исключаются из прикладных логов и уведомлений.

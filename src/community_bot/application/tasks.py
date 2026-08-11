@@ -11,6 +11,7 @@ from uuid import UUID
 from community_bot.domain.catalog import TaskFormat, validate_payload
 from community_bot.domain.economy import ResolvedLevel, refund_reward, reserve_reward
 from community_bot.domain.members import Member, MemberStatus
+from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import (
     AcceptanceTaskSnapshot,
     StaleTaskDraftError,
@@ -128,6 +129,9 @@ class TaskUnitOfWork(Protocol):
     async def acquire_assignment_task_gate(self, task_id: UUID) -> None: ...
     async def acquire_catalog_mutation_gate(self) -> None: ...
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
+    async def ensure_moderation_action_allowed(
+        self, member_id: UUID, action: RestrictedAction
+    ) -> None: ...
     async def lock_members(self, member_ids: Sequence[UUID]) -> dict[UUID, Member]: ...
     async def resolve_member_level(self, member_id: UUID) -> ResolvedLevel: ...
     async def template_for_creation(
@@ -206,6 +210,7 @@ class TaskService:
                 return await _draft_from_outcome(uow, replay)
             await uow.acquire_task_identity_gate(actor_telegram_user_id)
             actor = await _active_actor(uow, actor_telegram_user_id)
+            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.CREATE_TASK)
             if template_id is None:
                 draft = await uow.get_current_task_draft(actor.id)
                 outcome = "task_draft:none" if draft is None else f"task_draft:{draft.id}"
@@ -346,6 +351,9 @@ class TaskService:
             template_before = await uow.catalog_template(preliminary.template_id)
             if template_before is None or preliminary.performer_slots is None:
                 raise TaskError("Task draft is incomplete.")
+            await uow.ensure_moderation_action_allowed(
+                preliminary.creator_id, RestrictedAction.CREATE_TASK
+            )
             reserve_total = template_before.credit_reward * preliminary.performer_slots
             prepared = await uow.economy.prepare_batch(
                 (

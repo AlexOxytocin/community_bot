@@ -45,10 +45,9 @@ class MemberModel(Base):
             name="ck_members_status",
         ),
         CheckConstraint(
-            "permissions_json IN ('[]'::jsonb, '[\"karma_review\"]'::jsonb, "
-            "'[\"member_read\"]'::jsonb, "
-            '\'["karma_review","member_read"]\'::jsonb, '
-            '\'["member_read","karma_review"]\'::jsonb)',
+            "jsonb_typeof(permissions_json) = 'array' AND "
+            "permissions_json <@ "
+            '\'["karma_review","member_read","interaction_review"]\'::jsonb',
             name="ck_members_permissions",
         ),
     )
@@ -436,7 +435,7 @@ class AssignmentModel(Base):
             postgresql_where=text(
                 "status IN ('accepted', 'submitted', 'rejected_pending_dispute', "
                 "'disputed', 'reviewer_required', 'approved', 'partially_approved', "
-                "'rejected', 'no_show')"
+                "'rejected', 'no_show') OR slot_ever_paid"
             ),
         ),
         Index("ix_assignments_performer_status", "performer_id", "status"),
@@ -469,6 +468,7 @@ class AssignmentModel(Base):
     )
     terminal_outcome: Mapped[str | None] = mapped_column(Text)
     cancellation_reason: Mapped[str | None] = mapped_column(Text)
+    slot_ever_paid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class AssignmentResultVersionModel(Base):
@@ -548,6 +548,321 @@ class AssignmentDisputeModel(Base):
     )
 
 
+class ModerationCaseModel(Base):
+    """Mutable pointer to immutable moderation case history."""
+
+    __tablename__ = "moderation_cases"
+    __table_args__ = (
+        CheckConstraint("case_type IN ('dispute', 'fraud_review')", name="ck_cases_type"),
+        CheckConstraint("status IN ('open', 'resolved', 'appealed')", name="ck_cases_status"),
+        Index(
+            "uq_moderation_cases_active_assignment",
+            "assignment_id",
+            unique=True,
+            postgresql_where=text("status IN ('open', 'resolved', 'appealed')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False
+    )
+    dispute_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignment_disputes.id"), unique=True
+    )
+    case_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    opened_by_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    open_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    open_payload_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    current_resolution_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "dispute_resolutions.id",
+            use_alter=True,
+            name="fk_moderation_cases_current_resolution",
+        ),
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    opened_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    resolved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DisputeEvidenceModel(Base):
+    """Append-only privacy-sensitive evidence metadata."""
+
+    __tablename__ = "dispute_evidence"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("moderation_cases.id"), nullable=False, index=True
+    )
+    author_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    evidence_type: Mapped[str] = mapped_column(Text, nullable=False)
+    reference: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DisputeResolutionModel(Base):
+    """Immutable initial or appeal resolution."""
+
+    __tablename__ = "dispute_resolutions"
+    __table_args__ = (
+        UniqueConstraint("case_id", "version", name="uq_dispute_resolution_version"),
+        CheckConstraint("version IN (1, 2)", name="ck_dispute_resolution_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("moderation_cases.id"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    payload_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    effect_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    conflict_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DisputeAppealModel(Base):
+    """One immutable appeal request per moderation case."""
+
+    __tablename__ = "dispute_appeals"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("moderation_cases.id"), unique=True, nullable=False
+    )
+    appellant_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ModerationDecisionDraftModel(Base):
+    """Durable Telegram preview and confirmation identity."""
+
+    __tablename__ = "moderation_decision_drafts"
+    __table_args__ = (
+        CheckConstraint("state IN ('pending','confirmed')", name="ck_moderation_draft_state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    actor_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("moderation_cases.id"), nullable=False
+    )
+    expected_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    resolution_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MemberSanctionModel(Base):
+    """Current sanction state with immutable event history."""
+
+    __tablename__ = "member_sanctions"
+    __table_args__ = (
+        CheckConstraint(
+            "sanction_type IN ('notice','warning','restriction','suspension','ban')",
+            name="ck_member_sanctions_type",
+        ),
+        CheckConstraint("state IN ('active','revoked','expired')", name="ck_sanctions_state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    target_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False, index=True
+    )
+    author_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    sanction_type: Mapped[str] = mapped_column(Text, nullable=False)
+    restricted_actions_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    previous_status: Mapped[str | None] = mapped_column(Text)
+    applied_status: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SanctionEventModel(Base):
+    """Append-only sanction lifecycle event."""
+
+    __tablename__ = "sanction_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    sanction_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("member_sanctions.id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    command_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), unique=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class InteractionAlertModel(Base):
+    """One review episode for an unordered member pair."""
+
+    __tablename__ = "interaction_alerts"
+    __table_args__ = (
+        CheckConstraint("first_member_id < second_member_id", name="ck_alert_pair_order"),
+        CheckConstraint("state IN ('open','closed')", name="ck_alert_state"),
+        Index(
+            "uq_interaction_alert_open_pair",
+            "first_member_id",
+            "second_member_id",
+            unique=True,
+            postgresql_where=text("state = 'open'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    first_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    second_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    interaction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    config_version_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("product_config_versions.id"), nullable=False
+    )
+    outcome: Mapped[str | None] = mapped_column(Text)
+    meeting_notes: Mapped[str | None] = mapped_column(Text)
+    opened_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InteractionAlertAssignmentModel(Base):
+    """Immutable assignment membership of one alert episode."""
+
+    __tablename__ = "interaction_alert_assignments"
+    __table_args__ = (UniqueConstraint("alert_id", "assignment_id", name="uq_alert_assignment"),)
+
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("interaction_alerts.id"), primary_key=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), primary_key=True
+    )
+
+
+class ModerationRiskSignalModel(Base):
+    """Private idempotent signal that never applies an automatic sanction."""
+
+    __tablename__ = "moderation_risk_signals"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    signal_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    entity_key: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class KarmaVoteModerationModel(Base):
+    """Reversible exclusion of one exact karma vote revision."""
+
+    __tablename__ = "karma_vote_moderation"
+    __table_args__ = (
+        CheckConstraint("state IN ('excluded','restored')", name="ck_karma_moderation_state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    karma_vote_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("karma_votes.id"), nullable=False
+    )
+    vote_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ReliabilityEventModel(Base):
     """Append-only assignment reliability fact."""
 
@@ -566,6 +881,34 @@ class ReliabilityEventModel(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     supersedes_event_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("reliability_events.id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ReliabilityOutcomeCorrectionModel(Base):
+    """Append-only appeal correction of an immutable reliability root."""
+
+    __tablename__ = "reliability_outcome_corrections"
+    __table_args__ = (
+        UniqueConstraint("case_id", "resolution_version", name="uq_reliability_case_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("moderation_cases.id"), nullable=False
+    )
+    resolution_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    new_outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -685,7 +1028,8 @@ class AccountTransactionModel(Base):
         CheckConstraint(
             "transaction_type IN ('starting_grant', 'task_reward_reserved', "
             "'task_reward_earned', 'task_reward_refunded', 'partial_task_reward', "
-            "'community_task_reward', 'penalty', 'admin_adjustment', 'fraud_reversal')",
+            "'community_task_reward', 'penalty', 'admin_adjustment', 'fraud_reversal', "
+            "'resolution_reversal')",
             name="ck_account_transactions_type",
         ),
         CheckConstraint(
@@ -702,7 +1046,7 @@ class AccountTransactionModel(Base):
             "AND experience_delta = 0) OR "
             "(transaction_type = 'admin_adjustment' "
             "AND (credit_delta <> 0 OR experience_delta <> 0)) OR "
-            "(transaction_type = 'fraud_reversal' "
+            "(transaction_type IN ('fraud_reversal', 'resolution_reversal') "
             "AND (credit_delta <> 0 OR experience_delta <> 0))",
             name="ck_account_transactions_deltas",
         ),

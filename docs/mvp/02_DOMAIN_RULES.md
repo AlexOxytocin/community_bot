@@ -183,6 +183,13 @@ ledger. Cached level и его config version не участвуют в сор�
 
 Кредиты и карма не определяют место в основном лидерборде.
 
+Апелляционная correction не переписывает terminal root надёжности. Она хранит
+новый effective outcome append-only; профиль и лидерборд складывают root,
+responsibility chain и последнюю outcome correction. Обычная апелляция отменяет
+экономические эффекты типом `resolution_reversal`, fraud — типом
+`fraud_reversal`. Автоматический karma/fraud/interaction signal не меняет
+кредиты, опыт, статус или доступ сам по себе.
+
 ## 7. Атомарное завершение задания по источнику
 
 Полное подтверждение должно выполняться одной транзакцией:

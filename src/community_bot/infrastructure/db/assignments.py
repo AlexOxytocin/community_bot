@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import uuid
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,7 @@ from community_bot.infrastructure.db.models import (
     AssignmentModel,
     AssignmentResultVersionModel,
     AssignmentSubmissionDraftModel,
+    ModerationCaseModel,
     OutboxEventModel,
     ReliabilityEventModel,
 )
@@ -284,6 +286,8 @@ async def set_decision(
     if model is None:
         raise LookupError("Assignment does not exist.")
     model.status = status.value
+    if status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}:
+        model.slot_ever_paid = True
     model.terminal_command_id = command_id
     model.terminal_outcome = outcome
     if status is AssignmentStatus.REJECTED_PENDING_DISPUTE:
@@ -319,6 +323,19 @@ async def open_dispute(
     )
     session.add(model)
     await session.flush()
+    session.add(
+        ModerationCaseModel(
+            id=uuid.uuid4(),
+            assignment_id=assignment_id,
+            dispute_id=model.id,
+            case_type="dispute",
+            status="open",
+            opened_by_member_id=performer_id,
+            open_command_id=command_id,
+            open_payload_hash=hashlib.sha256(comment.encode()).hexdigest(),
+            reason=comment,
+        )
+    )
     assignment = await session.get(AssignmentModel, assignment_id)
     if assignment is None:
         raise LookupError("Assignment does not exist.")

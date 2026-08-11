@@ -45,6 +45,7 @@ class TransactionType(StrEnum):
     PENALTY = "penalty"
     ADMIN_ADJUSTMENT = "admin_adjustment"
     FRAUD_REVERSAL = "fraud_reversal"
+    RESOLUTION_REVERSAL = "resolution_reversal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,7 @@ class ReversalCommand:
     actor_member_id: UUID
     reason: str
     comment: str | None = None
+    transaction_type: TransactionType = TransactionType.FRAUD_REVERSAL
 
 
 EconomyMutationCommand = EconomyCommand | ReversalCommand
@@ -397,7 +399,10 @@ def validate_economy_command(command: EconomyCommand) -> None:
 
     _DELTA_VALIDATORS[command.transaction_type](command)
 
-    if command.transaction_type is not TransactionType.FRAUD_REVERSAL:
+    if command.transaction_type not in {
+        TransactionType.FRAUD_REVERSAL,
+        TransactionType.RESOLUTION_REVERSAL,
+    }:
         _require(
             condition=command.reversed_transaction_id is None,
             message="Only a reversal may reference a source.",
@@ -620,6 +625,7 @@ _DELTA_VALIDATORS: dict[TransactionType, Callable[[EconomyCommand], None]] = {
     TransactionType.PENALTY: _validate_penalty,
     TransactionType.ADMIN_ADJUSTMENT: _validate_adjustment,
     TransactionType.FRAUD_REVERSAL: _validate_reversal,
+    TransactionType.RESOLUTION_REVERSAL: _validate_reversal,
 }
 
 

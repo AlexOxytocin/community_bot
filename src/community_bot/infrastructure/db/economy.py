@@ -154,11 +154,14 @@ class SqlAlchemyEconomyMutation:
                 if source is None:
                     message = "Reversal source transaction does not exist."
                     raise LookupError(message)
-                if source.transaction_type == TransactionType.FRAUD_REVERSAL.value:
+                if source.transaction_type in {
+                    TransactionType.FRAUD_REVERSAL.value,
+                    TransactionType.RESOLUTION_REVERSAL.value,
+                }:
                     message = "A reversal cannot reverse another reversal."
                     raise IdempotencyConflictError(message)
                 normalized = EconomyCommand(
-                    transaction_type=TransactionType.FRAUD_REVERSAL,
+                    transaction_type=command.transaction_type,
                     member_id=source.member_id,
                     idempotency_key=command.idempotency_key,
                     credit_delta=-source.credit_delta,
@@ -167,6 +170,8 @@ class SqlAlchemyEconomyMutation:
                     reason=command.reason,
                     comment=command.comment,
                     reversed_transaction_id=source.id,
+                    task_id=source.task_id,
+                    assignment_id=source.assignment_id,
                 )
             else:
                 normalized = command
@@ -239,7 +244,11 @@ class SqlAlchemyEconomyMutation:
                 command.member_id != source.member_id
                 or command.credit_delta != -source.credit_delta
                 or command.experience_delta != -source.experience_delta
-                or source.transaction_type == TransactionType.FRAUD_REVERSAL.value
+                or source.transaction_type
+                in {
+                    TransactionType.FRAUD_REVERSAL.value,
+                    TransactionType.RESOLUTION_REVERSAL.value,
+                }
             ):
                 message = "Reversal no longer matches its immutable source."
                 raise IdempotencyConflictError(message)
@@ -324,6 +333,7 @@ def _append_economy_audit(session: AsyncSession, staged: _StagedEconomyBatch) ->
             TransactionType.PENALTY,
             TransactionType.ADMIN_ADJUSTMENT,
             TransactionType.FRAUD_REVERSAL,
+            TransactionType.RESOLUTION_REVERSAL,
         }:
             session.add(_economy_audit(command, transaction_id))
 

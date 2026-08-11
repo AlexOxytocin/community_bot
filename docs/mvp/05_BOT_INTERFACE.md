@@ -42,7 +42,19 @@
 /invite_create [лимит] [дни] [telegram_id]
 /invite_revoke <invitation_id>
 /registration_reject <member_id> <причина>
+/moderation
+/mod_fraud <assignment_id> <причина>
+/mod_resolve <case_id> <revision> <resolution_code> <причина>
+/mod_appeal <case_id> <причина>
+/mod_sanction <member_id> <type> <hours|0> <actions|-> <причина>
+/mod_revoke <sanction_id> <причина>
 ```
+
+`/mod_resolve` только сохраняет приватный предпросмотр. Эффекты применяются
+callback `mod:res:<draft_uuid_hex>` после повторной серверной проверки роли,
+конфликта интересов, revision и состояния дела. Черновик и command identity
+хранятся в PostgreSQL, поэтому подтверждение переживает перезапуск; stale и
+поддельный callback не создают ledger, audit, outbox или receipt effects.
 
 На текущем программном интерфейсе создания доступны резервные команды:
 
