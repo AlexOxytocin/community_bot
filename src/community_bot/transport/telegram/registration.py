@@ -120,36 +120,45 @@ def build_registration_router(
         except (RegistrationError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
+    async def _send_submitted_registrations(message: Message, actor_id: int) -> None:
+        applications = await service.submitted_registrations(actor_telegram_user_id=actor_id)
+        if not applications:
+            await message.answer("Новых заявок нет.")
+            return
+        for application in applications:
+            await message.answer(
+                _moderation_card(application.payload, application.member_id),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="Одобрить",
+                                callback_data=f"registration:approve:{application.member_id}",
+                            ),
+                            InlineKeyboardButton(
+                                text="Отклонить",
+                                callback_data=f"registration:reject_help:{application.member_id}",
+                            ),
+                        ]
+                    ]
+                ),
+            )
+
     async def handle_registrations(message: Message) -> None:
         if message.from_user is None:
             return
         try:
-            applications = await service.submitted_registrations(
-                actor_telegram_user_id=message.from_user.id
-            )
-            if not applications:
-                await message.answer("Новых заявок нет.")
-                return
-            for application in applications:
-                await message.answer(
-                    _moderation_card(application.payload, application.member_id),
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="Одобрить",
-                                    callback_data=f"registration:approve:{application.member_id}",
-                                ),
-                                InlineKeyboardButton(
-                                    text="Отклонить",
-                                    callback_data=f"registration:reject_help:{application.member_id}",
-                                ),
-                            ]
-                        ]
-                    ),
-                )
+            await _send_submitted_registrations(message, message.from_user.id)
         except (RegistrationError, PermissionError, LookupError) as error:
             await message.answer(_friendly_error(error))
+
+    async def handle_registration_list(callback: CallbackQuery) -> None:
+        try:
+            if isinstance(callback.message, Message):
+                await _send_submitted_registrations(callback.message, callback.from_user.id)
+            await callback.answer()
+        except (RegistrationError, PermissionError, LookupError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
 
     async def handle_registration_reject(message: Message, event_update: Update) -> None:
         if message.from_user is None:
@@ -286,6 +295,7 @@ def build_registration_router(
     router.callback_query.register(handle_consent, F.data == "registration:consent")
     router.callback_query.register(handle_submit, F.data == "registration:submit")
     router.callback_query.register(handle_reopen, F.data == "registration:reopen")
+    router.callback_query.register(handle_registration_list, F.data == "registration:list")
     router.callback_query.register(handle_approve, F.data.startswith("registration:approve:"))
     router.callback_query.register(
         handle_reject_help,
