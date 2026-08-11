@@ -93,13 +93,21 @@ root-owned environment file с правами `0600`.
 
 - Ruff format/check и `ty check src tests` — успешно;
 - базовый целевой unit/smoke/integration контур CB-15 — `48 passed`, без
-  skip/deselect; после final-review усиленный privacy-контур — `4 passed`;
+  skip/deselect; после final-review усиленный privacy/runtime-контур —
+  `23 passed`;
 - PostgreSQL 18 migration cycle и Testcontainers notification-контур — успешно;
 - `uv build`, четыре runtime entrypoint и production Compose contract — успешно;
 - production migration, worker readiness, bot readiness, Telegram API, backup и
   restore выполнены на реальном сервере;
 - `git diff --check`, link scan и secret scan — успешно;
 - полная продуктовая регрессия намеренно остаётся отдельной задачей CB-16.
+
+Первый PR CI подтвердил функциональную часть: `328 passed`, но завершился с
+ошибкой только из-за общей coverage `79.05%` при пороге `80%`. Порог не снижался
+и coverage не отключалась: добавлены быстрые unit-тесты новых health/migration
+entrypoint, Telegram error mapping и defensive Sentry shapes. Локальный
+корректирующий контур `23 passed`; итог должен подтвердить повторный GitHub CI
+после публикации этого delta.
 
 ## Соответствие Jira
 

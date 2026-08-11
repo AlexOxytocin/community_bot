@@ -1,4 +1,4 @@
-# CB-15 — повторное финальное ревью
+# CB-15 — повторное узкое CI-fix ревью
 
 Status: approved
 
@@ -6,24 +6,15 @@ Status: approved
 
 ## reviewed_scope
 
-- Jira `CB-15` повторно прочитана напрямую через Atlassian Rovo API: восемь
-  критериев приёмки, завершённые блокеры CB-13/CB-14 и исходящая связь к общей
-  регрессии CB-16 подтверждены.
-- Проверен новый exact staged tree
-  `466d975e5528ee8418a2afcb97f3edb1b27abad2` и точная разница относительно
-  первого review: observability logging/Sentry, четыре privacy tests,
-  `needs-info.md`, синхронизация implementation report и сохранённый verdict
-  первой попытки.
-- Повторно проверены только закрытие M-001/M-002 и отсутствие регрессии прежних
-  acceptance/self-hosted evidence. Полный notification, PostgreSQL 18,
-  `linux/arm64`, deploy, backup/restore и server gate заново не прогонялись:
-  приняты ранее подтверждённые `48 passed`, migration/build/entrypoint/Compose
-  checks и фактические server evidence. Полная регрессия остаётся CB-16.
-- Точечная контрольная проверка:
-  `uv run pytest -q --no-cov tests/unit/test_observability.py` — `4 passed`;
-  Ruff для трёх изменённых Python-файлов — успешно; отдельный Sentry-shape repro
-  подтвердил полное удаление request/user и редактирование message, logentry,
-  exception value и breadcrumb message.
+- Проверен exact staged tree
+  `1df6e7c3c6386f4ab4b757e5794d114d7370f740` поверх ранее проверенного CI-fix
+  snapshot.
+- Разница после `changes_requested` ограничена исправленной формулировкой
+  `tasks/CB-15/implementation-report.md` и сохранённым verdict первой попытки;
+  три test-файла, runtime, config и coverage threshold не менялись.
+- Принято ранее повторённое evidence affected suite: `23 passed`, Ruff и ty
+  clean. Полная регрессия и тестовый контур заново пропорционально не
+  запускались.
 
 ## critical_findings
 
@@ -35,27 +26,15 @@ Status: approved
 
 ### Закрытие M-001
 
-- Общий logging scrubber теперь очищает credential-shaped строки независимо от
-  имени поля: Telegram Bot API token, Bearer credential, secret/password/token/
-  invite/DSN assignment и URL userinfo.
-- Sentry `before_send` применяет общий scrubber, полностью удаляет `request` и
-  `user`, редактирует top-level `message`, `logentry.message/formatted`, каждое
-  `exception.values[].value` и `breadcrumbs.values[].message`.
-- Воспроизведение исходного дефекта теперь возвращает только `[REDACTED]`; тип
-  исключения и диагностическая структура сохраняются без приватного текста.
-- Четыре privacy tests включают embedded credential string и реальную структуру
-  Sentry event. Ослабления assertions или отключения Sentry gate нет.
+Implementation report теперь честно разделяет выполненное и будущее:
 
-### Закрытие M-002
+- GitHub run `31493377266` дал `328 passed`, но завершился failure только из-за
+  coverage `79.05% < 80%`;
+- локальный корректирующий контур фактически дал `23 passed`;
+- повторный GitHub CI не выдан за выполненный и явно оставлен обязательным
+  подтверждением после публикации delta.
 
-- `tasks/CB-15/needs-info.md` переименован по смыслу в журнал внешней информации
-  и явно имеет статус `Закрыто 2026-08-11`.
-- Артефакт фиксирует только несекретные факты: token передан и хранится в
-  root-owned `0600` server env, runtime/Telegram/health/backup/restore успешны,
-  открытой внешней информации нет.
-- `implementation-report.md` согласован с исправленным privacy contract и
-  отдельно фиксирует усиленный контур `4 passed`; противоречия о готовности
-  больше нет.
+Противоречия с разделом «Следующий шаг» больше нет.
 
 ## minor_findings
 
@@ -63,57 +42,41 @@ Status: approved
 
 ## acceptance_matrix_result
 
-| Критерий Jira | Результат | Доказательство |
-|---|---|---|
-| AC1: временная ошибка даёт ограниченный повтор | Пройден | Ранее подтверждённые bounded retry/backoff и terminal-limit tests |
-| AC2: успешная доставка не повторяется | Пройден | Persistent delivery state, dedup и restart evidence |
-| AC3: два worker не обрабатывают одну запись | Пройден | PostgreSQL `SKIP LOCKED`, fenced leases и concurrency evidence |
-| AC4: timezone участника | Пройден | IANA timezone, DST/window/deadline assertions |
-| AC5: restart продолжает pending без DB-дублей | Пройден | Expired lease reclaim и stale-token rejection |
-| AC6: health отражает критические зависимости | Пройден | DB/migration/heartbeat/poison checks и healthy server runtime |
-| AC7: backup восстановлен по runbook | Пройден | Реальный root `0600` dump, isolated restore `0010`, удаление drill DB и RTO 1 секунда |
-| AC8: логи/error reporting не раскрывают секреты | Пройден | M-001 закрыт deny-by-default Sentry projection, credential string scrubber и 4 privacy tests |
-
-Итог: `8/8` критериев пройдены.
+- Прежние `8/8` Jira AC остаются пройденными; runtime/self-hosted реализация не
+  менялась.
+- Test-only delta meaningful: 7 health/migrate cases, 5 Telegram sender cases и
+  1 defensive Sentry-shape case усиливают AC1/AC6/AC8 без ослабления барьеров.
 
 ## test_matrix_result
 
-| Сценарии test-plan | Результат |
+| Проверка | Результат |
 |---|---|
-| 1–6: materialization, concurrency, retry, restart, reminders, timezone | Пройдены ранее подтверждённым targeted gate |
-| 7: privacy persistence/logs/Sentry | Пройден; исходный leak воспроизведён как закрытый, `4 passed`, Ruff clean |
-| 8–9: readiness и migration cycle | Пройдены ранее подтверждённым PostgreSQL evidence |
-| 10–13: Compose, deployment order/failure, arm64 image/entrypoints | Пройдены contract/Docker/server evidence без изменений в повторном diff |
-| 14–16: backup, isolated restore, server isolation | Пройдены реальным server evidence; contracts не менялись |
-| 17: исключённая область | Пройден; external backup/R2/object storage/webhook не добавлены |
+| Affected suite | `23 passed` |
+| Ruff / ty | Пройдены |
+| Coverage threshold/config/runtime | Не менялись |
+| Первый GitHub CI | `328 passed`; единственный failure `79.05% < 80%` |
+| Повторный GitHub CI | Честно обозначен будущим post-publication gate |
 
-Итог: `17/17` сценариев пройдены. Полная продуктовая регрессия корректно
-оставлена отдельной задаче CB-16.
+Полная регрессия не требуется для узкой test-only коррекции.
 
 ## security_and_secret_result
 
-- Повторный staged secret-pattern scan не обнаружил private keys, access tokens,
-  Bot API tokens или production credentials.
-- Новый negative gate закрывает не только sensitive key names, но и credential
-  strings внутри обычных logging fields и стандартные Sentry free-form поля.
-- Request/user целиком не экспортируются в Sentry; PII остаётся выключенной,
-  traces sampling равен нулю.
-- Root-owned secret, private Compose network, PostgreSQL 18 volume, bounded logs
-  и isolated restore boundaries не изменились.
+- Test fixtures не содержат реальных credentials; credential-shaped Bot token
+  строится вычислением.
+- Telegram allowlist и defensive Sentry privacy assertions сохранены без
+  ослабления.
+- Новых секретов или внешних отправок нет.
 
 ## workflow_result
 
-- Level 3 пакет полон: Jira, ветка `task/CB-15`, source context, plan,
-  `Status: approved` plan review, test-plan, принятый ADR-0009,
-  implementation report и закрытый needs-info journal согласованы.
-- Разница между первым и повторным snapshot ограничена единым закрытием
-  M-001/M-002; прежний runtime/self-hosted scope не регрессировал.
-- `git diff --cached --check`, branch/scope и secret checks чисты. Staged tree
-  после проверки остаётся
-  `466d975e5528ee8418a2afcb97f3edb1b27abad2`.
+- Ветка `task/CB-15`, staged scope и `git diff --cached --check` чисты.
+- Единственный blocker предыдущего review закрыт ровно одной документальной
+  правкой; повторный CI остаётся корректным post-commit gate, а не ложным
+  текущим evidence.
+- Exact staged tree после проверки остаётся
+  `1df6e7c3c6386f4ab4b757e5794d114d7370f740`.
 - Jira, staged index, Git remote, server и Telegram не изменялись. Обновлён
-  только рабочий `tasks/CB-15/final-review.md`, оставленный unstaged поверх
-  frozen index.
+  только рабочий `tasks/CB-15/final-review.md`, оставленный unstaged.
 
 ## required_actions
 
@@ -121,9 +84,6 @@ Status: approved
 
 ## residual_risks
 
-- Same-host dump не переживает потерю хоста/диска — это явно принятый владельцем
-  MVP-риск ADR-0009.
-- Внешний Telegram crash-window между Bot API success и сохранением `sent_at`
-  остаётся ограничением ADR-0006; exactly-once заявляется только для DB-эффекта.
-- Измеренный RTO в одну секунду относится к текущему почти пустому пилотному
-  набору; цель `RTO <= 4h` поддерживается последующими четырёхнедельными drills.
+- После commit/push повторный GitHub CI обязан фактически подтвердить coverage
+  `>= 80%`; текущий `approved` не подменяет этот внешний merge gate.
+- Остальные ранее принятые MVP-риски ADR-0006/ADR-0009 не менялись.

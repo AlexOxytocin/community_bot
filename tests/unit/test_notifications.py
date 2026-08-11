@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
+from aiogram.methods import SendMessage
 
 from community_bot.application.notifications import (
     DeliveryClaim,
@@ -14,9 +16,12 @@ from community_bot.application.notifications import (
     NotificationWorker,
 )
 from community_bot.domain.notifications import DeliveryWindow, NotificationError, RetryPolicy
+from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from aiogram import Bot
 
 
 def test_retry_policy_is_bounded_and_deterministic() -> None:
@@ -153,3 +158,107 @@ async def test_worker_classifies_success_retry_and_terminal_failure() -> None:
         ("telegram_temporarily_unavailable", False),
         ("telegram_recipient_unavailable", True),
     ]
+
+
+class _TelegramBotStub:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, *, chat_id: int, text: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.sent.append((chat_id, text))
+
+
+def _telegram_method() -> SendMessage:
+    return SendMessage(chat_id=42, text="safe")
+
+
+@pytest.mark.asyncio
+async def test_telegram_sender_uses_allowlisted_message() -> None:
+    """Delivery ignores persisted payload and sends only allowlisted text."""
+    bot = _TelegramBotStub()
+    sender = TelegramNotificationSender(cast("Bot", bot))
+    claim = DeliveryClaim(
+        id=uuid4(),
+        member_id=uuid4(),
+        telegram_user_id=42,
+        notification_type="task.published",
+        payload={"private": "must not be sent"},
+        attempt_count=1,
+        lease_token=uuid4(),
+    )
+
+    await sender.send(claim)
+
+    assert bot.sent == [(42, "Опубликовано новое задание в сообществе.")]
+
+
+@pytest.mark.asyncio
+async def test_telegram_sender_rejects_unknown_notification_type() -> None:
+    """Unknown notification types fail permanently before Bot API access."""
+    bot = _TelegramBotStub()
+    sender = TelegramNotificationSender(cast("Bot", bot))
+    claim = DeliveryClaim(
+        id=uuid4(),
+        member_id=uuid4(),
+        telegram_user_id=42,
+        notification_type="private.raw.event",
+        payload={},
+        attempt_count=1,
+        lease_token=uuid4(),
+    )
+
+    with pytest.raises(NotificationProcessingError) as captured:
+        await sender.send(claim)
+
+    assert captured.value.error_code == "unsupported_notification_type"
+    assert captured.value.permanent
+    assert bot.sent == []
+
+
+@pytest.mark.parametrize(
+    ("telegram_error", "expected_code", "permanent"),
+    [
+        (
+            TelegramBadRequest(method=_telegram_method(), message="bad recipient"),
+            "telegram_recipient_unavailable",
+            True,
+        ),
+        (
+            TelegramRetryAfter(method=_telegram_method(), message="slow down", retry_after=1),
+            "telegram_rate_limited",
+            False,
+        ),
+        (
+            TelegramNetworkError(method=_telegram_method(), message="network unavailable"),
+            "telegram_temporarily_unavailable",
+            False,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_telegram_sender_classifies_api_failures(
+    telegram_error: Exception,
+    expected_code: str,
+    *,
+    permanent: bool,
+) -> None:
+    """Telegram failures become safe retry categories without raw details."""
+    sender = TelegramNotificationSender(cast("Bot", _TelegramBotStub(telegram_error)))
+    claim = DeliveryClaim(
+        id=uuid4(),
+        member_id=uuid4(),
+        telegram_user_id=42,
+        notification_type="task.cancelled",
+        payload={},
+        attempt_count=1,
+        lease_token=uuid4(),
+    )
+
+    with pytest.raises(NotificationProcessingError) as captured:
+        await sender.send(claim)
+
+    assert captured.value.error_code == expected_code
+    assert captured.value.permanent is permanent

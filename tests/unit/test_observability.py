@@ -93,6 +93,26 @@ def test_sentry_drops_free_form_exception_and_request_text() -> None:
     assert "user" not in scrubbed
 
 
+def test_sentry_rejects_invalid_shape_and_tolerates_missing_value_lists() -> None:
+    """Malformed optional Sentry sections remain privacy-safe and non-fatal."""
+    assert scrub_value(42) == 42
+    assert _before_send(cast("Event", "invalid"), {}) == {}
+
+    event = cast(
+        "Event",
+        {
+            "logentry": {},
+            "exception": None,
+            "breadcrumbs": {"values": None},
+        },
+    )
+    scrubbed = cast("dict[str, Any]", _before_send(event, {}))
+
+    assert scrubbed["logentry"] == {}
+    assert scrubbed["exception"] is None
+    assert scrubbed["breadcrumbs"] == {"values": None}
+
+
 def test_sentry_is_optional_and_configured_without_pii(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
