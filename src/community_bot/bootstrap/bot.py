@@ -25,6 +25,7 @@ from community_bot.infrastructure.observability import configure_logging, config
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.transport.telegram.assignments import build_assignment_router
 from community_bot.transport.telegram.catalog import build_catalog_router
+from community_bot.transport.telegram.conversation import build_conversation_router
 from community_bot.transport.telegram.moderation import build_moderation_router
 from community_bot.transport.telegram.navigation import build_navigation_router
 from community_bot.transport.telegram.registration import build_registration_router
@@ -115,8 +116,9 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
     dispatcher.include_router(build_assignment_router(AssignmentService(unit_of_work)))
     dispatcher.include_router(build_moderation_router(moderation))
     dispatcher.include_router(build_reputation_router(reputation))
-    dispatcher.include_router(build_task_router(tasks))
-    dispatcher.include_router(build_registration_router(registration))
+    dispatcher.include_router(build_task_router(tasks, include_text_fallback=False))
+    dispatcher.include_router(build_registration_router(registration, include_text_fallback=False))
+    dispatcher.include_router(build_conversation_router(tasks, registration))
     return dispatcher
 
 
