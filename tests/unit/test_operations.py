@@ -38,13 +38,17 @@ def test_deployment_script_keeps_migration_worker_bot_order() -> None:
     """The bot starts only after migration and worker readiness."""
     root = Path(__file__).parents[2]
     script = (root / "ops" / "deploy_self_hosted.sh").read_text(encoding="utf-8")
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
     migrate = script.index('"${compose[@]}" run --rm migrate')
+    config = script.index('"${compose[@]}" run --rm migrate community-bootstrap-product-config')
     worker = script.index('"${compose[@]}" up -d --no-deps worker')
     worker_health = script.index("wait_for_health worker community-worker")
     bot = script.index('"${compose[@]}" up -d --no-deps bot')
     bot_health = script.index("wait_for_health bot community-bot")
-    assert migrate < worker < worker_health < bot < bot_health
+    assert migrate < config < worker < worker_health < bot < bot_health
+    assert "community-bootstrap-admin" in script[migrate:config]
+    assert "COPY config ./config" in dockerfile
     assert "previous-image" in script
     assert "docker pull" in script
     assert "immutable image digest or image ID" in script
