@@ -14,6 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
 )
@@ -31,6 +32,7 @@ from community_bot.domain.registration import (
     RegistrationError,
     RegistrationStep,
 )
+from community_bot.transport.telegram.navigation import main_menu_markup
 
 if TYPE_CHECKING:
     from community_bot.application.registration import ProfileSnapshot, RegistrationService
@@ -327,12 +329,12 @@ async def _answer_callback_with_view(
 
 def _registration_presentation(
     view: RegistrationView,
-) -> tuple[str, InlineKeyboardMarkup | ReplyKeyboardRemove | None]:
+) -> tuple[str, InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None]:
     context = view.context
     if view.outcome_code == "invitation_required":
         return "Для регистрации откройте ссылку-приглашение от администратора.", None
     if view.outcome_code == "main_menu":
-        return "Регистрация подтверждена. Главное меню уже доступно.", None
+        return "Регистрация подтверждена. Главное меню уже доступно.", main_menu_markup()
     if view.outcome_code == "registration_pending":
         return "Анкета отправлена и ожидает подтверждения.", None
     if view.outcome_code == "registration_rejected":

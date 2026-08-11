@@ -30,9 +30,10 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from community_bot.application.catalog import CatalogTemplate
-    from community_bot.application.economy import EconomyMutationPort
+    from community_bot.application.economy import ActiveProductConfig, EconomyMutationPort
 
 _MAX_OWNED_TASKS = 20
+_MAX_AVAILABLE_TASKS = 10
 _FORMAT_VALUE_SIZE = 2
 
 
@@ -96,6 +97,14 @@ class PublishedTask:
 
 
 @dataclass(frozen=True, slots=True)
+class AvailableTaskPage:
+    """One stable page of tasks visible to an active performer."""
+
+    items: tuple[PublishedTask, ...]
+    next_cursor_task_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
 class AdvanceDraftCommand:
     """Advance one expected draft step with untrusted transport data."""
 
@@ -134,6 +143,8 @@ class TaskUnitOfWork(Protocol):
     ) -> None: ...
     async def lock_members(self, member_ids: Sequence[UUID]) -> dict[UUID, Member]: ...
     async def resolve_member_level(self, member_id: UUID) -> ResolvedLevel: ...
+    async def get_active_product_config(self) -> ActiveProductConfig | None: ...
+    async def count_active_assignments(self, performer_id: UUID) -> int: ...
     async def template_for_creation(
         self, *, template_id: UUID, level: int
     ) -> CatalogTemplate | None: ...
@@ -163,6 +174,15 @@ class TaskUnitOfWork(Protocol):
         status: TaskStatus | None,
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
+    ) -> tuple[PublishedTask, ...]: ...
+    async def list_available_tasks(
+        self,
+        *,
+        performer_id: UUID,
+        level: int,
+        limit: int,
+        cursor_task_id: UUID | None,
+        now: datetime.datetime,
     ) -> tuple[PublishedTask, ...]: ...
     async def add_task_outbox(
         self, *, event_type: str, task: PublishedTask, business_key: str
@@ -436,6 +456,34 @@ class TaskService:
                 before_created_at=None if cursor is None else cursor[0],
                 before_id=None if cursor is None else cursor[1],
             )
+
+    async def list_available(
+        self,
+        *,
+        actor_telegram_user_id: int,
+        cursor_task_id: UUID | None = None,
+    ) -> AvailableTaskPage:
+        """Return tasks the actor may attempt to accept right now."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.ACCEPT_TASK)
+            active = await uow.get_active_product_config()
+            limit = 3 if active is None else active.maximum_active_assignments
+            if await uow.count_active_assignments(actor.id) >= limit:
+                return AvailableTaskPage(items=(), next_cursor_task_id=None)
+            level = await uow.resolve_member_level(actor.id)
+            tasks = await uow.list_available_tasks(
+                performer_id=actor.id,
+                level=level.level_number,
+                limit=_MAX_AVAILABLE_TASKS + 1,
+                cursor_task_id=cursor_task_id,
+                now=datetime.datetime.now(datetime.UTC),
+            )
+        items = tasks[:_MAX_AVAILABLE_TASKS]
+        return AvailableTaskPage(
+            items=items,
+            next_cursor_task_id=items[-1].id if len(tasks) > _MAX_AVAILABLE_TASKS else None,
+        )
 
     async def cancel(
         self, *, update_id: int, actor_telegram_user_id: int, task_id: UUID
