@@ -33,9 +33,10 @@ from community_bot.domain.registration import (
     RegistrationStep,
 )
 from community_bot.transport.telegram.navigation import main_menu_markup
+from community_bot.transport.telegram.profile import own_profile_card, profile_edit_keyboard
 
 if TYPE_CHECKING:
-    from community_bot.application.registration import ProfileSnapshot, RegistrationService
+    from community_bot.application.registration import RegistrationService
 
 _STEP_PROMPTS: dict[RegistrationStep, str] = {
     RegistrationStep.CONSENT: "Подтвердите согласие с правилами и обработкой данных.",
@@ -170,8 +171,8 @@ def build_registration_router(
         try:
             profile = await service.own_profile(message.from_user.id)
             await message.answer(
-                _profile_card(profile),
-                reply_markup=_profile_edit_keyboard(),
+                own_profile_card(profile),
+                reply_markup=profile_edit_keyboard(),
             )
         except (RegistrationError, PermissionError, LookupError) as error:
             await message.answer(_friendly_error(error))
@@ -272,7 +273,11 @@ def build_registration_router(
     router.message.register(handle_invite_revoke, Command("invite_revoke"))
     router.message.register(handle_registrations, Command("registrations"))
     router.message.register(handle_registration_reject, Command("registration_reject"))
-    router.message.register(handle_profile, Command("profile"))
+    router.message.register(
+        handle_profile,
+        Command("profile"),
+        F.text.regexp(r"^/profile(?:@\w+)?\s*$"),
+    )
     router.message.register(handle_cancel, Command("cancel"))
     router.callback_query.register(handle_consent, F.data == "registration:consent")
     router.callback_query.register(handle_submit, F.data == "registration:submit")
@@ -413,49 +418,9 @@ def _draft_preview(payload: dict[str, object]) -> str:
     )
 
 
-def _profile_card(profile: ProfileSnapshot) -> str:
-    return (
-        f"{profile.display_name}\n"
-        f"{profile.city or 'Город не указан'} · {profile.timezone}\n\n"
-        f"{profile.short_bio or 'Описание не заполнено'}\n\n"
-        f"Цель: {profile.current_goal or '—'}\n"
-        f"Могу помочь: {', '.join(profile.help_categories) or '—'}\n"
-        f"Навыки: {', '.join(profile.skill_tags) or '—'}\n"
-        f"Доступность: {profile.availability or '—'}\n\n"
-        f"Уровень: {profile.level.level_number} · {profile.level.display_name}\n"
-        f"Опыт: {profile.experience_total}\n"
-        f"Баланс: {profile.credit_balance} кредитов"
-    )
-
-
-def _profile_edit_keyboard() -> InlineKeyboardMarkup:
-    buttons = [
-        InlineKeyboardButton(
-            text=_profile_field_label(field),
-            callback_data=f"profile:edit:{field.value}",
-        )
-        for field in ProfileField
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[[button] for button in buttons])
-
-
 def _profile_edit_prompt(field: ProfileField) -> str:
     step = RegistrationStep(field.value)
     return _STEP_PROMPTS[step]
-
-
-def _profile_field_label(field: ProfileField) -> str:
-    labels = {
-        ProfileField.DISPLAY_NAME: "Изменить имя",
-        ProfileField.CITY: "Изменить город",
-        ProfileField.TIMEZONE: "Изменить часовой пояс",
-        ProfileField.SHORT_BIO: "Изменить описание",
-        ProfileField.CURRENT_GOAL: "Изменить цель",
-        ProfileField.HELP_CATEGORIES: "Изменить категории помощи",
-        ProfileField.SKILL_TAGS: "Изменить навыки",
-        ProfileField.AVAILABILITY: "Изменить доступность",
-    }
-    return labels[field]
 
 
 def _moderation_card(payload: dict[str, object], member_id: UUID) -> str:

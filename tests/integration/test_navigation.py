@@ -266,6 +266,31 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
             ),
         )
 
+    profile_callbacks = {
+        "profile:edit:display_name",
+        "profile:edit:city",
+        "profile:edit:timezone",
+        "profile:edit:short_bio",
+        "profile:edit:current_goal",
+        "profile:edit:help_categories",
+        "profile:edit:skill_tags",
+        "profile:edit:availability",
+    }
+    session.callbacks.clear()
+    await dispatcher.feed_update(bot, message_update(69_001, 7_001, "/profile"))
+    assert set(session.callbacks) == profile_callbacks
+    await dispatcher.feed_update(bot, callback_update(69_002, 7_001, "profile:edit:city"))
+    await dispatcher.feed_update(bot, message_update(69_003, 7_001, "Buenos Aires"))
+    async with sessions() as db_session:
+        stored_admin = await db_session.get(MemberModel, admin.id)
+        assert stored_admin is not None
+        assert stored_admin.city == "Buenos Aires"
+        assert stored_admin.display_name == "Member 7001"
+
+    session.callbacks.clear()
+    await dispatcher.feed_update(bot, message_update(69_004, 7_003, "Моя карточка"))
+    assert set(session.callbacks) == profile_callbacks
+
     await dispatcher.feed_update(bot, message_update(70_001, 7_003, "/start"))
     assert {"Найти задание", "Создать задание", "Баланс", "Помощь"} <= set(session.reply_buttons)
 

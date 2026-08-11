@@ -25,6 +25,11 @@ from community_bot.application.registration import InvitationCreateCommand
 from community_bot.domain.catalog import CatalogError
 from community_bot.domain.members import AuthorizationError
 from community_bot.domain.tasks import TaskError
+from community_bot.transport.telegram.profile import (
+    PROFILE_TEXT,
+    own_profile_card,
+    profile_edit_keyboard,
+)
 
 if TYPE_CHECKING:
     from community_bot.application.catalog import CatalogPage, CatalogService
@@ -38,7 +43,6 @@ if TYPE_CHECKING:
 FIND_TASK_TEXT = "Найти задание"
 CREATE_TASK_TEXT = "Создать задание"
 MY_TASKS_TEXT = "Мои задания"
-PROFILE_TEXT = "Моя карточка"
 BALANCE_TEXT = "Баланс"
 STATISTICS_TEXT = "Статистика"
 LEADERBOARD_TEXT = "Лидерборд"
@@ -169,9 +173,8 @@ def build_navigation_router(  # noqa: PLR0913
         try:
             profile = await registration.own_profile(message.from_user.id)
             await message.answer(
-                f"{profile.display_name}\nУровень: {profile.level.level_number} · "
-                f"{profile.level.display_name}\nОпыт: {profile.experience_total}\n"
-                f"Баланс: {profile.credit_balance} кредитов"
+                own_profile_card(profile),
+                reply_markup=profile_edit_keyboard(),
             )
         except (PermissionError, LookupError, ValueError):
             await message.answer("Карточка сейчас недоступна.")
