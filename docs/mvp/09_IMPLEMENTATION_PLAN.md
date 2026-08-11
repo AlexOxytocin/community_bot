@@ -177,15 +177,17 @@
 - структурированные логи;
 - health check;
 - Sentry error reporting с deny-by-default scrubber;
-- Render Pro deployment из одного GHCR digest и expand-only migration gate;
-- PostgreSQL PITR с `RPO <= 24h`, `RTO <= 4h` и restore drill;
+- self-hosted Docker Compose deployment из одного GHCR digest и expand-only
+  migration gate;
+- ежедневный локальный PostgreSQL backup с `RPO <= 24h`, `RTO <= 4h` и restore
+  drill;
 - инструкция запуска, частичного rollback и восстановления.
 
 ### Критерий готовности
 
 Бот восстанавливается после перезапуска, не теряет диалоги и не отправляет
 дублирующиеся критические уведомления. Оба процесса имеют heartbeat/readiness,
-логи и error events не раскрывают приватные данные, а PITR restore воспроизводим
+логи и error events не раскрывают приватные данные, а backup restore воспроизводим
 по runbook.
 
 ## Этап 10. Пилот
@@ -232,12 +234,10 @@
 приватность и идемпотентность, а не подменять их техническими значениями по
 умолчанию.
 
-Остаются следующие барьеры:
+Остающийся барьер — до допуска когорты выполнить реальный backup → isolated
+restore drill на собственном сервере и подтвердить `RPO <= 24h`, `RTO <= 4h`.
 
-- перед production provisioning нужно подтвердить, что выбранный Render Pro
-  plan фактически даёт принятые 14 дней логов и семидневный PITR window.
-
-Ниша и эксплуатационный профиль приняты 11 августа 2026 года в D-024 и
-[ADR-0008](../adr/0008-pilot-runtime-and-operations.md). Application object
+Ниша принята 11 августа 2026 года в D-024/ADR-0008; self-hosted профиль принят
+в D-025 и [ADR-0009](../adr/0009-self-hosted-pilot-runtime.md). Application object
 storage и webhook не входят в CB-14/CB-15 и остаются отдельными открытыми
 техническими вопросами.

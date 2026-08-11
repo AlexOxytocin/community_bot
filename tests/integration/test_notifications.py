@@ -1,0 +1,451 @@
+"""PostgreSQL integration tests for durable notification processing."""
+
+from __future__ import annotations
+
+import asyncio
+import datetime
+from uuid import UUID, uuid4
+
+import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from community_bot.application.notifications import DeliveryClaim, NotificationWorker
+from community_bot.domain.notifications import DeliveryWindow, RetryPolicy
+from community_bot.infrastructure.db import Database, readiness_report
+from community_bot.infrastructure.db.models import (
+    AssignmentModel,
+    MemberModel,
+    NotificationModel,
+    OutboxEventModel,
+    TaskCategoryModel,
+    TaskModel,
+    TaskTemplateModel,
+)
+from community_bot.infrastructure.outbox import PostgresNotificationQueue
+
+pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+
+
+class _Sender:
+    """Record fake Telegram deliveries without network access."""
+
+    def __init__(self) -> None:
+        self.sent: list[int] = []
+
+    async def send(self, claim: DeliveryClaim) -> None:
+        self.sent.append(claim.telegram_user_id)
+
+
+async def _seed_published_task(database: Database) -> tuple[TaskModel, MemberModel]:
+    now = datetime.datetime.now(datetime.UTC)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        owner = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_001,
+            display_name="Owner",
+            timezone="UTC",
+            status="active",
+            role="member",
+        )
+        recipient = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_002,
+            display_name="Recipient",
+            timezone="UTC",
+            status="active",
+            role="member",
+        )
+        inactive = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_003,
+            display_name="Inactive",
+            timezone="UTC",
+            status="paused",
+            role="member",
+        )
+        category = TaskCategoryModel(
+            id=uuid4(), code="notification-test", name="Notification test", sort_order=500
+        )
+        template = TaskTemplateModel(
+            id=uuid4(),
+            category_id=category.id,
+            code="notification-test",
+            version=1,
+            name="Notification test",
+            description="Test",
+            creator_instructions="Test",
+            performer_instructions="Test",
+            completion_criteria="Test",
+            input_schema_json={},
+            result_schema_json={},
+            credit_reward=1,
+            estimated_minutes=10,
+            format="online",
+            minimum_level=1,
+            maximum_performers=1,
+            moderation_required=False,
+        )
+        task = TaskModel(
+            id=uuid4(),
+            origin="member",
+            template_id=template.id,
+            template_version=1,
+            creator_id=owner.id,
+            author_display_name=owner.display_name,
+            category_id=category.id,
+            title="Test task",
+            description="Test",
+            completion_criteria="Test",
+            materials_json={},
+            input_payload_json={},
+            credit_reward_per_performer=1,
+            performer_slots=1,
+            reserved_credit_total=1,
+            estimated_minutes=10,
+            minimum_level=1,
+            format="online",
+            deadline_at=now + datetime.timedelta(days=2),
+            safety_snapshot_json={},
+            publish_command_id=uuid4(),
+            published_at=now,
+        )
+        session.add_all((owner, recipient, inactive, category))
+        await session.flush()
+        session.add(template)
+        await session.flush()
+        session.add(task)
+    return task, recipient
+
+
+async def _add_outbox(
+    database: Database,
+    *,
+    event_type: str,
+    aggregate_type: str,
+    aggregate_id: UUID,
+    business_key: str,
+) -> None:
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add(
+            OutboxEventModel(
+                id=uuid4(),
+                event_type=event_type,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                payload_json={"token": "must-not-be-copied"},
+                business_key=business_key,
+            )
+        )
+
+
+async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notification(
+    database_url: str,
+) -> None:
+    """SKIP LOCKED, deduplication, recipient rules, and success survive restart."""
+    database = Database(database_url)
+    task, recipient = await _seed_published_task(database)
+    await _add_outbox(
+        database,
+        event_type="task.published",
+        aggregate_type="task",
+        aggregate_id=task.id,
+        business_key="notification-test:published",
+    )
+    first = PostgresNotificationQueue(database.session_factory)
+    second = PostgresNotificationQueue(database.session_factory)
+    now = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1)
+
+    claim_sets = await asyncio.wait_for(
+        asyncio.gather(
+            first.claim_outbox(now=now, limit=1, lease_duration=datetime.timedelta(minutes=2)),
+            second.claim_outbox(now=now, limit=1, lease_duration=datetime.timedelta(minutes=2)),
+        ),
+        timeout=10,
+    )
+    claims = tuple(item for group in claim_sets for item in group)
+    assert len(claims) == 1
+    await first.materialize(claims[0], now=now, window=DeliveryWindow())
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        notifications = (await session.scalars(select(NotificationModel))).all()
+        event = await session.get(OutboxEventModel, claims[0].id)
+    assert event is not None
+    assert event.status == "materialized"
+    assert len(notifications) == 1
+    assert notifications[0].member_id == recipient.id
+    assert set(notifications[0].payload_json) == {
+        "event_type",
+        "aggregate_type",
+        "aggregate_id",
+    }
+    assert "must-not-be-copied" not in str(notifications[0].payload_json)
+
+    sender = _Sender()
+    worker = NotificationWorker(first, sender)
+    result = await worker.tick(now=now)
+    repeated = await worker.tick(now=now)
+    assert result.notifications_sent == 1
+    assert repeated.notifications_sent == 0
+    assert sender.sent == [recipient.telegram_user_id]
+
+    async with sessions.begin() as session:
+        persisted_recipient = await session.get(MemberModel, recipient.id)
+        assert persisted_recipient is not None
+        persisted_recipient.status = "paused"
+    await _add_outbox(
+        database,
+        event_type="task.published",
+        aggregate_type="task",
+        aggregate_id=task.id,
+        business_key="notification-test:no-recipient",
+    )
+    empty_claim = (
+        await first.claim_outbox(
+            now=now + datetime.timedelta(minutes=1),
+            limit=1,
+            lease_duration=datetime.timedelta(minutes=2),
+        )
+    )[0]
+    await first.materialize(
+        empty_claim,
+        now=now + datetime.timedelta(minutes=1),
+        window=DeliveryWindow(),
+    )
+    async with sessions() as session:
+        empty_event = await session.get(OutboxEventModel, empty_claim.id)
+        total_notifications = await session.scalar(
+            select(func.count()).select_from(NotificationModel)
+        )
+    assert empty_event is not None
+    assert empty_event.status == "materialized"
+    assert total_notifications == 1
+    await database.dispose()
+
+
+async def test_expired_lease_is_reclaimed_and_stale_completion_is_rejected(
+    database_url: str,
+) -> None:
+    """A restarted worker safely owns expired work and fences the old token."""
+    database = Database(database_url)
+    _, recipient = await _seed_published_task(database)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    now = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1)
+    async with sessions.begin() as session:
+        session.add(
+            NotificationModel(
+                id=uuid4(),
+                member_id=recipient.id,
+                notification_type="task.published",
+                payload_json={},
+                scheduled_at=now,
+                next_attempt_at=now,
+                deduplication_key="lease-reclaim",
+            )
+        )
+    queue = PostgresNotificationQueue(database.session_factory)
+    old = (
+        await queue.claim_notifications(
+            now=now, limit=1, lease_duration=datetime.timedelta(seconds=30)
+        )
+    )[0]
+    assert not await queue.claim_notifications(
+        now=now + datetime.timedelta(seconds=20),
+        limit=1,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+    new = (
+        await queue.claim_notifications(
+            now=now + datetime.timedelta(seconds=31),
+            limit=1,
+            lease_duration=datetime.timedelta(seconds=30),
+        )
+    )[0]
+    assert new.lease_token != old.lease_token
+    assert not await queue.mark_sent(old, now=now + datetime.timedelta(seconds=32))
+    assert await queue.mark_sent(new, now=now + datetime.timedelta(seconds=32))
+    assert not await queue.claim_notifications(
+        now=now + datetime.timedelta(days=1),
+        limit=1,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+
+    retry_time = now + datetime.timedelta(days=2)
+    async with sessions.begin() as session:
+        session.add(
+            NotificationModel(
+                id=uuid4(),
+                member_id=recipient.id,
+                notification_type="task.published",
+                payload_json={},
+                scheduled_at=retry_time,
+                next_attempt_at=retry_time,
+                deduplication_key="bounded-retry",
+            )
+        )
+    retry_claim = (
+        await queue.claim_notifications(
+            now=retry_time,
+            limit=1,
+            lease_duration=datetime.timedelta(seconds=30),
+        )
+    )[0]
+    assert not await queue.mark_delivery_failed(
+        retry_claim,
+        now=retry_time,
+        error_code="telegram_temporarily_unavailable",
+        permanent=False,
+        policy=RetryPolicy(),
+    )
+    terminal_claim = (
+        await queue.claim_notifications(
+            now=retry_time + datetime.timedelta(hours=1),
+            limit=1,
+            lease_duration=datetime.timedelta(seconds=30),
+        )
+    )[0]
+    assert await queue.mark_delivery_failed(
+        terminal_claim,
+        now=retry_time + datetime.timedelta(hours=1),
+        error_code="telegram_recipient_unavailable",
+        permanent=True,
+        policy=RetryPolicy(),
+    )
+    await database.dispose()
+
+
+async def test_reminders_are_idempotent_and_address_the_performer_and_reviewer(
+    database_url: str,
+) -> None:
+    """Deadline goes to the performer while 24h/48h review reminders go to the owner."""
+    database = Database(database_url)
+    task, performer = await _seed_published_task(database)
+    submitted_at = task.published_at
+    assignment = AssignmentModel(
+        id=uuid4(),
+        task_id=task.id,
+        performer_id=performer.id,
+        slot_number=1,
+        status="submitted",
+        submitted_at=submitted_at,
+        review_deadline_at=submitted_at + datetime.timedelta(hours=72),
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add(assignment)
+    queue = PostgresNotificationQueue(database.session_factory)
+
+    first_due = submitted_at + datetime.timedelta(hours=25)
+    second_due = submitted_at + datetime.timedelta(hours=49)
+    assert await queue.schedule_reminders(now=first_due, window=DeliveryWindow()) == 2
+    assert await queue.schedule_reminders(now=first_due, window=DeliveryWindow()) == 0
+    assert await queue.schedule_reminders(now=second_due, window=DeliveryWindow()) == 1
+
+    async with sessions() as session:
+        reminders = (await session.scalars(select(NotificationModel))).all()
+    by_type = {item.notification_type: item.member_id for item in reminders}
+    assert by_type["task_deadline_reminder"] == performer.id
+    assert by_type["review_reminder_24h"] == task.creator_id
+    assert by_type["review_reminder_48h"] == task.creator_id
+
+    async with sessions.begin() as session:
+        persisted_assignment = await session.get(AssignmentModel, assignment.id)
+        assert persisted_assignment is not None
+        persisted_assignment.status = "approved"
+    assert not await queue.claim_notifications(
+        now=second_due + datetime.timedelta(hours=1),
+        limit=10,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+    async with sessions() as session:
+        reminder_statuses = (await session.scalars(select(NotificationModel.status))).all()
+    assert reminder_statuses == ["failed", "failed", "failed"]
+    assert await queue.schedule_reminders(now=second_due, window=DeliveryWindow()) == 0
+    await database.dispose()
+
+
+async def test_poison_event_is_bounded_and_does_not_block_neighbor(
+    database_url: str,
+) -> None:
+    """Unsupported materialization terminates after five attempts while valid work completes."""
+    database = Database(database_url)
+    task, recipient = await _seed_published_task(database)
+    await _add_outbox(
+        database,
+        event_type="unsupported",
+        aggregate_type="unsupported",
+        aggregate_id=uuid4(),
+        business_key="poison",
+    )
+    await _add_outbox(
+        database,
+        event_type="task.published",
+        aggregate_type="task",
+        aggregate_id=task.id,
+        business_key="neighbor",
+    )
+    queue = PostgresNotificationQueue(database.session_factory)
+    sender = _Sender()
+    worker = NotificationWorker(
+        queue,
+        sender,
+        retry_policy=RetryPolicy(maximum_attempts=5),
+    )
+    start = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1)
+    for attempt in range(5):
+        await worker.tick(now=start + datetime.timedelta(days=attempt))
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        poison = await session.scalar(
+            select(OutboxEventModel).where(OutboxEventModel.business_key == "poison")
+        )
+        neighbor = await session.scalar(
+            select(OutboxEventModel).where(OutboxEventModel.business_key == "neighbor")
+        )
+        notification_count = await session.scalar(
+            select(func.count()).select_from(NotificationModel)
+        )
+    assert poison is not None
+    assert poison.status == "failed"
+    assert poison.attempt_count == 5
+    assert poison.last_error_code == "unsupported_outbox_event"
+    assert neighbor is not None
+    assert neighbor.status == "materialized"
+    assert notification_count == 1
+    assert sender.sent == [recipient.telegram_user_id]
+    await database.dispose()
+
+
+async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: str) -> None:
+    """Readiness is green only with the current schema, fresh process, and no poison rows."""
+    database = Database(database_url)
+    queue = PostgresNotificationQueue(database.session_factory)
+    now = datetime.datetime.now(datetime.UTC)
+    await queue.heartbeat(
+        process_name="community-worker",
+        release="sha",
+        migration_revision="0010",
+        now=now,
+    )
+    healthy = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        now=now,
+    )
+    stale = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        now=now + datetime.timedelta(minutes=4),
+    )
+
+    assert healthy.healthy
+    assert healthy.code == "ready"
+    assert not stale.healthy
+    assert stale.code == "heartbeat_stale"
+    await database.dispose()

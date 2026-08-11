@@ -11,6 +11,7 @@ dependencies = [
     "jsonschema>=4,<5",
     "pydantic>=2,<3",
     "pydantic-settings>=2,<3",
+    "sentry-sdk>=2,<3",
     "sqlalchemy[asyncio]>=2,<3",
     "structlog>=25,<26",
     "tzdata>=2025,<2027",
@@ -18,6 +19,8 @@ dependencies = [
 
 [project.scripts]
 community-bot = "community_bot.bootstrap.bot:main"
+community-health = "community_bot.bootstrap.health:main"
+community-migrate = "community_bot.bootstrap.migrate:main"
 community-worker = "community_bot.worker.entrypoint:main"
 
 [build-system]
@@ -34,6 +37,7 @@ test = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
+    "pyyaml>=6,<7",
     "testcontainers[postgres]>=4,<5",
 ]
 

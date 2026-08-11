@@ -39,8 +39,8 @@
 - минимальные запускаемые процессы `bot` и `worker`;
 - документированные команды запуска и проверки;
 - GitHub Actions с быстрым quality-срезом и полным PostgreSQL-прогоном.
-- принятый профиль пилота из ADR-0008: Render Pro, два image-backed процесса,
-  managed PostgreSQL 18/PITR, один GHCR digest и Sentry с очищенным payload.
+- принятый self-hosted профиль из ADR-0009: отдельный Docker Compose project,
+  PostgreSQL 18, один GHCR digest, local backup/restore и очищенный Sentry.
 
 ## Критические запреты
 

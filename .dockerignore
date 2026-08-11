@@ -1,0 +1,12 @@
+.env
+.git
+.github
+.hypothesis
+.pytest_cache
+.ruff_cache
+.venv
+dist
+tasks
+tests
+**/__pycache__
+**/*.pyc

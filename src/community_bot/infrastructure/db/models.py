@@ -412,6 +412,102 @@ class OutboxEventModel(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     published_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    lease_expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','processing','materialized','failed')",
+            name="ck_outbox_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_outbox_attempt_count"),
+        CheckConstraint(
+            "(status = 'processing' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'processing' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="ck_outbox_lease_state",
+        ),
+        CheckConstraint(
+            "(status = 'materialized' AND published_at IS NOT NULL) OR status <> 'materialized'",
+            name="ck_outbox_materialized_at",
+        ),
+        CheckConstraint(
+            "(status = 'failed' AND last_error_code IS NOT NULL) OR status <> 'failed'",
+            name="ck_outbox_failed_error",
+        ),
+        Index("ix_outbox_due", "status", "next_attempt_at", "created_at"),
+    )
+
+
+class NotificationModel(Base):
+    """One addressable, retryable notification derived from a durable event."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','processing','sent','failed')",
+            name="ck_notifications_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_notifications_attempt_count"),
+        CheckConstraint(
+            "(status = 'processing' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'processing' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="ck_notifications_lease_state",
+        ),
+        CheckConstraint(
+            "(status = 'sent' AND sent_at IS NOT NULL) OR status <> 'sent'",
+            name="ck_notifications_sent_at",
+        ),
+        CheckConstraint(
+            "(status = 'failed' AND last_error_code IS NOT NULL) OR status <> 'failed'",
+            name="ck_notifications_failed_error",
+        ),
+        Index("ix_notifications_due", "status", "next_attempt_at", "scheduled_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    notification_type: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    scheduled_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    lease_expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(Text)
+    deduplication_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ProcessHeartbeatModel(Base):
+    """Latest readiness heartbeat for one runtime process."""
+
+    __tablename__ = "process_heartbeats"
+
+    process_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    release: Mapped[str] = mapped_column(Text, nullable=False)
+    migration_revision: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class AssignmentModel(Base):

@@ -1,0 +1,155 @@
+"""Targeted tests for notification scheduling and worker orchestration."""
+
+from __future__ import annotations
+
+import datetime
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+import pytest
+
+from community_bot.application.notifications import (
+    DeliveryClaim,
+    NotificationProcessingError,
+    NotificationWorker,
+)
+from community_bot.domain.notifications import DeliveryWindow, NotificationError, RetryPolicy
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
+def test_retry_policy_is_bounded_and_deterministic() -> None:
+    """The same failed attempt gets one reproducible bounded retry timestamp."""
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    policy = RetryPolicy(base_delay_seconds=30, maximum_delay_seconds=60)
+
+    first = policy.next_attempt_at(now=now, attempt_count=3, identity="delivery-1")
+    repeated = policy.next_attempt_at(now=now, attempt_count=3, identity="delivery-1")
+
+    assert first == repeated
+    assert datetime.timedelta(seconds=60) <= first - now < datetime.timedelta(seconds=90)
+    with pytest.raises(NotificationError):
+        policy.next_attempt_at(now=now, attempt_count=0, identity="delivery-1")
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        (datetime.datetime(2026, 1, 10, 11, tzinfo=datetime.UTC), (9, 0)),
+        (datetime.datetime(2026, 1, 10, 15, tzinfo=datetime.UTC), (12, 0)),
+        (datetime.datetime(2026, 1, 11, 0, tzinfo=datetime.UTC), (9, 0)),
+    ],
+)
+def test_delivery_window_uses_member_timezone(
+    candidate: datetime.datetime, expected: tuple[int, int]
+) -> None:
+    """The default half-open window is evaluated in the member's IANA timezone."""
+    scheduled = DeliveryWindow().schedule(
+        candidate=candidate,
+        timezone_name="America/Argentina/Buenos_Aires",
+    )
+
+    local = scheduled.astimezone(datetime.timezone(datetime.timedelta(hours=-3)))
+    assert (local.hour, local.minute) == expected
+
+
+def test_delivery_window_handles_dst_and_never_passes_deadline() -> None:
+    """DST conversion remains aware and a reminder never moves beyond its deadline."""
+    window = DeliveryWindow()
+    candidate = datetime.datetime(2026, 3, 8, 10, tzinfo=datetime.UTC)
+    deadline = datetime.datetime(2026, 3, 8, 13, tzinfo=datetime.UTC)
+
+    scheduled = window.schedule(
+        candidate=candidate,
+        timezone_name="America/New_York",
+        deadline=deadline,
+    )
+
+    assert scheduled.tzinfo is datetime.UTC
+    assert scheduled <= deadline
+    with pytest.raises(NotificationError):
+        window.schedule(candidate=candidate, timezone_name="Invalid/Timezone")
+
+
+class _Queue:
+    """Minimal queue fake for one bounded worker tick."""
+
+    def __init__(self, deliveries: Sequence[DeliveryClaim]) -> None:
+        self.deliveries = deliveries
+        self.failures: list[tuple[str, bool]] = []
+        self.sent: list[DeliveryClaim] = []
+
+    async def schedule_reminders(self, **_kwargs: object) -> int:
+        return 2
+
+    async def claim_outbox(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    async def materialize(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def fail_outbox(self, *_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def claim_notifications(self, **_kwargs: object) -> Sequence[DeliveryClaim]:
+        return self.deliveries
+
+    async def mark_sent(self, claim: DeliveryClaim, **_kwargs: object) -> bool:
+        self.sent.append(claim)
+        return True
+
+    async def mark_delivery_failed(self, claim: DeliveryClaim, **kwargs: object) -> bool:
+        del claim
+        error_code = kwargs["error_code"]
+        permanent = kwargs["permanent"]
+        assert isinstance(error_code, str)
+        assert isinstance(permanent, bool)
+        self.failures.append((error_code, permanent))
+        return permanent
+
+    async def heartbeat(self, **_kwargs: object) -> None:
+        return None
+
+
+class _Sender:
+    """Fail one configured delivery and accept the rest."""
+
+    async def send(self, claim: DeliveryClaim) -> None:
+        if claim.notification_type == "temporary":
+            error_code = "telegram_temporarily_unavailable"
+            raise NotificationProcessingError(error_code)
+        if claim.notification_type == "permanent":
+            error_code = "telegram_recipient_unavailable"
+            raise NotificationProcessingError(error_code, permanent=True)
+
+
+@pytest.mark.asyncio
+async def test_worker_classifies_success_retry_and_terminal_failure() -> None:
+    """One tick handles independent delivery outcomes without aborting the batch."""
+    deliveries = tuple(
+        DeliveryClaim(
+            id=uuid4(),
+            member_id=uuid4(),
+            telegram_user_id=index,
+            notification_type=notification_type,
+            payload={},
+            attempt_count=1,
+            lease_token=uuid4(),
+        )
+        for index, notification_type in enumerate(("ok", "temporary", "permanent"), start=1)
+    )
+    queue = _Queue(deliveries)
+
+    result = await NotificationWorker(queue, _Sender()).tick(
+        now=datetime.datetime.now(datetime.UTC)
+    )
+
+    assert result.reminders_created == 2
+    assert result.notifications_sent == 1
+    assert result.notifications_retried == 1
+    assert result.notifications_failed == 1
+    assert queue.failures == [
+        ("telegram_temporarily_unavailable", False),
+        ("telegram_recipient_unavailable", True),
+    ]

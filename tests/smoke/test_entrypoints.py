@@ -22,8 +22,14 @@ def test_check_mode_is_safe_and_successful(command: str) -> None:
     assert "bootstrap_check_passed" in result.stderr
 
 
-@pytest.mark.parametrize("command", ["community-bot", "community-worker"])
-def test_runtime_mode_fails_without_external_operations(command: str) -> None:
+@pytest.mark.parametrize(
+    ("command", "error_code"),
+    [
+        ("community-bot", "required_secret_missing"),
+        ("community-worker", "bot_token_missing"),
+    ],
+)
+def test_runtime_mode_fails_without_required_secrets(command: str, error_code: str) -> None:
     executable = shutil.which(command)
     assert executable is not None
 
@@ -35,4 +41,4 @@ def test_runtime_mode_fails_without_external_operations(command: str) -> None:
     )
 
     assert result.returncode == 2
-    assert "runtime_not_implemented" in result.stderr
+    assert error_code in result.stderr

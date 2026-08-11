@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from community_bot.infrastructure.db.database import Database
-from community_bot.infrastructure.db.health import database_healthcheck
+from community_bot.infrastructure.db.health import (
+    ReadinessReport,
+    database_healthcheck,
+    readiness_report,
+)
 
-__all__ = ["Database", "database_healthcheck"]
+__all__ = ["Database", "ReadinessReport", "database_healthcheck", "readiness_report"]
