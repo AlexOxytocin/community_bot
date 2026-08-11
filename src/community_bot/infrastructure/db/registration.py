@@ -336,7 +336,10 @@ async def get_own_profile(
     member = await session.scalar(
         select(MemberModel).where(MemberModel.telegram_user_id == telegram_user_id)
     )
-    if member is None or member.status != MemberStatus.ACTIVE.value:
+    if member is None or member.status not in {
+        MemberStatus.ACTIVE.value,
+        MemberStatus.PAUSED.value,
+    }:
         return None
     return ProfileData(
         member_id=member.id,

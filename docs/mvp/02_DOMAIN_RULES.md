@@ -158,11 +158,21 @@ reliability_rate = approved_assignments / accepted_assignments
 
 Из знаменателя исключаются отмены, произошедшие по вине автора задания или системы. Частичное выполнение считается как `0.5` завершения.
 
+Append-only история трактуется однозначно: `accepted` остаётся фактом принятия;
+один terminal root задаёт исход; цепочка `responsibility_excused` /
+`responsibility_restored` может менять только ответственность, не переписывая
+исход. `cancelled_creator` и effective `responsibility_excused` исключаются из
+знаменателя. Cross-assignment supersede, цикл и повторное покрытие одного leaf
+запрещены базой данных.
+
 Публично показатель отображается после минимум пяти принятых заданий. До этого показывается `недостаточно данных`.
 
 ## 6. Лидерборд
 
 Главный лидерборд строится по `experience_total DESC`.
+
+Authoritative `experience_total` равен сумме `experience_delta` immutable account
+ledger. Cached level и его config version не участвуют в сортировке.
 
 При равном опыте применяются критерии:
 

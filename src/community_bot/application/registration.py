@@ -756,11 +756,11 @@ class RegistrationService:
         return RegistrationView(outcome, context)
 
     async def own_profile(self, telegram_user_id: int) -> ProfileSnapshot:
-        """Return an active member's own profile with the current resolved level."""
+        """Return an active or paused member's own profile with the resolved level."""
         async with self._unit_of_work_factory() as unit_of_work:
             profile = await unit_of_work.get_own_profile(telegram_user_id)
             if profile is None:
-                message = "An active profile does not exist."
+                message = "An available own profile does not exist."
                 raise PermissionError(message)
             level = await unit_of_work.resolve_member_level(profile.member_id)
             return ProfileSnapshot(

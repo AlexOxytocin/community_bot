@@ -425,6 +425,8 @@ rater_id FK NOT NULL
 target_id FK NOT NULL
 value INTEGER NOT NULL CHECK(value IN (-1, 0, 1))
 comment TEXT NOT NULL
+revision INTEGER NOT NULL CHECK(revision > 0)
+last_command_id UUID UNIQUE NOT NULL
 created_at TIMESTAMP NOT NULL
 updated_at TIMESTAMP NOT NULL
 UNIQUE(rater_id, target_id)
@@ -436,16 +438,28 @@ CHECK(rater_id <> target_id)
 ```text
 id PK
 karma_vote_id FK NOT NULL
-rater_id FK NOT NULL
-target_id FK NOT NULL
+revision INTEGER NOT NULL
 old_value INTEGER NULL
 new_value INTEGER NOT NULL
 old_comment TEXT NULL
 new_comment TEXT NOT NULL
-changed_at TIMESTAMP NOT NULL
+command_id UUID UNIQUE NOT NULL
+actor_member_id FK NOT NULL
+created_at TIMESTAMP NOT NULL
+UNIQUE(karma_vote_id, revision)
 ```
 
-История доступна только администраторам и аудиту.
+`karma_vote_history` защищена trigger от `UPDATE`/`DELETE`. История и текущие raw
+строки доступны только active administrator с `karma_review`; non-active target
+дополнительно требует `member_read`, а каждый фактический просмотр создаёт audit.
+
+Возобновляемый диалог кармы использует общую `conversation_states` с
+`flow_type=karma` и монотонной `revision`; отдельная draft-таблица не создаётся.
+Поле `members.permissions_json` допускает только `karma_review` и `member_read`.
+
+Eligibility не дублируется: он выводится из исходной положительной
+`task_reward_earned|partial_task_reward` с `assignment_id` и member-origin task.
+Append-only ledger сохраняет этот факт навсегда даже после reversal.
 
 ## 8. Споры и санкции
 
