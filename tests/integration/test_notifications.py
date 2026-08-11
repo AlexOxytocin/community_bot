@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.notifications import DeliveryClaim, NotificationWorker
+from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.notifications import DeliveryWindow, RetryPolicy
 from community_bot.infrastructure.db import Database, readiness_report
 from community_bot.infrastructure.db.models import (
@@ -442,6 +445,30 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
         migration_revision="0010",
         now=now,
     )
+    missing_config = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        now=now,
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        admin = MemberModel(
+            telegram_user_id=89_001,
+            display_name="Readiness administrator",
+            timezone="UTC",
+            role="administrator",
+            status="active",
+        )
+        session.add(admin)
+    active = await ProductConfigBootstrapCoordinator(
+        database.unit_of_work,
+        load_product_config_candidate,
+    ).prepare(
+        candidate_path=Path("config/product-config.v2.json"),
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
     healthy = await readiness_report(
         database_url,
         process_name="community-worker",
@@ -455,8 +482,25 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
         now=now + datetime.timedelta(minutes=4),
     )
 
+    async with sessions.begin() as session:
+        persisted = await session.get(MemberModel, admin.id)
+        assert persisted is not None
+        persisted.level_config_version_id = None
+    stale_config = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        now=now,
+    )
+
+    assert not missing_config.healthy
+    assert missing_config.code == "product_config_incomplete"
     assert healthy.healthy
+    assert healthy.product_config
     assert healthy.code == "ready"
     assert not stale.healthy
     assert stale.code == "heartbeat_stale"
+    assert not stale_config.healthy
+    assert stale_config.code == "product_config_incomplete"
+    assert active.version == 2
     await database.dispose()

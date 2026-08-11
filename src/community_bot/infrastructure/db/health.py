@@ -11,6 +11,8 @@ from sqlalchemy import text
 
 from community_bot.infrastructure.db.database import Database
 
+_EXPECTED_LEVEL_COUNT = 10
+
 
 async def database_healthcheck(database_url: str) -> bool:
     """Execute a minimal database query and release the engine."""
@@ -30,6 +32,7 @@ class ReadinessReport:
     healthy: bool
     database: bool
     migration: bool
+    product_config: bool
     heartbeat: bool
     failed_outbox_events: int
     code: str
@@ -66,6 +69,31 @@ async def readiness_report(
                 )
                 or 0
             )
+            active_config_id = await connection.scalar(
+                text(
+                    "SELECT product_config_version_id FROM active_product_config "
+                    "WHERE singleton_key"
+                )
+            )
+            level_count = int(
+                await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM levels WHERE product_config_version_id = :config_id"
+                    ),
+                    {"config_id": active_config_id},
+                )
+                or 0
+            )
+            stale_member_count = int(
+                await connection.scalar(
+                    text(
+                        "SELECT count(*) FROM members WHERE status = 'active' AND "
+                        "level_config_version_id IS DISTINCT FROM :config_id"
+                    ),
+                    {"config_id": active_config_id},
+                )
+                or 0
+            )
     except Exception:  # noqa: BLE001 - health boundary always returns a safe result.
         return _unhealthy("database_unavailable")
     finally:
@@ -73,12 +101,19 @@ async def readiness_report(
 
     expected_revision = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
     migration_ok = revision == expected_revision
+    product_config_ok = (
+        active_config_id is not None
+        and level_count == _EXPECTED_LEVEL_COUNT
+        and stale_member_count == 0
+    )
     heartbeat_ok = (
         isinstance(heartbeat_at, datetime.datetime)
         and observed_now - heartbeat_at.astimezone(datetime.UTC) <= heartbeat_max_age
     )
     if not migration_ok:
         code = "migration_mismatch"
+    elif not product_config_ok:
+        code = "product_config_incomplete"
     elif not heartbeat_ok:
         code = "heartbeat_stale"
     elif failed_count:
@@ -86,9 +121,10 @@ async def readiness_report(
     else:
         code = "ready"
     return ReadinessReport(
-        healthy=migration_ok and heartbeat_ok and failed_count == 0,
+        healthy=migration_ok and product_config_ok and heartbeat_ok and failed_count == 0,
         database=True,
         migration=migration_ok,
+        product_config=product_config_ok,
         heartbeat=heartbeat_ok,
         failed_outbox_events=failed_count,
         code=code,
@@ -100,6 +136,7 @@ def _unhealthy(code: str) -> ReadinessReport:
         healthy=False,
         database=False,
         migration=False,
+        product_config=False,
         heartbeat=False,
         failed_outbox_events=0,
         code=code,

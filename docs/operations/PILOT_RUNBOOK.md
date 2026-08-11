@@ -31,40 +31,32 @@ logical backup. External backup, R2, application object storage и webhook в MV
    `DATABASE_URL`, `BOT_TOKEN`, случайным `INVITE_TOKEN_SECRET`, `ENVIRONMENT`,
    `RELEASE` и необязательным `SENTRY_DSN`.
 4. Для штатного release выполнить
-   `ops/deploy_self_hosted.sh GHCR_IMAGE@sha256:DIGEST`. Для первого bootstrap
+   `ops/deploy_self_hosted.sh GHCR_IMAGE@sha256:DIGEST`. Для первого запуска пустой
+   базы передать вторым аргументом Telegram user ID первого администратора:
+   `ops/deploy_self_hosted.sh GHCR_IMAGE@sha256:DIGEST TELEGRAM_ID`. Скрипт после
+   migrations создаст administrator, идемпотентно активирует packaged product config
+   и только затем запустит worker/bot. Для первого bootstrap
    допустимо безопасно загрузить проверенный image archive и передать его точный
    локальный `sha256:IMAGE_ID`. Mutable tag production script отклоняет.
-5. Скрипт последовательно запускает PostgreSQL, `community-migrate`, `worker`,
-   проверяет его readiness, затем запускает `bot` и проверяет его readiness.
-6. На действительно пустой базе создать первого администратора без ручного SQL:
-
-   ```bash
-   cd /opt/community-bot/current
-   read -r -p "Telegram user ID первого администратора: " BOOTSTRAP_TELEGRAM_ID
-   export COMMUNITY_BOT_IMAGE="$(</opt/community-bot/shared/releases/current-image)"
-   export COMMUNITY_BOT_ENV_FILE=/opt/community-bot/shared/.env
-   docker compose --project-directory /opt/community-bot/current \
-     --env-file /opt/community-bot/shared/.env \
-     -f compose.production.yaml run --rm migrate \
-     community-bootstrap-admin \
-     --telegram-user-id "${BOOTSTRAP_TELEGRAM_ID}" \
-     --reason initial_install
-   unset BOOTSTRAP_TELEGRAM_ID COMMUNITY_BOT_IMAGE COMMUNITY_BOT_ENV_FILE
-   ```
-
-   Code `0` означает создание либо точный идемпотентный повтор. Code `2` означает конфликт
-   состояния или невалидный ввод: остановиться, проверить наличие администратора и audit, не
-   выполнять ручной SQL. Code `1` означает техническую ошибку; после устранения причины команду
-   можно безопасно повторить. Затем этот администратор открывает `/admin` и создаёт
+5. Скрипт последовательно запускает PostgreSQL, `community-migrate`, optional
+   `community-bootstrap-admin`, обязательный `community-bootstrap-product-config`,
+   `worker`, проверяет его readiness, затем запускает `bot` и проверяет readiness.
+6. Code `0` bootstrap-команд означает создание либо точный идемпотентный повтор.
+   Code `2` означает конфликт состояния или невалидный ввод: остановиться, проверить
+   administrator/config/audit, не выполнять ручной SQL. Code `1` означает техническую
+   ошибку; после устранения причины команду можно безопасно повторить. Затем
+   администратор открывает `/admin` и создаёт
    одноразовую ссылку кнопкой `Создать приглашение`; `/invite_create` остаётся резервной
    командой.
 7. Установить unit/timer из `ops/systemd`, выполнить `systemctl daemon-reload`,
    `systemctl enable --now community-bot-backup.timer`.
 8. Создать первый backup и выполнить restore drill до допуска участников.
 
-При clean recovery на заново созданной пустой схеме используется та же команда с
-`--reason clean_recovery`. После обычного восстановления backup, где active administrator уже
-существует, bootstrap не запускается. Конфликт — это защитная остановка, а не повод обходить guard.
+При clean recovery на заново созданной пустой схеме перед запуском deploy установить
+`COMMUNITY_BOT_BOOTSTRAP_REASON=clean_recovery` и передать Telegram ID вторым аргументом.
+После обычного восстановления backup, где active administrator и active config уже
+существуют, второй аргумент не передаётся; config bootstrap возвращает идемпотентный
+success. Конфликт — защитная остановка, а не повод обходить guard.
 
 ## Обычный выпуск
 

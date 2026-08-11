@@ -18,6 +18,7 @@ from community_bot.application.economy import (
     ProductConfigService,
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
+from community_bot.bootstrap.product_config_cli import _bootstrap as bootstrap_product_config
 from community_bot.domain.economy import (
     AdministrativeContext,
     IdempotencyConflictError,
@@ -117,6 +118,25 @@ async def test_bootstrap_ingests_activates_backfills_and_replays(database_url: s
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
         assert persisted.level_config_version_id == first.id
+    await database.dispose()
+
+
+async def test_product_config_cli_bootstrap_requires_one_admin_and_replays(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    with pytest.raises(AuthorizationError, match="exactly one active administrator"):
+        await bootstrap_product_config(database_url, CONFIG_PATH)
+
+    await add_member(database, telegram_user_id=12, role=MemberRole.ADMINISTRATOR)
+    first = await bootstrap_product_config(database_url, CONFIG_PATH)
+    await add_member(database, telegram_user_id=13, role=MemberRole.ADMINISTRATOR)
+    replay = await bootstrap_product_config(database_url, CONFIG_PATH)
+
+    assert first == replay == 1
+    assert await model_count(database, ProductConfigVersionModel) == 1
+    assert await model_count(database, ProductConfigActivationModel) == 1
+    assert await model_count(database, LevelBackfillRunModel) == 1
     await database.dispose()
 
 

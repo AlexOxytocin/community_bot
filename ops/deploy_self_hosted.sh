@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: deploy_self_hosted.sh IMAGE_REFERENCE" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "Usage: deploy_self_hosted.sh IMAGE_REFERENCE [BOOTSTRAP_TELEGRAM_ID]" >&2
   exit 2
 fi
 
@@ -48,6 +48,12 @@ fi
 
 "${compose[@]}" up -d postgres
 "${compose[@]}" run --rm migrate
+if [[ $# -eq 2 ]]; then
+  "${compose[@]}" run --rm migrate community-bootstrap-admin \
+    --telegram-user-id "$2" \
+    --reason "${COMMUNITY_BOT_BOOTSTRAP_REASON:-initial_install}"
+fi
+"${compose[@]}" run --rm migrate community-bootstrap-product-config
 "${compose[@]}" up -d --no-deps worker
 
 wait_for_health() {
