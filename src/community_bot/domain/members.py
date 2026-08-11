@@ -58,6 +58,7 @@ class Member:
     telegram_user_id: int
     role: MemberRole
     status: MemberStatus
+    permissions: frozenset[str] = frozenset()
 
 
 def route_start(member: Member | None) -> StartOutcome:

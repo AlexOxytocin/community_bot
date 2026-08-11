@@ -17,6 +17,7 @@ from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.infrastructure.db import assignments as assignment_store
 from community_bot.infrastructure.db import catalog as catalog_store
 from community_bot.infrastructure.db import registration as registration_store
+from community_bot.infrastructure.db import reputation as reputation_store
 from community_bot.infrastructure.db import tasks as task_store
 from community_bot.infrastructure.db.economy import (
     SqlAlchemyEconomyMutation,
@@ -57,6 +58,18 @@ if TYPE_CHECKING:
         ProfileData,
         RegistrationContext,
     )
+    from community_bot.application.reputation import (
+        KarmaAggregate,
+        KarmaDraft,
+        KarmaVoteResult,
+        LeaderboardCursor,
+        LeaderboardPage,
+        MemberCatalogCursor,
+        MemberCatalogPage,
+        PersonalStatistics,
+        RawKarmaVote,
+        SafeProfile,
+    )
     from community_bot.application.tasks import PublishedTask, TaskDraft
     from community_bot.domain.assignments import (
         Assignment,
@@ -71,6 +84,7 @@ if TYPE_CHECKING:
         ProfileField,
         RegistrationStep,
     )
+    from community_bot.domain.reputation import KarmaStep
     from community_bot.domain.tasks import TaskStatus
 
 
@@ -180,6 +194,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(),
             telegram_user_id,
         )
+
+    async def acquire_reputation_pair_gate(self, first_id: UUID, second_id: UUID) -> None:
+        """Serialize all reputation mutations for one unordered member pair."""
+        await reputation_store.acquire_pair_gate(self._require_session(), first_id, second_id)
 
     @property
     def economy(self) -> SqlAlchemyEconomyMutation:
@@ -711,6 +729,101 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         )
         return None if model is None else _to_domain(model)
 
+    async def get_member(self, member_id: UUID) -> Member | None:
+        """Read one security snapshot by member UUID."""
+        model = await self._require_session().get(MemberModel, member_id)
+        return None if model is None else _to_domain(model)
+
+    async def karma_eligible(self, first_id: UUID, second_id: UUID) -> bool:
+        """Return permanent eligibility derived from paid member work."""
+        return await reputation_store.karma_eligible(self._require_session(), first_id, second_id)
+
+    async def get_karma_draft(self, member_id: UUID, *, for_update: bool) -> KarmaDraft | None:
+        """Read or lock one resumable karma conversation."""
+        return await reputation_store.get_draft(
+            self._require_session(), member_id, for_update=for_update
+        )
+
+    async def begin_karma_draft(self, member_id: UUID, target_id: UUID) -> KarmaDraft:
+        """Create or resume a karma conversation."""
+        return await reputation_store.begin_draft(self._require_session(), member_id, target_id)
+
+    async def save_karma_draft(
+        self,
+        *,
+        member_id: UUID,
+        expected_revision: int,
+        value: int | None,
+        comment: str | None,
+        step: KarmaStep,
+    ) -> KarmaDraft:
+        """Advance an exact karma conversation revision."""
+        return await reputation_store.save_draft(
+            self._require_session(),
+            member_id=member_id,
+            expected_revision=expected_revision,
+            value=value,
+            comment=comment,
+            step=step,
+        )
+
+    async def delete_karma_draft(self, member_id: UUID, expected_revision: int) -> None:
+        """Delete only an exact karma flow revision."""
+        await reputation_store.delete_draft(self._require_session(), member_id, expected_revision)
+
+    async def upsert_karma_vote(
+        self,
+        *,
+        rater_id: UUID,
+        target_id: UUID,
+        value: int,
+        comment: str,
+        command_id: UUID,
+    ) -> KarmaVoteResult:
+        """Persist one current vote and immutable revision."""
+        return await reputation_store.upsert_vote(
+            self._require_session(),
+            rater_id=rater_id,
+            target_id=target_id,
+            value=value,
+            comment=comment,
+            command_id=command_id,
+        )
+
+    async def karma_vote_by_command(self, command_id: UUID) -> KarmaVoteResult | None:
+        """Read a vote revision by immutable command identity."""
+        return await reputation_store.vote_by_command(self._require_session(), command_id)
+
+    async def karma_aggregate(self, target_id: UUID) -> KarmaAggregate:
+        """Return anonymous current karma aggregate."""
+        return await reputation_store.karma_aggregate(self._require_session(), target_id)
+
+    async def safe_profile(self, member_id: UUID) -> SafeProfile | None:
+        """Return one privacy-safe profile projection."""
+        return await reputation_store.safe_profile(self._require_session(), member_id)
+
+    async def safe_profiles(
+        self, *, limit: int, cursor: MemberCatalogCursor | None
+    ) -> MemberCatalogPage:
+        """Return the stable safe catalog of active profiles."""
+        return await reputation_store.safe_profiles(
+            self._require_session(), limit=limit, cursor=cursor
+        )
+
+    async def personal_statistics(self, member_id: UUID) -> PersonalStatistics:
+        """Return personal contribution aggregates."""
+        return await reputation_store.personal_statistics(self._require_session(), member_id)
+
+    async def raw_karma(self, target_id: UUID) -> tuple[RawKarmaVote, ...]:
+        """Return current raw karma after application authorization."""
+        return await reputation_store.raw_karma(self._require_session(), target_id)
+
+    async def leaderboard(self, *, limit: int, cursor: LeaderboardCursor | None) -> LeaderboardPage:
+        """Return a ledger-authoritative leaderboard page."""
+        return await reputation_store.leaderboard(
+            self._require_session(), limit=limit, cursor=cursor
+        )
+
     async def lock_members(self, member_ids: Sequence[UUID]) -> dict[UUID, Member]:
         """Lock requested members in deterministic UUID order."""
         ordered_ids = sorted(set(member_ids), key=str)
@@ -888,6 +1001,7 @@ def _to_domain(model: MemberModel) -> Member:
         telegram_user_id=model.telegram_user_id,
         role=MemberRole(model.role),
         status=MemberStatus(model.status),
+        permissions=frozenset(model.permissions_json),
     )
 
 

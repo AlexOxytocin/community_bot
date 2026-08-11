@@ -44,6 +44,13 @@ class MemberModel(Base):
             "'suspended', 'left', 'banned')",
             name="ck_members_status",
         ),
+        CheckConstraint(
+            "permissions_json IN ('[]'::jsonb, '[\"karma_review\"]'::jsonb, "
+            "'[\"member_read\"]'::jsonb, "
+            '\'["karma_review","member_read"]\'::jsonb, '
+            '\'["member_read","karma_review"]\'::jsonb)',
+            name="ck_members_permissions",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -61,6 +68,9 @@ class MemberModel(Base):
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     skill_tags_json: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    permissions_json: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     role: Mapped[str] = mapped_column(Text, nullable=False, default=MemberRole.MEMBER.value)
@@ -172,6 +182,7 @@ class ConversationStateModel(Base):
     """Persistent resumable Telegram conversation state."""
 
     __tablename__ = "conversation_states"
+    __table_args__ = (CheckConstraint("revision >= 0", name="ck_conversation_states_revision"),)
 
     member_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id"), primary_key=True
@@ -179,6 +190,7 @@ class ConversationStateModel(Base):
     flow_type: Mapped[str] = mapped_column(Text, nullable=False)
     current_step: Mapped[str] = mapped_column(Text, nullable=False)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -554,6 +566,70 @@ class ReliabilityEventModel(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     supersedes_event_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("reliability_events.id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class KarmaVoteModel(Base):
+    """Current private karma vote for one ordered member pair."""
+
+    __tablename__ = "karma_votes"
+    __table_args__ = (
+        UniqueConstraint("rater_id", "target_id", name="uq_karma_votes_pair"),
+        CheckConstraint("rater_id <> target_id", name="ck_karma_votes_not_self"),
+        CheckConstraint("value IN (-1, 0, 1)", name="ck_karma_votes_value"),
+        CheckConstraint("revision > 0", name="ck_karma_votes_revision"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    rater_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    target_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    value: Mapped[int] = mapped_column(Integer, nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KarmaVoteHistoryModel(Base):
+    """Immutable revision of one private karma vote."""
+
+    __tablename__ = "karma_vote_history"
+    __table_args__ = (
+        UniqueConstraint("karma_vote_id", "revision", name="uq_karma_history_revision"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    karma_vote_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("karma_votes.id"), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    old_value: Mapped[int | None] = mapped_column(Integer)
+    new_value: Mapped[int] = mapped_column(Integer, nullable=False)
+    old_comment: Mapped[str | None] = mapped_column(Text)
+    new_comment: Mapped[str] = mapped_column(Text, nullable=False)
+    command_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), unique=True, nullable=False
+    )
+    actor_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
