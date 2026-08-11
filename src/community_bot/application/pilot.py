@@ -85,9 +85,9 @@ class PilotSuccessMetrics(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    task_fill: bool | None
-    assignment_completion: bool | None
-    repeat_action: bool | None
+    task_fill_rate: bool | None
+    assignment_completion_rate: bool | None
+    repeat_action_rate: bool | None
 
 
 class PilotMetricsReport(BaseModel):
@@ -99,20 +99,20 @@ class PilotMetricsReport(BaseModel):
     from_at: datetime.datetime
     to_at: datetime.datetime
     generated_at: datetime.datetime
-    invite_conversion: MetricRatio
-    onboarding_completion: MetricRatio
+    invite_conversion_rate: MetricRatio
+    onboarding_completion_rate: MetricRatio
     current_active_members: int
     tasks_per_active_member: MetricRatio
-    task_fill: MetricRatio
-    task_fill_48h: MetricRatio
-    assignment_completion: MetricRatio
+    task_fill_rate: MetricRatio
+    task_fill_rate_48h: MetricRatio
+    assignment_completion_rate: MetricRatio
     median_time_to_first_completion_seconds: int | None
-    repeat_action: MetricRatio
+    repeat_action_rate: MetricRatio
     unique_paid_pairs: int
     community_tasks: CommunityTaskMetrics
     interaction_alerts: InteractionAlertMetrics
     disputes_and_cancellations: DisputeCancellationMetrics
-    weekly_retention: MetricRatio
+    weekly_retention_rate: MetricRatio
     top_20_percent_completion_share: MetricRatio
     credit_distribution: SafeDistribution
     experience_distribution: SafeDistribution
@@ -321,20 +321,20 @@ def calculate_pilot_metrics(
         from_at=from_at,
         to_at=to_at,
         generated_at=generated_at,
-        invite_conversion=invite_conversion,
-        onboarding_completion=onboarding,
+        invite_conversion_rate=invite_conversion,
+        onboarding_completion_rate=onboarding,
         current_active_members=len(active_member_ids),
         tasks_per_active_member=_ratio(len(window_tasks), len(active_member_ids)),
-        task_fill=task_fill,
-        task_fill_48h=task_fill_48h,
-        assignment_completion=assignment_completion,
+        task_fill_rate=task_fill,
+        task_fill_rate_48h=task_fill_48h,
+        assignment_completion_rate=assignment_completion,
         median_time_to_first_completion_seconds=_median_first_completion(
             facts.members,
             effective_rewards,
             from_at=from_at,
             to_at=to_at,
         ),
-        repeat_action=repeat_action,
+        repeat_action_rate=repeat_action,
         unique_paid_pairs=len(paid_pairs),
         community_tasks=CommunityTaskMetrics(
             published=sum(task.origin == "community" for task in window_tasks),
@@ -347,7 +347,7 @@ def calculate_pilot_metrics(
             from_at=from_at,
             to_at=to_at,
         ),
-        weekly_retention=weekly_retention,
+        weekly_retention_rate=weekly_retention,
         top_20_percent_completion_share=top_share,
         credit_distribution=_safe_distribution(
             [credit_totals.get(member_id, 0) for member_id in active_member_ids],
@@ -371,9 +371,9 @@ def calculate_pilot_metrics(
             ),
         ),
         success=PilotSuccessMetrics(
-            task_fill=_passes(task_fill, Decimal("0.7000")),
-            assignment_completion=_passes(assignment_completion, Decimal("0.7500")),
-            repeat_action=_passes(repeat_action, Decimal("0.6000")),
+            task_fill_rate=_passes(task_fill, Decimal("0.7000")),
+            assignment_completion_rate=_passes(assignment_completion, Decimal("0.7500")),
+            repeat_action_rate=_passes(repeat_action, Decimal("0.6000")),
         ),
     )
 
