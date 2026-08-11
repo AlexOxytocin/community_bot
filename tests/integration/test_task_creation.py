@@ -185,6 +185,7 @@ class CapturingSession(BaseSession):
         super().__init__()
         self.texts: list[str] = []
         self.callbacks: list[str] = []
+        self.callback_answers: list[str] = []
 
     async def close(self) -> None:
         """Close no external resources."""
@@ -202,11 +203,12 @@ class CapturingSession(BaseSession):
             self.texts.append(text_value)
         markup = getattr(method, "reply_markup", None)
         if markup is not None:
-            for row in markup.inline_keyboard:
+            for row in getattr(markup, "inline_keyboard", ()):
                 self.callbacks.extend(
                     button.callback_data for button in row if button.callback_data is not None
                 )
         if isinstance(method, AnswerCallbackQuery):
+            self.callback_answers.append(method.text or "")
             callback_result = True
             return cast("TelegramType", callback_result)
         return cast(

@@ -23,6 +23,7 @@ from community_bot.infrastructure.observability import configure_logging, config
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.transport.telegram.assignments import build_assignment_router
 from community_bot.transport.telegram.catalog import build_catalog_router
+from community_bot.transport.telegram.conversation import build_conversation_router
 from community_bot.transport.telegram.moderation import build_moderation_router
 from community_bot.transport.telegram.registration import build_registration_router
 from community_bot.transport.telegram.reputation import build_reputation_router
@@ -92,16 +93,23 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
     """Compose all implemented Telegram transport routers."""
     unit_of_work = database.unit_of_work
     dispatcher = Dispatcher()
+    task_service = TaskService(unit_of_work)
+    registration_service = RegistrationService(
+        unit_of_work,
+        InviteTokenCodec(invite_token_secret),
+    )
     dispatcher.include_router(build_catalog_router(CatalogService(unit_of_work)))
     dispatcher.include_router(build_assignment_router(AssignmentService(unit_of_work)))
     dispatcher.include_router(build_moderation_router(ModerationService(unit_of_work)))
     dispatcher.include_router(build_reputation_router(ReputationService(unit_of_work)))
-    dispatcher.include_router(build_task_router(TaskService(unit_of_work)))
+    dispatcher.include_router(build_task_router(task_service, include_text_fallback=False))
     dispatcher.include_router(
         build_registration_router(
-            RegistrationService(unit_of_work, InviteTokenCodec(invite_token_secret))
+            registration_service,
+            include_text_fallback=False,
         )
     )
+    dispatcher.include_router(build_conversation_router(task_service, registration_service))
     return dispatcher
 
 

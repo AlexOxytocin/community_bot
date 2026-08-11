@@ -21,6 +21,7 @@ dependencies = [
 community-bot = "community_bot.bootstrap.bot:main"
 community-health = "community_bot.bootstrap.health:main"
 community-migrate = "community_bot.bootstrap.migrate:main"
+community-pilot-report = "community_bot.bootstrap.pilot_report:main"
 community-worker = "community_bot.worker.entrypoint:main"
 
 [build-system]
@@ -125,6 +126,7 @@ asyncio_mode = "strict"
 filterwarnings = ["error"]
 markers = [
     "integration: exercises an actual PostgreSQL instance",
+    "e2e: exercises a complete user story through the production Telegram dispatcher",
 ]
 testpaths = ["tests"]
 

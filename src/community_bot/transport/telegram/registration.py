@@ -50,7 +50,11 @@ _MAX_INVITE_LIFETIME_DAYS = 365
 _INTENDED_ID_ARGUMENT_INDEX = 2
 
 
-def build_registration_router(service: RegistrationService) -> Router:
+def build_registration_router(
+    service: RegistrationService,
+    *,
+    include_text_fallback: bool = True,
+) -> Router:
     """Build the complete invitation, onboarding, moderation, and profile router."""
     router = Router(name="registration")
 
@@ -258,38 +262,8 @@ def build_registration_router(service: RegistrationService) -> Router:
             await callback.answer(_friendly_error(error), show_alert=True)
 
     async def handle_expected_text(message: Message, event_update: Update) -> None:
-        if message.from_user is None or message.text is None:
-            return
-        expectation = await service.expected_input(message.from_user.id)
-        if expectation is None:
+        if not await handle_registration_text(service, message, event_update):
             raise SkipHandler
-        flow_type, raw_step = expectation
-        try:
-            if flow_type == "registration":
-                step = RegistrationStep(raw_step)
-                if step in {RegistrationStep.PREVIEW, RegistrationStep.SUBMITTED}:
-                    return
-                view = await service.answer(
-                    RegistrationAnswerCommand(
-                        update_id=event_update.update_id,
-                        telegram_user_id=message.from_user.id,
-                        expected_step=step,
-                        raw_value=message.text,
-                    )
-                )
-                await _send_registration_view(message, view)
-                return
-            if flow_type == "profile_edit":
-                field = ProfileField(raw_step)
-                await service.save_profile_field(
-                    update_id=event_update.update_id,
-                    telegram_user_id=message.from_user.id,
-                    expected_field=field,
-                    raw_value=message.text,
-                )
-                await message.answer("Карточка обновлена.")
-        except (RegistrationError, PermissionError, LookupError, ValueError) as error:
-            await message.answer(_friendly_error(error))
 
     router.message.register(handle_start, CommandStart())
     router.message.register(handle_invite_create, Command("invite_create"))
@@ -307,8 +281,50 @@ def build_registration_router(service: RegistrationService) -> Router:
         F.data.startswith("registration:reject_help:"),
     )
     router.callback_query.register(handle_profile_edit, F.data.startswith("profile:edit:"))
-    router.message.register(handle_expected_text, F.text & ~F.text.startswith("/"))
+    if include_text_fallback:
+        router.message.register(handle_expected_text, F.text & ~F.text.startswith("/"))
     return router
+
+
+async def handle_registration_text(
+    service: RegistrationService,
+    message: Message,
+    event_update: Update,
+) -> bool:
+    """Handle the active registration/profile flow, or return false when none owns the text."""
+    if message.from_user is None or message.text is None:
+        return False
+    expectation = await service.expected_input(message.from_user.id)
+    if expectation is None:
+        return False
+    flow_type, raw_step = expectation
+    try:
+        if flow_type == "registration":
+            step = RegistrationStep(raw_step)
+            if step in {RegistrationStep.PREVIEW, RegistrationStep.SUBMITTED}:
+                return True
+            view = await service.answer(
+                RegistrationAnswerCommand(
+                    update_id=event_update.update_id,
+                    telegram_user_id=message.from_user.id,
+                    expected_step=step,
+                    raw_value=message.text,
+                )
+            )
+            await _send_registration_view(message, view)
+            return True
+        if flow_type == "profile_edit":
+            field = ProfileField(raw_step)
+            await service.save_profile_field(
+                update_id=event_update.update_id,
+                telegram_user_id=message.from_user.id,
+                expected_field=field,
+                raw_value=message.text,
+            )
+            await message.answer("Карточка обновлена.")
+    except (RegistrationError, PermissionError, LookupError, ValueError) as error:
+        await message.answer(_friendly_error(error))
+    return True
 
 
 async def _send_registration_view(message: Message, view: RegistrationView) -> None:

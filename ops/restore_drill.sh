@@ -57,5 +57,32 @@ cleanup
   --username "${POSTGRES_USER}" \
   --dbname "${drill_database}" \
   --set ON_ERROR_STOP=1 \
-  --tuples-only \
-  --command "SELECT version_num FROM alembic_version; SELECT count(*) FROM members; SELECT count(*) FROM account_transactions;"
+  --command "
+DO \$\$
+BEGIN
+  IF (SELECT version_num FROM alembic_version) <> '0010' THEN
+    RAISE EXCEPTION 'Unexpected Alembic revision in restored database.';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM members AS member
+    LEFT JOIN (
+      SELECT
+        member_id,
+        COALESCE(SUM(credit_delta), 0) AS credit_total,
+        COALESCE(SUM(experience_delta), 0) AS experience_total
+      FROM account_transactions
+      GROUP BY member_id
+    ) AS ledger ON ledger.member_id = member.id
+    WHERE member.credit_balance_cached <> COALESCE(ledger.credit_total, 0)
+       OR member.experience_total_cached <> COALESCE(ledger.experience_total, 0)
+  ) THEN
+    RAISE EXCEPTION 'Ledger reconciliation failed in restored database.';
+  END IF;
+END
+\$\$;
+SELECT version_num AS alembic_revision FROM alembic_version;
+SELECT count(*) AS members_count FROM members;
+SELECT count(*) AS account_transactions_count FROM account_transactions;
+SELECT 0 AS ledger_mismatch_count;
+"

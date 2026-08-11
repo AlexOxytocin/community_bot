@@ -67,6 +67,10 @@ def test_backup_restore_and_release_assets_keep_mvp_boundaries() -> None:
     assert "pg_restore" in restore
     assert "alembic_version" in restore
     assert "account_transactions" in restore
+    assert "credit_balance_cached" in restore
+    assert "experience_total_cached" in restore
+    assert "Ledger reconciliation failed" in restore
+    assert "ledger_mismatch_count" in restore
     assert "ledger_entries" not in restore
     assert "current-image" in backup
     assert "COMMUNITY_BOT_ENV_FILE" in backup

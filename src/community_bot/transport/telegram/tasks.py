@@ -23,7 +23,11 @@ _CALLBACK_PREFIX = "task:pub:"
 _CALLBACK_LIMIT = 64
 
 
-def build_task_router(service: TaskService) -> Router:
+def build_task_router(
+    service: TaskService,
+    *,
+    include_text_fallback: bool = True,
+) -> Router:
     """Build persistent task creation commands and callbacks."""
     router = Router(name="tasks")
 
@@ -59,26 +63,8 @@ def build_task_router(service: TaskService) -> Router:
             await message.answer(_friendly_error(error))
 
     async def handle_answer(message: Message, event_update: Update) -> None:
-        if message.from_user is None or message.text is None:
-            return
-        try:
-            draft = await service.current(actor_telegram_user_id=message.from_user.id)
-            if draft is None:
-                raise SkipHandler
-            value = _parse_step_value(draft.current_step, message.text)
-            updated = await service.advance(
-                AdvanceDraftCommand(
-                    event_update.update_id,
-                    message.from_user.id,
-                    draft.id,
-                    draft.current_step,
-                    draft.revision,
-                    value,
-                )
-            )
-            await message.answer(_draft_prompt(updated))
-        except (TaskError, PermissionError, LookupError, ValueError, json.JSONDecodeError) as error:
-            await message.answer(_friendly_error(error))
+        if not await handle_task_text(service, message, event_update):
+            raise SkipHandler
 
     async def handle_preview(message: Message, event_update: Update) -> None:
         if message.from_user is None:
@@ -159,8 +145,37 @@ def build_task_router(service: TaskService) -> Router:
     router.message.register(handle_owned, Command("my_tasks"))
     router.message.register(handle_cancel, Command("task_cancel"))
     router.callback_query.register(handle_publish, F.data.startswith(_CALLBACK_PREFIX))
-    router.message.register(handle_answer, F.text & ~F.text.startswith("/"))
+    if include_text_fallback:
+        router.message.register(handle_answer, F.text & ~F.text.startswith("/"))
     return router
+
+
+async def handle_task_text(service: TaskService, message: Message, event_update: Update) -> bool:
+    """Handle a task-draft answer, or return false when no task draft owns the text."""
+    if message.from_user is None or message.text is None:
+        return False
+    try:
+        draft = await service.current(actor_telegram_user_id=message.from_user.id)
+    except (PermissionError, LookupError):
+        return False
+    if draft is None:
+        return False
+    try:
+        value = _parse_step_value(draft.current_step, message.text)
+        updated = await service.advance(
+            AdvanceDraftCommand(
+                event_update.update_id,
+                message.from_user.id,
+                draft.id,
+                draft.current_step,
+                draft.revision,
+                value,
+            )
+        )
+        await message.answer(_draft_prompt(updated))
+    except (TaskError, PermissionError, LookupError, ValueError, json.JSONDecodeError) as error:
+        await message.answer(_friendly_error(error))
+    return True
 
 
 async def _send_preview(message: Message, preview: TaskPreview) -> None:
