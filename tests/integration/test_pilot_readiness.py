@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from community_bot.application.pilot import PilotMetricsService
 from community_bot.infrastructure.db.database import Database
-from community_bot.infrastructure.db.models import AccountTransactionModel, MemberModel
+from community_bot.infrastructure.db.models import (
+    AccountTransactionModel,
+    KarmaVoteHistoryModel,
+    KarmaVoteModel,
+    MemberModel,
+)
 from community_bot.infrastructure.db.pilot import PostgresPilotMetrics
 
 pytestmark = pytest.mark.integration
@@ -104,6 +109,92 @@ async def test_pilot_report_is_ledger_authoritative_and_contains_no_member_data(
     assert "Private Pilot Member" not in payload
     assert "991000" not in payload
     assert all(str(member.id) not in payload for member in members)
+    await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_karma_history_keeps_actor_active_across_weekly_revisions(
+    database_url: str,
+) -> None:
+    """Every immutable karma revision contributes its own activity timestamp."""
+    database = Database(database_url)
+    to_at = datetime.datetime(2026, 8, 15, tzinfo=datetime.UTC)
+    previous_week = to_at - datetime.timedelta(days=10)
+    current_week = to_at - datetime.timedelta(days=2)
+    rater = MemberModel(
+        telegram_user_id=9_920_001,
+        display_name="Retention actor",
+        timezone="UTC",
+        role="member",
+        status="active",
+        approved_at=previous_week - datetime.timedelta(days=1),
+    )
+    target = MemberModel(
+        telegram_user_id=9_920_002,
+        display_name="Retention target",
+        timezone="UTC",
+        role="member",
+        status="active",
+        approved_at=previous_week - datetime.timedelta(days=1),
+    )
+    async with database.session_factory.begin() as session:
+        session.add_all((rater, target))
+        await session.flush()
+        vote = KarmaVoteModel(
+            rater_id=rater.id,
+            target_id=target.id,
+            value=1,
+            comment="Current revision",
+            revision=2,
+            last_command_id=uuid4(),
+            created_at=previous_week,
+            updated_at=current_week,
+        )
+        session.add(vote)
+        await session.flush()
+        session.add_all(
+            (
+                KarmaVoteHistoryModel(
+                    karma_vote_id=vote.id,
+                    revision=1,
+                    old_value=None,
+                    new_value=-1,
+                    old_comment=None,
+                    new_comment="Previous revision",
+                    command_id=uuid4(),
+                    actor_member_id=rater.id,
+                    created_at=previous_week,
+                ),
+                KarmaVoteHistoryModel(
+                    karma_vote_id=vote.id,
+                    revision=2,
+                    old_value=-1,
+                    new_value=1,
+                    old_comment="Previous revision",
+                    new_comment="Current revision",
+                    command_id=uuid4(),
+                    actor_member_id=rater.id,
+                    created_at=current_week,
+                ),
+            )
+        )
+
+    facts = await PostgresPilotMetrics(database.session_factory).load_facts(to_at=to_at)
+    report = await PilotMetricsService(PostgresPilotMetrics(database.session_factory)).report(
+        from_at=to_at - datetime.timedelta(days=7),
+        to_at=to_at,
+        generated_at=to_at,
+    )
+
+    assert {(item.member_id, item.occurred_at) for item in facts.karma_activities} == {
+        (rater.id, previous_week),
+        (rater.id, current_week),
+    }
+    assert report.weekly_retention_rate.model_dump() == {
+        "numerator": 1,
+        "denominator": 1,
+        "rate": "1.0000",
+    }
     await database.dispose()
 
 

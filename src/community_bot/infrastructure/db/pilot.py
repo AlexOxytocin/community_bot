@@ -24,7 +24,7 @@ from community_bot.infrastructure.db.models import (
     InteractionAlertModel,
     InvitationModel,
     InvitationRedemptionModel,
-    KarmaVoteModel,
+    KarmaVoteHistoryModel,
     MemberModel,
     TaskModel,
 )
@@ -189,9 +189,10 @@ async def _karma_activities(
 ) -> tuple[TimedMemberFact, ...]:
     rows = (
         await session.execute(
-            select(KarmaVoteModel.rater_id, KarmaVoteModel.updated_at).where(
-                KarmaVoteModel.updated_at < to_at
-            )
+            select(
+                KarmaVoteHistoryModel.actor_member_id,
+                KarmaVoteHistoryModel.created_at,
+            ).where(KarmaVoteHistoryModel.created_at < to_at)
         )
     ).all()
     return tuple(TimedMemberFact(*row) for row in rows)
