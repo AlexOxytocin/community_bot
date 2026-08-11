@@ -740,17 +740,13 @@ async def test_migration_backfills_only_active_administrators(database_url: str)
     )
     engine = create_async_engine(database_url)
     async with engine.connect() as connection:
-        rows = dict(
-            (
-                await connection.execute(
-                    text(
-                        "SELECT id, permissions_json FROM members "
-                        "WHERE id IN (:active, :paused, :member)"
-                    ),
-                    {"active": active_id, "paused": paused_id, "member": member_id},
-                )
-            ).all()
+        result = await connection.execute(
+            text(
+                "SELECT id, permissions_json FROM members WHERE id IN (:active, :paused, :member)"
+            ),
+            {"active": active_id, "paused": paused_id, "member": member_id},
         )
+        rows = {row[0]: row[1] for row in result}
     await engine.dispose()
     assert set(rows[active_id]) == {"karma_review", "member_read"}
     assert rows[paused_id] == []
