@@ -130,7 +130,6 @@ async def complete_registration(
         (RegistrationStep.CONSENT, "да"),
         (RegistrationStep.DISPLAY_NAME, "Анна"),
         (RegistrationStep.CITY, "Москва"),
-        (RegistrationStep.TIMEZONE, "Europe/Moscow"),
         (RegistrationStep.SHORT_BIO, "Помогаю тестировать цифровые продукты"),
         (RegistrationStep.CURRENT_GOAL, "Найти полезные задачи"),
         (RegistrationStep.HELP_CATEGORIES, "Тестирование, Продукт"),
@@ -196,6 +195,103 @@ async def test_invitation_is_hashed_and_concurrent_last_use_is_atomic(
     assert token not in invitation.code_hash
     assert invitation.uses_count == 1
     assert await count(database, InvitationRedemptionModel) == 1
+    await database.dispose()
+
+
+async def test_existing_timezone_step_accepts_human_city_name(database_url: str) -> None:
+    database = Database(database_url)
+    admin = await add_member(
+        database,
+        telegram_user_id=150,
+        role=MemberRole.ADMINISTRATOR,
+    )
+    registration = service(database)
+    token = await create_invite(registration, admin, update_id=1_500)
+    await registration.start(
+        RegistrationStartCommand(
+            update_id=1_501,
+            telegram_user_id=151,
+            telegram_username="existing_draft",
+            telegram_display_name="Existing Draft",
+            invitation_token=token,
+        )
+    )
+    await registration.answer(
+        RegistrationAnswerCommand(
+            update_id=1_502,
+            telegram_user_id=151,
+            expected_step=RegistrationStep.CONSENT,
+            raw_value="да",
+        )
+    )
+    await registration.answer(
+        RegistrationAnswerCommand(
+            update_id=1_503,
+            telegram_user_id=151,
+            expected_step=RegistrationStep.DISPLAY_NAME,
+            raw_value="Андрей",
+        )
+    )
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_registration_router(registration))
+    session = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=session)
+    user = User(id=151, is_bot=False, first_name="Andrey", username="existing_draft")
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=1_504,
+            message=Message(
+                message_id=1_504,
+                date=datetime.now(UTC),
+                chat=Chat(id=user.id, type="private"),
+                from_user=user,
+                text="Неизвестный небольшой город",
+            ),
+        ),
+    )
+    city_view = await registration.answer(
+        RegistrationAnswerCommand(
+            update_id=1_504,
+            telegram_user_id=151,
+            expected_step=RegistrationStep.CITY,
+            raw_value="Неизвестный небольшой город",
+        )
+    )
+    assert city_view.context is not None
+    assert city_view.context.current_step is RegistrationStep.TIMEZONE
+    assert any("ближайший крупный город" in text_value for text_value in session.texts)
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=1_505,
+            message=Message(
+                message_id=1_505,
+                date=datetime.now(UTC),
+                chat=Chat(id=user.id, type="private"),
+                from_user=user,
+                text="Buenos Aires",
+            ),
+        ),
+    )
+    timezone_view = await registration.answer(
+        RegistrationAnswerCommand(
+            update_id=1_505,
+            telegram_user_id=151,
+            expected_step=RegistrationStep.TIMEZONE,
+            raw_value="Buenos Aires",
+        )
+    )
+
+    assert timezone_view.context is not None
+    assert timezone_view.context.current_step is RegistrationStep.SHORT_BIO
+    assert timezone_view.context.payload["timezone"] == "America/Argentina/Buenos_Aires"
+    assert any("Коротко расскажите" in text_value for text_value in session.texts)
+    assert not any(
+        "Не удалось сохранить" in text_value  # noqa: RUF001 - exact Russian error text.
+        for text_value in session.texts
+    )
+    await bot.session.close()
     await database.dispose()
 
 
@@ -818,8 +914,7 @@ async def test_complete_synthetic_telegram_registration_and_profile_smoke(
     assert await registration.expected_input(user.id) == ("registration", "display_name")
     answers = [
         "Анна",
-        "Москва",
-        "Europe/Moscow",
+        "Buenos Aires",
         "Помогаю тестировать цифровые продукты",
         "Найти полезные задачи",
         "Тестирование, Продукт",
@@ -836,6 +931,8 @@ async def test_complete_synthetic_telegram_registration_and_profile_smoke(
         actor_telegram_user_id=admin.telegram_user_id
     )
     assert len(queue) == 1
+    assert queue[0].payload["city"] == "Buenos Aires"
+    assert queue[0].payload["timezone"] == "America/Argentina/Buenos_Aires"
     target_id = queue[0].member_id
     await dispatcher.feed_update(
         bot,
@@ -852,6 +949,11 @@ async def test_complete_synthetic_telegram_registration_and_profile_smoke(
     await dispatcher.feed_update(bot, message_update(8_022, user, "/profile"))
 
     assert any("Проверьте анкету" in text_value for text_value in session.texts)
+    assert any(
+        "Коротко расскажите о себе" in text_value  # noqa: RUF001 - exact Russian prompt.
+        for text_value in session.texts
+    )
+    assert not any("Europe/Moscow" in text_value for text_value in session.texts)
     assert any("Баланс: 5 кредитов" in text_value for text_value in session.texts)
     assert await count(database, AccountTransactionModel) == 1
     await bot.session.close()

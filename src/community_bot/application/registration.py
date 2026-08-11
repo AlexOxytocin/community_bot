@@ -25,6 +25,7 @@ from community_bot.domain.registration import (
     require_invitation_manager,
     require_profile_owner,
     require_registration_moderator,
+    resolve_timezone,
 )
 
 if TYPE_CHECKING:
@@ -538,7 +539,18 @@ class RegistrationService:
                     value=answer.value,
                     next_step=answer.next_step,
                 )
-                outcome = f"registration_step:{answer.next_step.value}"
+                next_step = answer.next_step
+                if command.expected_step is RegistrationStep.CITY:
+                    inferred_timezone = resolve_timezone(str(answer.value))
+                    if inferred_timezone is not None:
+                        next_step = RegistrationStep.SHORT_BIO
+                        context = await unit_of_work.save_registration_answer(
+                            member_id=context.member_id,
+                            field=ProfileField.TIMEZONE.value,
+                            value=inferred_timezone,
+                            next_step=next_step,
+                        )
+                outcome = f"registration_step:{next_step.value}"
             await unit_of_work.add_registration_receipt(
                 update_id=command.update_id,
                 update_type="registration_answer",
