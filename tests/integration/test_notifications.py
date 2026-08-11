@@ -26,6 +26,8 @@ from community_bot.infrastructure.outbox import PostgresNotificationQueue
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
+_IN_WINDOW_UTC = datetime.datetime(2026, 1, 15, 12, tzinfo=datetime.UTC)
+
 
 class _Sender:
     """Record fake Telegram deliveries without network access."""
@@ -37,8 +39,12 @@ class _Sender:
         self.sent.append(claim.telegram_user_id)
 
 
-async def _seed_published_task(database: Database) -> tuple[TaskModel, MemberModel]:
-    now = datetime.datetime.now(datetime.UTC)
+async def _seed_published_task(
+    database: Database,
+    *,
+    now: datetime.datetime | None = None,
+) -> tuple[TaskModel, MemberModel]:
+    now = now or datetime.datetime.now(datetime.UTC)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
         owner = MemberModel(
@@ -119,26 +125,29 @@ async def _seed_published_task(database: Database) -> tuple[TaskModel, MemberMod
     return task, recipient
 
 
-async def _add_outbox(
+async def _add_outbox(  # noqa: PLR0913 - explicit event fixture fields stay readable.
     database: Database,
     *,
     event_type: str,
     aggregate_type: str,
     aggregate_id: UUID,
     business_key: str,
+    now: datetime.datetime | None = None,
 ) -> None:
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
-        session.add(
-            OutboxEventModel(
-                id=uuid4(),
-                event_type=event_type,
-                aggregate_type=aggregate_type,
-                aggregate_id=aggregate_id,
-                payload_json={"token": "must-not-be-copied"},
-                business_key=business_key,
-            )
+        event = OutboxEventModel(
+            id=uuid4(),
+            event_type=event_type,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            payload_json={"token": "must-not-be-copied"},
+            business_key=business_key,
         )
+        if now is not None:
+            event.created_at = now
+            event.next_attempt_at = now
+        session.add(event)
 
 
 async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notification(
@@ -146,17 +155,18 @@ async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notificat
 ) -> None:
     """SKIP LOCKED, deduplication, recipient rules, and success survive restart."""
     database = Database(database_url)
-    task, recipient = await _seed_published_task(database)
+    task, recipient = await _seed_published_task(database, now=_IN_WINDOW_UTC)
     await _add_outbox(
         database,
         event_type="task.published",
         aggregate_type="task",
         aggregate_id=task.id,
         business_key="notification-test:published",
+        now=_IN_WINDOW_UTC,
     )
     first = PostgresNotificationQueue(database.session_factory)
     second = PostgresNotificationQueue(database.session_factory)
-    now = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1)
+    now = _IN_WINDOW_UTC + datetime.timedelta(seconds=1)
 
     claim_sets = await asyncio.wait_for(
         asyncio.gather(
@@ -202,6 +212,7 @@ async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notificat
         aggregate_type="task",
         aggregate_id=task.id,
         business_key="notification-test:no-recipient",
+        now=now + datetime.timedelta(minutes=1),
     )
     empty_claim = (
         await first.claim_outbox(
@@ -322,7 +333,7 @@ async def test_reminders_are_idempotent_and_address_the_performer_and_reviewer(
 ) -> None:
     """Deadline goes to the performer while 24h/48h review reminders go to the owner."""
     database = Database(database_url)
-    task, performer = await _seed_published_task(database)
+    task, performer = await _seed_published_task(database, now=_IN_WINDOW_UTC)
     submitted_at = task.published_at
     assignment = AssignmentModel(
         id=uuid4(),
