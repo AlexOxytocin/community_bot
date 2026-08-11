@@ -1,30 +1,34 @@
-# CB-16 — финальное ревью
+# CB-16 — повторное финальное ревью
 
-Status: changes_requested
+Status: approved
 
 Схема: `community_bot.final_review.verdict.v1`.
 
 ## reviewed_scope
 
 - Jira `CB-16` свежо прочитана напрямую через Atlassian Rovo API: статус
-  `В работе`, семь критериев приёмки, комментарии и связи.
+  `В работе`, семь критериев приёмки, комментарии, зависимости и связи.
 - Discovery JQL `project = CB AND labels = cb16-regression ORDER BY key ASC`
-  вернул ровно два Bug: `CB-20` и `CB-21`; оба имеют severity `High`, статус
-  `Готово`, labels `cb16-regression`/`severity-high` и связи с `CB-16`.
-  Отдельный JQL по открытым `Highest|High` в этом discovery set вернул `0`.
-- Полностью прочитаны Level 3 package `tasks/CB-16`, канонические process
-  документы, approved plan review, test-plan, staged implementation report и
-  фактический diff `origin/main...HEAD`.
-- Проверен exact combined tree
-  `d220e2f40613a8f344327c26ff4563857901ced4` на ветке `task/CB-16`:
-  `HEAD=5e3e99badae43f2f9fad24289c11fd39a063cfac`, staged delta — только
-  `tasks/CB-16/implementation-report.md`.
-- Принято authoritative evidence итогового PostgreSQL 18 gate: `369 passed`,
-  `0 skipped`, `0 deselected`, coverage `80.15%`, Ruff/ty/build/entrypoints и
-  diff-check зелёные. Полная регрессия повторно не запускалась.
-- Узко воспроизведён CLI output на пустом периоде; проверены diff/branch,
-  локальные Markdown-ссылки и secret-like patterns. Реальные Telegram-отправки
-  и внешние изменения не выполнялись.
+  вернул ровно `CB-20`, `CB-21`, `CB-22`, `CB-23`. Все четыре Bug имеют status
+  category `Done`, label `severity-high`, а также `Relates` и `Blocks` с
+  `CB-16`. Canonical severity в плане CB-16 задаётся label; Jira priority у
+  CB-20/CB-21 — `High`, у CB-22/CB-23 — `Medium`.
+- JQL по открытым `severity-critical|severity-high` внутри discovery set вернул
+  `0`.
+- Полностью прочитаны Level 3 package CB-16, approved plan/test-plan, прежний
+  `changes_requested` final review, approved пакеты CB-22/CB-23, staged
+  implementation report и фактический diff `origin/main...HEAD`.
+- Проверен frozen staged tree
+  `d0ffdb5da348ade60f8f397d2c4788b5fd5ca025`,
+  `HEAD=a10cc62ba73eb2e1c44b75dc1da363cc693012f9` на ветке `task/CB-16`.
+- Принято authoritative evidence локального PostgreSQL 18 regression:
+  `369 passed`, `0 skipped`, `0 deselected`, coverage `80.15%`.
+- GitHub Actions run `31515817454` независимо проверен через `gh`: `success`,
+  Quality и PostgreSQL/Alembic успешны, `374 passed`, coverage `80.14%`.
+  Run `31517497965`: `success`, оба job успешны, `374 passed`, coverage
+  `80.13%`.
+- Полная регрессия локально не запускалась повторно. Выполнены только targeted
+  CB-22/CB-23 и статические gates.
 
 ## critical_findings
 
@@ -32,68 +36,46 @@ Status: changes_requested
 
 ## major_findings
 
-### M-001 — фактическая schema метрик не соответствует approved contract и runbook
+Нет.
 
-Approved plan задаёт публичные поля `invite_conversion_rate`,
-`task_fill_rate`, `task_fill_rate_48h`, `assignment_completion_rate`,
-`repeat_action_rate` и `weekly_retention_rate`; эти же имена используются в
-checklist, retrospective и порогах runbook. Модель в
-`src/community_bot/application/pilot.py:102-115` сериализует вместо них
-`invite_conversion`, `task_fill`, `task_fill_48h`, `assignment_completion`,
-`repeat_action` и `weekly_retention`.
+### Закрытие M-001 — exact metrics contract
 
-Воспроизведение:
+- `community_bot.pilot_metrics.v1` сериализует exact approved keys:
+  `invite_conversion_rate`, `onboarding_completion_rate`, `task_fill_rate`,
+  `task_fill_rate_48h`, `assignment_completion_rate`, `repeat_action_rate`,
+  `weekly_retention_rate`.
+- Nested `success` использует exact `task_fill_rate`,
+  `assignment_completion_rate`, `repeat_action_rate`.
+- Независимый CLI scan подтвердил exact `22` top-level и `3` success keys;
+  runtime, runbook, checklist и retrospective согласованы.
 
-```powershell
-$env:DATABASE_URL='postgresql+asyncpg://community_bot:community_bot@localhost:5432/community_bot'
-uv run community-pilot-report --from 2026-08-01T00:00:00Z --to 2026-08-08T00:00:00Z
-```
+### Закрытие M-002 — immutable karma activity
 
-Фактический JSON содержит `task_fill`, `assignment_completion` и
-`repeat_action`, тогда как `docs/operations/PILOT_CHECKLIST.md:40-42` требует
-поля с суффиксом `_rate`. Владелец не может механически перенести значения по
-проверенному контракту, а versioned schema уже расходится с approved plan.
+- PostgreSQL adapter читает каждую
+  `karma_vote_history.actor_member_id/created_at` с cutoff `< to_at`, не
+  использует mutable current vote.
+- Integration case предыдущая неделя → текущая revision возвращает обе history
+  rows и retention `1/1 = 1.0000`.
 
-### M-002 — retention теряет предыдущие изменения кармы
+### Закрытие M-003 — metrics evidence matrix
 
-План определяет activity как каждую `karma mutation`. Adapter
-`src/community_bot/infrastructure/db/pilot.py:186-195` читает только текущую
-строку `KarmaVoteModel.updated_at`. Если участник поставил оценку в предыдущую
-неделю и изменил её в текущую, прежняя mutation исчезает из фактов: для пары
-остаётся только новый `updated_at`, и weekly retention ошибочно не считает
-участника активным в обеих неделях. Канонический источник обеих mutation уже
-существует — immutable `karma_vote_history` с `actor_member_id` и `created_at`.
+- Exact tests добавлены для positive partial, reversed reward/reject outcome,
+  deterministic top tie, невозможного safe merge с suppression, community
+  aggregates и representative A–D fact bundle.
+- Output/privacy assertions проверяют fixed schema, absence старых keys и
+  participant/private fields; implementation report не выдаёт fact-bundle
+  oracle за повтор transport E2E.
 
-Имеющийся unit test вручную передаёт два `TimedMemberFact` и проверяет только
-чистую функцию; PostgreSQL adapter case с двумя revision через границу недель
-отсутствует, поэтому общий зелёный gate этот дефект не обнаруживает.
+### Закрытие M-004 — representative migration oracle
 
-### M-003 — заявленная матрица метрик существенно шире фактических тестов
-
-`implementation-report.md` утверждает покрытие `from`, `to`, `+48h`,
-full/partial/reject/cancel, retention, deterministic top-20%, small-cell
-merge/suppression и ledger-authoritative values. В
-`tests/unit/test_pilot_metrics.py` есть только empty case, один совмещённый
-formula case и проверка интервала; integration test проверяет ledger/cache и
-отсутствие трёх конкретных participant values.
-
-В совмещённом case partial reward стоит ровно на `to` и потому исключается;
-нет positive partial case, reject/reversal case, top-20 tie с несколькими
-performers, невозможного для объединения small cell `1|2`, community aggregates
-и отчёта на наборе A–D. Поэтому обязательные пункты 2–7 раздела «Метрики и
-документы» test-plan не имеют проверяемого evidence, а отчёт завышает покрытие.
-
-### M-004 — supported-schema migration fixture не доказывает обещанное сохранение домена
-
-Approved plan и `test-plan.md:109-112` требуют базу `0009` с members, ledger,
-task/assignment, karma и moderation history и проверку сохранения строк и FK
-после `0010`. `test_supported_schema_upgrade_preserves_outbox_semantics`
-создаёт на `0009` только две строки `outbox_events`; helper
-`_seed_legacy_outbox` не создаёт ни одного из перечисленных доменных объектов.
-
-Сам upgrade и backfill outbox доказаны, но обязательный representative-data
-oracle отсутствует. Следовательно, критерий поддерживаемой схемы закрыт лишь
-частично, несмотря на формулировку implementation report.
+- Fixture exact revision `0009` содержит 2 members, 4 immutable ledger rows,
+  task/assignment/result, karma current+2 history, moderation case+resolution и
+  две legacy outbox rows.
+- После `0010` сравниваются counts, manifest UUID/values/payload/timestamps и
+  шесть FK-oracle; outbox statuses/поля, constraints/indexes и invalid states
+  сохранены.
+- Повторный `upgrade head` запускает полный oracle снова; отдельная временная DB
+  гарантированно удаляется в `finally`.
 
 ## minor_findings
 
@@ -103,15 +85,15 @@ oracle отсутствует. Следовательно, критерий по
 
 | Критерий Jira | Результат | Доказательство |
 |---|---|---|
-| Регистрация, полный обмен, отмена, спор и карма | Пройден | E2E A–D через production Dispatcher/fake Bot API входят в authoritative `369 passed` |
-| Критические гонки и повторная доставка | Пройден | Integration/replay/concurrency suite и повтор updates/callbacks в A–D |
-| Пустая и поддерживаемая схема | Частично | Пустой `head→base→head` и `0009→0010` outbox пройдены; representative domain fixture отсутствует (M-004) |
-| Восстановление сохраняет ledger | Пройден | Fresh backup, isolated restore `0010`, `ledger_mismatch_count=0`, drill DB удалена |
-| Открытых critical/high нет | Пройден | Jira JQL: ровно CB-20/CB-21, оба `Готово`; open blocking set = `0` |
-| Метрики и stop-условия доступны владельцу | Не пройден | Schema/runbook mismatch и неверная история karma activity (M-001, M-002), неполная test matrix (M-003) |
-| Runbook запуска, мониторинга, отката и завершения проверен | Пройден | Immutable deploy/health/timer/backup/restore/rollback/closeout evidence; post-merge deploy честно оставлен будущим шагом |
+| Регистрация, полный обмен, отмена, спор и карма | Пройден | PostgreSQL E2E A–D через production Dispatcher/fake Bot API; authoritative local и CI suites |
+| Критические гонки и повторная доставка | Пройден | Integration/replay/concurrency/fault/outbox контур; `369 passed` локально и `374 passed` в обоих CI |
+| Пустая и поддерживаемая схема | Пройден | Empty `head→base→head`; representative `0009→0010`, exact values/FK/outbox/guards/re-upgrade |
+| Восстановленная база сохраняет ledger | Пройден | Fresh backup, isolated restore revision `0010`, `ledger_mismatch_count=0`, RPO/RTO evidence |
+| Нет открытых critical/high defects | Пройден | Discovery ровно CB-20…CB-23, все Done/severity-high/linked; open severity JQL = `0` |
+| Метрики успеха и stop доступны владельцу | Пройден | Exact PII-free v1 JSON, thresholds, immutable retention, checklist/runbook/retrospective |
+| Runbook запуска/мониторинга/отката/завершения проверен | Пройден | Immutable deploy, health, timer, backup/restore, rollback, stop/closeout; post-merge deploy честно оставлен будущим шагом |
 
-Итог: `5/7` критериев пройдены, `1/7` закрыт частично, `1/7` не пройден.
+Итог: `7/7` критериев пройдены.
 
 ## test_matrix_result
 
@@ -121,63 +103,62 @@ oracle отсутствует. Следовательно, критерий по
 | E2E B — отмена/replay | Пройден |
 | E2E C — спор/partial settlement/replay | Пройден |
 | E2E D — карма/history/raw-read audit | Пройден |
-| Critical concurrency/replay/outbox | Пройден в authoritative full regression |
-| Пустая schema и base cycle | Пройден |
-| Supported `0009→0010` | Частично: outbox/constraints доказаны, representative domain preservation — нет |
-| Backup/restore/ledger/RPO/RTO | Пройден по фактическому self-hosted evidence |
-| PII-free output boundary | Базовая negative проверка пройдена; имена schema и karma-history semantics требуют исправления |
-| Полная формульная матрица metrics | Не пройдена: обязательные cases test-plan отсутствуют |
-| Runbook/checklist/retrospective | Пройдены по структуре и ссылкам; checklist сейчас не совпадает с runtime keys |
-| Итоговый quality gate | Принят: `369 passed`, `0 skip/deselect`, coverage `80.15%` |
+| Critical concurrency/replay/outbox | Пройден в authoritative local/CI suites |
+| Empty schema/base cycle | Пройден |
+| Representative `0009→0010` | Пройден; counts/values/FK/outbox/guards/re-upgrade/isolation |
+| Backup/restore/ledger/RPO/RTO | Пройден по self-hosted evidence |
+| Exact metrics keys/success thresholds | Пройден; CLI `22 + 3` keys |
+| Partial/reversal/tie/suppression/community/A–D metrics | Пройден targeted assertions |
+| Immutable karma retention | Пройден PostgreSQL adapter case |
+| Privacy/docs/runbook | Пройден; PII-free fixed output и согласованные operations docs |
+
+Независимо повторено:
+
+- CB-22 targeted contour — `9 passed`, `2 deselected` migration tests;
+- CB-23 targeted migration — `1 passed`;
+- Ruff format/check, ty, `git diff --check` — успешно.
+
+Authoritative общая проверка: local `369 passed / 80.15%`, затем combined CI
+после CB-22 и CB-23 — `374 passed / 80.14%` и `374 passed / 80.13%`.
 
 ## security_and_secret_result
 
-- Secret-like scan изменённого diff и staged report не выявил учётных данных,
-  приватных ключей, Bot API token или connection string.
-- E2E использует зарезервированные синтетические Telegram ID и fake Bot API;
-  реальных чатов и отправок не было.
-- Фактический CLI output на проверенном периоде не содержит имён, Telegram ID,
-  UUID участников, комментариев или материалов.
-- M-001/M-002 относятся к корректности и операционному контракту, а не к
-  обнаруженной утечке PII.
+- E2E использует только synthetic reserved Telegram IDs и fake Bot API;
+  реальные chats/updates/messages не использовались.
+- Metrics adapter извлекает privacy-minimal facts; JSON/log boundary не содержит
+  имён, Telegram ID, member UUID, comments, materials или raw karma.
+- Restore drill выполняется в isolated DB без cutover; production schema/runtime
+  не изменялись targeted fixes.
+- Secret-like scan combined diff и staged report не выявил credentials, Bot API
+  tokens, connection strings или private keys.
 
 ## workflow_result
 
-- Уровень 3 подтверждён. Jira, `plan-source-context.md`, `plan.md`,
-  `test-plan.md`, точный `Status: approved` в `plan-review.md` и staged
-  implementation report присутствуют.
-- Ветка `task/CB-16` содержит плановый commit, implementation commit и merge
-  актуального `main`; combined index tree совпадает с переданным exact tree.
-- Diff ограничен E2E/regression, pilot metrics и operational readiness; ключ
-  Jira не используется в runtime names/logs/metrics.
-- Staged index не изменён; `final-review.md` оставлен единственным unstaged
-  артефактом ревью. Jira, Git remote, server state и Telegram не менялись.
-- Post-merge release step описан честно: финальный CB-16 digest ещё не выпущен
-  и должен быть штатно развёрнут до приглашения когорты; это не выдано за уже
-  выполненное действие.
+- Уровень 3 подтверждён. Jira, source context, approved plan review, plan,
+  test-plan, implementation report и принятые operational ADR присутствуют.
+- Ветка `task/CB-16` содержит исходную реализацию, merge актуального main и
+  отдельные merged PR CB-22/CB-23; regression Bugs прошли собственные approved
+  final reviews и имеют Jira status `Готово`.
+- Combined scope соответствует плану: E2E, migration/restore, metrics и
+  operations. Несвязанных runtime изменений и Jira keys в runtime names/logs/
+  metrics не найдено.
+- Staged implementation report честно различает локальный authoritative
+  regression, последующие полные CI runs, уже выполненный smoke на accepted
+  main и ещё не выполненный deploy финального CB-16 digest после merge.
+- Frozen index tree после проверки остаётся
+  `d0ffdb5da348ade60f8f397d2c4788b5fd5ca025`; Jira, index, Git remote, server
+  и Telegram не менялись. Обновлён только unstaged `tasks/CB-16/final-review.md`.
 
 ## required_actions
 
-1. Привести serialized `community_bot.pilot_metrics.v1` к exact именам
-   approved plan/runbook либо единообразно пересогласовать versioned contract;
-   добавить assertion фактических JSON keys.
-2. Строить karma activity из всех immutable revision и добавить PostgreSQL
-   case «создание в предыдущей неделе → изменение в текущей».
-3. Закрыть оставшиеся обязательные metrics cases test-plan отдельными точными
-   assertions и синхронизировать implementation report с реально выполненным
-   набором.
-4. Расширить fixture `0009→0010` representative members/ledger/task/assignment/
-   karma/moderation rows и доказать сохранение значений и FK после upgrade.
-5. После единого исправления повторить только затронутые targeted checks,
-   обновить implementation report и передать новый exact snapshot на повторное
-   final review; полный regression повторно не нужен без изменения общего
-   runtime-контура сверх этих исправлений.
+Нет.
 
 ## residual_risks
 
-- Same-host backup не защищает от потери единственного сервера/диска; риск явно
-  принят ADR-0009.
-- Synthetic Telegram E2E не доказывает доступность внешней сети Bot API;
-  реальная отправка корректно вынесена за отдельное разрешение владельца.
-- Финальный immutable digest CB-16 появится только после merge и должен быть
-  развёрнут с повторной health-проверкой до допуска когорты.
+- Same-host backup не защищает от полной потери единственного сервера/диска;
+  риск явно принят ADR-0009.
+- Synthetic Telegram E2E доказывает Dispatcher/application/DB boundary, но не
+  доступность внешней сети Bot API; реальная отправка требует отдельного
+  разрешения владельца.
+- Финальный immutable digest CB-16 появится только после merge в `main`; до
+  приглашения когорты его нужно штатно развернуть и повторно подтвердить health.
