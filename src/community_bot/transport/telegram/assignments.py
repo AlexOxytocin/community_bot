@@ -20,13 +20,17 @@ from community_bot.application.assignments import (
     SaveSubmissionDraftCommand,
 )
 from community_bot.domain.assignments import AssignmentDecision, AssignmentError
+from community_bot.transport.telegram.tasks import reviewer_replacement_callback
 
 if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentService
+    from community_bot.application.conversations import TextFlow
 
 _ACCEPT_PREFIX = "task:accept:"
 _DECIDE_PREFIX = "assign:review:"
 _SUBMIT_PREFIX = "assign:submit:"
+_ACTION_PREFIX = "as:a:"
+_DISPUTE_PREFIX = "as:d:"
 
 
 def build_assignment_router(service: AssignmentService) -> Router:
@@ -41,7 +45,10 @@ def build_assignment_router(service: AssignmentService) -> Router:
             )
             await callback.answer("Задание принято.")
             if isinstance(callback.message, Message):
-                await callback.message.answer(f"Назначение: {assignment.id}")
+                await callback.message.answer(
+                    "Задание принято. Что хотите сделать дальше?",
+                    reply_markup=_assignment_actions(assignment.id, assignment.status.value),
+                )
         except (AssignmentError, PermissionError, LookupError, ValueError):
             await callback.answer("Не удалось принять задание.", show_alert=True)
 
@@ -49,13 +56,7 @@ def build_assignment_router(service: AssignmentService) -> Router:
         if message.from_user is None:
             return
         try:
-            assignments = await service.list_owned(message.from_user.id)
-            text = (
-                "У вас пока нет заданий."
-                if not assignments
-                else "\n".join(f"{item.id} · {item.status.value}" for item in assignments)
-            )
-            await message.answer(text)
+            await send_assignment_overview(message, service)
         except (AssignmentError, PermissionError, LookupError):
             await message.answer("Не удалось открыть ваши задания.")
 
@@ -139,6 +140,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
                 )
             )
             await callback.answer(f"Результат отправлен, версия {result.version}.")
+            if isinstance(callback.message, Message):
+                await callback.message.answer("Автор получил результат на проверку.")
         except (AssignmentError, PermissionError, LookupError, ValueError):
             await callback.answer("Не удалось отправить результат.", show_alert=True)
 
@@ -157,6 +160,58 @@ def build_assignment_router(service: AssignmentService) -> Router:
             await callback.answer(f"Решение сохранено: {updated.status.value}.")
         except (AssignmentError, PermissionError, LookupError, ValueError):
             await callback.answer("Не удалось применить решение.", show_alert=True)
+
+    async def action(callback: CallbackQuery, event_update: Update) -> None:
+        try:
+            action_code, assignment_id = _parse_action(str(callback.data))
+            if action_code == "s":
+                await service.begin_submission(
+                    BeginSubmissionCommand(
+                        event_update.update_id,
+                        callback.from_user.id,
+                        assignment_id,
+                    )
+                )
+                answer = "Опишите результат одним сообщением (не короче 10 символов)."
+            elif action_code == "c":
+                await service.cancel(
+                    update_id=event_update.update_id,
+                    actor_telegram_user_id=callback.from_user.id,
+                    assignment_id=assignment_id,
+                    reason="Отменено исполнителем через Telegram",
+                )
+                answer = "Выполнение отменено."
+            elif action_code == "d":
+                await service.begin_dispute(
+                    update_id=event_update.update_id,
+                    actor_telegram_user_id=callback.from_user.id,
+                    assignment_id=assignment_id,
+                )
+                answer = "Опишите причину спора одним сообщением. Комментарий увидит модерация."
+            else:
+                raise ValueError("Unknown assignment action.")
+            await callback.answer()
+            if isinstance(callback.message, Message):
+                await callback.message.answer(answer)
+        except (AssignmentError, PermissionError, LookupError, ValueError):
+            await callback.answer("Действие недоступно или уже выполнено.", show_alert=True)
+
+    async def reviews(message: Message) -> None:
+        if message.from_user is None:
+            return
+        try:
+            cards = await service.review_cards(message.from_user.id)
+            if not cards:
+                await message.answer("Результатов на проверку сейчас нет.")
+                return
+            for card in cards:
+                summary = card.result_summary or "Результат без краткого описания"
+                await message.answer(
+                    f"{card.task_title}\nИсполнитель: {card.performer_display_name}\n{summary}",
+                    reply_markup=_review_keyboard(card.assignment.id),
+                )
+        except (AssignmentError, PermissionError, LookupError):
+            await message.answer("Результаты на проверку сейчас недоступны.")
 
     async def dispute(message: Message, event_update: Update) -> None:
         if message.from_user is None:
@@ -177,14 +232,204 @@ def build_assignment_router(service: AssignmentService) -> Router:
             await message.answer("Не удалось открыть спор. Проверьте срок и комментарий.")
 
     router.callback_query.register(accept, F.data.startswith(_ACCEPT_PREFIX))
+    router.callback_query.register(action, F.data.startswith(_ACTION_PREFIX))
     router.callback_query.register(decide, F.data.startswith(_DECIDE_PREFIX))
     router.callback_query.register(confirm_submit, F.data.startswith(_SUBMIT_PREFIX))
     router.message.register(owned, Command("my_assignments"))
+    router.message.register(reviews, Command("reviews"))
     router.message.register(cancel, Command("assignment_cancel"))
     router.message.register(submit, Command("assignment_submit"))
     router.message.register(save_preview, Command("assignment_result"))
     router.message.register(dispute, Command("assignment_dispute"))
     return router
+
+
+async def send_assignment_overview(message: Message, service: AssignmentService) -> None:
+    """Send performer and reviewer cards through one visible entry point."""
+    if message.from_user is None:
+        return
+    cards = await service.cards(message.from_user.id)
+    reviews = await service.review_cards(message.from_user.id)
+    if not cards and not reviews:
+        await message.answer("У вас пока нет принятых заданий или результатов на проверку.")
+        return
+    for card in cards:
+        await message.answer(
+            f"{card.task_title}\nСтатус: {_status(card.assignment.status.value)}",
+            reply_markup=_assignment_actions(
+                card.assignment.id,
+                card.assignment.status.value,
+                case_id=card.case_id,
+                case_status=card.case_status,
+            ),
+        )
+    for card in reviews:
+        summary = card.result_summary or "Результат без краткого описания"
+        markup = (
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Выбрать нового проверяющего",
+                            callback_data=reviewer_replacement_callback(card.assignment.task_id),
+                        )
+                    ]
+                ]
+            )
+            if card.assignment.status.value == "reviewer_required"
+            else _review_keyboard(card.assignment.id)
+        )
+        await message.answer(
+            f"На проверку: {card.task_title}\n"
+            f"Исполнитель: {card.performer_display_name}\n{summary}",
+            reply_markup=markup,
+        )
+
+
+async def handle_assignment_text(
+    service: AssignmentService,
+    owner: TextFlow,
+    message: Message,
+    event_update: Update,
+) -> bool:
+    """Consume text only when the durable owner selects an assignment flow."""
+    if message.from_user is None or message.text is None or owner.reference_id is None:
+        return False
+    text = message.text.strip()
+    if owner.flow_type == "assignment_result":
+        try:
+            draft = await service.save_submission_draft(
+                SaveSubmissionDraftCommand(
+                    event_update.update_id,
+                    message.from_user.id,
+                    owner.reference_id,
+                    owner.revision,
+                    {"summary": text, "findings": [text], "evidence": []},
+                )
+            )
+            await message.answer(
+                f"Проверьте результат:\n{text}",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="Подтвердить результат",
+                                callback_data=f"{_SUBMIT_PREFIX}{draft.id.hex}:{draft.revision}",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        except (AssignmentError, PermissionError, LookupError, ValueError):
+            await message.answer("Не удалось сохранить результат. Нужен текст от 10 символов.")
+        return True
+    if owner.flow_type == "assignment_dispute":
+        try:
+            updated = await service.dispute(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=message.from_user.id,
+                assignment_id=owner.reference_id,
+                command_id=uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"telegram:{event_update.update_id}:dispute"
+                ),
+                comment=text,
+            )
+            await message.answer(
+                "Спор открыт и передан модерации.",
+                reply_markup=_assignment_actions(updated.id, updated.status.value),
+            )
+        except (AssignmentError, PermissionError, LookupError, ValueError):
+            await message.answer("Не удалось открыть спор. Проверьте срок и комментарий.")
+        return True
+    return False
+
+
+def _assignment_actions(
+    assignment_id: UUID,
+    status: str,
+    *,
+    case_id: UUID | None = None,
+    case_status: str | None = None,
+) -> InlineKeyboardMarkup | None:
+    buttons: list[list[InlineKeyboardButton]] = []
+    if status == "accepted":
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="Отправить результат",
+                    callback_data=f"{_ACTION_PREFIX}s:{assignment_id.hex}",
+                ),
+                InlineKeyboardButton(
+                    text="Отказаться",
+                    callback_data=f"{_ACTION_PREFIX}c:{assignment_id.hex}",
+                ),
+            ]
+        )
+    elif status == "rejected_pending_dispute":
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="Открыть спор",
+                    callback_data=f"{_ACTION_PREFIX}d:{assignment_id.hex}",
+                )
+            ]
+        )
+    if case_id is not None and case_status == "resolved":
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="Подать апелляцию",
+                    callback_data=f"mod:appeal:{case_id.hex}",
+                )
+            ]
+        )
+    return None if not buttons else InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _review_keyboard(assignment_id: UUID) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Принять полностью",
+                    callback_data=f"{_DECIDE_PREFIX}{assignment_id.hex}:full",
+                ),
+                InlineKeyboardButton(
+                    text="Принять частично",
+                    callback_data=f"{_DECIDE_PREFIX}{assignment_id.hex}:partial",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отклонить",
+                    callback_data=f"{_DECIDE_PREFIX}{assignment_id.hex}:reject",
+                )
+            ],
+        ]
+    )
+
+
+def _parse_action(value: str) -> tuple[str, UUID]:
+    payload = value.removeprefix(_ACTION_PREFIX)
+    action, separator, raw_id = payload.partition(":")
+    if not separator or action not in {"s", "c", "d"}:
+        raise ValueError("Assignment action callback is invalid.")
+    return action, UUID(hex=raw_id)
+
+
+def _status(value: str) -> str:
+    return {
+        "accepted": "в работе",
+        "submitted": "на проверке",
+        "rejected_pending_dispute": "отклонено, можно открыть спор",
+        "disputed": "спор рассматривается",
+        "approved": "выполнено",
+        "partially_approved": "выполнено частично",
+        "rejected": "отклонено",
+        "cancelled": "отменено",
+        "no_show": "неявка",
+        "reviewer_required": "нужен новый проверяющий",
+    }.get(value, value)
 
 
 def _two_arguments(text: str | None) -> tuple[str, str]:

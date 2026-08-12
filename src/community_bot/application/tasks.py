@@ -10,7 +10,7 @@ from uuid import UUID
 
 from community_bot.domain.catalog import TaskFormat, validate_payload
 from community_bot.domain.economy import ResolvedLevel, refund_reward, reserve_reward
-from community_bot.domain.members import Member, MemberStatus
+from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import (
     AcceptanceTaskSnapshot,
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from community_bot.application.catalog import CatalogTemplate
     from community_bot.application.economy import ActiveProductConfig, EconomyMutationPort
+    from community_bot.domain.assignments import Assignment
 
 _MAX_OWNED_TASKS = 20
 _MAX_AVAILABLE_TASKS = 10
@@ -43,6 +44,8 @@ class TaskDraft:
 
     id: UUID
     creator_id: UUID
+    origin: str
+    reviewer_admin_id: UUID | None
     template_id: UUID
     input_payload: dict[str, object] | None
     deadline_at: datetime.datetime | None
@@ -72,6 +75,8 @@ class PublishedTask:
 
     id: UUID
     creator_id: UUID | None
+    created_by_admin_id: UUID | None
+    reviewer_admin_id: UUID | None
     origin: str
     template_id: UUID
     template_version: int
@@ -105,6 +110,14 @@ class AvailableTaskPage:
 
 
 @dataclass(frozen=True, slots=True)
+class AdministratorOption:
+    """Safe administrator choice shown during community task creation."""
+
+    id: UUID
+    display_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class AdvanceDraftCommand:
     """Advance one expected draft step with untrusted transport data."""
 
@@ -126,7 +139,7 @@ class PublishTaskCommand:
     expected_revision: int
 
 
-class TaskUnitOfWork(Protocol):
+class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Caller-owned transaction contract for task workflows."""
 
     @property
@@ -149,12 +162,30 @@ class TaskUnitOfWork(Protocol):
         self, *, template_id: UUID, level: int
     ) -> CatalogTemplate | None: ...
     async def catalog_template(self, template_id: UUID) -> CatalogTemplate | None: ...
-    async def create_task_draft(self, *, creator_id: UUID, template_id: UUID) -> TaskDraft: ...
+    async def create_task_draft(
+        self, *, creator_id: UUID, template_id: UUID, origin: str = "member"
+    ) -> TaskDraft: ...
     async def get_current_task_draft(self, creator_id: UUID) -> TaskDraft | None: ...
     async def get_task_draft(self, draft_id: UUID) -> TaskDraft | None: ...
     async def lock_task_draft(self, draft_id: UUID) -> TaskDraft | None: ...
     async def select_task_draft(self, *, creator_id: UUID, draft_id: UUID) -> TaskDraft: ...
     async def save_task_draft(self, draft: TaskDraft) -> TaskDraft: ...
+    async def list_active_administrators(
+        self, *, exclude_id: UUID
+    ) -> tuple[AdministratorOption, ...]: ...
+    async def claim_text_flow(  # noqa: PLR0913
+        self,
+        *,
+        member_id: UUID,
+        flow_type: str,
+        step: str,
+        reference_id: UUID | None,
+        revision: int,
+        payload: dict[str, object] | None = None,
+    ) -> object: ...
+    async def clear_text_flow(
+        self, *, member_id: UUID, flow_type: str, reference_id: UUID | None = None
+    ) -> bool: ...
     async def delete_task_draft(self, draft_id: UUID) -> None: ...
     async def task_by_publish_command(self, command_id: UUID) -> PublishedTask | None: ...
     async def insert_published_task(
@@ -164,8 +195,11 @@ class TaskUnitOfWork(Protocol):
     async def lock_task(self, task_id: UUID) -> PublishedTask | None: ...
     async def list_task_assignments(
         self, task_id: UUID, *, for_update: bool = False
-    ) -> tuple[object, ...]: ...
+    ) -> tuple[Assignment, ...]: ...
     async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask: ...
+    async def save_community_reviewer(
+        self, *, task_id: UUID, reviewer_id: UUID, now: datetime.datetime
+    ) -> PublishedTask: ...
     async def list_owned_tasks(
         self,
         *,
@@ -207,7 +241,7 @@ class TaskUnitOfWork(Protocol):
     async def commit(self) -> None: ...
 
 
-class TaskUnitOfWorkFactory(Protocol):
+class TaskUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing contract.
     """Create isolated task transactions."""
 
     def __call__(self) -> AbstractAsyncContextManager[TaskUnitOfWork]: ...
@@ -221,7 +255,12 @@ class TaskService:
         self._unit_of_work_factory = unit_of_work_factory
 
     async def start(
-        self, *, update_id: int, actor_telegram_user_id: int, template_id: UUID | None
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        template_id: UUID | None,
+        origin: str = "member",
     ) -> TaskDraft | None:
         """Create a new current draft or resume the existing current draft."""
         async with self._unit_of_work_factory() as uow:
@@ -244,10 +283,85 @@ class TaskService:
                 )
                 if template is None:
                     raise PermissionError("Task template is unavailable to this member.")
-                draft = await uow.create_task_draft(creator_id=actor.id, template_id=template.id)
+                if origin not in {"member", "community"}:
+                    raise TaskError("Task origin is invalid.")
+                if origin == "community" and actor.role is not MemberRole.ADMINISTRATOR:
+                    raise PermissionError("Only an administrator may create a community task.")
+                draft = await uow.create_task_draft(
+                    creator_id=actor.id,
+                    template_id=template.id,
+                    origin=origin,
+                )
                 outcome = f"task_draft:{draft.id}"
+            if draft is not None:
+                await uow.claim_text_flow(
+                    member_id=actor.id,
+                    flow_type="task",
+                    step=draft.current_step.value,
+                    reference_id=draft.id,
+                    revision=draft.revision,
+                )
             await _finish(uow, update_id, actor, outcome, "task_draft")
             return draft
+
+    async def community_reviewers(
+        self, actor_telegram_user_id: int
+    ) -> tuple[AdministratorOption, ...]:
+        """List independent active administrators available for a community draft."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            if actor.role is not MemberRole.ADMINISTRATOR:
+                raise PermissionError("Only an administrator may select a community reviewer.")
+            return await uow.list_active_administrators(exclude_id=actor.id)
+
+    async def select_community_reviewer(
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        reviewer_id: UUID,
+    ) -> TaskDraft:
+        """Assign another active administrator to the current community draft."""
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin_update(uow, update_id)
+            if replay is not None:
+                draft = await _draft_from_outcome(uow, replay)
+                if draft is None:
+                    raise TaskError("Stored community draft does not exist.")
+                return draft
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            draft = await uow.get_current_task_draft(actor.id)
+            if draft is None or draft.origin != "community":
+                raise TaskError("Current community draft does not exist.")
+            locked = await uow.lock_members((actor.id, reviewer_id))
+            actor, reviewer = locked[actor.id], locked[reviewer_id]
+            if (
+                actor.role is not MemberRole.ADMINISTRATOR
+                or reviewer.role is not MemberRole.ADMINISTRATOR
+                or reviewer.status is not MemberStatus.ACTIVE
+                or reviewer.id == actor.id
+            ):
+                raise PermissionError("Community reviewer must be another active administrator.")
+            current = await uow.lock_task_draft(draft.id)
+            if current is None or current.creator_id != actor.id:
+                raise PermissionError("Task draft is not owned by this administrator.")
+            updated = await uow.save_task_draft(
+                _replace_draft(
+                    current,
+                    reviewer_admin_id=reviewer.id,
+                    revision=current.revision + 1,
+                )
+            )
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="task",
+                step=updated.current_step.value,
+                reference_id=updated.id,
+                revision=updated.revision,
+            )
+            await _finish(uow, update_id, actor, f"task_draft:{updated.id}", "task_draft")
+            return updated
 
     async def resume(
         self, *, update_id: int, actor_telegram_user_id: int, draft_id: UUID
@@ -263,6 +377,13 @@ class TaskService:
             await uow.acquire_task_identity_gate(actor_telegram_user_id)
             actor = await _active_actor(uow, actor_telegram_user_id)
             draft = await uow.select_task_draft(creator_id=actor.id, draft_id=draft_id)
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="task",
+                step=draft.current_step.value,
+                reference_id=draft.id,
+                revision=draft.revision,
+            )
             await _finish(uow, update_id, actor, f"task_draft:{draft.id}", "task_draft")
             return draft
 
@@ -293,6 +414,7 @@ class TaskService:
             if draft.current_step is TaskDraftStep.PUBLISHED:
                 raise TaskError("Published task draft cannot be deleted.")
             await uow.delete_task_draft(draft.id)
+            await uow.clear_text_flow(member_id=actor.id, flow_type="task", reference_id=draft.id)
             await _finish(
                 uow,
                 update_id,
@@ -323,6 +445,13 @@ class TaskService:
                 raise TaskError("Task template version does not exist.")
             updated = _advance_draft(draft, template, command.value)
             updated = await uow.save_task_draft(updated)
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="task",
+                step=updated.current_step.value,
+                reference_id=updated.id,
+                revision=updated.revision,
+            )
             await _finish(uow, command.update_id, actor, f"task_draft:{updated.id}", "task_draft")
             return updated
 
@@ -353,10 +482,12 @@ class TaskService:
                 draft,
                 template.name,
                 template.credit_reward,
-                template.credit_reward * draft.performer_slots,
+                0
+                if draft.origin == "community"
+                else template.credit_reward * draft.performer_slots,
             )
 
-    async def publish(self, command: PublishTaskCommand) -> PublishedTask:
+    async def publish(self, command: PublishTaskCommand) -> PublishedTask:  # noqa: PLR0915
         """Atomically reserve credits and publish one exact preview revision."""
         async with self._unit_of_work_factory() as uow:
             replay = await _begin_update(uow, command.update_id)
@@ -374,17 +505,37 @@ class TaskService:
             await uow.ensure_moderation_action_allowed(
                 preliminary.creator_id, RestrictedAction.CREATE_TASK
             )
-            reserve_total = template_before.credit_reward * preliminary.performer_slots
-            prepared = await uow.economy.prepare_batch(
-                (
-                    reserve_reward(
-                        member_id=preliminary.creator_id,
-                        amount=reserve_total,
-                        idempotency_key=(f"task_publish:{preliminary.publish_command_id}:reserve"),
-                    ),
+            prepared = None
+            if preliminary.origin == "community":
+                if preliminary.reviewer_admin_id is None:
+                    raise TaskError("Community task reviewer is required.")
+                locked = await uow.lock_members(
+                    (preliminary.creator_id, preliminary.reviewer_admin_id)
                 )
-            )
-            actor = prepared.members[preliminary.creator_id]
+                actor = locked[preliminary.creator_id]
+                reviewer = locked[preliminary.reviewer_admin_id]
+                if (
+                    actor.role is not MemberRole.ADMINISTRATOR
+                    or reviewer.role is not MemberRole.ADMINISTRATOR
+                    or reviewer.status is not MemberStatus.ACTIVE
+                    or reviewer.id == actor.id
+                ):
+                    raise PermissionError("Community reviewer is no longer independent.")
+                reserve_total = 0
+            else:
+                reserve_total = template_before.credit_reward * preliminary.performer_slots
+                prepared = await uow.economy.prepare_batch(
+                    (
+                        reserve_reward(
+                            member_id=preliminary.creator_id,
+                            amount=reserve_total,
+                            idempotency_key=(
+                                f"task_publish:{preliminary.publish_command_id}:reserve"
+                            ),
+                        ),
+                    )
+                )
+                actor = prepared.members[preliminary.creator_id]
             if actor.telegram_user_id != command.actor_telegram_user_id:
                 raise PermissionError("Task draft is not owned by this member.")
             _require_active(actor)
@@ -398,7 +549,8 @@ class TaskService:
                     or draft.revision != command.expected_revision + 1
                 ):
                     raise StaleTaskDraftError("Task publication identity is conflicting.")
-                await prepared.apply()
+                if prepared is not None:
+                    await prepared.apply()
                 await _finish_receipt(uow, command.update_id, actor, f"task:{existing.id}")
                 return existing
             _expect(draft, TaskDraftStep.PREVIEW, command.expected_revision)
@@ -409,9 +561,15 @@ class TaskService:
             if template is None:
                 raise PermissionError("Task template is no longer publishable.")
             _validate_publishable(draft, template)
-            if template.credit_reward * (draft.performer_slots or 0) != reserve_total:
+            expected_reserve = (
+                0
+                if draft.origin == "community"
+                else template.credit_reward * (draft.performer_slots or 0)
+            )
+            if expected_reserve != reserve_total:
                 raise TaskError("Task reserve changed after preview.")
-            await prepared.apply()
+            if prepared is not None:
+                await prepared.apply()
             task = await uow.insert_published_task(draft=draft, template=template)
             await uow.save_task_draft(
                 _replace_draft(
@@ -421,6 +579,7 @@ class TaskService:
                     revision=draft.revision + 1,
                 )
             )
+            await uow.clear_text_flow(member_id=actor.id, flow_type="task", reference_id=draft.id)
             await uow.append_audit_event(
                 actor_member_id=actor.id,
                 action="task_published",
@@ -541,6 +700,45 @@ class TaskService:
             await _finish_receipt(uow, update_id, actor, f"task:{task.id}")
             return task
 
+    async def replace_community_reviewer(
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        task_id: UUID,
+        reviewer_id: UUID,
+    ) -> PublishedTask:
+        """Replace a community reviewer without exposing member identifiers to users."""
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin_update(uow, update_id)
+            if replay is not None:
+                return await _task_from_outcome(uow, replay)
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            await uow.acquire_assignment_task_gate(task_id)
+            task = await uow.lock_task(task_id)
+            assignments = await uow.list_task_assignments(task_id, for_update=True)
+            locked = await uow.lock_members((actor.id, reviewer_id))
+            actor, reviewer = locked[actor.id], locked[reviewer_id]
+            if (
+                task is None
+                or task.origin != "community"
+                or actor.role is not MemberRole.ADMINISTRATOR
+                or actor.status is not MemberStatus.ACTIVE
+                or reviewer.role is not MemberRole.ADMINISTRATOR
+                or reviewer.status is not MemberStatus.ACTIVE
+                or reviewer.id == task.created_by_admin_id
+                or any(item.performer_id == reviewer.id for item in assignments)
+            ):
+                raise PermissionError("Community reviewer replacement is unavailable.")
+            updated = await uow.save_community_reviewer(
+                task_id=task.id,
+                reviewer_id=reviewer.id,
+                now=datetime.datetime.now(datetime.UTC),
+            )
+            await _finish(uow, update_id, actor, f"task:{updated.id}", "task_reviewer")
+            return updated
+
     async def validate_acceptance(
         self, *, task_id: UUID, actor_telegram_user_id: int
     ) -> PublishedTask:
@@ -583,8 +781,13 @@ def _advance_draft(draft: TaskDraft, template: CatalogTemplate, value: object) -
     if draft.current_step is TaskDraftStep.INPUT:
         if not isinstance(value, Mapping):
             raise TaskError("Task input must be an object.")
+        normalized = (
+            _plain_input_payload(template.input_schema, str(value["_plain_text"]))
+            if set(value) == {"_plain_text"}
+            else value
+        )
         changes = {
-            "input_payload": validate_payload(template.input_schema, value),
+            "input_payload": validate_payload(template.input_schema, normalized),
             "current_step": TaskDraftStep.DEADLINE,
         }
     elif draft.current_step is TaskDraftStep.DEADLINE:
@@ -638,6 +841,30 @@ def _validate_publishable(draft: TaskDraft, template: CatalogTemplate) -> None:
     validate_deadline(draft.deadline_at, now=_utc_now())
     validate_task_format(draft.format, template_format=template.format, city=draft.city)
     validate_slots(draft.performer_slots, maximum=template.maximum_performers)
+
+
+def _plain_input_payload(schema: Mapping[str, object], text: str) -> dict[str, object]:
+    """Map one human description to a template's required fields without JSON input."""
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, Mapping) or not isinstance(required, list):
+        raise TaskError("Task input schema is invalid.")
+    payload: dict[str, object] = {}
+    for key in required:
+        if not isinstance(key, str) or not isinstance(properties.get(key), Mapping):
+            raise TaskError("Task input schema is invalid.")
+        field_type = properties[key].get("type")
+        if field_type == "array":
+            payload[key] = [text]
+        elif field_type == "integer":
+            payload[key] = 1
+        elif field_type == "number":
+            payload[key] = 1.0
+        elif field_type == "boolean":
+            payload[key] = True
+        else:
+            payload[key] = text
+    return payload
 
 
 def _replace_draft(draft: TaskDraft, **changes: object) -> TaskDraft:

@@ -155,6 +155,8 @@ JSON Schema Draft 2020-12 без удалённых `$ref`. Input проверя
 ```text
 id UUID PK
 creator_id FK NOT NULL
+origin TEXT NOT NULL DEFAULT 'member' CHECK(origin IN ('member', 'community'))
+reviewer_admin_id FK NULL
 template_id FK NOT NULL
 input_payload_json JSON NULL
 deadline_at TIMESTAMP WITH TIME ZONE NULL
@@ -171,7 +173,9 @@ updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
 У участника может быть несколько незавершённых черновиков, но только один
-текущий. Каждый ответ сверяет ожидаемые шаг и revision. После публикации
+текущий. Каждый ответ сверяет ожидаемые шаг и revision. Community-черновик
+создаёт только active administrator; до публикации в нём сохраняется другой
+active administrator как независимый `reviewer_admin_id`. После публикации
 черновик остаётся исторической связью с заданием, получает terminal-шаг и
 перестаёт быть текущим.
 
@@ -214,9 +218,11 @@ updated_at TIMESTAMP NOT NULL
 Для задания участника `creator_id` обязателен, а
 `reserved_credit_total = credit_reward_per_performer * performer_slots`.
 Поля карточки являются снимком точной версии шаблона и после публикации не
-редактируются; до появления assignments CB-10 разрешает только переход
-`published → cancelled`. Публикация и отмена имеют уникальные command ID и
-выполняются в одной транзакции с ledger, audit, outbox и Telegram receipt.
+редактируются. Исключение — операционный указатель `reviewer_admin_id`
+community-задачи: его можно заменить только на другого active administrator,
+который не является creator или performer. DB-trigger продолжает запрещать
+изменение остальных полей снимка. Публикация и отмена имеют уникальные command
+ID и выполняются в одной транзакции с ledger, audit, outbox и Telegram receipt.
 
 ### `outbox_events`
 
@@ -615,6 +621,14 @@ payload_json NOT NULL
 expires_at TIMESTAMP NULL
 updated_at TIMESTAMP NOT NULL
 ```
+
+Строка является единственным долговечным владельцем следующего свободного
+текста участника. `flow_type` выбирает ровно один из диалогов регистрации,
+редактирования профиля, создания задания, результата, спора или кармы;
+`payload_json` хранит только техническую ссылку и revision, а предметные данные
+остаются в своих таблицах. Начало другого flow атомарно переключает владельца,
+но не удаляет сохранённый предметный черновик. Регистрацию и редактирование
+профиля нельзя вытеснить без явной отмены.
 
 Для регистрации и редактирования профиля mutation-протокол использует порядок
 `update gate → telegram identity gate → locked state → expected_step`.

@@ -13,10 +13,13 @@ from typing import TYPE_CHECKING
 from sqlalchemy import and_, func, or_, select, text
 
 from community_bot.application.moderation import (
+    InteractionAlert,
     ModerationCase,
+    PaidAssignment,
     ResolutionPreview,
     ResolveCaseCommand,
     Sanction,
+    SanctionCard,
 )
 from community_bot.domain.economy import (
     AdministrativeContext,
@@ -116,6 +119,61 @@ class SqlAlchemyModerationMutation:
             )
         ).all()
         return tuple([await self._case(model) for model in models])
+
+    async def list_paid_assignments(self, *, limit: int = 20) -> tuple[PaidAssignment, ...]:
+        """List paid assignments without exposing private result payloads."""
+        rows = (
+            await self._session.execute(
+                select(AssignmentModel, TaskModel.title, MemberModel.display_name)
+                .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+                .join(MemberModel, MemberModel.id == AssignmentModel.performer_id)
+                .where(AssignmentModel.status.in_(("approved", "partially_approved")))
+                .order_by(AssignmentModel.accepted_at.desc(), AssignmentModel.id)
+                .limit(limit)
+            )
+        ).all()
+        return tuple(
+            PaidAssignment(model.id, title, display_name, model.status)
+            for model, title, display_name in rows
+        )
+
+    async def list_open_alerts(self, *, limit: int = 20) -> tuple[InteractionAlert, ...]:
+        """List open alerts with only member display names and aggregate counts."""
+        first = MemberModel.__table__.alias("first_member")
+        second = MemberModel.__table__.alias("second_member")
+        rows = (
+            await self._session.execute(
+                select(
+                    InteractionAlertModel,
+                    first.c.display_name,
+                    second.c.display_name,
+                )
+                .join(first, first.c.id == InteractionAlertModel.first_member_id)
+                .join(second, second.c.id == InteractionAlertModel.second_member_id)
+                .where(InteractionAlertModel.state == "open")
+                .order_by(InteractionAlertModel.opened_at, InteractionAlertModel.id)
+                .limit(limit)
+            )
+        ).all()
+        return tuple(
+            InteractionAlert(
+                model.id, first_name, second_name, model.interaction_count, model.threshold
+            )
+            for model, first_name, second_name in rows
+        )
+
+    async def list_active_sanctions(self, *, limit: int = 20) -> tuple[SanctionCard, ...]:
+        """List active sanctions with their target display names."""
+        rows = (
+            await self._session.execute(
+                select(MemberSanctionModel, MemberModel.display_name)
+                .join(MemberModel, MemberModel.id == MemberSanctionModel.target_member_id)
+                .where(MemberSanctionModel.state == "active")
+                .order_by(MemberSanctionModel.created_at.desc(), MemberSanctionModel.id)
+                .limit(limit)
+            )
+        ).all()
+        return tuple(SanctionCard(_sanction(model), display_name) for model, display_name in rows)
 
     async def replay(self, outcome: str) -> object:
         """Reconstruct a committed moderation result from its receipt marker."""
@@ -268,6 +326,10 @@ class SqlAlchemyModerationMutation:
             raise ModerationError("Moderation case is not awaiting a resolution.")
         if version == 2 and actor.role is not MemberRole.ADMINISTRATOR:
             raise PermissionError("Only an administrator may resolve an appeal.")
+        if (
+            case.case_type == "fraud_review" or command.code is ResolutionCode.FRAUD
+        ) and actor.role is not MemberRole.ADMINISTRATOR:
+            raise PermissionError("Only an administrator may apply a fraud resolution.")
         assignment = await self._session.scalar(
             select(AssignmentModel)
             .where(AssignmentModel.id == case.assignment_id)
@@ -279,7 +341,11 @@ class SqlAlchemyModerationMutation:
         if task is None:
             raise LookupError("Case task does not exist.")
         await self._reject_conflict(actor, assignment, task, case, version)
-        if case.case_type == "fraud_review" and command.code is not ResolutionCode.FRAUD:
+        if (
+            case.case_type == "fraud_review"
+            and version == 1
+            and command.code is not ResolutionCode.FRAUD
+        ):
             raise ModerationError("A post-payment fraud case accepts only the fraud code.")
         effect = resolution_effect(command.code, origin=task.origin)
         previous = None
@@ -289,7 +355,15 @@ class SqlAlchemyModerationMutation:
             source_ids = tuple(
                 uuid.UUID(value) for value in previous.effect_json.get("ledger_ids", [])
             )
-            if source_ids:
+            reversible_source_ids = tuple(
+                await self._session.scalars(
+                    select(AccountTransactionModel.id).where(
+                        AccountTransactionModel.id.in_(source_ids),
+                        AccountTransactionModel.reversed_transaction_id.is_(None),
+                    )
+                )
+            )
+            if reversible_source_ids:
                 reversal_results = await self._economy.apply_batch(
                     tuple(
                         ReversalCommand(
@@ -299,7 +373,7 @@ class SqlAlchemyModerationMutation:
                             reason=reason,
                             transaction_type=TransactionType.RESOLUTION_REVERSAL,
                         )
-                        for source_id in source_ids
+                        for source_id in reversible_source_ids
                     )
                 )
         payout_results = await self._apply_resolution_economy(
@@ -704,7 +778,7 @@ class SqlAlchemyModerationMutation:
         actor: Member,
         reason: str,
     ) -> tuple[EconomyMutationResult, ...]:
-        if case.case_type == "fraud_review":
+        if case.case_type == "fraud_review" and version == 1:
             source_rows = await self._fraud_sources(assignment.id)
             if not source_rows:
                 raise ModerationError("Paid fraud case has no reversible payout.")

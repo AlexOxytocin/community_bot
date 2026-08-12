@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher
 
 from community_bot.application.assignments import AssignmentService
 from community_bot.application.catalog import CatalogService
+from community_bot.application.conversations import ConversationService
 from community_bot.application.economy import EconomyQueryService
 from community_bot.application.moderation import ModerationService
 from community_bot.application.navigation import NavigationService
@@ -97,6 +98,8 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
     unit_of_work = database.unit_of_work
     dispatcher = Dispatcher()
     catalog = CatalogService(unit_of_work)
+    assignments = AssignmentService(unit_of_work)
+    conversations = ConversationService(unit_of_work)
     moderation = ModerationService(unit_of_work)
     registration = RegistrationService(unit_of_work, InviteTokenCodec(invite_token_secret))
     reputation = ReputationService(unit_of_work)
@@ -110,15 +113,24 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
             registration=registration,
             reputation=reputation,
             moderation=moderation,
+            assignments=assignments,
+        )
+    )
+    dispatcher.include_router(
+        build_conversation_router(
+            tasks,
+            registration,
+            assignments,
+            reputation,
+            conversations,
         )
     )
     dispatcher.include_router(build_catalog_router(catalog))
-    dispatcher.include_router(build_assignment_router(AssignmentService(unit_of_work)))
+    dispatcher.include_router(build_assignment_router(assignments))
     dispatcher.include_router(build_moderation_router(moderation))
-    dispatcher.include_router(build_reputation_router(reputation))
+    dispatcher.include_router(build_reputation_router(reputation, moderation))
     dispatcher.include_router(build_task_router(tasks, include_text_fallback=False))
     dispatcher.include_router(build_registration_router(registration, include_text_fallback=False))
-    dispatcher.include_router(build_conversation_router(tasks, registration))
     return dispatcher
 
 
@@ -129,7 +141,7 @@ async def _heartbeat_loop(queue: PostgresNotificationQueue) -> None:
         await queue.heartbeat(
             process_name="community-bot",
             release=settings.release,
-            migration_revision="0011",
+            migration_revision="0012",
             now=datetime.datetime.now(datetime.UTC),
         )
         await asyncio.sleep(60)

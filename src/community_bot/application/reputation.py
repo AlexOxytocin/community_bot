@@ -66,6 +66,7 @@ class KarmaAggregate:
 class RawKarmaVote:
     """Administrative raw karma projection."""
 
+    vote_id: UUID
     rater_id: UUID
     value: int
     comment: str
@@ -178,7 +179,7 @@ class LeaderboardPage:
     next_cursor: LeaderboardCursor | None
 
 
-class ReputationUnitOfWork(Protocol):
+class ReputationUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Transactional persistence required by reputation workflows."""
 
     async def acquire_update_gate(self, update_id: int) -> None: ...
@@ -247,7 +248,7 @@ class ReputationUnitOfWork(Protocol):
     async def commit(self) -> None: ...
 
 
-class ReputationUnitOfWorkFactory(Protocol):
+class ReputationUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing contract.
     """Create isolated reputation transactions."""
 
     def __call__(self) -> AbstractAsyncContextManager[ReputationUnitOfWork]: ...

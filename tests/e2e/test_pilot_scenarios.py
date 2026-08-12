@@ -487,7 +487,7 @@ async def test_dispute_partial_resolution(database_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_karma_after_paid_interaction(database_url: str) -> None:  # noqa: PLR0915
+async def test_karma_after_paid_interaction(database_url: str) -> None:
     database = Database(database_url)
     rater = await add_reputation_member(database, 9_900_031)
     await prepare_reputation_config(database, rater.id)
@@ -509,14 +509,11 @@ async def test_karma_after_paid_interaction(database_url: str) -> None:  # noqa:
     value_callbacks = driver.capture.callbacks[before:]
     positive = next(value for value in value_callbacks if value.endswith(":1"))
     await driver.callback(230_001, rater_user, positive)
-    revision_match = re.search(r"/karma_comment (\d+)", driver.capture.texts[-1])
-    assert revision_match is not None
-    value_revision = revision_match.group(1)
     before = len(driver.capture.callbacks)
     await driver.message(
         230_002,
         rater_user,
-        f"/karma_comment {value_revision} Очень полезная и аккуратная помощь.",
+        "Очень полезная и аккуратная помощь.",
     )
     confirm = driver.capture.callbacks[before:][-1]
     await driver.callback(230_003, outsider_user, confirm)
@@ -526,14 +523,11 @@ async def test_karma_after_paid_interaction(database_url: str) -> None:  # noqa:
     value_callbacks = driver.capture.callbacks[before:]
     negative = next(value for value in value_callbacks if value.endswith(":-1"))
     await driver.callback(230_006, rater_user, negative)
-    revision_match = re.search(r"/karma_comment (\d+)", driver.capture.texts[-1])
-    assert revision_match is not None
-    value_revision = revision_match.group(1)
     before = len(driver.capture.callbacks)
     await driver.message(
         230_007,
         rater_user,
-        f"/karma_comment {value_revision} Результат пришлось полностью переделать.",
+        "Результат пришлось полностью переделать.",
     )
     confirm = driver.capture.callbacks[before:][-1]
     await driver.callback(230_008, rater_user, confirm)

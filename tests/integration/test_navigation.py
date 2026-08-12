@@ -62,13 +62,15 @@ class CapturingSession(BaseSession):
         self.texts: list[str] = []
         self.text_payloads: list[tuple[str, object]] = []
         self.callbacks: list[str] = []
+        self.callback_answers: list[str] = []
+        self.button_payloads: list[tuple[str, str]] = []
         self.reply_buttons: list[str] = []
 
     async def close(self) -> None:
         """Close no external resources."""
 
     @override
-    async def make_request(
+    async def make_request(  # noqa: C901 - one fake Bot API capture boundary.
         self,
         bot: Bot,
         method: TelegramMethod[TelegramType],
@@ -82,12 +84,16 @@ class CapturingSession(BaseSession):
         markup = getattr(method, "reply_markup", None)
         if markup is not None and hasattr(markup, "inline_keyboard"):
             for row in markup.inline_keyboard:
-                self.callbacks.extend(
-                    button.callback_data for button in row if button.callback_data is not None
-                )
+                for button in row:
+                    if button.callback_data is not None:
+                        self.callbacks.append(button.callback_data)
+                        if isinstance(text_value, str):
+                            self.button_payloads.append((text_value, button.callback_data))
         if markup is not None and hasattr(markup, "keyboard"):
             self.reply_buttons.extend(button.text for row in markup.keyboard for button in row)
         if isinstance(method, AnswerCallbackQuery):
+            if method.text is not None:
+                self.callback_answers.append(method.text)
             return cast("TelegramType", True)  # noqa: FBT003
         if isinstance(method, GetMe):
             return cast(
@@ -196,11 +202,17 @@ async def _submitted_member(database: Database, telegram_user_id: int) -> Member
 
 
 async def _published_task(
-    database: Database, author: MemberModel, template_id: UUID
+    database: Database,
+    author: MemberModel,
+    template_id: UUID,
+    *,
+    update_id_base: int = 60_000,
 ) -> PublishedTask:
     service = TaskService(database.unit_of_work)
     draft = await service.start(
-        update_id=60_000, actor_telegram_user_id=author.telegram_user_id, template_id=template_id
+        update_id=update_id_base,
+        actor_telegram_user_id=author.telegram_user_id,
+        template_id=template_id,
     )
     assert draft is not None
     values: list[object] = [
@@ -231,7 +243,7 @@ async def _published_task(
     ):
         current = await service.advance(
             AdvanceDraftCommand(
-                60_000 + offset,
+                update_id_base + offset,
                 author.telegram_user_id,
                 current.id,
                 step,
@@ -240,14 +252,17 @@ async def _published_task(
             )
         )
     preview = await service.preview(
-        update_id=60_006,
+        update_id=update_id_base + 6,
         actor_telegram_user_id=author.telegram_user_id,
         draft_id=current.id,
         expected_revision=current.revision,
     )
     return await service.publish(
         PublishTaskCommand(
-            60_007, author.telegram_user_id, preview.draft.id, preview.draft.revision
+            update_id_base + 7,
+            author.telegram_user_id,
+            preview.draft.id,
+            preview.draft.revision,
         )
     )
 
@@ -429,7 +444,8 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     assert approved_member.city == "Mendoza"
     assert approved_conversation is None
     assert grant_count == 1
-    assert sum("Административное меню недоступно." in text for text in session.texts) == 2
+    assert sum("Административное меню недоступно." in text for text in session.texts) == 1
+    assert any("Очередь споров и расследований пуста." in text for text in session.texts)
     assert any("Баланс: 5 кредитов" in text for text in session.texts)
     assert any("Как пользоваться ботом" in text for text in session.texts)
     assert any("https://t.me/humanquest_bot?start=" in text for text in session.texts)

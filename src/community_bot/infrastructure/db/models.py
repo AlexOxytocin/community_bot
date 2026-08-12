@@ -286,6 +286,7 @@ class TaskCreationDraftModel(Base):
             "performer_slots IS NULL OR performer_slots BETWEEN 1 AND 10",
             name="ck_task_creation_drafts_slots",
         ),
+        CheckConstraint("origin IN ('member', 'community')", name="ck_task_creation_drafts_origin"),
         Index(
             "uq_task_creation_drafts_current_creator",
             "creator_id",
@@ -299,6 +300,10 @@ class TaskCreationDraftModel(Base):
     )
     creator_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    origin: Mapped[str] = mapped_column(Text, nullable=False, default="member")
+    reviewer_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
     template_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
@@ -346,6 +351,14 @@ class TaskModel(Base):
             "OR (origin = 'community' AND creator_id IS NULL AND reserved_credit_total = 0)",
             name="ck_tasks_origin_reserve",
         ),
+        CheckConstraint(
+            "(origin = 'member' AND created_by_admin_id IS NULL "
+            "AND reviewer_admin_id IS NULL) OR (origin = 'community' AND "
+            "((created_by_admin_id IS NULL AND reviewer_admin_id IS NULL) OR "
+            "(created_by_admin_id IS NOT NULL AND reviewer_admin_id IS NOT NULL "
+            "AND created_by_admin_id <> reviewer_admin_id)))",
+            name="ck_tasks_community_provenance",
+        ),
         Index("ix_tasks_creator_created", "creator_id", "created_at", "id"),
         Index("ix_tasks_status_deadline", "status", "deadline_at"),
     )
@@ -359,6 +372,12 @@ class TaskModel(Base):
     )
     template_version: Mapped[int] = mapped_column(Integer, nullable=False)
     creator_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    created_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    reviewer_admin_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
     author_display_name: Mapped[str] = mapped_column(Text, nullable=False)

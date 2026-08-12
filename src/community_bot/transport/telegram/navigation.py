@@ -25,13 +25,17 @@ from community_bot.application.registration import InvitationCreateCommand
 from community_bot.domain.catalog import CatalogError
 from community_bot.domain.members import AuthorizationError
 from community_bot.domain.tasks import TaskError
+from community_bot.transport.telegram.assignments import send_assignment_overview
+from community_bot.transport.telegram.moderation import send_moderation_overview
 from community_bot.transport.telegram.profile import (
     PROFILE_TEXT,
     own_profile_card,
     profile_edit_keyboard,
 )
+from community_bot.transport.telegram.reputation import send_member_catalog
 
 if TYPE_CHECKING:
+    from community_bot.application.assignments import AssignmentService
     from community_bot.application.catalog import CatalogPage, CatalogService
     from community_bot.application.economy import EconomyQueryService, LedgerHistoryItem
     from community_bot.application.moderation import ModerationService
@@ -51,6 +55,7 @@ HELP_TEXT = "Помощь"
 ADMIN_TEXT = "Администрирование"
 _TASK_PAGE_PREFIX = "nav:tasks:"
 _CREATE_PREFIX = "nav:create:"
+_COMMUNITY_PREFIX = "nav:community:"
 _ADMIN_PREFIX = "nav:admin:"
 
 
@@ -77,6 +82,7 @@ def build_navigation_router(  # noqa: PLR0913
     registration: RegistrationService,
     reputation: ReputationService,
     moderation: ModerationService,
+    assignments: AssignmentService,
 ) -> Router:
     """Build exact commands, button mappings, and navigation callbacks."""
     router = Router(name="navigation")
@@ -110,26 +116,52 @@ def build_navigation_router(  # noqa: PLR0913
             page = await catalog.browse(
                 CatalogQuery(actor_telegram_user_id=message.from_user.id, limit=20)
             )
-            await _send_creation_catalog(message, page)
+            await _send_creation_catalog(message, page, prefix=_CREATE_PREFIX)
         except (CatalogError, PermissionError, LookupError):
             await message.answer("Каталог создания сейчас недоступен.")
 
     async def choose_template(callback: CallbackQuery, event_update: Update) -> None:
         try:
-            template_id = UUID(hex=str(callback.data).removeprefix(_CREATE_PREFIX))
+            raw_data = str(callback.data)
+            community = raw_data.startswith(_COMMUNITY_PREFIX)
+            prefix = _COMMUNITY_PREFIX if community else _CREATE_PREFIX
+            template_id = UUID(hex=raw_data.removeprefix(prefix))
             draft = await tasks.start(
                 update_id=event_update.update_id,
                 actor_telegram_user_id=callback.from_user.id,
                 template_id=template_id,
+                origin="community" if community else "member",
             )
             if draft is None:
                 await callback.answer("Шаблон недоступен.", show_alert=True)
                 return
             await callback.answer("Шаблон выбран.")
             if isinstance(callback.message, Message):
-                await callback.message.answer(
-                    "Черновик создан. Отправьте JSON с данными задания. Для отмены — /cancel."
-                )
+                if community:
+                    reviewers = await tasks.community_reviewers(callback.from_user.id)
+                    if not reviewers:
+                        await callback.message.answer(
+                            "Нужен второй активный администратор для независимой проверки."
+                        )
+                    else:
+                        await callback.message.answer(
+                            "Выберите независимого проверяющего.",
+                            reply_markup=InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [
+                                        InlineKeyboardButton(
+                                            text=item.display_name,
+                                            callback_data=f"task:reviewer:{item.id.hex}",
+                                        )
+                                    ]
+                                    for item in reviewers
+                                ]
+                            ),
+                        )
+                else:
+                    await callback.message.answer(
+                        "Черновик создан. Опишите задачу обычным сообщением. Для отмены — /cancel."
+                    )
         except (CatalogError, PermissionError, LookupError, TaskError, ValueError):
             await callback.answer("Шаблон недоступен.", show_alert=True)
 
@@ -165,6 +197,7 @@ def build_navigation_router(  # noqa: PLR0913
                 else "\n".join(f"{item.title} · {item.status.value}" for item in owned)
             )
             await message.answer(body)
+            await send_assignment_overview(message, assignments)
         except (PermissionError, LookupError, TaskError):
             await message.answer("Ваши задания сейчас недоступны.")
 
@@ -210,18 +243,7 @@ def build_navigation_router(  # noqa: PLR0913
             await message.answer("Лидерборд сейчас недоступен.")
 
     async def show_members(message: Message) -> None:
-        if message.from_user is None:
-            return
-        try:
-            page = await reputation.members(telegram_user_id=message.from_user.id)
-            body = (
-                "Каталог участников пока пуст."
-                if not page.items
-                else "\n".join(item.display_name for item in page.items)
-            )
-            await message.answer(body)
-        except (PermissionError, LookupError, ValueError):
-            await message.answer("Участники сейчас недоступны.")
+        await send_member_catalog(message, reputation, moderation)
 
     async def show_admin(message: Message) -> None:
         if message.from_user is None:
@@ -230,7 +252,10 @@ def build_navigation_router(  # noqa: PLR0913
             await navigation.require_active_administrator(message.from_user.id)
             await message.answer("Администрирование", reply_markup=_admin_markup())
         except PermissionError:
-            await message.answer("Административное меню недоступно.")
+            try:
+                await send_moderation_overview(message, moderation)
+            except (PermissionError, LookupError, ValueError):
+                await message.answer("Административное меню недоступно.")
 
     async def admin_action(callback: CallbackQuery, event_update: Update) -> None:
         try:
@@ -259,6 +284,18 @@ def build_navigation_router(  # noqa: PLR0913
                         parse_mode=None,
                     )
                 return
+            if action == "community":
+                page = await catalog.browse(
+                    CatalogQuery(actor_telegram_user_id=callback.from_user.id, limit=20)
+                )
+                await callback.answer()
+                if isinstance(callback.message, Message):
+                    await _send_creation_catalog(
+                        callback.message,
+                        page,
+                        prefix=_COMMUNITY_PREFIX,
+                    )
+                return
             if action == "registrations":
                 applications = await registration.submitted_registrations(
                     actor_telegram_user_id=callback.from_user.id
@@ -271,12 +308,10 @@ def build_navigation_router(  # noqa: PLR0913
                     )
                 )
             elif action == "moderation":
-                cases = await moderation.queue(callback.from_user.id)
-                body = (
-                    "Очередь модерации пуста."
-                    if not cases
-                    else "\n".join(f"{item.case_type} · {item.status}" for item in cases)
-                )
+                await callback.answer()
+                if isinstance(callback.message, Message):
+                    await send_moderation_overview(callback.message, moderation)
+                return
             else:
                 await callback.answer("Административное действие недоступно.", show_alert=True)
                 return
@@ -291,7 +326,10 @@ def build_navigation_router(  # noqa: PLR0913
     router.callback_query.register(next_tasks, F.data.startswith(_TASK_PAGE_PREFIX))
     router.message.register(show_create, Command("create"))
     router.message.register(show_create, F.text == CREATE_TASK_TEXT)
-    router.callback_query.register(choose_template, F.data.startswith(_CREATE_PREFIX))
+    router.callback_query.register(
+        choose_template,
+        F.data.startswith(_CREATE_PREFIX) | F.data.startswith(_COMMUNITY_PREFIX),
+    )
     router.message.register(show_balance, Command("balance"))
     router.message.register(show_balance, F.text == BALANCE_TEXT)
     router.message.register(show_help, Command("help"))
@@ -337,7 +375,12 @@ async def _send_task_page(message: Message, page: AvailableTaskPage) -> None:
         )
 
 
-async def _send_creation_catalog(message: Message, page: CatalogPage) -> None:
+async def _send_creation_catalog(
+    message: Message,
+    page: CatalogPage,
+    *,
+    prefix: str,
+) -> None:
     if not page.items:
         await message.answer("Доступных шаблонов пока нет.")
         return
@@ -350,7 +393,7 @@ async def _send_creation_catalog(message: Message, page: CatalogPage) -> None:
                     [
                         InlineKeyboardButton(
                             text="Создать по шаблону",
-                            callback_data=f"{_CREATE_PREFIX}{template.id.hex}",
+                            callback_data=f"{prefix}{template.id.hex}",
                         )
                     ]
                 ]
@@ -363,6 +406,12 @@ def _admin_markup() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Создать приглашение", callback_data="nav:admin:invite")],
             [InlineKeyboardButton(text="Заявки", callback_data="registration:list")],
+            [
+                InlineKeyboardButton(
+                    text="Создать задание сообщества",
+                    callback_data="nav:admin:community",
+                )
+            ],
             [InlineKeyboardButton(text="Модерация", callback_data="nav:admin:moderation")],
         ]
     )
@@ -396,4 +445,5 @@ _HELP_TEXT = """Как пользоваться ботом:
 • /cancel — отменить текущий диалог;
 • /help — снова открыть эту подсказку.
 
-Администратору: /admin открывает приглашения, заявки и очередь модерации."""
+Модератору и администратору: /admin открывает доступную очередь модерации;
+администратору также доступны приглашения, заявки и служебные разделы."""
