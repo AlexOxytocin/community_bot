@@ -29,6 +29,9 @@ from community_bot.application.registration import (
 from community_bot.domain.registration import (
     ModerationDecision,
     ProfileField,
+    ProfileListItemLengthError,
+    ProfileListSizeError,
+    ProfileTextLengthError,
     RegistrationError,
     RegistrationStep,
     TimezoneResolutionError,
@@ -49,8 +52,12 @@ _STEP_PROMPTS: dict[RegistrationStep, str] = {
     ),
     RegistrationStep.SHORT_BIO: "Коротко расскажите о себе — от 10 до 500 символов.",
     RegistrationStep.CURRENT_GOAL: "Какая у вас сейчас основная цель?",
-    RegistrationStep.HELP_CATEGORIES: "В чём вы можете помогать? Перечислите через запятую.",
-    RegistrationStep.SKILL_TAGS: "Перечислите навыки через запятую.",
+    RegistrationStep.HELP_CATEGORIES: (
+        "В чём вы можете помогать? Укажите до 10 пунктов через запятую, каждый до 80 символов."
+    ),
+    RegistrationStep.SKILL_TAGS: (
+        "Перечислите до 20 навыков через запятую, каждый до 50 символов."
+    ),
     RegistrationStep.AVAILABILITY: "Когда и в каком объёме вы обычно доступны?",
 }
 _MAX_INVITE_LIFETIME_DAYS = 365
@@ -491,6 +498,21 @@ def _friendly_error(error: Exception) -> str:
         return (
             "Не удалось определить часовой пояс. Напишите ближайший крупный город, "
             "например Москва или Buenos Aires."
+        )
+    if isinstance(error, ProfileTextLengthError):
+        return (
+            "Не удалось сохранить данные: длина ответа должна быть от "
+            f"{error.minimum} до {error.maximum} символов."
+        )
+    if isinstance(error, ProfileListItemLengthError):
+        return (
+            "Не удалось сохранить данные: один из пунктов слишком длинный. "
+            f"Максимум {error.maximum_item_length} символов на пункт."
+        )
+    if isinstance(error, ProfileListSizeError):
+        return (
+            "Не удалось сохранить данные: укажите от 1 до "
+            f"{error.maximum_items} пунктов через запятую."
         )
     if isinstance(error, PermissionError):
         return "Это действие вам недоступно."

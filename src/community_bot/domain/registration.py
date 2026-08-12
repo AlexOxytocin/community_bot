@@ -27,6 +27,38 @@ class TimezoneResolutionError(RegistrationError):
     """Raised when a human location cannot be resolved without guessing."""
 
 
+class ProfileTextLengthError(RegistrationError):
+    """Raised when one profile text field misses its length bounds."""
+
+    def __init__(self, *, label: str, minimum: int, maximum: int) -> None:
+        """Store bounds for user-facing transport messages."""
+        self.label = label
+        self.minimum = minimum
+        self.maximum = maximum
+        message = f"The {label} length must be between {minimum} and {maximum} characters."
+        super().__init__(message)
+
+
+class ProfileListSizeError(RegistrationError):
+    """Raised when a profile list is empty or has too many items."""
+
+    def __init__(self, *, maximum_items: int) -> None:
+        """Store the item count limit for user-facing transport messages."""
+        self.maximum_items = maximum_items
+        message = f"Profile list must contain between 1 and {maximum_items} items."
+        super().__init__(message)
+
+
+class ProfileListItemLengthError(RegistrationError):
+    """Raised when one profile list item exceeds the configured limit."""
+
+    def __init__(self, *, maximum_item_length: int) -> None:
+        """Store the item length limit for user-facing transport messages."""
+        self.maximum_item_length = maximum_item_length
+        message = f"Profile list items must be at most {maximum_item_length} characters."
+        super().__init__(message)
+
+
 class RegistrationStep(StrEnum):
     """Ordered steps of the persistent registration conversation."""
 
@@ -155,7 +187,7 @@ def normalize_profile_value(  # noqa: PLR0911 - explicit field rules stay readab
     if field is ProfileField.AVAILABILITY:
         return _bounded_text(raw_value, minimum=2, maximum=200, label="availability")
     if field is ProfileField.HELP_CATEGORIES:
-        return _normalized_list(raw_value, maximum_items=10, maximum_item_length=50)
+        return _normalized_list(raw_value, maximum_items=10, maximum_item_length=80)
     return _normalized_list(raw_value, maximum_items=20, maximum_item_length=50)
 
 
@@ -228,8 +260,7 @@ def require_profile_owner(actor: Member, target_member_id: object) -> None:
 def _bounded_text(raw_value: str, *, minimum: int, maximum: int, label: str) -> str:
     value = " ".join(raw_value.split())
     if not minimum <= len(value) <= maximum:
-        message = f"The {label} length must be between {minimum} and {maximum} characters."
-        raise RegistrationError(message)
+        raise ProfileTextLengthError(label=label, minimum=minimum, maximum=maximum)
     return value
 
 
@@ -247,11 +278,9 @@ def _normalized_list(
         if not item or identity in seen:
             continue
         if len(item) > maximum_item_length:
-            message = "A profile list item is too long."
-            raise RegistrationError(message)
+            raise ProfileListItemLengthError(maximum_item_length=maximum_item_length)
         seen.add(identity)
         items.append(item)
     if not items or len(items) > maximum_items:
-        message = f"The profile list must contain between 1 and {maximum_items} items."
-        raise RegistrationError(message)
+        raise ProfileListSizeError(maximum_items=maximum_items)
     return tuple(items)
