@@ -368,7 +368,6 @@ async def test_unavailable_community_reviewer_is_replaced_from_visible_card(  # 
         actor_member_id=creator.id,
         activation_command_id=uuid4(),
     )
-    await EconomyService(database.unit_of_work).apply_one(starting_grant(performer.id))
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
         template_id = await session.scalar(
@@ -773,7 +772,6 @@ async def test_community_provenance_survives_exact_migration_cycle(
         actor_member_id=creator.id,
         activation_command_id=uuid4(),
     )
-    await EconomyService(database.unit_of_work).apply_one(starting_grant(performer.id))
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
         template_id = await session.scalar(

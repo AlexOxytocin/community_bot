@@ -78,6 +78,7 @@ class PublishedTask:
     created_by_admin_id: UUID | None
     reviewer_admin_id: UUID | None
     origin: str
+    author_display_name: str
     template_id: UUID
     template_version: int
     title: str

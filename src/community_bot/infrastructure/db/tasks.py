@@ -403,6 +403,7 @@ def _task(model: TaskModel) -> PublishedTask:
         created_by_admin_id=model.created_by_admin_id,
         reviewer_admin_id=model.reviewer_admin_id,
         origin=model.origin,
+        author_display_name=model.author_display_name,
         template_id=model.template_id,
         template_version=model.template_version,
         title=model.title,

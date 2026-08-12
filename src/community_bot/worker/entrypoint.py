@@ -93,7 +93,7 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
             await queue.heartbeat(
                 process_name="community-worker",
                 release=settings.release,
-                migration_revision="0012",
+                migration_revision="0013",
                 now=now,
             )
             logger.info(

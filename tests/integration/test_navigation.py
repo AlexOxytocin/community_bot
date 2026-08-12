@@ -366,6 +366,11 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
 
     await dispatcher.feed_update(bot, callback_update(70_002, 7_003, "nav:tasks:not-a-uuid"))
     await dispatcher.feed_update(bot, message_update(70_003, 7_003, "Найти задание"))
+    task_card = next(
+        text for text, callback in session.button_payloads if callback == f"task:accept:{task.id}"
+    )
+    author_label = "\u0410\u0432\u0442\u043e\u0440"
+    assert f"\n{author_label}: {author.display_name}\n" in task_card
     accept_callback = next(
         value for value in session.callbacks if value == f"task:accept:{task.id}"
     )
@@ -446,7 +451,7 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     assert grant_count == 1
     assert sum("Административное меню недоступно." in text for text in session.texts) == 1
     assert any("Очередь споров и расследований пуста." in text for text in session.texts)
-    assert any("Баланс: 5 кредитов" in text for text in session.texts)
+    assert any("Баланс: 10 кредитов" in text for text in session.texts)
     assert any("Как пользоваться ботом" in text for text in session.texts)
     assert any("https://t.me/humanquest_bot?start=" in text for text in session.texts)
     invitation_payload = next(

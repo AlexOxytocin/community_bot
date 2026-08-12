@@ -73,7 +73,7 @@ def test_empty_database_cycles_and_restores_catalog_seed(database_url: str) -> N
     _alembic(url, "base", downgrade=True)
     _alembic(url, "head")
     counts = asyncio.run(_catalog_counts(url))
-    assert counts == (8, 8, "0012")
+    assert counts == (8, 8, "0013")
 
 
 @pytest.mark.asyncio
@@ -102,7 +102,7 @@ async def test_pilot_report_is_ledger_authoritative_and_contains_no_member_data(
         session.add_all(
             AccountTransactionModel(
                 member_id=member.id,
-                credit_delta=5,
+                credit_delta=10,
                 experience_delta=0,
                 transaction_type="starting_grant",
                 idempotency_key=f"pilot-ledger:{member.id}",
@@ -118,7 +118,7 @@ async def test_pilot_report_is_ledger_authoritative_and_contains_no_member_data(
     payload = report.model_dump_json()
     assert report.current_active_members == 3
     assert [cell.model_dump() for cell in report.credit_distribution.cells] == [
-        {"label": "5-9", "count": 3}
+        {"label": "10-19", "count": 3}
     ]
     assert [cell.model_dump() for cell in report.experience_distribution.cells] == [
         {"label": "0", "count": 3}
@@ -708,7 +708,7 @@ async def _assert_upgraded_snapshot(
             } <= constraints
             assert {"ix_outbox_due", "ix_notifications_due"} <= indexes
             assert (
-                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012"
+                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013"
             )
             invalid_states = (
                 "UPDATE outbox_events SET status='processing' WHERE business_key='pilot:pending'",

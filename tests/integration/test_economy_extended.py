@@ -268,7 +268,7 @@ async def test_database_constraints_reject_invalid_ledger_rows(database_url: str
         "INSERT INTO account_transactions "
         "(id, member_id, credit_delta, experience_delta, transaction_type, "
         "idempotency_key, payload_hash) VALUES "
-        "(:id, :member, 5, 0, 'starting_grant', :key, :hash)",
+        "(:id, :member, 10, 0, 'starting_grant', :key, :hash)",
         {**base, "id": uuid4(), "key": "second-grant"},
     )
     await assert_database_error(
@@ -335,7 +335,7 @@ async def test_operation_matrix_keeps_cache_equal_to_ledger(database_url: str) -
                 ).where(AccountTransactionModel.member_id == member.id)
             )
         ).one()
-    assert cache == sums == (22, 8)
+    assert cache == sums == (27, 8)
     await database.dispose()
 
 
@@ -470,10 +470,10 @@ async def test_concurrent_grant_and_reserve_never_lose_or_overdraw(database_url:
     results = await asyncio.wait_for(
         asyncio.gather(
             service.apply_one(
-                reserve_reward(member_id=member.id, amount=7, idempotency_key="reserve:7")
+                reserve_reward(member_id=member.id, amount=12, idempotency_key="reserve:12")
             ),
             service.apply_one(
-                reserve_reward(member_id=member.id, amount=6, idempotency_key="reserve:6")
+                reserve_reward(member_id=member.id, amount=11, idempotency_key="reserve:11")
             ),
             return_exceptions=True,
         ),
