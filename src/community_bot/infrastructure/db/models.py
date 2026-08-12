@@ -1148,7 +1148,7 @@ class AccountTransactionModel(Base):
             name="ck_account_transactions_type",
         ),
         CheckConstraint(
-            "(transaction_type = 'starting_grant' AND credit_delta = 5 "
+            "(transaction_type = 'starting_grant' AND credit_delta IN (5, 10) "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'task_reward_reserved' AND credit_delta < 0 "
             "AND experience_delta = 0) OR "

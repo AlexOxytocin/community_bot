@@ -351,8 +351,12 @@ async def _send_task_page(message: Message, page: AvailableTaskPage) -> None:
         return
     for task in page.items:
         await message.answer(
-            f"{task.title}\n{task.description}\nНаграда: {task.credit_reward_per_performer} "
-            f"кредита\nСрок: {task.deadline_at:%d.%m %H:%M}\nФормат: {task.format.value}",
+            f"{task.title}\n"
+            f"Автор: {task.author_display_name}\n"
+            f"{task.description}\n"
+            f"Награда: {task.credit_reward_per_performer} кредита\n"
+            f"Срок: {task.deadline_at:%d.%m %H:%M}\n"
+            f"Формат: {task.format.value}",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="Взять", callback_data=f"task:accept:{task.id}")]

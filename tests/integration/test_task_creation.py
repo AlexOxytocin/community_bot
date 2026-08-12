@@ -295,7 +295,7 @@ async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -
             )
         ).all()
     assert model is not None
-    assert model.credit_balance_cached == 5
+    assert model.credit_balance_cached == 10
     assert transactions[-1].experience_delta == 0
     assert await scalar_count(database, OutboxEventModel) == 2
     await database.dispose()
@@ -319,6 +319,21 @@ async def test_two_public_drafts_compete_for_one_balance(database_url: str) -> N
         update_base=21_100,
     )
     assert first_id != second_id
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        admin = await session.scalar(
+            select(MemberModel).where(MemberModel.role == MemberRole.ADMINISTRATOR.value)
+        )
+    assert admin is not None
+    await EconomyService(database.unit_of_work).apply_one(
+        admin_adjustment(
+            member_id=member.id,
+            credit_delta=-5,
+            experience_delta=0,
+            idempotency_key="task-competing-drafts:balance-fixture",
+            context=AdministrativeContext(admin.id, "Competing drafts balance fixture."),
+        )
+    )
     results = await asyncio.wait_for(
         asyncio.gather(
             service.publish(
@@ -335,7 +350,6 @@ async def test_two_public_drafts_compete_for_one_balance(database_url: str) -> N
     assert sum(isinstance(item, BaseException) for item in results) == 1
     assert await scalar_count(database, TaskModel) == 1
     assert await scalar_count(database, OutboxEventModel) == 1
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
         persisted = await session.get(MemberModel, member.id)
         receipts = (
@@ -549,7 +563,7 @@ async def test_publish_business_retry_concurrent_cancel_and_private_listing(  # 
     assert len(refunds) == 1
     assert refunds[0].experience_delta == 0
     assert persisted_owner is not None
-    assert persisted_owner.credit_balance_cached == 5
+    assert persisted_owner.credit_balance_cached == 10
     audit_after_cancel = await scalar_count(database, AuditEventModel)
     outbox_after_cancel = await scalar_count(database, OutboxEventModel)
     receipts_after_cancel = await scalar_count(database, ProcessedTelegramUpdateModel)
@@ -822,7 +836,18 @@ async def test_config_activation_and_publish_use_one_resolved_version(
 
 async def test_task_snapshot_db_guard_and_migration_cycle(database_url: str) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=2300)
+    admin = await add_member(database, telegram_user_id=3300, role=MemberRole.ADMINISTRATOR)
+    member = await add_member(database, telegram_user_id=2300)
+    await prepare_config(database, admin)
+    await EconomyService(database.unit_of_work).apply_one(
+        admin_adjustment(
+            member_id=member.id,
+            credit_delta=10,
+            experience_delta=0,
+            idempotency_key="task-migration-cycle:balance-fixture",
+            context=AdministrativeContext(admin.id, "Task migration cycle balance fixture."),
+        )
+    )
     selected = await template_id(database, "repository_first_impression")
     service = TaskService(database.unit_of_work)
     draft_id, revision = await complete_preview(

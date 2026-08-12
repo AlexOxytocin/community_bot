@@ -347,8 +347,8 @@ async def test_full_exchange(database_url: str) -> None:
     assert assignment_stored.status == "approved"
     assert task_stored is not None
     assert task_stored.status == "completed"
-    assert (author_stored.credit_balance_cached, author_ledger) == (3, 3)
-    assert (performer_stored.credit_balance_cached, performer_ledger) == (7, 7)
+    assert (author_stored.credit_balance_cached, author_ledger) == (8, 8)
+    assert (performer_stored.credit_balance_cached, performer_ledger) == (12, 12)
     assert performer_stored.experience_total_cached == 2
     assert await transaction_count(database, assignment_id=assignment.id) == 1
     assert int(outbox_count or 0) >= 1

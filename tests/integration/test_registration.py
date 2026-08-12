@@ -622,13 +622,13 @@ async def test_concurrent_moderation_creates_one_grant_and_active_profile(
         conversation = await session.get(ConversationStateModel, target_id)
     assert target is not None
     assert target.status == MemberStatus.ACTIVE.value
-    assert target.credit_balance_cached == 5
+    assert target.credit_balance_cached == 10
     assert target.experience_total_cached == 0
     assert application is not None
     assert application.status == RegistrationApplicationStatus.APPROVED.value
     assert conversation is None
     assert len(transactions) == 1
-    assert transactions[0].credit_delta == 5
+    assert transactions[0].credit_delta == 10
     assert transactions[0].experience_delta == 0
     await database.dispose()
 
@@ -726,7 +726,7 @@ async def test_reject_resubmit_approve_and_edit_own_profile(database_url: str) -
     assert profile.help_categories == ("Продукт", "Исследования")
     assert profile.skill_tags == ("Python", "Интервью")
     assert profile.availability == "Три часа в неделю"
-    assert profile.credit_balance == 5
+    assert profile.credit_balance == 10
     assert profile.experience_total == 0
     assert profile.level.level_number == 1
     assert await count(database, AccountTransactionModel) == 1
@@ -966,7 +966,7 @@ async def test_complete_synthetic_telegram_registration_and_profile_smoke(
         for text_value in session.texts
     )
     assert not any("Europe/Moscow" in text_value for text_value in session.texts)
-    assert any("Баланс: 5 кредитов" in text_value for text_value in session.texts)
+    assert any("Баланс: 10 кредитов" in text_value for text_value in session.texts)
     assert await count(database, AccountTransactionModel) == 1
     await bot.session.close()
     await database.dispose()
@@ -996,28 +996,26 @@ async def test_migration_closes_only_stale_approved_registration_state(
         telegram_user_id=8_100,
         role=MemberRole.ADMINISTRATOR,
     )
-    registration = service(database)
-    token = await create_invite(registration, admin, update_id=81_000)
-    target_id = await complete_registration(
-        registration,
-        token=token,
+    target = await add_member(
+        database,
         telegram_user_id=8_101,
-        first_update_id=81_100,
+        role=MemberRole.MEMBER,
     )
-    await registration.moderate(
-        ModerationCommand(
-            update_id=81_200,
-            actor_telegram_user_id=admin.telegram_user_id,
-            target_member_id=target_id,
-            decision=ModerationDecision.APPROVE,
-        )
-    )
+    now = datetime.now(UTC)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
         session.add_all(
             (
+                RegistrationApplicationModel(
+                    member_id=target.id,
+                    status=RegistrationApplicationStatus.APPROVED.value,
+                    consented_at=now,
+                    submitted_at=now,
+                    reviewed_at=now,
+                    reviewed_by_member_id=admin.id,
+                ),
                 ConversationStateModel(
-                    member_id=target_id,
+                    member_id=target.id,
                     flow_type="registration_paused",
                     current_step=RegistrationStep.SUBMITTED.value,
                     payload_json={},
@@ -1050,7 +1048,7 @@ async def test_migration_closes_only_stale_approved_registration_state(
     repaired = Database(database_url)
     repaired_sessions = async_sessionmaker(repaired.engine, expire_on_commit=False)
     async with repaired_sessions() as session:
-        stale_state = await session.get(ConversationStateModel, target_id)
+        stale_state = await session.get(ConversationStateModel, target.id)
         profile_edit = await session.get(ConversationStateModel, admin.id)
     assert stale_state is None
     assert profile_edit is not None

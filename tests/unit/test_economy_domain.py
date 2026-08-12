@@ -66,7 +66,7 @@ def test_named_economy_factories_produce_exact_deltas_and_metadata() -> None:
     assert [
         (item.transaction_type, item.credit_delta, item.experience_delta) for item in commands
     ] == [
-        (TransactionType.STARTING_GRANT, 5, 0),
+        (TransactionType.STARTING_GRANT, 10, 0),
         (TransactionType.TASK_REWARD_RESERVED, -4, 0),
         (TransactionType.TASK_REWARD_EARNED, 4, 4),
         (TransactionType.TASK_REWARD_REFUNDED, 4, 0),
@@ -177,7 +177,7 @@ def test_generated_economy_sequence_preserves_nonnegative_totals(
     operations: list[tuple[str, int]],
 ) -> None:
     member_id = uuid4()
-    credit_total = 5
+    credit_total = 10
     experience_total = 0
     for index, (operation, amount) in enumerate(operations):
         if operation == "reserve":
