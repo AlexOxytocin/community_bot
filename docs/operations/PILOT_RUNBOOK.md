@@ -48,6 +48,12 @@ logical backup. External backup, R2, application object storage и webhook в MV
    администратор открывает `/admin` и создаёт
    одноразовую ссылку кнопкой `Создать приглашение`; `/invite_create` остаётся резервной
    командой.
+   Если bootstrap administrator сохранил нейтральное либо повреждённое отображаемое имя,
+   исправить его без ручного SQL, передав Telegram ID и новое имя двумя строками через stdin:
+   `printf '%s\n%s\n' "$TELEGRAM_ID" "$DISPLAY_NAME" | docker compose run --rm -T migrate community-repair-bootstrap-admin-profile`.
+   Приватные значения не попадают в process argv и Sentry `ArgvIntegration`. Команда применима только к единственному active
+   administrator с bootstrap provenance, не меняет остальные поля и безопасна при повторе.
+   Значение имени и Telegram ID не записываются в runtime logs и audit payload.
 7. Установить unit/timer из `ops/systemd`, выполнить `systemctl daemon-reload`,
    `systemctl enable --now community-bot-backup.timer`.
 8. Создать первый backup и выполнить restore drill до допуска участников.

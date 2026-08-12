@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast, override
 from uuid import uuid4
 
@@ -13,14 +15,18 @@ from aiogram.types import Chat, Message, Update, User
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.initial_admin import (
     InitialAdministratorCommand,
     InitialAdministratorConflictError,
+    InitialAdministratorProfileRepairCommand,
     InitialAdministratorReason,
     InitialAdministratorService,
 )
 from community_bot.bootstrap.bot import _dispatcher
 from community_bot.bootstrap.initial_admin import main as bootstrap_main
+from community_bot.bootstrap.initial_admin import repair_main
+from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import get_settings
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.models import (
@@ -41,6 +47,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 TelegramType = TypeVar("TelegramType")
 _TOKEN_SECRET = "x" * 32
+_CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v2.json"
 
 
 class CapturingSession(BaseSession):
@@ -176,6 +183,13 @@ async def test_exact_retry_conflicts_when_another_active_administrator_exists(
 
     with pytest.raises(InitialAdministratorConflictError):
         await service.bootstrap(_command(2_101))
+    with pytest.raises(InitialAdministratorConflictError):
+        await service.repair_profile(
+            InitialAdministratorProfileRepairCommand(
+                telegram_user_id=2_101,
+                display_name="Should not be saved",
+            )
+        )
     assert await _counts(database) == (2, 1)
     await database.dispose()
 
@@ -199,6 +213,133 @@ async def test_bootstrap_fault_rolls_back_and_retry_wins(database_url: str) -> N
     ).bootstrap(_command(3_001))
     assert result.created is True
     assert await _counts(database) == (1, 1)
+    await database.dispose()
+
+
+async def test_profile_repair_is_utf8_safe_idempotent_and_fail_closed(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    service = InitialAdministratorService(database.initial_administrator_unit_of_work)
+    created = await service.bootstrap(_command(3_101))
+    command = InitialAdministratorProfileRepairCommand(
+        telegram_user_id=3_101,
+        display_name="  Алексей Тестовый  ",
+    )
+
+    repaired = await service.repair_profile(command)
+    replayed = await service.repair_profile(command)
+    assert repaired.changed is True
+    assert replayed.changed is False
+    assert replayed.member_id == created.member_id
+
+    with pytest.raises(InitialAdministratorConflictError):
+        await service.repair_profile(
+            InitialAdministratorProfileRepairCommand(
+                telegram_user_id=3_102,
+                display_name="Другой администратор",
+            )
+        )
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        member = await session.get(MemberModel, created.member_id)
+        repair_events = (
+            await session.scalars(
+                select(AuditEventModel).where(
+                    AuditEventModel.action == "initial_administrator_profile_repaired"
+                )
+            )
+        ).all()
+    assert member is not None
+    assert member.display_name == "Алексей Тестовый"
+    assert member.timezone == "UTC"
+    assert member.city is None
+    assert member.role == "administrator"
+    assert member.status == "active"
+    assert member.permissions_json == ["interaction_review", "karma_review", "member_read"]
+    assert member.credit_balance_cached == 0
+    assert member.experience_total_cached == 0
+    assert len(repair_events) == 1
+    assert repair_events[0].before_json is None
+    assert repair_events[0].after_json == {"display_name_repaired": True}
+    assert repair_events[0].reason == "operator_request"
+    assert "Алексей" not in str(repair_events[0].after_json)
+    assert "3101" not in str(repair_events[0].after_json)
+    await database.dispose()
+
+
+async def test_profile_repair_fault_rolls_back_and_retry_succeeds(database_url: str) -> None:
+    database = Database(database_url)
+    regular = InitialAdministratorService(database.initial_administrator_unit_of_work)
+    created = await regular.bootstrap(_command(3_201))
+
+    def fail_after_audit() -> None:
+        message = "synthetic profile repair audit fault"
+        raise RuntimeError(message)
+
+    failing = InitialAdministratorService(
+        lambda: database.initial_administrator_unit_of_work(after_audit_flushed=fail_after_audit)
+    )
+    command = InitialAdministratorProfileRepairCommand(
+        telegram_user_id=3_201,
+        display_name="Исправленное имя",
+    )
+    with pytest.raises(RuntimeError, match="synthetic profile repair audit fault"):
+        await failing.repair_profile(command)
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        unchanged = await session.get(MemberModel, created.member_id)
+        repair_count = await session.scalar(
+            select(func.count())
+            .select_from(AuditEventModel)
+            .where(AuditEventModel.action == "initial_administrator_profile_repaired")
+        )
+    assert unchanged is not None
+    assert unchanged.display_name == "Administrator"
+    assert repair_count == 0
+
+    retry = await regular.repair_profile(command)
+    assert retry.changed is True
+    await database.dispose()
+
+
+async def test_profile_repair_requires_exact_bootstrap_provenance(database_url: str) -> None:
+    database = Database(database_url)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add(
+            MemberModel(
+                id=uuid4(),
+                telegram_user_id=3_301,
+                display_name="Existing administrator",
+                timezone="UTC",
+                role="administrator",
+                status="active",
+                level_number=1,
+            )
+        )
+    service = InitialAdministratorService(database.initial_administrator_unit_of_work)
+    with pytest.raises(InitialAdministratorConflictError):
+        await service.repair_profile(
+            InitialAdministratorProfileRepairCommand(
+                telegram_user_id=3_301,
+                display_name="Нельзя изменить",
+            )
+        )
+    with pytest.raises(ValueError, match="display name length"):
+        InitialAdministratorProfileRepairCommand(
+            telegram_user_id=3_301,
+            display_name="?",
+        )
+    async with sessions() as session:
+        unchanged = await session.scalar(
+            select(MemberModel).where(MemberModel.telegram_user_id == 3_301)
+        )
+    assert unchanged is not None
+    assert unchanged.display_name == "Existing administrator"
+    assert await _counts(database) == (1, 0)
     await database.dispose()
 
 
@@ -236,6 +377,7 @@ async def test_concurrent_bootstrap_has_one_persisted_winner(
 async def test_real_cli_then_production_dispatcher_creates_invitation_and_registration(  # noqa: PLR0915
     database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", database_url)
     get_settings.cache_clear()
@@ -247,8 +389,37 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
     finally:
         get_settings.cache_clear()
     assert exit_code == 0
+    repair_exit_code = await asyncio.to_thread(
+        repair_main,
+        [],
+        io.StringIO("5001\nАлексей Администратор\n"),  # noqa: RUF001 - UTF-8 input.
+    )
+    replay_exit_code = await asyncio.to_thread(
+        repair_main,
+        [],
+        io.StringIO("5001\nАлексей Администратор\n"),  # noqa: RUF001 - UTF-8 input.
+    )
+    assert repair_exit_code == 0
+    assert replay_exit_code == 0
+    safe_cli_output = capsys.readouterr()
+    assert "Алексей Администратор" not in safe_cli_output.out + safe_cli_output.err
+    assert "5001" not in safe_cli_output.out + safe_cli_output.err
 
     database = Database(database_url)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        administrator_model = await db_session.scalar(
+            select(MemberModel).where(MemberModel.telegram_user_id == 5_001)
+        )
+    assert administrator_model is not None
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work,
+        load_product_config_candidate,
+    ).prepare(
+        candidate_path=_CONFIG_PATH,
+        actor_member_id=administrator_model.id,
+        activation_command_id=uuid4(),
+    )
     dispatcher = _dispatcher(database, invite_token_secret=_TOKEN_SECRET)
     session = CapturingSession()
     bot = Bot(token=f"{123456}:{'T' * 35}", session=session)
@@ -267,6 +438,11 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
             ),
         )
 
+    await dispatcher.feed_update(bot, update(49_001, administrator, "/profile"))
+    await dispatcher.feed_update(bot, update(49_002, administrator, "/members"))
+    await dispatcher.feed_update(bot, update(49_003, administrator, "/leaderboard"))
+    assert sum("Алексей Администратор" in text_value for text_value in session.texts) == 3
+
     await dispatcher.feed_update(bot, update(50_001, administrator, "/invite_create 1 7 5002"))
     response = next(text_value for text_value in session.texts if "/start " in text_value)
     match = re.search(r"/start ([A-Za-z0-9_-]+)", response)
@@ -274,7 +450,6 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
     token = match.group(1)
     await dispatcher.feed_update(bot, update(50_002, newcomer, f"/start {token}"))
 
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as db_session:
         members = (
             await db_session.scalars(select(MemberModel).order_by(MemberModel.telegram_user_id))
@@ -293,6 +468,13 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
                 AuditEventModel.action == "initial_administrator_bootstrapped"
             )
         )
+        repair_audits = (
+            await db_session.scalars(
+                select(AuditEventModel).where(
+                    AuditEventModel.action == "initial_administrator_profile_repaired"
+                )
+            )
+        ).all()
         ledger_count = await db_session.scalar(
             select(func.count()).select_from(AccountTransactionModel)
         )
@@ -302,7 +484,7 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
         (5_002, "member", "pending"),
     ]
     admin = members[0]
-    assert admin.display_name == "Administrator"
+    assert admin.display_name == "Алексей Администратор"
     assert admin.timezone == "UTC"
     assert admin.approved_at is not None
     assert admin.permissions_json == ["interaction_review", "karma_review", "member_read"]
@@ -325,6 +507,9 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
         "role": "administrator",
         "status": "active",
     }
+    assert len(repair_audits) == 1
+    assert repair_audits[0].after_json == {"display_name_repaired": True}
+    assert repair_audits[0].reason == "operator_request"
     serialized_audit = str(
         {
             "entity_id": bootstrap_audit.entity_id,
