@@ -50,6 +50,35 @@ class Sanction:
 
 
 @dataclass(frozen=True, slots=True)
+class PaidAssignment:
+    """Paid assignment available for an administrator fraud review."""
+
+    assignment_id: UUID
+    task_title: str
+    performer_display_name: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionAlert:
+    """Privacy-minimal open interaction alert."""
+
+    id: UUID
+    first_display_name: str
+    second_display_name: str
+    interaction_count: int
+    threshold: int
+
+
+@dataclass(frozen=True, slots=True)
+class SanctionCard:
+    """Active sanction with the target's display name."""
+
+    sanction: Sanction
+    target_display_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class OpenFraudCaseCommand:
     """Open an administrator investigation for a paid assignment."""
 
@@ -186,6 +215,12 @@ class ModerationMutationPort(Protocol):
 
     async def list_cases(self, *, limit: int = 20) -> tuple[ModerationCase, ...]: ...
 
+    async def list_paid_assignments(self, *, limit: int = 20) -> tuple[PaidAssignment, ...]: ...
+
+    async def list_open_alerts(self, *, limit: int = 20) -> tuple[InteractionAlert, ...]: ...
+
+    async def list_active_sanctions(self, *, limit: int = 20) -> tuple[SanctionCard, ...]: ...
+
     async def replay(self, outcome: str) -> object: ...
 
     async def open_fraud_case(
@@ -259,8 +294,40 @@ class ModerationService:
         """Return the current queue to active moderation staff."""
         async with self._unit_of_work_factory() as uow:
             actor = await _active_staff(uow, actor_telegram_user_id)
-            del actor
-            return await uow.moderation.list_cases()
+            cases = await uow.moderation.list_cases()
+            return (
+                cases
+                if actor.role is MemberRole.ADMINISTRATOR
+                else tuple(item for item in cases if item.case_type != "fraud_review")
+            )
+
+    async def is_administrator(self, actor_telegram_user_id: int) -> bool:
+        """Return whether this Telegram identity is an active administrator."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await uow.get_member_by_telegram_user_id(actor_telegram_user_id)
+            return bool(
+                actor is not None
+                and actor.status is MemberStatus.ACTIVE
+                and actor.role is MemberRole.ADMINISTRATOR
+            )
+
+    async def paid_assignments(self, actor_telegram_user_id: int) -> tuple[PaidAssignment, ...]:
+        """Return paid assignments that an active administrator may investigate."""
+        async with self._unit_of_work_factory() as uow:
+            await _active_admin(uow, actor_telegram_user_id)
+            return await uow.moderation.list_paid_assignments()
+
+    async def alerts(self, actor_telegram_user_id: int) -> tuple[InteractionAlert, ...]:
+        """Return open interaction alerts to an active administrator."""
+        async with self._unit_of_work_factory() as uow:
+            await _active_admin(uow, actor_telegram_user_id)
+            return await uow.moderation.list_open_alerts()
+
+    async def sanctions(self, actor_telegram_user_id: int) -> tuple[SanctionCard, ...]:
+        """Return active sanctions to an active administrator."""
+        async with self._unit_of_work_factory() as uow:
+            await _active_admin(uow, actor_telegram_user_id)
+            return await uow.moderation.list_active_sanctions()
 
     async def open_fraud_case(self, command: OpenFraudCaseCommand) -> ModerationCase:
         """Open a paid-assignment investigation as an administrator."""
@@ -356,6 +423,13 @@ async def _active_staff(uow: ModerationUnitOfWork, telegram_user_id: int) -> Mem
     actor = await _active_member(uow, telegram_user_id)
     if actor.role not in {MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}:
         raise PermissionError("Only active moderation staff may perform this operation.")
+    return actor
+
+
+async def _active_admin(uow: ModerationUnitOfWork, telegram_user_id: int) -> Member:
+    actor = await _active_member(uow, telegram_user_id)
+    if actor.role is not MemberRole.ADMINISTRATOR:
+        raise PermissionError("Only an active administrator may perform this operation.")
     return actor
 
 

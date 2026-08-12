@@ -27,6 +27,7 @@ from community_bot.application.reputation import (
     SafeProfile,
 )
 from community_bot.domain.reputation import KarmaStep, ReliabilityFacts
+from community_bot.infrastructure.db import conversations as conversation_store
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
     AssignmentModel,
@@ -111,28 +112,26 @@ async def get_draft(
 
 
 async def begin_draft(session: AsyncSession, member_id: UUID, target_id: UUID) -> KarmaDraft:
-    """Create or resume karma state without overwriting another conversation."""
+    """Create or select karma as the one current free-text flow."""
     state = await session.scalar(
         select(ConversationStateModel)
         .where(ConversationStateModel.member_id == member_id)
         .with_for_update()
     )
-    if state is None:
-        state = ConversationStateModel(
+    if (
+        state is None
+        or state.flow_type != "karma"
+        or str(state.payload_json.get("target_id")) != str(target_id)
+    ):
+        await conversation_store.claim_text_flow(
+            session,
             member_id=member_id,
             flow_type="karma",
-            current_step=KarmaStep.VALUE.value,
-            payload_json={"target_id": str(target_id), "value": None, "comment": None},
+            step=KarmaStep.VALUE.value,
+            reference_id=target_id,
             revision=0,
+            payload={"target_id": str(target_id), "value": None, "comment": None},
         )
-        session.add(state)
-        await session.flush()
-    elif state.flow_type != "karma":
-        message = "Another conversation is already active."
-        raise ValueError(message)
-    elif str(state.payload_json.get("target_id")) != str(target_id):
-        message = "Finish or cancel the current karma conversation first."
-        raise ValueError(message)
     draft = await get_draft(session, member_id, for_update=False)
     if draft is None:
         message = "Karma conversation could not be created."
@@ -350,6 +349,7 @@ async def raw_karma(session: AsyncSession, target_id: UUID) -> tuple[RawKarmaVot
         )
         result.append(
             RawKarmaVote(
+                vote_id=row.id,
                 rater_id=row.rater_id,
                 value=row.value,
                 comment=row.comment,

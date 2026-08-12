@@ -8,8 +8,9 @@ import hashlib
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 
+from community_bot.application.assignments import AssignmentCard
 from community_bot.domain.assignments import (
     ACTIVE_ASSIGNMENT_STATUSES,
     OCCUPIED_SLOT_STATUSES,
@@ -24,13 +25,16 @@ from community_bot.infrastructure.db.models import (
     AssignmentModel,
     AssignmentResultVersionModel,
     AssignmentSubmissionDraftModel,
+    MemberModel,
     ModerationCaseModel,
     OutboxEventModel,
     ReliabilityEventModel,
+    TaskModel,
 )
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 _TASK_GATE = "task_assignment"
 _ACTIVE_LIMIT_GATE = "assignment_active_limit"
@@ -115,6 +119,90 @@ async def list_assignments(
     return tuple(_assignment(model) for model in models)
 
 
+async def list_assignment_cards(
+    session: AsyncSession, performer_id: uuid.UUID
+) -> tuple[AssignmentCard, ...]:
+    """List performer cards with task and current case context."""
+    return await _cards(
+        session,
+        AssignmentModel.performer_id == performer_id,
+    )
+
+
+async def list_review_cards(
+    session: AsyncSession, actor_id: uuid.UUID
+) -> tuple[AssignmentCard, ...]:
+    """List assignments owned by this member-author or community reviewer."""
+    return await _cards(
+        session,
+        or_(
+            TaskModel.creator_id == actor_id,
+            TaskModel.created_by_admin_id == actor_id,
+            TaskModel.reviewer_admin_id == actor_id,
+        ),
+        statuses=(AssignmentStatus.SUBMITTED.value, AssignmentStatus.REVIEWER_REQUIRED.value),
+    )
+
+
+async def _cards(
+    session: AsyncSession,
+    predicate: ColumnElement[bool],
+    *,
+    statuses: tuple[str, ...] | None = None,
+) -> tuple[AssignmentCard, ...]:
+    latest_payload = (
+        select(AssignmentResultVersionModel.payload_json)
+        .where(AssignmentResultVersionModel.assignment_id == AssignmentModel.id)
+        .order_by(AssignmentResultVersionModel.version.desc())
+        .limit(1)
+        .correlate(AssignmentModel)
+        .scalar_subquery()
+    )
+    statement = (
+        select(
+            AssignmentModel,
+            TaskModel,
+            MemberModel.display_name,
+            ModerationCaseModel.id,
+            ModerationCaseModel.status,
+            ModerationCaseModel.revision,
+            latest_payload,
+        )
+        .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+        .join(MemberModel, MemberModel.id == AssignmentModel.performer_id)
+        .outerjoin(
+            ModerationCaseModel,
+            ModerationCaseModel.assignment_id == AssignmentModel.id,
+        )
+        .where(predicate)
+        .order_by(AssignmentModel.accepted_at.desc(), AssignmentModel.id)
+        .limit(50)
+    )
+    if statuses is not None:
+        statement = statement.where(AssignmentModel.status.in_(statuses))
+    rows = (await session.execute(statement)).all()
+    cards = []
+    for assignment, task, display_name, case_id, case_status, case_revision, payload in rows:
+        summary = None
+        if isinstance(payload, dict) and isinstance(payload.get("summary"), str):
+            summary = str(payload["summary"])
+        cards.append(
+            AssignmentCard(
+                assignment=_assignment(assignment),
+                task_title=task.title,
+                task_origin=task.origin,
+                task_creator_id=task.creator_id,
+                reviewer_admin_id=task.reviewer_admin_id,
+                performer_display_name=str(display_name),
+                result_summary=summary,
+                case_id=case_id,
+                case_status=case_status,
+                case_revision=case_revision,
+            )
+        )
+    return tuple(cards)
+
+
 async def list_task_assignments(
     session: AsyncSession, task_id: uuid.UUID, *, for_update: bool = False
 ) -> tuple[Assignment, ...]:
@@ -142,6 +230,17 @@ async def cancel_assignment(
     model.cancellation_reason = reason
     await session.flush()
     await append_reliability(session, model.id, "cancelled_performer", model.performer_id, reason)
+    return _assignment(model)
+
+
+async def mark_reviewer_required(session: AsyncSession, assignment_id: uuid.UUID) -> Assignment:
+    """Pause community autoconfirm until another independent reviewer is selected."""
+    model = await session.get(AssignmentModel, assignment_id)
+    if model is None:
+        raise LookupError("Assignment does not exist.")
+    model.status = AssignmentStatus.REVIEWER_REQUIRED.value
+    model.review_deadline_at = None
+    await session.flush()
     return _assignment(model)
 
 
@@ -203,6 +302,17 @@ async def get_submission_draft(
         statement = statement.with_for_update()
     model = await session.scalar(statement)
     return None if model is None else _submission_draft(model)
+
+
+async def delete_submission_draft(session: AsyncSession, draft_id: uuid.UUID) -> None:
+    """Delete one unsubmitted Telegram result draft."""
+    model = await session.get(AssignmentSubmissionDraftModel, draft_id)
+    if model is None:
+        return
+    if model.submitted_result_id is not None:
+        raise AssignmentError("Submitted result draft cannot be deleted.")
+    await session.delete(model)
+    await session.flush()
 
 
 async def create_or_get_submission_draft(

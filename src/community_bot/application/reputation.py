@@ -66,6 +66,7 @@ class KarmaAggregate:
 class RawKarmaVote:
     """Administrative raw karma projection."""
 
+    vote_id: UUID
     rater_id: UUID
     value: int
     comment: str

@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from community_bot.application.member_foundation import FoundationUnitOfWork, UpdateReceipt
+from community_bot.application.tasks import AdministratorOption
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.infrastructure.db import assignments as assignment_store
 from community_bot.infrastructure.db import catalog as catalog_store
+from community_bot.infrastructure.db import conversations as conversation_store
 from community_bot.infrastructure.db import moderation as moderation_store
 from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db import reputation as reputation_store
@@ -223,6 +225,48 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Serialize all reputation mutations for one unordered member pair."""
         await reputation_store.acquire_pair_gate(self._require_session(), first_id, second_id)
 
+    async def get_text_flow(self, member_id: UUID, *, for_update: bool = False):  # noqa: ANN201
+        """Read or lock the member's one free-text owner."""
+        return await conversation_store.get_text_flow(
+            self._require_session(), member_id, for_update=for_update
+        )
+
+    async def claim_text_flow(  # noqa: ANN201, PLR0913
+        self,
+        *,
+        member_id: UUID,
+        flow_type: str,
+        step: str,
+        reference_id: UUID | None,
+        revision: int,
+        payload: dict[str, object] | None = None,
+    ):
+        """Select the only free-text owner in the current transaction."""
+        return await conversation_store.claim_text_flow(
+            self._require_session(),
+            member_id=member_id,
+            flow_type=flow_type,
+            step=step,
+            reference_id=reference_id,
+            revision=revision,
+            payload=payload,
+        )
+
+    async def clear_text_flow(
+        self,
+        *,
+        member_id: UUID,
+        flow_type: str,
+        reference_id: UUID | None = None,
+    ) -> bool:
+        """Clear only the selected free-text owner."""
+        return await conversation_store.clear_text_flow(
+            self._require_session(),
+            member_id=member_id,
+            flow_type=flow_type,
+            reference_id=reference_id,
+        )
+
     @property
     def economy(self) -> SqlAlchemyEconomyMutation:
         """Return the economy adapter bound to this transaction."""
@@ -292,6 +336,14 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """List one performer's assignments."""
         return await assignment_store.list_assignments(self._require_session(), performer_id)
 
+    async def list_assignment_cards(self, performer_id: UUID):  # noqa: ANN201
+        """List performer assignment cards."""
+        return await assignment_store.list_assignment_cards(self._require_session(), performer_id)
+
+    async def list_review_cards(self, actor_id: UUID):  # noqa: ANN201
+        """List reviewable assignment cards for one actor."""
+        return await assignment_store.list_review_cards(self._require_session(), actor_id)
+
     async def list_task_assignments(
         self, task_id: UUID, *, for_update: bool = False
     ) -> tuple[Assignment, ...]:
@@ -305,6 +357,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await assignment_store.cancel_assignment(
             self._require_session(), assignment_id, reason
         )
+
+    async def mark_reviewer_required(self, assignment_id: UUID) -> Assignment:
+        """Pause a submitted community result until reviewer replacement."""
+        return await assignment_store.mark_reviewer_required(self._require_session(), assignment_id)
 
     async def append_assignment_result(
         self,
@@ -337,6 +393,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await assignment_store.get_submission_draft(
             self._require_session(), draft_id, for_update=for_update
         )
+
+    async def delete_submission_draft(self, draft_id: UUID) -> None:
+        """Delete one unsubmitted result-input draft."""
+        await assignment_store.delete_submission_draft(self._require_session(), draft_id)
 
     async def create_or_get_submission_draft(
         self, *, assignment_id: UUID, performer_id: UUID
@@ -474,10 +534,15 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), code=code, enabled=enabled
         )
 
-    async def create_task_draft(self, *, creator_id: UUID, template_id: UUID) -> TaskDraft:
+    async def create_task_draft(
+        self, *, creator_id: UUID, template_id: UUID, origin: str = "member"
+    ) -> TaskDraft:
         """Create a new current persistent task draft."""
         return await task_store.create_task_draft(
-            self._require_session(), creator_id=creator_id, template_id=template_id
+            self._require_session(),
+            creator_id=creator_id,
+            template_id=template_id,
+            origin=origin,
         )
 
     async def get_current_task_draft(self, creator_id: UUID) -> TaskDraft | None:
@@ -501,6 +566,23 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     async def save_task_draft(self, draft: TaskDraft) -> TaskDraft:
         """Persist one validated task draft snapshot."""
         return await task_store.save_task_draft(self._require_session(), draft)
+
+    async def list_active_administrators(
+        self, *, exclude_id: UUID
+    ) -> tuple[AdministratorOption, ...]:
+        """Return active administrators except one creator."""
+        models = (
+            await self._require_session().scalars(
+                select(MemberModel)
+                .where(
+                    MemberModel.role == MemberRole.ADMINISTRATOR.value,
+                    MemberModel.status == MemberStatus.ACTIVE.value,
+                    MemberModel.id != exclude_id,
+                )
+                .order_by(MemberModel.display_name, MemberModel.id)
+            )
+        ).all()
+        return tuple(AdministratorOption(model.id, model.display_name) for model in models)
 
     async def delete_task_draft(self, draft_id: UUID) -> None:
         """Delete one unfinished task creation draft."""
@@ -533,6 +615,21 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Persist a creation-owned task status transition."""
         return await task_store.save_task_status(
             self._require_session(), task_id=task_id, status=status
+        )
+
+    async def save_community_reviewer(
+        self,
+        *,
+        task_id: UUID,
+        reviewer_id: UUID,
+        now: datetime.datetime,
+    ) -> PublishedTask:
+        """Replace a community reviewer and reopen assignments waiting for one."""
+        return await task_store.save_community_reviewer(
+            self._require_session(),
+            task_id=task_id,
+            reviewer_id=reviewer_id,
+            now=now,
         )
 
     async def list_owned_tasks(

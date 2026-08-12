@@ -12,12 +12,15 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
+from community_bot.application.moderation import ModerateKarmaCommand
 from community_bot.application.reputation import ReputationError
 from community_bot.domain.reputation import ProfileUnavailableError
 
 if TYPE_CHECKING:
     from decimal import Decimal
 
+    from community_bot.application.conversations import TextFlow
+    from community_bot.application.moderation import ModerationService
     from community_bot.application.reputation import (
         KarmaDraft,
         LeaderboardPage,
@@ -29,6 +32,7 @@ if TYPE_CHECKING:
 
 def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injected service.
     service: ReputationService,
+    moderation: ModerationService | None = None,
 ) -> Router:
     """Build the complete reputation and profile transport boundary."""
     router = Router(name="reputation")
@@ -53,18 +57,7 @@ def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injecte
             await message.answer("Профиль недоступен.")
 
     async def members(message: Message) -> None:
-        if message.from_user is None:
-            return
-        try:
-            page = await service.members(telegram_user_id=message.from_user.id)
-            if not page.items:
-                await message.answer("Каталог участников пока пуст.")
-                return
-            await message.answer(
-                "\n".join(f"{item.display_name} — {item.member_id}" for item in page.items)
-            )
-        except ProfileUnavailableError:
-            await message.answer("Профиль недоступен.")
+        await send_member_catalog(message, service, moderation)
 
     async def leaderboard(message: Message) -> None:
         if message.from_user is None:
@@ -89,12 +82,41 @@ def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injecte
         except (ValueError, PermissionError):
             await message.answer("Оценка недоступна.")
 
+    async def profile_callback(callback: CallbackQuery) -> None:
+        try:
+            target_id = UUID(hex=str(callback.data).rsplit(":", 1)[1])
+            view = await service.profile(
+                telegram_user_id=callback.from_user.id,
+                target_id=target_id,
+            )
+            await callback.answer()
+            if callback.message is not None:
+                await callback.message.answer(present_profile(view))
+        except (ValueError, ProfileUnavailableError):
+            await callback.answer("Профиль недоступен.", show_alert=True)
+
+    async def karma_begin_callback(callback: CallbackQuery, event_update: Update) -> None:
+        try:
+            target_id = UUID(hex=str(callback.data).rsplit(":", 1)[1])
+            draft = await service.begin_vote(
+                update_id=event_update.update_id,
+                telegram_user_id=callback.from_user.id,
+                target_id=target_id,
+            )
+            await callback.answer()
+            if callback.message is not None:
+                await callback.message.answer(
+                    "Выберите оценку.", reply_markup=_karma_value_keyboard(draft)
+                )
+        except (ValueError, PermissionError, ReputationError):
+            await callback.answer("Оценка недоступна.", show_alert=True)
+
     async def karma_value(callback: CallbackQuery, event_update: Update) -> None:
         if callback.from_user is None or callback.data is None:
             return
         try:
             _, _, revision, raw_value = callback.data.split(":", 3)
-            draft = await service.save_value(
+            await service.save_value(
                 update_id=event_update.update_id,
                 telegram_user_id=callback.from_user.id,
                 expected_revision=int(revision),
@@ -102,10 +124,7 @@ def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injecte
             )
             await callback.answer()
             if callback.message is not None:
-                await callback.message.answer(
-                    "Добавьте комментарий от 10 до 300 символов: "
-                    f"/karma_comment {draft.revision} <текст>"
-                )
+                await callback.message.answer("Добавьте комментарий от 10 до 300 символов.")
         except (ValueError, ReputationError):
             await callback.answer("Шаг устарел.", show_alert=True)
 
@@ -164,6 +183,63 @@ def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injecte
             return
         raise SkipHandler
 
+    async def raw_karma(callback: CallbackQuery, event_update: Update) -> None:
+        try:
+            target_id = UUID(hex=str(callback.data).rsplit(":", 1)[1])
+            rows = await service.raw_karma(
+                update_id=event_update.update_id,
+                telegram_user_id=callback.from_user.id,
+                target_id=target_id,
+            )
+            await callback.answer()
+            if callback.message is None:
+                return
+            if not rows:
+                await callback.message.answer("У участника пока нет оценок.")
+                return
+            for row in rows:
+                await callback.message.answer(
+                    f"Оценка: {row.value}\nКомментарий: {row.comment}\n"
+                    f"Версия: {row.revision}\nИзменений: {len(row.history)}",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="Исключить",
+                                    callback_data=(f"karma:mod:{row.vote_id.hex}:{row.revision}:x"),
+                                ),
+                                InlineKeyboardButton(
+                                    text="Вернуть",
+                                    callback_data=(f"karma:mod:{row.vote_id.hex}:{row.revision}:r"),
+                                ),
+                            ]
+                        ]
+                    ),
+                )
+        except (ValueError, PermissionError, ReputationError, ProfileUnavailableError):
+            await callback.answer("Проверка кармы недоступна.", show_alert=True)
+
+    async def moderate_karma(callback: CallbackQuery, event_update: Update) -> None:
+        if moderation is None:
+            await callback.answer("Модерация кармы недоступна.", show_alert=True)
+            return
+        try:
+            _, _, raw_id, raw_revision, action = str(callback.data).split(":", 4)
+            result = await moderation.moderate_karma(
+                ModerateKarmaCommand(
+                    update_id=event_update.update_id,
+                    actor_telegram_user_id=callback.from_user.id,
+                    vote_id=UUID(hex=raw_id),
+                    vote_revision=int(raw_revision),
+                    command_id=UUID(int=event_update.update_id % (1 << 128)),
+                    exclude=action == "x",
+                    reason="Решение администратора через Telegram",
+                )
+            )
+            await callback.answer("Оценка исключена." if result else "Оценка обновлена.")
+        except (ValueError, PermissionError, LookupError):
+            await callback.answer("Оценка или её версия уже изменилась.", show_alert=True)
+
     router.message.register(
         profile,
         Command("profile"),
@@ -177,7 +253,96 @@ def build_reputation_router(  # noqa: C901, PLR0915 - handlers share one injecte
     router.message.register(karma_cancel, Command("cancel"))
     router.callback_query.register(karma_value, F.data.startswith("karma:value:"))
     router.callback_query.register(karma_confirm, F.data.startswith("karma:confirm:"))
+    router.callback_query.register(profile_callback, F.data.startswith("member:profile:"))
+    router.callback_query.register(karma_begin_callback, F.data.startswith("karma:begin:"))
+    router.callback_query.register(raw_karma, F.data.startswith("karma:raw:"))
+    router.callback_query.register(moderate_karma, F.data.startswith("karma:mod:"))
     return router
+
+
+async def send_member_catalog(
+    message: Message,
+    service: ReputationService,
+    moderation: ModerationService | None = None,
+) -> None:
+    """Render member cards and the actions available to the current actor."""
+    if message.from_user is None:
+        return
+    try:
+        page = await service.members(telegram_user_id=message.from_user.id)
+        admin_actions = bool(
+            moderation is not None and await moderation.is_administrator(message.from_user.id)
+        )
+        if not page.items:
+            await message.answer("Каталог участников пока пуст.")
+            return
+        for item in page.items:
+            buttons = [
+                InlineKeyboardButton(
+                    text="Открыть профиль", callback_data=f"member:profile:{item.member_id.hex}"
+                ),
+                InlineKeyboardButton(
+                    text="Оценить", callback_data=f"karma:begin:{item.member_id.hex}"
+                ),
+            ]
+            if admin_actions:
+                buttons.extend(
+                    [
+                        InlineKeyboardButton(
+                            text="Проверить карму",
+                            callback_data=f"karma:raw:{item.member_id.hex}",
+                        ),
+                        InlineKeyboardButton(
+                            text="Предупредить",
+                            callback_data=f"mod:warn:{item.member_id.hex}",
+                        ),
+                        InlineKeyboardButton(
+                            text="Ограничить на 7 дней",
+                            callback_data=f"mod:restrict:{item.member_id.hex}",
+                        ),
+                    ]
+                )
+            await message.answer(
+                f"{item.display_name}\nУровень: {item.level_number}\n"
+                f"Карма: {item.karma.score} ({item.karma.count})",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button] for button in buttons]),
+            )
+    except ProfileUnavailableError:
+        await message.answer("Профиль недоступен.")
+
+
+async def handle_karma_text(
+    service: ReputationService,
+    owner: TextFlow,
+    message: Message,
+    event_update: Update,
+) -> bool:
+    """Consume a comment only for the selected karma flow."""
+    if owner.flow_type != "karma" or owner.step != "comment" or message.from_user is None:
+        return False
+    try:
+        draft = await service.save_comment(
+            update_id=event_update.update_id,
+            telegram_user_id=message.from_user.id,
+            expected_revision=owner.revision,
+            comment=message.text or "",
+        )
+        await message.answer(
+            "Проверьте оценку и подтвердите.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Подтвердить",
+                            callback_data=f"karma:confirm:{draft.revision}",
+                        )
+                    ]
+                ]
+            ),
+        )
+    except (ValueError, ReputationError):
+        await message.answer("Комментарий должен содержать от 10 до 300 символов.")
+    return True
 
 
 def present_profile(profile: SafeProfile) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 from typing import TYPE_CHECKING
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     from community_bot.application.tasks import TaskDraft, TaskPreview, TaskService
 
 _CALLBACK_PREFIX = "task:pub:"
+_REVIEWER_PREFIX = "task:reviewer:"
+_STEP_PREFIX = "task:step:"
+_REPLACE_REVIEWER_PREFIX = "task:rr:"
+_SELECT_REVIEWER_PREFIX = "task:rs:"
 _CALLBACK_LIMIT = 64
 
 
@@ -45,7 +50,7 @@ def build_task_router(
             if draft is None:
                 await message.answer("Активного черновика нет. Выберите шаблон в каталоге.")
             else:
-                await message.answer(_draft_prompt(draft))
+                await _send_draft_prompt(message, draft)
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
@@ -58,7 +63,7 @@ def build_task_router(
                 actor_telegram_user_id=message.from_user.id,
                 draft_id=UUID(_required_tail(message.text)),
             )
-            await message.answer(_draft_prompt(draft))
+            await _send_draft_prompt(message, draft)
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
@@ -97,6 +102,111 @@ def build_task_router(
             await callback.answer("Задание опубликовано.")
             if isinstance(callback.message, Message):
                 await callback.message.answer(f"Задание опубликовано: {task.title}")
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
+
+    async def handle_reviewer(callback: CallbackQuery, event_update: Update) -> None:
+        try:
+            reviewer_id = UUID(hex=str(callback.data).removeprefix(_REVIEWER_PREFIX))
+            await service.select_community_reviewer(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                reviewer_id=reviewer_id,
+            )
+            await callback.answer("Проверяющий выбран.")
+            if isinstance(callback.message, Message):
+                await callback.message.answer(
+                    "Опишите задание обычным сообщением. Для отмены — /cancel."
+                )
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
+
+    async def handle_step(callback: CallbackQuery, event_update: Update) -> None:
+        try:
+            action = str(callback.data).removeprefix(_STEP_PREFIX)
+            draft = await service.current(actor_telegram_user_id=callback.from_user.id)
+            if draft is None:
+                raise TaskError("Task draft does not exist.")
+            if action.startswith("days:"):
+                days = int(action.removeprefix("days:"))
+                value: object = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=days)
+            elif action == "online":
+                value = (TaskFormat.ONLINE, None)
+            elif action == "materials:none":
+                value = {"text": "Дополнительные материалы не требуются"}
+            elif action.startswith("slots:"):
+                value = int(action.removeprefix("slots:"))
+            elif action == "preview":
+                preview = await service.preview(
+                    update_id=event_update.update_id,
+                    actor_telegram_user_id=callback.from_user.id,
+                    draft_id=draft.id,
+                    expected_revision=draft.revision,
+                )
+                await callback.answer()
+                if isinstance(callback.message, Message):
+                    await _send_preview(callback.message, preview)
+                return
+            else:
+                raise TaskError("Task step callback is invalid.")
+            updated = await service.advance(
+                AdvanceDraftCommand(
+                    event_update.update_id,
+                    callback.from_user.id,
+                    draft.id,
+                    draft.current_step,
+                    draft.revision,
+                    value,
+                )
+            )
+            await callback.answer()
+            if isinstance(callback.message, Message):
+                await _send_draft_prompt(callback.message, updated)
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
+
+    async def replace_reviewer(callback: CallbackQuery) -> None:
+        try:
+            task_id = _decode_uuid(str(callback.data).removeprefix(_REPLACE_REVIEWER_PREFIX))
+            reviewers = await service.community_reviewers(callback.from_user.id)
+            if not reviewers:
+                raise TaskError("No independent community reviewer is available.")
+            await callback.answer()
+            if isinstance(callback.message, Message):
+                await callback.message.answer(
+                    "Выберите нового независимого проверяющего:",
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text=item.display_name,
+                                    callback_data=(
+                                        f"{_SELECT_REVIEWER_PREFIX}{_encode_uuid(task_id)}:"
+                                        f"{_encode_uuid(item.id)}"
+                                    ),
+                                )
+                            ]
+                            for item in reviewers
+                        ]
+                    ),
+                )
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
+
+    async def select_replacement(callback: CallbackQuery, event_update: Update) -> None:
+        try:
+            raw_task, raw_reviewer = (
+                str(callback.data).removeprefix(_SELECT_REVIEWER_PREFIX).split(":", 1)
+            )
+            await service.replace_community_reviewer(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                task_id=_decode_uuid(raw_task),
+                reviewer_id=_decode_uuid(raw_reviewer),
+            )
+            await callback.answer("Проверяющий заменён.")
+            if isinstance(callback.message, Message):
+                await callback.message.answer("Результат снова доступен для проверки.")
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await callback.answer(_friendly_error(error), show_alert=True)
 
@@ -145,6 +255,16 @@ def build_task_router(
     router.message.register(handle_owned, Command("my_tasks"))
     router.message.register(handle_cancel, Command("task_cancel"))
     router.callback_query.register(handle_publish, F.data.startswith(_CALLBACK_PREFIX))
+    router.callback_query.register(handle_reviewer, F.data.startswith(_REVIEWER_PREFIX))
+    router.callback_query.register(handle_step, F.data.startswith(_STEP_PREFIX))
+    router.callback_query.register(
+        replace_reviewer,
+        F.data.startswith(_REPLACE_REVIEWER_PREFIX),
+    )
+    router.callback_query.register(
+        select_replacement,
+        F.data.startswith(_SELECT_REVIEWER_PREFIX),
+    )
     if include_text_fallback:
         router.message.register(handle_answer, F.text & ~F.text.startswith("/"))
     return router
@@ -172,8 +292,8 @@ async def handle_task_text(service: TaskService, message: Message, event_update:
                 value,
             )
         )
-        await message.answer(_draft_prompt(updated))
-    except (TaskError, PermissionError, LookupError, ValueError, json.JSONDecodeError) as error:
+        await _send_draft_prompt(message, updated)
+    except (TaskError, PermissionError, LookupError, ValueError) as error:
         await message.answer(_friendly_error(error))
     return True
 
@@ -189,38 +309,106 @@ async def _send_preview(message: Message, preview: TaskPreview) -> None:
         f"{preview.template_name}\n"
         f"{preview.credit_reward_per_performer} кредита × "
         f"{preview.draft.performer_slots} = {preview.reserved_credit_total}\n"
-        f"Срок: {preview.draft.deadline_at}",
+        f"Срок: {preview.draft.deadline_at:%d.%m.%Y %H:%M} UTC",
         reply_markup=markup,
     )
 
 
-def _parse_step_value(step: TaskDraftStep, text: str) -> object:
-    if step in {TaskDraftStep.INPUT, TaskDraftStep.MATERIALS}:
-        value = json.loads(text)
-        if not isinstance(value, dict):
-            raise TaskError("Task JSON answer must be an object.")
-        return value
+def _parse_step_value(step: TaskDraftStep, text: str) -> object:  # noqa: PLR0911
+    clean = text.strip()
+    if step is TaskDraftStep.INPUT:
+        if clean.startswith("{"):
+            value = json.loads(clean)
+            if not isinstance(value, dict):
+                raise TaskError("Task JSON answer must be an object.")
+            return value
+        return {"_plain_text": clean}
     if step is TaskDraftStep.DEADLINE:
-        return datetime.datetime.fromisoformat(text)
+        return datetime.datetime.fromisoformat(clean)
+    if step is TaskDraftStep.MATERIALS:
+        if clean.startswith("{"):
+            value = json.loads(clean)
+            if not isinstance(value, dict):
+                raise TaskError("Task JSON answer must be an object.")
+            return value
+        return {"text": clean}
     if step is TaskDraftStep.FORMAT:
-        format_value, _, city = text.partition(" ")
-        return TaskFormat(format_value), city.strip() or None
+        format_value, separator, city = clean.partition(" ")
+        if format_value in {TaskFormat.ONLINE.value, TaskFormat.OFFLINE.value}:
+            return TaskFormat(format_value), city.strip() if separator else None
+        return TaskFormat.OFFLINE, clean
     if step is TaskDraftStep.SLOTS:
-        return int(text)
+        return int(clean)
     raise StaleTaskDraftError("Task draft is not waiting for a text answer.")
 
 
 def _draft_prompt(draft: TaskDraft) -> str:
     prompts = {
-        TaskDraftStep.INPUT: "Отправьте JSON с данными шаблона.",
-        TaskDraftStep.DEADLINE: "Отправьте срок в ISO 8601 с часовым поясом.",
-        TaskDraftStep.FORMAT: "Отправьте online или offline и город.",
-        TaskDraftStep.MATERIALS: "Отправьте JSON материалов: text и/или url.",
-        TaskDraftStep.SLOTS: "Отправьте число исполнителей, затем /task_preview.",
-        TaskDraftStep.PREVIEW: "Черновик готов. Используйте /task_preview.",
+        TaskDraftStep.INPUT: "Опишите задание обычным сообщением.",
+        TaskDraftStep.DEADLINE: "Выберите срок выполнения.",
+        TaskDraftStep.FORMAT: "Выберите онлайн или отправьте город для очного задания.",
+        TaskDraftStep.MATERIALS: "Отправьте материалы или нажмите «Не нужны».",
+        TaskDraftStep.SLOTS: "Выберите число исполнителей.",
+        TaskDraftStep.PREVIEW: "Черновик готов. Откройте предпросмотр.",
         TaskDraftStep.PUBLISHED: "Этот черновик уже опубликован.",
     }
     return prompts[draft.current_step]
+
+
+async def _send_draft_prompt(message: Message, draft: TaskDraft) -> None:
+    rows: list[list[InlineKeyboardButton]] = []
+    if draft.current_step is TaskDraftStep.DEADLINE:
+        rows = [
+            [
+                InlineKeyboardButton(text="1 день", callback_data=f"{_STEP_PREFIX}days:1"),
+                InlineKeyboardButton(text="3 дня", callback_data=f"{_STEP_PREFIX}days:3"),
+                InlineKeyboardButton(text="7 дней", callback_data=f"{_STEP_PREFIX}days:7"),
+            ]
+        ]
+    elif draft.current_step is TaskDraftStep.FORMAT:
+        rows = [[InlineKeyboardButton(text="Онлайн", callback_data=f"{_STEP_PREFIX}online")]]
+    elif draft.current_step is TaskDraftStep.MATERIALS:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="Не нужны",
+                    callback_data=f"{_STEP_PREFIX}materials:none",
+                )
+            ]
+        ]
+    elif draft.current_step is TaskDraftStep.SLOTS:
+        if draft.performer_slots is None:
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        text=str(value),
+                        callback_data=f"{_STEP_PREFIX}slots:{value}",
+                    )
+                    for value in range(1, 4)
+                ]
+            ]
+        else:
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        text="Предпросмотр",
+                        callback_data=f"{_STEP_PREFIX}preview",
+                    )
+                ]
+            ]
+    elif draft.current_step is TaskDraftStep.PREVIEW:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="Предпросмотр",
+                    callback_data=f"{_STEP_PREFIX}preview",
+                )
+            ]
+        ]
+    await message.answer(
+        _draft_prompt(draft),
+        reply_markup=None if not rows else InlineKeyboardMarkup(inline_keyboard=rows),
+    )
 
 
 def _parse_publish_callback(value: str) -> tuple[UUID, int]:
@@ -231,6 +419,19 @@ def _parse_publish_callback(value: str) -> tuple[UUID, int]:
     if not separator:
         raise TaskError("Task publish callback is invalid.")
     return UUID(hex=draft_hex), int(revision)
+
+
+def reviewer_replacement_callback(task_id: UUID) -> str:
+    """Build a compact callback for the visible reviewer-replacement action."""
+    return f"{_REPLACE_REVIEWER_PREFIX}{_encode_uuid(task_id)}"
+
+
+def _encode_uuid(value: UUID) -> str:
+    return base64.urlsafe_b64encode(value.bytes).decode().rstrip("=")
+
+
+def _decode_uuid(value: str) -> UUID:
+    return UUID(bytes=base64.urlsafe_b64decode(f"{value}=="))
 
 
 def _command_tail(text: str | None) -> str:

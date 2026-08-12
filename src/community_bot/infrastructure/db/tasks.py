@@ -6,7 +6,7 @@ import datetime
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, exists, func, select, text, tuple_, update
+from sqlalchemy import delete, exists, func, or_, select, text, tuple_, update
 
 from community_bot.application.tasks import PublishedTask, TaskDraft
 from community_bot.domain.assignments import AssignmentStatus
@@ -50,7 +50,11 @@ async def acquire_task_command_gate(session: AsyncSession, command_id: uuid.UUID
 
 
 async def create_task_draft(
-    session: AsyncSession, *, creator_id: uuid.UUID, template_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    creator_id: uuid.UUID,
+    template_id: uuid.UUID,
+    origin: str = "member",
 ) -> TaskDraft:
     """Create a new current draft while preserving previous drafts."""
     await session.execute(
@@ -62,6 +66,7 @@ async def create_task_draft(
     model = TaskCreationDraftModel(
         creator_id=creator_id,
         template_id=template_id,
+        origin=origin,
         current_step=TaskDraftStep.INPUT.value,
         revision=0,
         is_current=True,
@@ -129,6 +134,8 @@ async def save_task_draft(session: AsyncSession, draft: TaskDraft) -> TaskDraft:
     if model is None:
         raise LookupError("Task draft does not exist.")
     model.input_payload_json = draft.input_payload
+    model.origin = draft.origin
+    model.reviewer_admin_id = draft.reviewer_admin_id
     model.deadline_at = draft.deadline_at
     model.format = None if draft.format is None else draft.format.value
     model.city = draft.city
@@ -179,12 +186,15 @@ async def insert_published_task(
     creator = await session.get(MemberModel, draft.creator_id)
     if creator is None:
         raise LookupError("Task creator does not exist.")
+    community = draft.origin == "community"
     model = TaskModel(
-        origin="member",
+        origin=draft.origin,
         template_id=template.id,
         template_version=template.version,
-        creator_id=draft.creator_id,
-        author_display_name=creator.display_name,
+        creator_id=None if community else draft.creator_id,
+        created_by_admin_id=draft.creator_id if community else None,
+        reviewer_admin_id=draft.reviewer_admin_id if community else None,
+        author_display_name="Сообщество" if community else creator.display_name,
         category_id=template.category_id,
         title=template.name,
         description=template.description,
@@ -193,7 +203,7 @@ async def insert_published_task(
         input_payload_json=draft.input_payload,
         credit_reward_per_performer=template.credit_reward,
         performer_slots=draft.performer_slots,
-        reserved_credit_total=template.credit_reward * draft.performer_slots,
+        reserved_credit_total=0 if community else template.credit_reward * draft.performer_slots,
         estimated_minutes=template.estimated_minutes,
         minimum_level=template.minimum_level,
         format=draft.format.value,
@@ -239,6 +249,30 @@ async def save_task_status(
     return _task(model)
 
 
+async def save_community_reviewer(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    reviewer_id: uuid.UUID,
+    now: datetime.datetime,
+) -> PublishedTask:
+    """Replace a community reviewer and reopen only assignments waiting for one."""
+    model = await session.get(TaskModel, task_id)
+    if model is None:
+        raise LookupError("Task does not exist.")
+    model.reviewer_admin_id = reviewer_id
+    await session.execute(
+        update(AssignmentModel)
+        .where(
+            AssignmentModel.task_id == task_id,
+            AssignmentModel.status == "reviewer_required",
+        )
+        .values(status="submitted", review_deadline_at=now + datetime.timedelta(hours=72))
+    )
+    await session.flush()
+    return _task(model)
+
+
 async def list_owned_tasks(  # noqa: PLR0913 - explicit keyset fields keep the query typed.
     session: AsyncSession,
     *,
@@ -249,7 +283,13 @@ async def list_owned_tasks(  # noqa: PLR0913 - explicit keyset fields keep the q
     before_id: uuid.UUID | None,
 ) -> tuple[PublishedTask, ...]:
     """Return the latest owned tasks without exposing other creators."""
-    statement = select(TaskModel).where(TaskModel.creator_id == creator_id)
+    statement = select(TaskModel).where(
+        or_(
+            TaskModel.creator_id == creator_id,
+            TaskModel.created_by_admin_id == creator_id,
+            TaskModel.reviewer_admin_id == creator_id,
+        )
+    )
     if status is not None:
         statement = statement.where(TaskModel.status == status.value)
     if before_created_at is not None and before_id is not None:
@@ -340,6 +380,8 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
     return TaskDraft(
         id=model.id,
         creator_id=model.creator_id,
+        origin=model.origin,
+        reviewer_admin_id=model.reviewer_admin_id,
         template_id=model.template_id,
         input_payload=None if model.input_payload_json is None else dict(model.input_payload_json),
         deadline_at=model.deadline_at,
@@ -358,6 +400,8 @@ def _task(model: TaskModel) -> PublishedTask:
     return PublishedTask(
         id=model.id,
         creator_id=model.creator_id,
+        created_by_admin_id=model.created_by_admin_id,
+        reviewer_admin_id=model.reviewer_admin_id,
         origin=model.origin,
         template_id=model.template_id,
         template_version=model.template_version,

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from community_bot.application.catalog import CatalogTemplate
+    from community_bot.application.conversations import TextFlow
     from community_bot.application.economy import ActiveProductConfig, EconomyMutationPort
     from community_bot.application.tasks import PublishedTask
     from community_bot.domain.economy import ResolvedLevel
@@ -101,6 +102,22 @@ class ConfirmSubmissionDraftCommand:
     expected_revision: int
 
 
+@dataclass(frozen=True, slots=True)
+class AssignmentCard:
+    """Privacy-safe Telegram projection for one assignment and its task."""
+
+    assignment: Assignment
+    task_title: str
+    task_origin: str
+    task_creator_id: UUID | None
+    reviewer_admin_id: UUID | None
+    performer_display_name: str
+    result_summary: str | None
+    case_id: UUID | None
+    case_status: str | None
+    case_revision: int | None
+
+
 class AssignmentUnitOfWork(Protocol):
     """Caller-owned transaction required by assignment workflows."""
 
@@ -127,6 +144,8 @@ class AssignmentUnitOfWork(Protocol):
     async def lock_assignment(self, assignment_id: UUID) -> Assignment | None: ...
     async def get_assignment(self, assignment_id: UUID) -> Assignment | None: ...
     async def list_assignments(self, performer_id: UUID) -> tuple[Assignment, ...]: ...
+    async def list_assignment_cards(self, performer_id: UUID) -> tuple[AssignmentCard, ...]: ...
+    async def list_review_cards(self, actor_id: UUID) -> tuple[AssignmentCard, ...]: ...
     async def list_task_assignments(
         self, task_id: UUID, *, for_update: bool = False
     ) -> tuple[Assignment, ...]: ...
@@ -143,6 +162,7 @@ class AssignmentUnitOfWork(Protocol):
     async def get_submission_draft(
         self, draft_id: UUID, *, for_update: bool = False
     ) -> SubmissionDraft | None: ...
+    async def delete_submission_draft(self, draft_id: UUID) -> None: ...
     async def create_or_get_submission_draft(
         self, *, assignment_id: UUID, performer_id: UUID
     ) -> SubmissionDraft: ...
@@ -165,6 +185,7 @@ class AssignmentUnitOfWork(Protocol):
         outcome: str,
         now: datetime.datetime,
     ) -> Assignment: ...
+    async def mark_reviewer_required(self, assignment_id: UUID) -> Assignment: ...
     async def open_assignment_dispute(
         self, *, assignment_id: UUID, performer_id: UUID, command_id: UUID, comment: str
     ) -> UUID: ...
@@ -178,6 +199,22 @@ class AssignmentUnitOfWork(Protocol):
     async def add_receipt(
         self, *, update_id: int, update_type: str, actor_id: UUID | None, outcome_code: str
     ) -> None: ...
+    async def get_text_flow(
+        self, member_id: UUID, *, for_update: bool = False
+    ) -> TextFlow | None: ...
+    async def claim_text_flow(  # noqa: PLR0913
+        self,
+        *,
+        member_id: UUID,
+        flow_type: str,
+        step: str,
+        reference_id: UUID | None,
+        revision: int,
+        payload: dict[str, object] | None = None,
+    ) -> object: ...
+    async def clear_text_flow(
+        self, *, member_id: UUID, flow_type: str, reference_id: UUID | None = None
+    ) -> bool: ...
     async def commit(self) -> None: ...
     async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask: ...
 
@@ -186,6 +223,38 @@ class AssignmentUnitOfWorkFactory(Protocol):
     """Create isolated assignment transactions."""
 
     def __call__(self) -> AbstractAsyncContextManager[AssignmentUnitOfWork]: ...
+
+
+class AssignmentDeadlineSource(Protocol):
+    """List bounded tasks whose acceptance deadline has arrived."""
+
+    async def due_task_ids(self, *, now: datetime.datetime, limit: int) -> Sequence[UUID]: ...
+
+
+class AssignmentDeadlineWorker:
+    """Finalize due assignments through the canonical transactional service."""
+
+    def __init__(
+        self,
+        source: AssignmentDeadlineSource,
+        service: AssignmentService,
+        *,
+        batch_size: int = 25,
+    ) -> None:
+        self._source = source
+        self._service = service
+        self._batch_size = batch_size
+
+    async def tick(self, *, now: datetime.datetime) -> int:
+        """Finalize one bounded due-task batch and return its task count."""
+        task_ids = await self._source.due_task_ids(now=now, limit=self._batch_size)
+        for task_id in task_ids:
+            await self._service.finalize_deadline(
+                task_id=task_id,
+                command_id=UUID(int=task_id.int ^ int(now.timestamp())),
+                now=now,
+            )
+        return len(task_ids)
 
 
 class AssignmentService:
@@ -209,6 +278,8 @@ class AssignmentService:
             if task is None:
                 raise LookupError("Task does not exist.")
             actor = (await uow.lock_members((actor.id,)))[actor.id]
+            if task.origin == "community" and task.reviewer_admin_id == actor.id:
+                raise PermissionError("Community reviewer cannot perform the task.")
             level = await uow.resolve_member_level(actor.id)
             task_snapshot = task.acceptance_snapshot()
             from community_bot.domain.tasks import validate_acceptance_actor
@@ -237,6 +308,92 @@ class AssignmentService:
             actor = await _actor(uow, actor_telegram_user_id)
             return await uow.list_assignments(actor.id)
 
+    async def cards(self, actor_telegram_user_id: int) -> tuple[AssignmentCard, ...]:
+        """Return visible performer cards without exposing internal identifiers."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _actor(uow, actor_telegram_user_id)
+            return await uow.list_assignment_cards(actor.id)
+
+    async def begin_dispute(
+        self, *, update_id: int, actor_telegram_user_id: int, assignment_id: UUID
+    ) -> Assignment:
+        """Select one rejected assignment as the current private comment flow."""
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin(uow, update_id)
+            if replay is not None:
+                return await _assignment_replay(uow, replay)
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            actor = await _actor(uow, actor_telegram_user_id)
+            assignment = await uow.get_assignment(assignment_id)
+            if assignment is None or assignment.performer_id != actor.id:
+                raise PermissionError("Assignment is not owned by this member.")
+            require_dispute_allowed(assignment, now=datetime.datetime.now(datetime.UTC))
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="assignment_dispute",
+                step="comment",
+                reference_id=assignment.id,
+                revision=0,
+            )
+            await uow.add_receipt(
+                update_id=update_id,
+                update_type="assignment_workflow",
+                actor_id=actor.id,
+                outcome_code=f"assignment:{assignment.id}",
+            )
+            await uow.commit()
+            return assignment
+
+    async def cancel_text_flow(
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        flow_type: str,
+        reference_id: UUID,
+    ) -> bool:
+        """Cancel only the selected assignment result or dispute input."""
+        if flow_type not in {"assignment_result", "assignment_dispute"}:
+            return False
+        async with self._unit_of_work_factory() as uow:
+            await uow.acquire_update_gate(update_id)
+            stored = await uow.get_receipt_outcome(update_id)
+            if stored is not None:
+                if stored != f"assignment_flow_cancelled:{flow_type}:{reference_id}":
+                    raise AssignmentError("Telegram update belongs to another operation.")
+                return True
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            actor = await _actor(uow, actor_telegram_user_id)
+            owner = await uow.get_text_flow(actor.id, for_update=True)
+            if owner is None or owner.flow_type != flow_type or owner.reference_id != reference_id:
+                return False
+            if flow_type == "assignment_result":
+                draft = await uow.get_submission_draft(reference_id, for_update=True)
+                if draft is None or draft.performer_id != actor.id:
+                    raise PermissionError("Submission draft is not owned by this member.")
+                if draft.submitted_result_id is None:
+                    await uow.delete_submission_draft(draft.id)
+            await uow.clear_text_flow(
+                member_id=actor.id,
+                flow_type=flow_type,
+                reference_id=reference_id,
+            )
+            outcome = f"assignment_flow_cancelled:{flow_type}:{reference_id}"
+            await uow.add_receipt(
+                update_id=update_id,
+                update_type="assignment_workflow",
+                actor_id=actor.id,
+                outcome_code=outcome,
+            )
+            await uow.commit()
+            return True
+
+    async def review_cards(self, actor_telegram_user_id: int) -> tuple[AssignmentCard, ...]:
+        """Return only assignments this actor may attempt to review."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _actor(uow, actor_telegram_user_id)
+            return await uow.list_review_cards(actor.id)
+
     async def begin_submission(self, command: BeginSubmissionCommand) -> SubmissionDraft:
         """Start or resume result input with all state persisted in PostgreSQL."""
         async with self._unit_of_work_factory() as uow:
@@ -253,11 +410,20 @@ class AssignmentService:
             assignment = await uow.lock_assignment(preliminary.id)
             if task is None or assignment is None:
                 raise LookupError("Assignment task does not exist.")
+            if task.origin == "community" and task.reviewer_admin_id == actor.id:
+                raise PermissionError("Community reviewer cannot perform the task.")
             require_submit_allowed(
                 assignment, task_deadline=task.deadline_at, now=datetime.datetime.now(datetime.UTC)
             )
             draft = await uow.create_or_get_submission_draft(
                 assignment_id=assignment.id, performer_id=actor.id
+            )
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="assignment_result",
+                step="text",
+                reference_id=draft.id,
+                revision=draft.revision,
             )
             await uow.add_receipt(
                 update_id=command.update_id,
@@ -301,6 +467,13 @@ class AssignmentService:
                 draft_id=draft.id,
                 expected_revision=command.expected_revision,
                 payload=payload,
+            )
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="assignment_result",
+                step="preview",
+                reference_id=saved.id,
+                revision=saved.revision,
             )
             await uow.add_receipt(
                 update_id=command.update_id,
@@ -350,6 +523,11 @@ class AssignmentService:
                 now=now,
             )
             await uow.complete_submission_draft(draft_id=draft.id, result_id=result.id)
+            await uow.clear_text_flow(
+                member_id=actor.id,
+                flow_type="assignment_result",
+                reference_id=draft.id,
+            )
             updated = await uow.lock_assignment(assignment.id)
             if updated is None:
                 raise LookupError("Assignment does not exist.")
@@ -470,7 +648,17 @@ class AssignmentService:
             assignment = await uow.lock_assignment(assignment.id)
             authorized = task is not None and (
                 task.creator_id == actor.id
-                or (task.origin == "community" and actor.role is MemberRole.ADMINISTRATOR)
+                or (
+                    task.origin == "community"
+                    and actor.role is MemberRole.ADMINISTRATOR
+                    and (
+                        (
+                            task.reviewer_admin_id == actor.id
+                            and task.created_by_admin_id != actor.id
+                        )
+                        or (task.reviewer_admin_id is None and task.created_by_admin_id is None)
+                    )
+                )
             )
             if assignment is None or task is None or not authorized:
                 raise PermissionError("Only the task creator can review this assignment.")
@@ -586,6 +774,11 @@ class AssignmentService:
                 command_id=command_id,
                 comment=normalized,
             )
+            await uow.clear_text_flow(
+                member_id=actor.id,
+                flow_type="assignment_dispute",
+                reference_id=assignment.id,
+            )
             updated = await uow.lock_assignment(assignment.id)
             if updated is None:
                 raise LookupError("Assignment does not exist.")
@@ -614,6 +807,28 @@ class AssignmentService:
                 return assignment
             if assignment.review_deadline_at is None or now < assignment.review_deadline_at:
                 raise AssignmentError("Assignment review deadline has not arrived.")
+            if task.origin == "community":
+                reviewer = (
+                    None
+                    if task.reviewer_admin_id is None
+                    else (await uow.lock_members((task.reviewer_admin_id,))).get(
+                        task.reviewer_admin_id
+                    )
+                )
+                if (
+                    reviewer is None
+                    or reviewer.role is not MemberRole.ADMINISTRATOR
+                    or reviewer.status is not MemberStatus.ACTIVE
+                    or reviewer.id in {task.created_by_admin_id, assignment.performer_id}
+                ):
+                    updated = await uow.mark_reviewer_required(assignment.id)
+                    await uow.add_assignment_outbox(
+                        assignment=updated,
+                        event_type="reviewer_required",
+                        business_key=f"assignment:{assignment.id}:reviewer_required",
+                    )
+                    await uow.commit()
+                    return updated
             reward_builder = earn_community_reward if task.origin == "community" else earn_reward
             prepared = await uow.economy.prepare_batch(
                 (

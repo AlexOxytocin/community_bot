@@ -11,10 +11,12 @@ from typing import TYPE_CHECKING
 import structlog
 from aiogram import Bot
 
+from community_bot.application.assignments import AssignmentDeadlineWorker, AssignmentService
 from community_bot.application.notifications import NotificationWorker
 from community_bot.bootstrap.settings import get_settings
 from community_bot.domain.notifications import DeliveryWindow
 from community_bot.infrastructure.db import Database
+from community_bot.infrastructure.db.assignment_deadlines import PostgresAssignmentDeadlineSource
 from community_bot.infrastructure.observability import configure_logging, configure_sentry
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
@@ -77,18 +79,28 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
         batch_size=settings.worker_batch_size,
         lease_duration=datetime.timedelta(seconds=settings.worker_lease_seconds),
     )
+    deadlines = AssignmentDeadlineWorker(
+        PostgresAssignmentDeadlineSource(database.session_factory),
+        AssignmentService(database.unit_of_work),
+        batch_size=settings.worker_batch_size,
+    )
     logger = structlog.get_logger(process="community-worker")
     try:
         while True:
             now = datetime.datetime.now(datetime.UTC)
+            deadlines_finalized = await deadlines.tick(now=now)
             result = await worker.tick(now=now)
             await queue.heartbeat(
                 process_name="community-worker",
                 release=settings.release,
-                migration_revision="0011",
+                migration_revision="0012",
                 now=now,
             )
-            logger.info("worker_tick_completed", **asdict(result))
+            logger.info(
+                "worker_tick_completed",
+                deadlines_finalized=deadlines_finalized,
+                **asdict(result),
+            )
             if once:
                 return
             await asyncio.sleep(settings.worker_poll_interval_seconds)
