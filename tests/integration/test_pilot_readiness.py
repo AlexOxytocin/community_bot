@@ -73,7 +73,21 @@ def test_empty_database_cycles_and_restores_catalog_seed(database_url: str) -> N
     _alembic(url, "base", downgrade=True)
     _alembic(url, "head")
     counts = asyncio.run(_catalog_counts(url))
-    assert counts == (8, 8, "0015")
+    assert counts == (8, 8, "0016")
+
+
+def test_migration_retires_synthetic_pilot_rows(database_url: str) -> None:
+    """Migration 0016 removes known synthetic rows from live discovery surfaces."""
+    url = make_url(database_url)
+    _alembic(url, "0015", downgrade=True)
+    asyncio.run(_seed_synthetic_pilot_rows(url))
+    _alembic(url, "head")
+    _alembic(url, "head")
+    assert asyncio.run(_synthetic_cleanup_snapshot(url)) == (
+        ("left", "active"),
+        ("cancelled", "published"),
+        "0016",
+    )
 
 
 @pytest.mark.asyncio
@@ -657,6 +671,98 @@ async def _seed_legacy_snapshot(url: URL) -> LegacySnapshot:
     )
 
 
+async def _seed_synthetic_pilot_rows(url: URL) -> None:
+    engine = create_async_engine(url)
+    synthetic_id, real_id = uuid4(), uuid4()
+    synthetic_task_id, real_task_id = uuid4(), uuid4()
+    try:
+        async with engine.begin() as connection:
+            template = (
+                await connection.execute(
+                    text(
+                        "SELECT id,category_id,version FROM task_templates "
+                        "WHERE is_active ORDER BY code,version LIMIT 1"
+                    )
+                )
+            ).one()
+            await connection.execute(
+                text(
+                    "INSERT INTO members "
+                    "(id,telegram_user_id,display_name,timezone,role,status,level_number,"
+                    "credit_balance_cached,experience_total_cached) VALUES "
+                    "(:synthetic_id,9930001,'CB29 Synthetic Author','UTC','member','active',"
+                    "1,10,0),"
+                    "(:real_id,9930002,'Real Pilot Author','UTC','member','active',1,10,0)"
+                ),
+                {"synthetic_id": synthetic_id, "real_id": real_id},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO tasks "
+                    "(id,origin,template_id,template_version,creator_id,author_display_name,"
+                    "category_id,title,description,completion_criteria,materials_json,"
+                    "input_payload_json,credit_reward_per_performer,performer_slots,"
+                    "reserved_credit_total,estimated_minutes,minimum_level,format,deadline_at,"
+                    "safety_snapshot_json,publish_command_id,status) VALUES "
+                    "(:synthetic_task_id,'member',:template_id,:template_version,"
+                    ":synthetic_id,'CB29 Synthetic Author',:category_id,"
+                    "'Первое впечатление от репозитория','Synthetic task','Done',"
+                    "'{}'::jsonb,'{}'::jsonb,2,1,2,30,1,'online',"
+                    "'2026-08-20T00:00:00+00:00','{}'::jsonb,:synthetic_publish,'published'),"
+                    "(:real_task_id,'member',:template_id,:template_version,:real_id,"
+                    "'Real Pilot Author',:category_id,'Real task','Real task','Done',"
+                    "'{}'::jsonb,'{}'::jsonb,2,1,2,30,1,'online',"
+                    "'2026-08-20T00:00:00+00:00','{}'::jsonb,:real_publish,'published')"
+                ),
+                {
+                    "synthetic_task_id": synthetic_task_id,
+                    "real_task_id": real_task_id,
+                    "template_id": template.id,
+                    "template_version": template.version,
+                    "synthetic_id": synthetic_id,
+                    "real_id": real_id,
+                    "category_id": template.category_id,
+                    "synthetic_publish": uuid4(),
+                    "real_publish": uuid4(),
+                },
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _synthetic_cleanup_snapshot(
+    url: URL,
+) -> tuple[tuple[str | None, str | None], tuple[str | None, str | None], str | None]:
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as connection:
+            member_statuses = (
+                await connection.execute(
+                    text(
+                        "SELECT "
+                        "max(status) FILTER (WHERE display_name = 'CB29 Synthetic Author'),"
+                        "max(status) FILTER (WHERE display_name = 'Real Pilot Author') "
+                        "FROM members"
+                    )
+                )
+            ).one()
+            task_statuses = (
+                await connection.execute(
+                    text(
+                        "SELECT "
+                        "max(status) FILTER (WHERE author_display_name = "
+                        "'CB29 Synthetic Author'),"
+                        "max(status) FILTER (WHERE author_display_name = 'Real Pilot Author') "
+                        "FROM tasks"
+                    )
+                )
+            ).one()
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+    finally:
+        await engine.dispose()
+    return (member_statuses[0], member_statuses[1]), (task_statuses[0], task_statuses[1]), revision
+
+
 async def _assert_upgraded_snapshot(
     url: URL,
     expected: LegacySnapshot,
@@ -708,7 +814,7 @@ async def _assert_upgraded_snapshot(
             } <= constraints
             assert {"ix_outbox_due", "ix_notifications_due"} <= indexes
             assert (
-                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0015"
+                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0016"
             )
             invalid_states = (
                 "UPDATE outbox_events SET status='processing' WHERE business_key='pilot:pending'",
