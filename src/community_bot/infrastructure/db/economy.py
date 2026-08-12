@@ -310,7 +310,10 @@ def _apply_member_caches(
         member = members[member_id]
         member.credit_balance_cached = credit_total
         member.experience_total_cached = experience_total
-        if active is not None and member_id in staged.experience_changed:
+        if active is not None and (
+            member_id in staged.experience_changed
+            or member.level_config_version_id != active.config.id
+        ):
             level = resolve_level(
                 experience_total=experience_total,
                 config_id=active.config.id,
@@ -399,12 +402,10 @@ class _SqlAlchemyPreparedEconomyBatch:
             self._applied = replayed
             return replayed
 
-        active = None
-        if any(command.experience_delta for command in self._commands):
-            active = await _get_active_snapshot(self._session)
-            if active is None:
-                message = "Experience mutations require an active product configuration."
-                raise ProductConfigError(message)
+        active = await _get_active_snapshot(self._session)
+        if active is None and any(command.experience_delta for command in self._commands):
+            message = "Experience mutations require an active product configuration."
+            raise ProductConfigError(message)
 
         staged = _stage_economy_batch(
             self._session,

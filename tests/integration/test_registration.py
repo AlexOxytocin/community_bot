@@ -558,6 +558,14 @@ async def test_concurrent_moderation_creates_one_grant_and_active_profile(
         telegram_user_id=503,
         role=MemberRole.MEMBER,
     )
+    active_config = await ProductConfigBootstrapCoordinator(
+        database.unit_of_work,
+        load_product_config_candidate,
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
     registration = service(database)
     token = await create_invite(registration, admin, update_id=5_000)
     target_id = await complete_registration(
@@ -625,6 +633,7 @@ async def test_concurrent_moderation_creates_one_grant_and_active_profile(
     assert target.status == MemberStatus.ACTIVE.value
     assert target.credit_balance_cached == 10
     assert target.experience_total_cached == 0
+    assert target.level_config_version_id == active_config.id
     assert application is not None
     assert application.status == RegistrationApplicationStatus.APPROVED.value
     assert conversation is None
@@ -1126,4 +1135,60 @@ async def test_migration_backfills_missing_active_starting_grants(
     assert grants_by_member[active_missing.id].payload_hash == economy_payload_hash(
         starting_grant(active_missing.id)
     )
+    await repaired.dispose()
+
+
+async def test_migration_backfills_stale_active_member_level_config(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    admin = await add_member(
+        database,
+        telegram_user_id=8_300,
+        role=MemberRole.ADMINISTRATOR,
+    )
+    active_config = await ProductConfigBootstrapCoordinator(
+        database.unit_of_work,
+        load_product_config_candidate,
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    stale_active = await add_member(
+        database,
+        telegram_user_id=8_301,
+        role=MemberRole.MEMBER,
+    )
+    pending = await add_member(
+        database,
+        telegram_user_id=8_302,
+        role=MemberRole.MEMBER,
+        status=MemberStatus.PENDING,
+    )
+    await database.dispose()
+
+    previous_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    configuration = Config("alembic.ini")
+    try:
+        await asyncio.to_thread(command.downgrade, configuration, "0014")
+        await asyncio.to_thread(command.upgrade, configuration, "head")
+        await asyncio.to_thread(command.upgrade, configuration, "head")
+    finally:
+        if previous_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_url
+
+    repaired = Database(database_url)
+    sessions = async_sessionmaker(repaired.engine, expire_on_commit=False)
+    async with sessions() as session:
+        stale_active_model = await session.get(MemberModel, stale_active.id)
+        pending_model = await session.get(MemberModel, pending.id)
+    assert stale_active_model is not None
+    assert stale_active_model.level_number == 1
+    assert stale_active_model.level_config_version_id == active_config.id
+    assert pending_model is not None
+    assert pending_model.level_config_version_id is None
     await repaired.dispose()
