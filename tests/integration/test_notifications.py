@@ -442,7 +442,7 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
     await queue.heartbeat(
         process_name="community-worker",
         release="sha",
-        migration_revision="0013",
+        migration_revision="0014",
         now=now,
     )
     missing_config = await readiness_report(

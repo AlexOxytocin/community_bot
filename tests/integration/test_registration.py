@@ -17,7 +17,7 @@ from alembic.config import Config
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from community_bot.application.economy import ProductConfigBootstrapCoordinator
+from community_bot.application.economy import EconomyService, ProductConfigBootstrapCoordinator
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
@@ -27,6 +27,7 @@ from community_bot.application.registration import (
     RegistrationStartCommand,
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
+from community_bot.domain.economy import economy_payload_hash, starting_grant
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.domain.registration import (
     InvitationError,
@@ -1055,4 +1056,74 @@ async def test_migration_closes_only_stale_approved_registration_state(
     assert profile_edit.flow_type == "profile_edit"
     assert await count(repaired, AuditEventModel) == audit_count
     assert await count(repaired, ProcessedTelegramUpdateModel) == receipt_count
+    await repaired.dispose()
+
+
+async def test_migration_backfills_missing_active_starting_grants(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    active_missing = await add_member(
+        database,
+        telegram_user_id=8_200,
+        role=MemberRole.MEMBER,
+    )
+    active_existing = await add_member(
+        database,
+        telegram_user_id=8_201,
+        role=MemberRole.MEMBER,
+    )
+    pending_missing = await add_member(
+        database,
+        telegram_user_id=8_202,
+        role=MemberRole.MEMBER,
+        status=MemberStatus.PENDING,
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(active_existing.id))
+    await database.dispose()
+
+    previous_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    configuration = Config("alembic.ini")
+    try:
+        await asyncio.to_thread(command.downgrade, configuration, "0013")
+        await asyncio.to_thread(command.upgrade, configuration, "head")
+        await asyncio.to_thread(command.upgrade, configuration, "head")
+    finally:
+        if previous_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_url
+
+    repaired = Database(database_url)
+    sessions = async_sessionmaker(repaired.engine, expire_on_commit=False)
+    async with sessions() as session:
+        active_missing_model = await session.get(MemberModel, active_missing.id)
+        active_existing_model = await session.get(MemberModel, active_existing.id)
+        pending_missing_model = await session.get(MemberModel, pending_missing.id)
+        grant_result = await session.execute(
+            select(AccountTransactionModel).where(
+                AccountTransactionModel.member_id.in_(
+                    (active_missing.id, active_existing.id, pending_missing.id)
+                ),
+                AccountTransactionModel.transaction_type == "starting_grant",
+            )
+        )
+        grant_rows = list(grant_result.scalars().all())
+    assert len(grant_rows) == 2
+    grants_by_member = {item.member_id: item for item in grant_rows}
+    assert active_missing_model is not None
+    assert active_missing_model.credit_balance_cached == 10
+    assert active_existing_model is not None
+    assert active_existing_model.credit_balance_cached == 10
+    assert pending_missing_model is not None
+    assert pending_missing_model.credit_balance_cached == 0
+    assert set(grants_by_member) == {active_missing.id, active_existing.id}
+    assert grants_by_member[active_missing.id].credit_delta == 10
+    assert grants_by_member[active_missing.id].idempotency_key == (
+        f"starting_grant:{active_missing.id}"
+    )
+    assert grants_by_member[active_missing.id].payload_hash == economy_payload_hash(
+        starting_grant(active_missing.id)
+    )
     await repaired.dispose()

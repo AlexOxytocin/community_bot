@@ -73,7 +73,7 @@ def test_empty_database_cycles_and_restores_catalog_seed(database_url: str) -> N
     _alembic(url, "base", downgrade=True)
     _alembic(url, "head")
     counts = asyncio.run(_catalog_counts(url))
-    assert counts == (8, 8, "0013")
+    assert counts == (8, 8, "0014")
 
 
 @pytest.mark.asyncio
@@ -708,7 +708,7 @@ async def _assert_upgraded_snapshot(
             } <= constraints
             assert {"ix_outbox_due", "ix_notifications_due"} <= indexes
             assert (
-                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013"
+                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0014"
             )
             invalid_states = (
                 "UPDATE outbox_events SET status='processing' WHERE business_key='pilot:pending'",
