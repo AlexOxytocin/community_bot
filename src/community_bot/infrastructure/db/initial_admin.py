@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 _BOOTSTRAP_NAMESPACE = "initial_administrator_bootstrap"
 _BOOTSTRAP_ACTION = "initial_administrator_bootstrapped"
+_PROFILE_REPAIR_ACTION = "initial_administrator_profile_repaired"
 _ADMIN_PERMISSIONS = ["interaction_review", "karma_review", "member_read"]
 
 
@@ -148,6 +149,37 @@ class SqlAlchemyInitialAdministratorUnitOfWork:
                     "status": "active",
                 },
                 reason=reason.value,
+            )
+        )
+        await self._require_session().flush()
+        if self._after_audit_flushed is not None:
+            self._after_audit_flushed()
+
+    async def repair_display_name(self, member_id: UUID, display_name: str) -> bool:
+        """Replace only the locked bootstrap administrator display name."""
+        model = await self._require_session().get(MemberModel, member_id)
+        if model is None:
+            message = "Bootstrap administrator disappeared during profile repair."
+            raise LookupError(message)
+        if model.display_name == display_name:
+            return False
+        model.display_name = display_name
+        await self._require_session().flush()
+        if self._after_member_flushed is not None:
+            self._after_member_flushed()
+        return True
+
+    async def append_profile_repair_audit(self, member_id: UUID) -> None:
+        """Record a repair without persisting the private profile value."""
+        self._require_session().add(
+            AuditEventModel(
+                actor_member_id=None,
+                action=_PROFILE_REPAIR_ACTION,
+                entity_type="member",
+                entity_id=str(member_id),
+                before_json=None,
+                after_json={"display_name_repaired": True},
+                reason="operator_request",
             )
         )
         await self._require_session().flush()
