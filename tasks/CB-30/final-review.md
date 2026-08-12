@@ -1,12 +1,12 @@
-# Контрольная финальная проверка CB-30
+# Повторная финальная проверка CI-fix CB-30
 
 Status: approved
 
 ## Проверенная область
 
-- Свежая Jira `CB-30`, проектные правила, `AGENT_WORKFLOW`, полный Level 3 пакет, `problem-escalation.md`, три сохранённые попытки final-review, отчёт и фактический staged diff прочитаны независимо.
-- Проверен frozen staged tree `9cf379204d549b041fae078a67b31ffebe431298` в ветке `task/CB-30`; index во время review не менялся.
-- Контроль ограничен явно одобренным владельцем минимальным исправлением M-003 и отсутствием регрессии M-001/M-002. Полная регрессия CB-29 не запускалась.
+- Свежая Jira `CB-30`, прежний approved verdict, CI-fix report и полный staged delta поверх commit `0be1d82` прочитаны независимо.
+- Проверен frozen staged tree `55d0f47675f57225c471e760f168230e303d5033` в ветке `task/CB-30`; delta ограничен `tests/e2e/test_pilot_scenarios.py` и `tasks/CB-30/implementation-report.md`.
+- Runtime-код, миграции, product policy и ранее одобренные M-001–M-003 не изменялись. Full regression CB-29 не запускалась.
 
 ## Замечания
 
@@ -14,48 +14,31 @@ Status: approved
 - Существенных: нет.
 - Незначительных: нет.
 
-## Закрытие M-003
+## Проверка CI-fix
 
-- `PostgresAssignmentDeadlineSource` сохраняет условия due и `published|settling`, но теперь включает задачу в bounded batch только при correlated `EXISTS` назначения со статусом `accepted`.
-- Старое `settling`-задание только с non-actionable assignment больше не занимает пачку.
-- Прямой PostgreSQL oracle с `batch_size=1` подтверждает продвижение очереди: старое submitted назначение не меняется, следующее accepted назначение выбирается и переводится в `no_show`.
-- Решение точно соответствует зафиксированному выбору владельца и не расширяет архитектуру.
+- После выбора karma value production transport явно отвечает видимым приглашением добавить комментарий и сохраняет durable conversation owner `karma/comment` с текущей revision.
+- Оба комментария E2E теперь отправляются обычным текстом следующим update; revision берётся transport/application слоем из сохранённого состояния, а не извлекается тестом из скрытой `/karma_comment <revision>` команды.
+- Удалены только устаревшие regex/revision assertions. Проверки visible callback, foreign confirm denial, итогового score/count, единственного vote, двух history revisions, raw history/audit и отсутствия outsider receipt сохранены.
+- Поэтому изменение синхронизирует oracle с Jira output-driven контрактом и не ослабляет бизнес-, permission-, idempotency- или audit-барьеры.
+- Отчёт честно фиксирует исходный CI failure, точную Quality-команду `247 passed, 147 deselected` без `DATABASE_URL` и причинную связь вторичного `ResourceWarning` с ранним падением незакрытого E2E.
 
 ## Матрица критериев Jira
 
-| Критерий | Результат | Доказательство |
-|---|---|---|
-| Output-driven UI перечисленных областей | пройден | Production Dispatcher journeys используют действия из captured Bot API. |
-| Роли и права на каждую mutation | пройден | Application/storage gates и targeted role evidence сохранены. |
-| Production Dispatcher без DB-driven next input и будущих callback constants | пройден | Пользовательские переходы извлекаются из фактических ответов fake Bot API. |
-| Full/partial/reject/no-show, community reward, reversal/penalty через видимый UI | пройден | Existing visible journeys сохранены; no-show проходит через production deadline components, bounded source больше не допускает выявленное starvation. |
-| Idempotency и ledger invariants | пройден | Task gates/status, replay/fault/concurrency evidence и exact migration manifest не регрессировали. |
-
-Итог: `5/5` критериев Jira закрыты.
-
-## Матрица test plan
-
-- Сценарии 1–19 и 21–24: приняты ранее подтверждённые targeted evidence; фактический delta не меняет эти цепочки.
-- Сценарий 20: direct PostgreSQL starvation oracle и существующий visible no-show проходят.
-- Сценарий 25: exact `0011 → 0012 → 0011 → 0012` повторён; creator/reviewer provenance, assignment и ledger UUID сохранены.
-- Сценарий 26: пропорциональные targeted и статические gates зелёные.
-
-Итог: `26/26` сценариев имеют проверяемое доказательство.
+Все `5/5` критериев остаются закрыты. Delta усиливает критерии output-driven UI и production-like E2E: пользователь больше не должен знать revision или скрытую команду; роли, экономика, idempotency и ledger не менялись.
 
 ## Независимые проверки
 
-- `test_deadline_worker_skips_non_actionable_older_tasks`, `test_no_show_is_visible_after_deadline_worker`, `test_community_provenance_survives_exact_migration_cycle`: `3 passed`.
-- `ruff format --check src tests migrations`: успешно, `131 files already formatted`.
-- `ruff check .`: успешно.
+- `tests/e2e/test_pilot_scenarios.py::test_karma_after_paid_interaction`: `1 passed`.
+- Принято указанное точное Quality evidence: `247 passed, 147 deselected`; локально повторно полный набор не запускался.
+- `ruff format --check tests/e2e/test_pilot_scenarios.py`: успешно.
+- `ruff check tests/e2e/test_pilot_scenarios.py`: успешно.
 - `ty check`: успешно.
 - `git diff --cached --check`: успешно.
-- Staged secret scan: private key, GitHub/Slack/Telegram token и assigned-secret patterns — `0/0/0/0/0`.
-- Full regression намеренно не запускалась: общий барьер остаётся в CB-29.
+- Staged secret scan: private key, GitHub/Slack/Telegram token patterns — `0/0/0/0`.
 
-## Безопасность, процесс и остаточные риски
+## Безопасность, workflow и остаточные риски
 
-- Секретов и новых privacy findings нет; реальный Telegram не использовался.
-- `plan-review.md` содержит точный `Status: approved`; решение владельца и история трёх неуспешных попыток сохранены.
-- Runtime-имена не содержат Jira key; staged scope соответствует CB-30.
-- Jira, код, index, Git remote, production и Telegram не менялись; изменён только этот unstaged verdict.
-- Остаточный риск ограничен общей регрессией MVP в CB-29; обязательных действий внутри CB-30 не осталось.
+- Новых секретов, privacy findings и реальных Telegram-вызовов нет.
+- Jira, runtime-код, index, Git remote, production и Telegram не менялись; изменён только этот unstaged verdict.
+- Staged tree перед verdict остался `55d0f47675f57225c471e760f168230e303d5033`.
+- Обязательных действий внутри CB-30 не осталось; общий regression gate остаётся в CB-29.

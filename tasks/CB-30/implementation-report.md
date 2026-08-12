@@ -82,6 +82,12 @@
   partial/no-show, exact migration и production worker composition;
 - точечный контроль deadline source и пользовательского no-show: `2 passed`, включая
   продвижение bounded-очереди после недействующего старого `settling`-задания;
+- после публикации PR pilot E2E кармы синхронизирован с новым output-driven контрактом:
+  комментарий берётся как обычный следующий текст после видимого ответа бота, без
+  извлечения устаревшей скрытой команды `/karma_comment <revision>`;
+- точная команда Quality без PostgreSQL после синхронизации: `247 passed`,
+  `147 deselected`; вторичный ResourceWarning исчез вместе с корректным закрытием
+  ранее падавшего E2E;
 - pilot migration/head smoke: `2 passed`;
 - `uv run ruff format src tests migrations` — без изменений;
 - `uv run ruff check .` — успешно;
