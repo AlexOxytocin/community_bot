@@ -116,7 +116,7 @@ restore, Alembic revision и результат проверок. Цели ло�
 ## Preflight допуска когорты
 
 1. Зафиксировать reviewed commit и immutable image digest текущего release.
-2. Подтвердить `0010`, healthy `postgres`, `community-worker` и `community-bot`,
+2. Подтвердить `0011`, healthy `postgres`, `community-worker` и `community-bot`,
    отсутствие terminal `failed` outbox и свежие heartbeat.
 3. Создать свежий backup, выполнить isolated restore drill и получить
    `ledger_mismatch_count = 0`; возраст backup должен быть не более 24 часов, а

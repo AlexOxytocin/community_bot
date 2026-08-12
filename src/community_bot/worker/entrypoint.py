@@ -85,7 +85,7 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
             await queue.heartbeat(
                 process_name="community-worker",
                 release=settings.release,
-                migration_revision="0010",
+                migration_revision="0011",
                 now=now,
             )
             logger.info("worker_tick_completed", **asdict(result))

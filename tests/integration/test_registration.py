@@ -38,6 +38,8 @@ from community_bot.domain.registration import (
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
+    AuditEventModel,
+    ConversationStateModel,
     InvitationModel,
     InvitationRedemptionModel,
     MemberModel,
@@ -617,21 +619,31 @@ async def test_concurrent_moderation_creates_one_grant_and_active_profile(
             )
         ).all()
         application = await session.get(RegistrationApplicationModel, target_id)
+        conversation = await session.get(ConversationStateModel, target_id)
     assert target is not None
     assert target.status == MemberStatus.ACTIVE.value
     assert target.credit_balance_cached == 5
     assert target.experience_total_cached == 0
     assert application is not None
     assert application.status == RegistrationApplicationStatus.APPROVED.value
+    assert conversation is None
     assert len(transactions) == 1
     assert transactions[0].credit_delta == 5
     assert transactions[0].experience_delta == 0
     await database.dispose()
 
     restarted = Database(database_url)
+    restarted_sessions = async_sessionmaker(restarted.engine, expire_on_commit=False)
+    async with restarted_sessions.begin() as session:
+        paused_target = await session.get(MemberModel, target_id)
+        assert paused_target is not None
+        paused_target.status = MemberStatus.PAUSED.value
     replay = await service(restarted).moderate(admin_approval)
     assert replay.outcome_code == "registration_approved"
+    assert replay.context is not None
+    assert replay.context.member_status is MemberStatus.PAUSED
     assert await count(restarted, AccountTransactionModel) == 1
+    assert await count(restarted, ConversationStateModel) == 0
     await restarted.dispose()
 
 
@@ -972,3 +984,77 @@ async def test_registration_migration_cycle_returns_to_head(database_url: str) -
             os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = previous_url
+
+
+async def test_migration_closes_only_stale_approved_registration_state(
+    database_url: str,
+) -> None:
+    """Upgrade removes the old terminal row without touching evidence or profile edits."""
+    database = Database(database_url)
+    admin = await add_member(
+        database,
+        telegram_user_id=8_100,
+        role=MemberRole.ADMINISTRATOR,
+    )
+    registration = service(database)
+    token = await create_invite(registration, admin, update_id=81_000)
+    target_id = await complete_registration(
+        registration,
+        token=token,
+        telegram_user_id=8_101,
+        first_update_id=81_100,
+    )
+    await registration.moderate(
+        ModerationCommand(
+            update_id=81_200,
+            actor_telegram_user_id=admin.telegram_user_id,
+            target_member_id=target_id,
+            decision=ModerationDecision.APPROVE,
+        )
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add_all(
+            (
+                ConversationStateModel(
+                    member_id=target_id,
+                    flow_type="registration_paused",
+                    current_step=RegistrationStep.SUBMITTED.value,
+                    payload_json={},
+                ),
+                ConversationStateModel(
+                    member_id=admin.id,
+                    flow_type="profile_edit",
+                    current_step=ProfileField.CITY.value,
+                    payload_json={},
+                ),
+            )
+        )
+    audit_count = await count(database, AuditEventModel)
+    receipt_count = await count(database, ProcessedTelegramUpdateModel)
+    await database.dispose()
+
+    previous_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    configuration = Config("alembic.ini")
+    try:
+        await asyncio.to_thread(command.downgrade, configuration, "0010")
+        await asyncio.to_thread(command.upgrade, configuration, "head")
+        await asyncio.to_thread(command.upgrade, configuration, "head")
+    finally:
+        if previous_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_url
+
+    repaired = Database(database_url)
+    repaired_sessions = async_sessionmaker(repaired.engine, expire_on_commit=False)
+    async with repaired_sessions() as session:
+        stale_state = await session.get(ConversationStateModel, target_id)
+        profile_edit = await session.get(ConversationStateModel, admin.id)
+    assert stale_state is None
+    assert profile_edit is not None
+    assert profile_edit.flow_type == "profile_edit"
+    assert await count(repaired, AuditEventModel) == audit_count
+    assert await count(repaired, ProcessedTelegramUpdateModel) == receipt_count
+    await repaired.dispose()

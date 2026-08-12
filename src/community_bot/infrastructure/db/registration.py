@@ -294,6 +294,7 @@ async def decide_registration(
         member.status = MemberStatus.ACTIVE.value
         member.approved_at = now
         application.status = RegistrationApplicationStatus.APPROVED.value
+        await session.delete(state)
     else:
         application.status = RegistrationApplicationStatus.REJECTED.value
         state.flow_type = "registration"
@@ -480,6 +481,20 @@ async def _context_by_member(
         state_statement = state_statement.with_for_update()
     application = await session.scalar(application_statement)
     state = await session.scalar(state_statement)
+    if (
+        application is not None
+        and application.status == RegistrationApplicationStatus.APPROVED.value
+    ):
+        return RegistrationContext(
+            member_id=member.id,
+            telegram_user_id=member.telegram_user_id,
+            telegram_username=member.telegram_username,
+            member_status=MemberStatus(member.status),
+            application_status=RegistrationApplicationStatus.APPROVED,
+            current_step=RegistrationStep.SUBMITTED,
+            payload={},
+            review_comment=application.review_comment,
+        )
     if application is None or state is None:
         message = "Member registration records are incomplete."
         raise RegistrationError(message)

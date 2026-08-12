@@ -129,7 +129,7 @@ async def _heartbeat_loop(queue: PostgresNotificationQueue) -> None:
         await queue.heartbeat(
             process_name="community-bot",
             release=settings.release,
-            migration_revision="0010",
+            migration_revision="0011",
             now=datetime.datetime.now(datetime.UTC),
         )
         await asyncio.sleep(60)
