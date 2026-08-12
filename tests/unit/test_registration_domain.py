@@ -7,6 +7,8 @@ import pytest
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.domain.registration import (
     ProfileField,
+    ProfileListItemLengthError,
+    ProfileListSizeError,
     RegistrationError,
     RegistrationStep,
     normalize_profile_value,
@@ -70,10 +72,28 @@ def test_profile_lists_are_trimmed_deduplicated_and_bounded() -> None:
         ProfileField.SKILL_TAGS,
         " Python, python , SQL ",
     ) == ("Python", "SQL")
-    with pytest.raises(RegistrationError):
+    with pytest.raises(ProfileListSizeError):
         normalize_profile_value(ProfileField.HELP_CATEGORIES, "")
+    with pytest.raises(ProfileListItemLengthError):
+        normalize_profile_value(ProfileField.HELP_CATEGORIES, "x" * 81)
     with pytest.raises(RegistrationError):
         normalize_profile_value(ProfileField.TIMEZONE, "Mars/Olympus")
+
+
+def test_help_categories_accept_human_sized_descriptions() -> None:
+    assert normalize_profile_value(
+        ProfileField.HELP_CATEGORIES,
+        (
+            "В вопросах финансов и планирования, работа с криптовалютами, "  # noqa: RUF001 - exact Russian user input.
+            "психологические консультации в сфере семьи и личностного роста, "
+            "администрирование и общение с клиентами онлайн"  # noqa: RUF001 - exact Russian user input.
+        ),
+    ) == (
+        "В вопросах финансов и планирования",  # noqa: RUF001 - exact Russian user input.
+        "работа с криптовалютами",  # noqa: RUF001 - exact Russian user input.
+        "психологические консультации в сфере семьи и личностного роста",
+        "администрирование и общение с клиентами онлайн",  # noqa: RUF001 - exact Russian user input.
+    )
 
 
 @pytest.mark.parametrize(
