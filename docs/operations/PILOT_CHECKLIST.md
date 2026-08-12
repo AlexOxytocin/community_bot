@@ -8,7 +8,7 @@
 
 - Reviewed commit:
 - Immutable image digest:
-- Alembic revision (`0010` ожидается):
+- Alembic revision (`0011` ожидается):
 - `postgres`: `healthy|unhealthy`
 - `community-worker`: `healthy|unhealthy`
 - `community-bot`: `healthy|unhealthy`

@@ -60,7 +60,7 @@ cleanup
   --command "
 DO \$\$
 BEGIN
-  IF (SELECT version_num FROM alembic_version) <> '0010' THEN
+  IF (SELECT version_num FROM alembic_version) <> '0011' THEN
     RAISE EXCEPTION 'Unexpected Alembic revision in restored database.';
   END IF;
   IF EXISTS (

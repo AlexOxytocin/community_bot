@@ -126,7 +126,7 @@ class _FakeDatabase:
 
 @pytest.mark.parametrize(
     ("migration_returncode", "actual_revision", "expected_code"),
-    [(0, "0010", 0), (0, "0009", 1), (7, "0010", 7)],
+    [(0, "0011", 0), (0, "0010", 1), (7, "0011", 7)],
 )
 def test_migration_gate_unlocks_and_disposes_for_all_outcomes(
     monkeypatch: pytest.MonkeyPatch,
@@ -148,7 +148,7 @@ def test_migration_gate_unlocks_and_disposes_for_all_outcomes(
     monkeypatch.setattr(
         migrate_module.ScriptDirectory,
         "from_config",
-        lambda _config: SimpleNamespace(get_current_head=lambda: "0010"),
+        lambda _config: SimpleNamespace(get_current_head=lambda: "0011"),
     )
 
     def fake_subprocess_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:

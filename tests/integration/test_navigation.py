@@ -286,6 +286,7 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
         7_001: User(id=7_001, is_bot=False, first_name="Admin"),
         7_003: User(id=7_003, is_bot=False, first_name="Performer"),
         7_004: User(id=7_004, is_bot=False, first_name="Moderator"),
+        7_005: User(id=7_005, is_bot=False, first_name="Applicant"),
     }
 
     def message_update(update_id: int, actor_id: int, text: str) -> Update:
@@ -390,10 +391,15 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     )
     await dispatcher.feed_update(bot, callback_update(70_017, 7_001, approval_callback))
     await dispatcher.feed_update(bot, callback_update(70_017, 7_001, approval_callback))
-    await dispatcher.feed_update(bot, message_update(70_018, 7_001, "/admin"))
-    await dispatcher.feed_update(bot, callback_update(70_019, 7_001, "nav:admin:invite"))
-    await dispatcher.feed_update(bot, callback_update(70_019, 7_001, "nav:admin:invite"))
-    await dispatcher.feed_update(bot, callback_update(70_020, 7_001, "nav:admin:moderation"))
+    session.callbacks.clear()
+    await dispatcher.feed_update(bot, message_update(70_021, 7_005, "/profile"))
+    city_edit_callback = next(value for value in session.callbacks if value == "profile:edit:city")
+    await dispatcher.feed_update(bot, callback_update(70_022, 7_005, city_edit_callback))
+    await dispatcher.feed_update(bot, message_update(70_023, 7_005, "Mendoza"))
+    await dispatcher.feed_update(bot, message_update(70_024, 7_001, "/admin"))
+    await dispatcher.feed_update(bot, callback_update(70_025, 7_001, "nav:admin:invite"))
+    await dispatcher.feed_update(bot, callback_update(70_025, 7_001, "nav:admin:invite"))
+    await dispatcher.feed_update(bot, callback_update(70_026, 7_001, "nav:admin:moderation"))
 
     async with sessions() as db_session:
         assignment_count = await db_session.scalar(
@@ -404,6 +410,7 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
             select(TaskCreationDraftModel).where(TaskCreationDraftModel.creator_id == performer.id)
         )
         approved_member = await db_session.get(MemberModel, pending.id)
+        approved_conversation = await db_session.get(ConversationStateModel, pending.id)
         grant_count = await db_session.scalar(
             select(func.count())
             .select_from(AccountTransactionModel)
@@ -419,6 +426,8 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     assert performer_draft.current_step == "deadline"
     assert approved_member is not None
     assert approved_member.status == "active"
+    assert approved_member.city == "Mendoza"
+    assert approved_conversation is None
     assert grant_count == 1
     assert sum("Административное меню недоступно." in text for text in session.texts) == 2
     assert any("Баланс: 5 кредитов" in text for text in session.texts)
