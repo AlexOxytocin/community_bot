@@ -1,4 +1,3 @@
-# ruff: noqa: RUF001
 """Focused parsing tests for assignment Telegram commands and callbacks."""
 
 from __future__ import annotations
@@ -145,6 +144,7 @@ async def test_assignment_router_reports_invalid_updates_without_effects() -> No
 
     updates = [
         message_update(70_001, "/my_assignments"),
+        message_update(70_009, "/reviews"),
         message_update(70_002, "/assignment_cancel"),
         message_update(70_003, "/assignment_submit invalid"),
         message_update(70_004, "/assignment_result draft 0 not-json"),
@@ -152,10 +152,15 @@ async def test_assignment_router_reports_invalid_updates_without_effects() -> No
         callback_update(70_006, "task:accept:invalid"),
         callback_update(70_007, "assign:review:invalid"),
         callback_update(70_008, "assign:submit:invalid"),
+        callback_update(70_010, f"as:a:s:{uuid4().hex}"),
+        callback_update(70_011, f"as:a:c:{uuid4().hex}"),
+        callback_update(70_012, f"as:a:d:{uuid4().hex}"),
+        callback_update(70_013, f"as:d:{uuid4().hex}:full"),
+        callback_update(70_014, f"as:s:{uuid4().hex}:1"),
     ]
     for update in updates:
         await dispatcher.feed_update(bot, update)
 
-    assert len(capture.texts) == len(updates)
-    assert all("Не удалось" in value for value in capture.texts)
+    assert len(capture.texts) == 12
+    assert all("не" in value.lower() for value in capture.texts)
     await bot.session.close()

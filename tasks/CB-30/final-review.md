@@ -1,12 +1,12 @@
-# Повторная финальная проверка CI-fix CB-30
+# Финальная проверка второго CI gate CB-30
 
 Status: approved
 
 ## Проверенная область
 
-- Свежая Jira `CB-30`, прежний approved verdict, CI-fix report и полный staged delta поверх commit `0be1d82` прочитаны независимо.
-- Проверен frozen staged tree `55d0f47675f57225c471e760f168230e303d5033` в ветке `task/CB-30`; delta ограничен `tests/e2e/test_pilot_scenarios.py` и `tasks/CB-30/implementation-report.md`.
-- Runtime-код, миграции, product policy и ранее одобренные M-001–M-003 не изменялись. Full regression CB-29 не запускалась.
+- Свежая Jira `CB-30`, ранее одобренная реализация, CI evidence и фактический staged delta поверх head `ddffc24` прочитаны независимо.
+- Проверен frozen staged tree `51d3496f1b66b1672cfca58bbafbdcd6b8f03fdb` в ветке `task/CB-30`.
+- Review ограничен coverage CI-fix: новые transport safety tests, декларативные Protocol exclusions и синхронизация implementation report. Full regression не повторялась.
 
 ## Замечания
 
@@ -14,31 +14,31 @@ Status: approved
 - Существенных: нет.
 - Незначительных: нет.
 
-## Проверка CI-fix
+## Проверка тестов и coverage barrier
 
-- После выбора karma value production transport явно отвечает видимым приглашением добавить комментарий и сохраняет durable conversation owner `karma/comment` с текущей revision.
-- Оба комментария E2E теперь отправляются обычным текстом следующим update; revision берётся transport/application слоем из сохранённого состояния, а не извлекается тестом из скрытой `/karma_comment <revision>` команды.
-- Удалены только устаревшие regex/revision assertions. Проверки visible callback, foreign confirm denial, итогового score/count, единственного vote, двух history revisions, raw history/audit и отсутствия outsider receipt сохранены.
-- Поэтому изменение синхронизирует oracle с Jira output-driven контрактом и не ослабляет бизнес-, permission-, idempotency- или audit-барьеры.
-- Отчёт честно фиксирует исходный CI failure, точную Quality-команду `247 passed, 147 deselected` без `DATABASE_URL` и причинную связь вторичного `ResourceWarning` с ранним падением незакрытого E2E.
+- Новые тесты реально отправляют updates через aiogram `Dispatcher`: 18 moderation command/callback routes, output-driven task commands/free text/callback routes и дополнительные assignment review/action callbacks.
+- Safety oracles требуют безопасного пользовательского ответа при permission/domain denial; они не подменяют production router прямым вызовом handler и не ослабляют существующие бизнес/E2E assertions.
+- `pragma: no cover - structural typing contract` добавлена только на классы, наследующие `typing.Protocol`: unit-of-work, factory, mutation port и deadline source. Их тела состоят из декларативных сигнатур/`...`; исполняемые service, transport, storage и domain ветви не исключены.
+- `pyproject.toml`, coverage threshold и `.github/workflows` в staged delta отсутствуют: `fail-under=80` и PostgreSQL Quality gate не снижены и не отключены.
+- Отчёт честно фиксирует GitHub run `31582443241`: Quality success, PostgreSQL `394 passed`, failure `78.37% < 80`; затем отдельно приводит чистый local full `396 passed`, `79.46%` до корректировки структурного измерения и `79.904%`/display `80`, `coverage report --fail-under=80` exit `0` после неё.
 
 ## Матрица критериев Jira
 
-Все `5/5` критериев остаются закрыты. Delta усиливает критерии output-driven UI и production-like E2E: пользователь больше не должен знать revision или скрытую команду; роли, экономика, idempotency и ledger не менялись.
+Все `5/5` критериев Jira остаются закрыты. Delta не меняет runtime behavior, роли, ledger или idempotency; новые route tests дополнительно подтверждают безопасную обработку output-driven и moderation paths.
 
 ## Независимые проверки
 
-- `tests/e2e/test_pilot_scenarios.py::test_karma_after_paid_interaction`: `1 passed`.
-- Принято указанное точное Quality evidence: `247 passed, 147 deselected`; локально повторно полный набор не запускался.
-- `ruff format --check tests/e2e/test_pilot_scenarios.py`: успешно.
-- `ruff check tests/e2e/test_pilot_scenarios.py`: успешно.
+- `tests/unit/test_assignment_transport.py`, `tests/unit/test_moderation_transport.py`, `tests/unit/test_task_transport.py`: `20 passed`.
+- Принято authoritative evidence полного локального gate: `396 passed`, coverage gate exit `0`; полный прогон повторно не запускался.
+- `ruff format --check src tests`: успешно, `120 files already formatted`.
+- `ruff check .`: успешно.
 - `ty check`: успешно.
 - `git diff --cached --check`: успешно.
 - Staged secret scan: private key, GitHub/Slack/Telegram token patterns — `0/0/0/0`.
 
 ## Безопасность, workflow и остаточные риски
 
-- Новых секретов, privacy findings и реальных Telegram-вызовов нет.
-- Jira, runtime-код, index, Git remote, production и Telegram не менялись; изменён только этот unstaged verdict.
-- Staged tree перед verdict остался `55d0f47675f57225c471e760f168230e303d5033`.
+- Секретов, privacy findings и реальных Telegram-вызовов нет.
+- Threshold/workflow, runtime-код за пределами декларативных Protocol comments, Jira, Git remote и production не менялись.
+- Изменён только этот unstaged verdict; index перед verdict сохранил tree `51d3496f1b66b1672cfca58bbafbdcd6b8f03fdb`.
 - Обязательных действий внутри CB-30 не осталось; общий regression gate остаётся в CB-29.

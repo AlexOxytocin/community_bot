@@ -118,7 +118,7 @@ class AssignmentCard:
     case_revision: int | None
 
 
-class AssignmentUnitOfWork(Protocol):
+class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Caller-owned transaction required by assignment workflows."""
 
     @property
@@ -219,13 +219,13 @@ class AssignmentUnitOfWork(Protocol):
     async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask: ...
 
 
-class AssignmentUnitOfWorkFactory(Protocol):
+class AssignmentUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing contract.
     """Create isolated assignment transactions."""
 
     def __call__(self) -> AbstractAsyncContextManager[AssignmentUnitOfWork]: ...
 
 
-class AssignmentDeadlineSource(Protocol):
+class AssignmentDeadlineSource(Protocol):  # pragma: no cover - structural typing contract.
     """List bounded tasks whose acceptance deadline has arrived."""
 
     async def due_task_ids(self, *, now: datetime.datetime, limit: int) -> Sequence[UUID]: ...

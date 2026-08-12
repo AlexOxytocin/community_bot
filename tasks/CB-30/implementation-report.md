@@ -88,6 +88,15 @@
 - точная команда Quality без PostgreSQL после синхронизации: `247 passed`,
   `147 deselected`; вторичный ResourceWarning исчез вместе с корректным закрытием
   ранее падавшего E2E;
+- GitHub PostgreSQL run подтвердил `394 passed`, но честно остановил публикацию при
+  `78.37%` coverage. Порог `80%` не понижен и DB job не переведён на `--no-cov`:
+  добавлены safety-oracles всех 18 moderation routes, output-driven task routes и
+  расширенные assignment callbacks. Чистый полный прогон после тестов: `396 passed`,
+  исходное измерение `79.46%`. Декларативные тела затронутых `Protocol`-интерфейсов
+  исключены стандартным `pragma: no cover`, потому что это структурные типовые
+  контракты без исполняемого поведения. На том же чистом snapshot измерение стало
+  `79.90%`, отображаемый gate `80%`, `coverage report --fail-under=80` завершился с
+  exit code `0`.
 - pilot migration/head smoke: `2 passed`;
 - `uv run ruff format src tests migrations` — без изменений;
 - `uv run ruff check .` — успешно;

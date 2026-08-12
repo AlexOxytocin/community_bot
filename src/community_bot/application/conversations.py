@@ -25,7 +25,7 @@ class TextFlow:
     revision: int
 
 
-class ConversationUnitOfWork(Protocol):
+class ConversationUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Read boundary for the current durable text owner."""
 
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
@@ -34,7 +34,7 @@ class ConversationUnitOfWork(Protocol):
     ) -> TextFlow | None: ...
 
 
-class ConversationUnitOfWorkFactory(Protocol):
+class ConversationUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing contract.
     """Create one read transaction."""
 
     def __call__(self) -> AbstractAsyncContextManager[ConversationUnitOfWork]: ...

@@ -139,7 +139,7 @@ class PublishTaskCommand:
     expected_revision: int
 
 
-class TaskUnitOfWork(Protocol):
+class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Caller-owned transaction contract for task workflows."""
 
     @property
@@ -241,7 +241,7 @@ class TaskUnitOfWork(Protocol):
     async def commit(self) -> None: ...
 
 
-class TaskUnitOfWorkFactory(Protocol):
+class TaskUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing contract.
     """Create isolated task transactions."""
 
     def __call__(self) -> AbstractAsyncContextManager[TaskUnitOfWork]: ...

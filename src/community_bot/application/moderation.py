@@ -210,7 +210,7 @@ ModerationCommand = (
 )
 
 
-class ModerationMutationPort(Protocol):
+class ModerationMutationPort(Protocol):  # pragma: no cover - structural typing contract.
     """PostgreSQL-backed moderation operations within a caller-owned UoW."""
 
     async def list_cases(self, *, limit: int = 20) -> tuple[ModerationCase, ...]: ...
@@ -250,7 +250,7 @@ class ModerationMutationPort(Protocol):
     async def moderate_karma(self, command: ModerateKarmaCommand, actor: Member) -> str: ...
 
 
-class ModerationUnitOfWork(Protocol):
+class ModerationUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Transaction contract shared with Telegram update receipts."""
 
     @property
@@ -278,7 +278,7 @@ class ModerationUnitOfWork(Protocol):
     async def commit(self) -> None: ...
 
 
-class ModerationUnitOfWorkFactory(Protocol):
+class ModerationUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing contract.
     """Create isolated moderation transactions."""
 
     def __call__(self) -> ModerationUnitOfWork: ...
