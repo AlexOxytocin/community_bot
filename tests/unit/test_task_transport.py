@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Never, cast
 from uuid import uuid4
 
@@ -12,14 +13,18 @@ from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
 from community_bot.application.tasks import TaskDraft
 from community_bot.domain.catalog import TaskFormat
-from community_bot.domain.tasks import TaskDraftStep, TaskError
-from community_bot.transport.telegram.tasks import _encode_uuid, build_task_router
+from community_bot.domain.tasks import TaskDraftStep, TaskError, TaskStatus
+from community_bot.transport.telegram.tasks import (
+    _encode_uuid,
+    build_task_router,
+    task_cancellation_keyboard,
+)
 from tests.integration.test_task_creation import CapturingSession
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from community_bot.application.tasks import TaskService
+    from community_bot.application.tasks import PublishedTask, TaskService
 
 _DENIAL = "synthetic denial"
 
@@ -124,6 +129,8 @@ async def test_task_router_safely_denies_every_output_driven_route() -> None:
         callback_update(93_013, "task:step:preview"),
         callback_update(93_014, f"task:rr:{encoded}"),
         callback_update(93_015, f"task:rs:{encoded}:{encoded}"),
+        callback_update(93_016, f"task:cancel:ask:{encoded}"),
+        callback_update(93_017, f"task:cancel:do:{encoded}"),
     ]
     for update in updates:
         await dispatcher.feed_update(bot, update)
@@ -131,3 +138,66 @@ async def test_task_router_safely_denies_every_output_driven_route() -> None:
     assert len(capture.texts) == len(updates)
     assert all("не" in value.lower() or "ошиб" in value.lower() for value in capture.texts)
     await bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_callbacks_reject_group_chat_before_service() -> None:
+    """Cancellation cannot be requested or confirmed outside the private chat."""
+    service = _DeniedTaskService()
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_task_router(cast("TaskService", service)))
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'K' * 35}", session=capture)
+    actor = User(id=9302, is_bot=False, first_name="Author")
+    encoded = _encode_uuid(uuid4())
+
+    for update_id, data in (
+        (93_101, f"task:cancel:ask:{encoded}"),
+        (93_102, f"task:cancel:do:{encoded}"),
+        (93_103, "task:cancel:no"),
+    ):
+        await dispatcher.feed_update(
+            bot,
+            Update(
+                update_id=update_id,
+                callback_query=CallbackQuery(
+                    id=f"group-task-{update_id}",
+                    from_user=actor,
+                    chat_instance="group-task-cancellation",
+                    data=data,
+                    message=Message(
+                        message_id=update_id,
+                        date=datetime.datetime.now(datetime.UTC),
+                        chat=Chat(id=-1009302, type="supergroup"),
+                        from_user=actor,
+                        text="task",
+                    ),
+                ),
+            ),
+        )
+
+    private_only = "Работа с заданиями доступна только в личном чате с ботом."  # noqa: RUF001
+    assert capture.callback_answers == [private_only, private_only, private_only]
+    await bot.session.close()
+
+
+@pytest.mark.parametrize(
+    ("creator_id", "status"),
+    [
+        (None, TaskStatus.PUBLISHED),
+        (uuid4(), TaskStatus.CANCELLED),
+        (uuid4(), TaskStatus.EXPIRED),
+        (uuid4(), TaskStatus.PARTIALLY_COMPLETED),
+        (uuid4(), TaskStatus.COMPLETED),
+    ],
+)
+def test_task_cancellation_button_is_hidden_for_community_and_terminal_tasks(
+    creator_id: object, status: TaskStatus
+) -> None:
+    """Only a member-owned published task exposes the cancellation action."""
+    task = cast(
+        "PublishedTask",
+        SimpleNamespace(id=uuid4(), creator_id=creator_id, status=status),
+    )
+
+    assert task_cancellation_keyboard(task) is None

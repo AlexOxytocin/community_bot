@@ -15,18 +15,22 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from community_bot.application.tasks import AdvanceDraftCommand, PublishTaskCommand
 from community_bot.domain.catalog import TaskFormat
-from community_bot.domain.tasks import StaleTaskDraftError, TaskDraftStep, TaskError
+from community_bot.domain.tasks import StaleTaskDraftError, TaskDraftStep, TaskError, TaskStatus
 from community_bot.transport.telegram.task_card import preview_task_card
 
 if TYPE_CHECKING:
-    from community_bot.application.tasks import TaskDraft, TaskPreview, TaskService
+    from community_bot.application.tasks import PublishedTask, TaskDraft, TaskPreview, TaskService
 
 _CALLBACK_PREFIX = "task:pub:"
 _REVIEWER_PREFIX = "task:reviewer:"
 _STEP_PREFIX = "task:step:"
 _REPLACE_REVIEWER_PREFIX = "task:rr:"
 _SELECT_REVIEWER_PREFIX = "task:rs:"
+_CANCEL_REQUEST_PREFIX = "task:cancel:ask:"
+_CANCEL_CONFIRM_PREFIX = "task:cancel:do:"
+_CANCEL_DISMISS = "task:cancel:no"
 _CALLBACK_LIMIT = 64
+_SINGULAR_CREDIT_TEEN = 11
 
 
 def build_task_router(
@@ -272,11 +276,61 @@ def build_task_router(
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
+    async def request_cancel(callback: CallbackQuery) -> None:
+        if not await _require_private_callback(callback):
+            return
+        try:
+            task_id = _decode_uuid(str(callback.data).removeprefix(_CANCEL_REQUEST_PREFIX))
+            owned = await service.list_owned(actor_telegram_user_id=callback.from_user.id)
+            task = next((item for item in owned if item.id == task_id), None)
+            if task is None or task.creator_id is None:
+                raise PermissionError("Only the task creator can cancel this task.")
+            if task.status is not TaskStatus.PUBLISHED:
+                raise TaskError("Task cannot be cancelled from its current state.")
+            await callback.answer()
+            if isinstance(callback.message, Message):
+                await callback.message.answer(
+                    f"Отменить «{task.title}»?\n"
+                    "Задание исчезнет из каталога, а "
+                    f"{_credits(task.reserved_credit_total)} вернутся в доступный баланс.\n"
+                    "Если задание уже взяли, отмена будет недоступна.",
+                    reply_markup=_cancel_confirmation_keyboard(task.id),
+                )
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_cancel_error(error), show_alert=True)
+
+    async def confirm_cancel(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
+        try:
+            task_id = _decode_uuid(str(callback.data).removeprefix(_CANCEL_CONFIRM_PREFIX))
+            task = await service.cancel(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                task_id=task_id,
+            )
+            await callback.answer("Задание отменено.")
+            if isinstance(callback.message, Message):
+                await callback.message.answer(
+                    f"Задание «{task.title}» отменено. "
+                    f"{_credits(task.reserved_credit_total)} возвращены в доступный баланс."
+                )
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_cancel_error(error), show_alert=True)
+
+    async def dismiss_cancel(callback: CallbackQuery) -> None:
+        if not await _require_private_callback(callback):
+            return
+        await callback.answer("Отмена не выполнена.")
+
     router.message.register(handle_create, Command("task_create"))
     router.message.register(handle_resume, Command("task_resume"))
     router.message.register(handle_preview, Command("task_preview"))
     router.message.register(handle_owned, Command("my_tasks"))
     router.message.register(handle_cancel, Command("task_cancel"))
+    router.callback_query.register(request_cancel, F.data.startswith(_CANCEL_REQUEST_PREFIX))
+    router.callback_query.register(confirm_cancel, F.data.startswith(_CANCEL_CONFIRM_PREFIX))
+    router.callback_query.register(dismiss_cancel, F.data == _CANCEL_DISMISS)
     router.callback_query.register(handle_publish, F.data.startswith(_CALLBACK_PREFIX))
     router.callback_query.register(handle_reviewer, F.data.startswith(_REVIEWER_PREFIX))
     router.callback_query.register(handle_step, F.data.startswith(_STEP_PREFIX))
@@ -449,6 +503,32 @@ def reviewer_replacement_callback(task_id: UUID) -> str:
     return f"{_REPLACE_REVIEWER_PREFIX}{_encode_uuid(task_id)}"
 
 
+def task_cancellation_keyboard(task: PublishedTask) -> InlineKeyboardMarkup | None:
+    """Expose cancellation only for the creator-owned cancellable task state."""
+    if task.creator_id is None or task.status is not TaskStatus.PUBLISHED:
+        return None
+    callback_data = f"{_CANCEL_REQUEST_PREFIX}{_encode_uuid(task.id)}"
+    if len(callback_data.encode()) > _CALLBACK_LIMIT:
+        raise TaskError("Task cancellation callback exceeds the Telegram limit.")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Отменить", callback_data=callback_data)]]
+    )
+
+
+def _cancel_confirmation_keyboard(task_id: UUID) -> InlineKeyboardMarkup:
+    callback_data = f"{_CANCEL_CONFIRM_PREFIX}{_encode_uuid(task_id)}"
+    if len(callback_data.encode()) > _CALLBACK_LIMIT:
+        raise TaskError("Task cancellation callback exceeds the Telegram limit.")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, отменить", callback_data=callback_data),
+                InlineKeyboardButton(text="Не отменять", callback_data=_CANCEL_DISMISS),
+            ]
+        ]
+    )
+
+
 def _encode_uuid(value: UUID) -> str:
     return base64.urlsafe_b64encode(value.bytes).decode().rstrip("=")
 
@@ -477,6 +557,29 @@ def _friendly_error(error: Exception) -> str:
     if isinstance(error, StaleTaskDraftError):
         return "Черновик уже изменился. Откройте его заново."
     return "Не удалось обработать задание. Проверьте данные и попробуйте снова."
+
+
+def _cancel_error(error: Exception) -> str:
+    if isinstance(error, PermissionError):
+        return "Отменить задание может только его автор."
+    detail = str(error)
+    if "assignment history" in detail:
+        return "Задание уже взял исполнитель, поэтому отменить его нельзя."
+    if "already cancelled" in detail:
+        return "Это задание уже отменено."
+    if "current state" in detail:
+        return "Задание уже завершено или недоступно для отмены."
+    return "Не удалось отменить задание. Откройте «Мои задания» и попробуйте снова."
+
+
+def _credits(value: int) -> str:
+    if value % 10 == 1 and value % 100 != _SINGULAR_CREDIT_TEEN:
+        suffix = "кредит"
+    elif value % 10 in {2, 3, 4} and value % 100 not in {12, 13, 14}:
+        suffix = "кредита"
+    else:
+        suffix = "кредитов"
+    return f"{value} {suffix}"
 
 
 async def _require_private_message(message: Message) -> bool:

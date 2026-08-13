@@ -34,6 +34,7 @@ from community_bot.transport.telegram.profile import (
 )
 from community_bot.transport.telegram.reputation import send_member_catalog
 from community_bot.transport.telegram.task_card import published_task_card
+from community_bot.transport.telegram.tasks import task_cancellation_keyboard
 
 if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentService
@@ -212,6 +213,7 @@ def build_navigation_router(  # noqa: PLR0913
                 await message.answer(
                     f"{published_task_card(item)}\nСтатус: {item.status.value}",
                     parse_mode=None,
+                    reply_markup=task_cancellation_keyboard(item),
                 )
             await send_assignment_overview(message, assignments)
         except (PermissionError, LookupError, TaskError):

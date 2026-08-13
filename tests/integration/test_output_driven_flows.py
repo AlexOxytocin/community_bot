@@ -37,12 +37,15 @@ from community_bot.infrastructure.db.assignment_deadlines import PostgresAssignm
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
     AssignmentModel,
+    AuditEventModel,
     InteractionAlertModel,
     KarmaVoteModel,
     KarmaVoteModerationModel,
     MemberModel,
     MemberSanctionModel,
     ModerationCaseModel,
+    OutboxEventModel,
+    ProcessedTelegramUpdateModel,
     TaskModel,
     TaskTemplateModel,
 )
@@ -239,6 +242,11 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     await send_message(81_218_1, author.telegram_user_id, MY_TASKS_TEXT)
     owned_card = next(text for text in capture.texts if details in text)
     _assert_task_card(capture, owned_card, details, materials)
+    _visible_on_text(
+        capture,
+        lambda text: details in text,
+        lambda value: value.startswith("task:cancel:ask:"),
+    )
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
@@ -259,6 +267,150 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     await send_message(81_221, performer.telegram_user_id, MY_TASKS_TEXT)
     recovered_text = next(text for text in capture.texts if details in text)
     _assert_task_card(capture, recovered_text, details, materials)
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_message(81_222, author.telegram_user_id, MY_TASKS_TEXT)
+    cancel_request = _visible_on_text(
+        capture,
+        lambda text: details in text,
+        lambda value: value.startswith("task:cancel:ask:"),
+    )
+    capture.callbacks.clear()
+    await send_callback(81_223, author.telegram_user_id, cancel_request)
+    cancel_confirm = _visible_on_text(
+        capture,
+        lambda text: "Если задание уже взяли" in text,
+        lambda value: value.startswith("task:cancel:do:"),
+    )
+    await send_callback(81_224, author.telegram_user_id, cancel_confirm)
+    assert capture.callback_answers[-1] == (
+        "Задание уже взял исполнитель, поэтому отменить его нельзя."  # noqa: RUF001
+    )
+    await bot.session.close()
+    await database.dispose()
+
+
+async def test_author_cancels_published_task_through_visible_confirmation(  # noqa: PLR0915
+    database_url: str,
+) -> None:
+    """The visible two-step action refunds exactly once without exposing a UUID."""
+    database = Database(database_url)
+    admin = await _member(database, 81_301, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_302)
+    outsider = await _member(database, 81_303)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    published = await _published_task(
+        database,
+        author,
+        template_id,
+        update_id_base=81_310,
+    )
+
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    actors = _actors(author.telegram_user_id, outsider.telegram_user_id)
+    send_message, send_callback = _transport(dispatcher, bot, actors)
+
+    await send_message(81_320, author.telegram_user_id, MY_TASKS_TEXT)
+    request = _visible_on_text(
+        capture,
+        lambda text: published.title in text,
+        lambda value: value.startswith("task:cancel:ask:"),
+    )
+    assert len(request.encode()) <= 64
+    async with sessions() as session:
+        author_before_request = await session.get(MemberModel, author.id)
+        assert author_before_request is not None
+        immutable_before_request = (
+            author_before_request.credit_balance_cached,
+            await session.scalar(select(func.count()).select_from(AccountTransactionModel)),
+            await session.scalar(select(func.count()).select_from(AuditEventModel)),
+            await session.scalar(select(func.count()).select_from(OutboxEventModel)),
+            await session.scalar(select(func.count()).select_from(ProcessedTelegramUpdateModel)),
+        )
+
+    await send_callback(81_320_1, outsider.telegram_user_id, request)
+    assert capture.callback_answers[-1] == (
+        "Отменить задание может только его автор."  # noqa: RUF001
+    )
+    capture.callbacks.clear()
+    await send_callback(81_321, author.telegram_user_id, request)
+    confirm = _visible_on_text(
+        capture,
+        lambda text: f"Отменить «{published.title}»?" in text,
+        lambda value: value.startswith("task:cancel:do:"),
+    )
+    assert len(confirm.encode()) <= 64
+
+    async with sessions() as session:
+        stored_before = await session.get(TaskModel, published.id)
+        refunds_before = await session.scalar(
+            select(func.count())
+            .select_from(AccountTransactionModel)
+            .where(AccountTransactionModel.transaction_type == "task_reward_refunded")
+        )
+        author_after_request = await session.get(MemberModel, author.id)
+        assert author_after_request is not None
+        immutable_after_request = (
+            author_after_request.credit_balance_cached,
+            await session.scalar(select(func.count()).select_from(AccountTransactionModel)),
+            await session.scalar(select(func.count()).select_from(AuditEventModel)),
+            await session.scalar(select(func.count()).select_from(OutboxEventModel)),
+            await session.scalar(select(func.count()).select_from(ProcessedTelegramUpdateModel)),
+        )
+    assert stored_before is not None
+    assert stored_before.status == "published"
+    assert refunds_before == 0
+    assert immutable_after_request == immutable_before_request
+
+    capture.callbacks.clear()
+    await send_callback(81_322, author.telegram_user_id, confirm)
+    await send_callback(81_322, author.telegram_user_id, confirm)
+    assert any("возвращены в доступный баланс" in text for text in capture.texts)
+    async with sessions() as session:
+        stored_after = await session.get(TaskModel, published.id)
+        refunds_after = await session.scalar(
+            select(func.count())
+            .select_from(AccountTransactionModel)
+            .where(AccountTransactionModel.transaction_type == "task_reward_refunded")
+        )
+        persisted_author = await session.get(MemberModel, author.id)
+    assert stored_after is not None
+    assert stored_after.status == "cancelled"
+    assert refunds_after == 1
+    assert persisted_author is not None
+    assert persisted_author.credit_balance_cached == 10
+
+    await send_callback(81_322_1, author.telegram_user_id, confirm)
+    assert capture.callback_answers[-1] == "Это задание уже отменено."
+    async with sessions() as session:
+        refunds_after_stale_callback = await session.scalar(
+            select(func.count())
+            .select_from(AccountTransactionModel)
+            .where(AccountTransactionModel.transaction_type == "task_reward_refunded")
+        )
+    assert refunds_after_stale_callback == 1
+
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_message(81_323, author.telegram_user_id, MY_TASKS_TEXT)
+    assert not any(value.startswith("task:cancel:ask:") for value in capture.callbacks)
     await bot.session.close()
     await database.dispose()
 
