@@ -33,6 +33,7 @@ from community_bot.transport.telegram.profile import (
     profile_edit_keyboard,
 )
 from community_bot.transport.telegram.reputation import send_member_catalog
+from community_bot.transport.telegram.task_card import published_task_card
 
 if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentService
@@ -90,6 +91,9 @@ def build_navigation_router(  # noqa: PLR0913
     async def show_tasks(message: Message) -> None:
         if message.from_user is None:
             return
+        if message.chat.type != "private":
+            await message.answer("Задания доступны только в личном чате с ботом.")
+            return
         try:
             await _send_task_page(
                 message, await tasks.list_available(actor_telegram_user_id=message.from_user.id)
@@ -99,18 +103,23 @@ def build_navigation_router(  # noqa: PLR0913
 
     async def next_tasks(callback: CallbackQuery) -> None:
         try:
+            if not isinstance(callback.message, Message) or callback.message.chat.type != "private":
+                await callback.answer("Откройте задания в личном чате с ботом.", show_alert=True)
+                return
             cursor = UUID(str(callback.data).removeprefix(_TASK_PAGE_PREFIX))
             page = await tasks.list_available(
                 actor_telegram_user_id=callback.from_user.id, cursor_task_id=cursor
             )
             await callback.answer()
-            if isinstance(callback.message, Message):
-                await _send_task_page(callback.message, page)
+            await _send_task_page(callback.message, page)
         except (PermissionError, LookupError, TaskError, ValueError):
             await callback.answer("Не удалось открыть страницу заданий.", show_alert=True)
 
     async def show_create(message: Message) -> None:
         if message.from_user is None:
+            return
+        if message.chat.type != "private":
+            await message.answer("Создание заданий доступно только в личном чате с ботом.")
             return
         try:
             page = await catalog.browse(
@@ -122,6 +131,9 @@ def build_navigation_router(  # noqa: PLR0913
 
     async def choose_template(callback: CallbackQuery, event_update: Update) -> None:
         try:
+            if not isinstance(callback.message, Message) or callback.message.chat.type != "private":
+                await callback.answer("Создавайте задания в личном чате с ботом.", show_alert=True)
+                return
             raw_data = str(callback.data)
             community = raw_data.startswith(_COMMUNITY_PREFIX)
             prefix = _COMMUNITY_PREFIX if community else _CREATE_PREFIX
@@ -189,14 +201,18 @@ def build_navigation_router(  # noqa: PLR0913
     async def show_owned(message: Message) -> None:
         if message.from_user is None:
             return
+        if message.chat.type != "private":
+            await message.answer("Задания доступны только в личном чате с ботом.")
+            return
         try:
             owned = await tasks.list_owned(actor_telegram_user_id=message.from_user.id)
-            body = (
-                "У вас пока нет опубликованных заданий."
-                if not owned
-                else "\n".join(f"{item.title} · {item.status.value}" for item in owned)
-            )
-            await message.answer(body)
+            if not owned:
+                await message.answer("У вас пока нет опубликованных заданий.")
+            for item in owned:
+                await message.answer(
+                    f"{published_task_card(item)}\nСтатус: {item.status.value}",
+                    parse_mode=None,
+                )
             await send_assignment_overview(message, assignments)
         except (PermissionError, LookupError, TaskError):
             await message.answer("Ваши задания сейчас недоступны.")
@@ -250,7 +266,10 @@ def build_navigation_router(  # noqa: PLR0913
             return
         try:
             await navigation.require_active_administrator(message.from_user.id)
-            await message.answer("Администрирование", reply_markup=_admin_markup())
+            await message.answer(
+                "Администрирование",
+                reply_markup=_admin_markup(include_task_creation=message.chat.type == "private"),
+            )
         except PermissionError:
             try:
                 await send_moderation_overview(message, moderation)
@@ -261,6 +280,14 @@ def build_navigation_router(  # noqa: PLR0913
         try:
             await navigation.require_active_administrator(callback.from_user.id)
             action = str(callback.data).removeprefix(_ADMIN_PREFIX)
+            if action == "community" and (
+                not isinstance(callback.message, Message) or callback.message.chat.type != "private"
+            ):
+                await callback.answer(
+                    "Создавайте задания сообщества в личном чате с ботом.",
+                    show_alert=True,
+                )
+                return
             if action == "invite":
                 result = await registration.create_invitation(
                     InvitationCreateCommand(
@@ -351,12 +378,8 @@ async def _send_task_page(message: Message, page: AvailableTaskPage) -> None:
         return
     for task in page.items:
         await message.answer(
-            f"{task.title}\n"
-            f"Автор: {task.author_display_name}\n"
-            f"{task.description}\n"
-            f"Награда: {task.credit_reward_per_performer} кредита\n"
-            f"Срок: {task.deadline_at:%d.%m %H:%M}\n"
-            f"Формат: {task.format.value}",
+            published_task_card(task),
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="Взять", callback_data=f"task:accept:{task.id}")]
@@ -405,20 +428,22 @@ async def _send_creation_catalog(
         )
 
 
-def _admin_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Создать приглашение", callback_data="nav:admin:invite")],
-            [InlineKeyboardButton(text="Заявки", callback_data="registration:list")],
+def _admin_markup(*, include_task_creation: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Создать приглашение", callback_data="nav:admin:invite")],
+        [InlineKeyboardButton(text="Заявки", callback_data="registration:list")],
+    ]
+    if include_task_creation:
+        rows.append(
             [
                 InlineKeyboardButton(
                     text="Создать задание сообщества",
                     callback_data="nav:admin:community",
                 )
-            ],
-            [InlineKeyboardButton(text="Модерация", callback_data="nav:admin:moderation")],
-        ]
-    )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="Модерация", callback_data="nav:admin:moderation")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _ledger_line(item: LedgerHistoryItem) -> str:

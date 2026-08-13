@@ -20,6 +20,7 @@ from community_bot.application.assignments import (
     SaveSubmissionDraftCommand,
 )
 from community_bot.domain.assignments import AssignmentDecision, AssignmentError
+from community_bot.transport.telegram.task_card import published_task_card
 from community_bot.transport.telegram.tasks import reviewer_replacement_callback
 
 if TYPE_CHECKING:
@@ -39,21 +40,28 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def accept(callback: CallbackQuery, event_update: Update) -> None:
         try:
+            if not await _require_private_callback(callback):
+                return
+            message = callback.message
+            if not isinstance(message, Message):
+                return
             task_id = UUID(str(callback.data).removeprefix(_ACCEPT_PREFIX))
-            assignment = await service.accept(
+            assignment, task = await service.accept_with_task(
                 AcceptAssignmentCommand(event_update.update_id, callback.from_user.id, task_id)
             )
             await callback.answer("Задание принято.")
-            if isinstance(callback.message, Message):
-                await callback.message.answer(
-                    "Задание принято. Что хотите сделать дальше?",
-                    reply_markup=_assignment_actions(assignment.id, assignment.status.value),
-                )
+            await message.answer(
+                f"{published_task_card(task)}\n\nЗадание принято. Что хотите сделать дальше?",
+                parse_mode=None,
+                reply_markup=_assignment_actions(assignment.id, assignment.status.value),
+            )
         except (AssignmentError, PermissionError, LookupError, ValueError):
             await callback.answer("Не удалось принять задание.", show_alert=True)
 
     async def owned(message: Message) -> None:
         if message.from_user is None:
+            return
+        if not await _require_private_message(message):
             return
         try:
             await send_assignment_overview(message, service)
@@ -62,6 +70,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def cancel(message: Message, event_update: Update) -> None:
         if message.from_user is None:
+            return
+        if not await _require_private_message(message):
             return
         try:
             raw_id, reason = _two_arguments(message.text)
@@ -77,6 +87,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def submit(message: Message, event_update: Update) -> None:
         if message.from_user is None:
+            return
+        if not await _require_private_message(message):
             return
         try:
             draft = await service.begin_submission(
@@ -97,6 +109,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def save_preview(message: Message, event_update: Update) -> None:
         if message.from_user is None:
+            return
+        if not await _require_private_message(message):
             return
         try:
             raw_draft, raw_revision, raw_payload = _three_arguments(message.text)
@@ -133,6 +147,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def confirm_submit(callback: CallbackQuery, event_update: Update) -> None:
         try:
+            if not await _require_private_callback(callback):
+                return
             draft_id, revision = _parse_submission(str(callback.data))
             result = await service.confirm_submission_draft(
                 ConfirmSubmissionDraftCommand(
@@ -147,6 +163,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def decide(callback: CallbackQuery, event_update: Update) -> None:
         try:
+            if not await _require_private_callback(callback):
+                return
             assignment_id, decision = _parse_decision(str(callback.data))
             updated = await service.decide(
                 DecideAssignmentCommand(
@@ -163,6 +181,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def action(callback: CallbackQuery, event_update: Update) -> None:
         try:
+            if not await _require_private_callback(callback):
+                return
             action_code, assignment_id = _parse_action(str(callback.data))
             if action_code == "s":
                 await service.begin_submission(
@@ -199,6 +219,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
     async def reviews(message: Message) -> None:
         if message.from_user is None:
             return
+        if not await _require_private_message(message):
+            return
         try:
             cards = await service.review_cards(message.from_user.id)
             if not cards:
@@ -215,6 +237,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     async def dispute(message: Message, event_update: Update) -> None:
         if message.from_user is None:
+            return
+        if not await _require_private_message(message):
             return
         try:
             raw_id, comment = _two_arguments(message.text)
@@ -248,6 +272,9 @@ async def send_assignment_overview(message: Message, service: AssignmentService)
     """Send performer and reviewer cards through one visible entry point."""
     if message.from_user is None:
         return
+    if message.chat.type != "private":
+        await message.answer("Задания доступны только в личном чате с ботом.")
+        return
     cards = await service.cards(message.from_user.id)
     reviews = await service.review_cards(message.from_user.id)
     if not cards and not reviews:
@@ -255,7 +282,8 @@ async def send_assignment_overview(message: Message, service: AssignmentService)
         return
     for card in cards:
         await message.answer(
-            f"{card.task_title}\nСтатус: {_status(card.assignment.status.value)}",
+            f"{published_task_card(card.task)}\nСтатус: {_status(card.assignment.status.value)}",
+            parse_mode=None,
             reply_markup=_assignment_actions(
                 card.assignment.id,
                 card.assignment.status.value,
@@ -295,6 +323,8 @@ async def handle_assignment_text(
     """Consume text only when the durable owner selects an assignment flow."""
     if message.from_user is None or message.text is None or owner.reference_id is None:
         return False
+    if not await _require_private_message(message):
+        return True
     text = message.text.strip()
     if owner.flow_type == "assignment_result":
         try:
@@ -341,6 +371,22 @@ async def handle_assignment_text(
         except (AssignmentError, PermissionError, LookupError, ValueError):
             await message.answer("Не удалось открыть спор. Проверьте срок и комментарий.")
         return True
+    return False
+
+
+async def _require_private_message(message: Message) -> bool:
+    if message.chat.type == "private":
+        return True
+    await message.answer("Работа с заданиями доступна только в личном чате с ботом.")
+    return False
+
+
+async def _require_private_callback(callback: CallbackQuery) -> bool:
+    if isinstance(callback.message, Message) and callback.message.chat.type == "private":
+        return True
+    await callback.answer(
+        "Работа с заданиями доступна только в личном чате с ботом.", show_alert=True
+    )
     return False
 
 

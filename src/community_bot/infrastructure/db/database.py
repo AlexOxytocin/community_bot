@@ -607,6 +607,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Read one task snapshot."""
         return await task_store.get_task(self._require_session(), task_id)
 
+    async def member_display_name(self, member_id: UUID) -> str:
+        """Return the current profile label used by an author preview."""
+        return await task_store.member_display_name(self._require_session(), member_id)
+
     async def lock_task(self, task_id: UUID) -> PublishedTask | None:
         """Lock one task snapshot."""
         return await task_store.lock_task(self._require_session(), task_id)
