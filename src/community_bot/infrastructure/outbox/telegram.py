@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -18,10 +18,21 @@ from community_bot.application.notifications import NotificationProcessingError
 
 if TYPE_CHECKING:
     from aiogram import Bot
+    from aiogram.types import ReplyKeyboardMarkup
 
     from community_bot.application.notifications import DeliveryClaim
 
+
+class ReplyMarkupFactory(Protocol):
+    """Build allowlisted Telegram markup for one notification type."""
+
+    def __call__(self, notification_type: str) -> ReplyKeyboardMarkup | None:
+        """Return markup for the exact allowlisted notification type."""
+        ...
+
+
 _MESSAGES = {
+    "registration.approved": "Регистрация подтверждена. Главное меню уже доступно.",
     "task.published": "Опубликовано новое задание в сообществе.",
     "task.cancelled": "Задание отменено.",
     "assignment_accepted": "У задания появился исполнитель.",
@@ -47,17 +58,27 @@ _TEMPORARILY_UNAVAILABLE = "telegram_temporarily_unavailable"
 class TelegramNotificationSender:
     """Send allowlisted messages without exposing persisted payload details."""
 
-    def __init__(self, bot: Bot) -> None:
+    def __init__(self, bot: Bot, reply_markup_factory: ReplyMarkupFactory | None = None) -> None:
         """Use one process-owned aiogram bot client."""
         self._bot = bot
+        self._reply_markup_factory = reply_markup_factory
 
     async def send(self, claim: DeliveryClaim) -> None:
         """Map Telegram failures to safe retry categories."""
         text = _MESSAGES.get(claim.notification_type)
         if text is None:
             raise NotificationProcessingError(_UNSUPPORTED_NOTIFICATION_TYPE, permanent=True)
+        reply_markup = (
+            None
+            if self._reply_markup_factory is None
+            else self._reply_markup_factory(claim.notification_type)
+        )
         try:
-            await self._bot.send_message(chat_id=claim.telegram_user_id, text=text)
+            await self._bot.send_message(
+                chat_id=claim.telegram_user_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
         except (TelegramForbiddenError, TelegramBadRequest) as error:
             raise NotificationProcessingError(_RECIPIENT_UNAVAILABLE, permanent=True) from error
         except TelegramRetryAfter as error:

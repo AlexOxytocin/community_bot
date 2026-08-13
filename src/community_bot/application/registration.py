@@ -263,6 +263,10 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         """Persist the approved or rejected registration state."""
         ...
 
+    async def add_registration_approved_outbox(self, member_id: UUID) -> None:
+        """Stage one durable approval notification for a newly active member."""
+        ...
+
     async def list_submitted_registrations(self, limit: int) -> tuple[RegistrationContext, ...]:
         """Return oldest submitted applications first."""
         ...
@@ -707,6 +711,7 @@ class RegistrationService:
                     entity_id=str(target.id),
                     reason=command.comment,
                 )
+                await unit_of_work.add_registration_approved_outbox(target.id)
             outcome = "registration_approved"
             await unit_of_work.add_registration_receipt(
                 update_id=command.update_id,

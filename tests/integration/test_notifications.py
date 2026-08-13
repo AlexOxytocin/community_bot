@@ -153,6 +153,59 @@ async def _add_outbox(  # noqa: PLR0913 - explicit event fixture fields stay rea
         session.add(event)
 
 
+async def test_registration_approval_is_immediate_and_suppresses_inactive_recipient(
+    database_url: str,
+) -> None:
+    """Approval bypasses quiet hours but stale active access is checked before delivery."""
+    database = Database(database_url)
+    outside_window = datetime.datetime(2026, 1, 15, 23, tzinfo=datetime.UTC)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        member = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_010,
+            display_name="New member",
+            timezone="UTC",
+            status="active",
+            role="member",
+        )
+        session.add(member)
+    await _add_outbox(
+        database,
+        event_type="registration.approved",
+        aggregate_type="member",
+        aggregate_id=member.id,
+        business_key="registration-approved-immediate",
+        now=outside_window,
+    )
+    queue = PostgresNotificationQueue(database.session_factory)
+    claims = await queue.claim_outbox(
+        now=outside_window,
+        limit=10,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+    assert len(claims) == 1
+    await queue.materialize(claims[0], now=outside_window, window=DeliveryWindow())
+    async with sessions() as session:
+        notification = await session.scalar(select(NotificationModel))
+    assert notification is not None
+    assert notification.scheduled_at == outside_window
+
+    async with sessions.begin() as session:
+        persisted = await session.get(MemberModel, member.id)
+        assert persisted is not None
+        persisted.status = "paused"
+    deliveries = await queue.claim_notifications(
+        now=outside_window,
+        limit=10,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+    assert deliveries == ()
+    async with sessions() as session:
+        assert await session.scalar(select(NotificationModel.status)) == "failed"
+    await database.dispose()
+
+
 async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notification(
     database_url: str,
 ) -> None:

@@ -26,6 +26,7 @@ from community_bot.infrastructure.db.models import (
     InvitationModel,
     InvitationRedemptionModel,
     MemberModel,
+    OutboxEventModel,
     RegistrationApplicationModel,
 )
 
@@ -355,6 +356,20 @@ async def get_own_profile(
         credit_balance=member.credit_balance_cached,
         experience_total=member.experience_total_cached,
     )
+
+
+async def add_registration_approved_outbox(session: AsyncSession, member_id: UUID) -> None:
+    """Stage the one durable notification emitted by first approval."""
+    session.add(
+        OutboxEventModel(
+            event_type="registration.approved",
+            aggregate_type="member",
+            aggregate_id=member_id,
+            payload_json={"member_id": str(member_id)},
+            business_key=f"registration.approved:{member_id}",
+        )
+    )
+    await session.flush()
 
 
 async def get_conversation_expectation(

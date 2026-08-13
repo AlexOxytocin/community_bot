@@ -164,11 +164,19 @@ class _TelegramBotStub:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.sent: list[tuple[int, str]] = []
+        self.reply_markups: list[object | None] = []
 
-    async def send_message(self, *, chat_id: int, text: str) -> None:
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        reply_markup: object | None = None,
+    ) -> None:
         if self.error is not None:
             raise self.error
         self.sent.append((chat_id, text))
+        self.reply_markups.append(reply_markup)
 
 
 def _telegram_method() -> SendMessage:
@@ -193,6 +201,7 @@ async def test_telegram_sender_uses_allowlisted_message() -> None:
     await sender.send(claim)
 
     assert bot.sent == [(42, "Опубликовано новое задание в сообществе.")]
+    assert bot.reply_markups == [None]
 
 
 @pytest.mark.asyncio

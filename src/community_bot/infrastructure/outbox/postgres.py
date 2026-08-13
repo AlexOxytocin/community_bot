@@ -127,15 +127,18 @@ class PostgresNotificationQueue:
                 raise NotificationProcessingError(_STALE_OUTBOX_LEASE, permanent=True)
             recipients = await self._event_recipients(session, event)
             for recipient in recipients:
-                try:
-                    scheduled_at = window.schedule(
-                        candidate=now,
-                        timezone_name=recipient.timezone,
-                    )
-                except NotificationError as error:
-                    raise NotificationProcessingError(
-                        _INVALID_MEMBER_TIMEZONE, permanent=True
-                    ) from error
+                if event.event_type == "registration.approved":
+                    scheduled_at = now
+                else:
+                    try:
+                        scheduled_at = window.schedule(
+                            candidate=now,
+                            timezone_name=recipient.timezone,
+                        )
+                    except NotificationError as error:
+                        raise NotificationProcessingError(
+                            _INVALID_MEMBER_TIMEZONE, permanent=True
+                        ) from error
                 await self._insert_notification(
                     session,
                     member_id=recipient.member_id,
@@ -282,7 +285,7 @@ class PostgresNotificationQueue:
                     row.status = "failed"
                     row.last_error_code = "notification_recipient_missing"
                     continue
-                if not await self._notification_is_current(session, row, now=now):
+                if not await self._notification_is_current(session, row, member=member, now=now):
                     row.status = "failed"
                     row.last_error_code = "notification_obsolete"
                     continue
@@ -429,6 +432,8 @@ class PostgresNotificationQueue:
                 )
             )
             member_ids.update(administrators)
+        elif event.aggregate_type == "member" and event.event_type == "registration.approved":
+            member_ids.add(event.aggregate_id)
         else:
             raise NotificationProcessingError(_UNSUPPORTED_OUTBOX_EVENT, permanent=True)
 
@@ -471,6 +476,7 @@ class PostgresNotificationQueue:
         session: AsyncSession,
         notification: NotificationModel,
         *,
+        member: MemberModel,
         now: datetime.datetime,
     ) -> bool:
         """Suppress a scheduled reminder after its domain state becomes terminal."""
@@ -479,7 +485,10 @@ class PostgresNotificationQueue:
             "review_reminder_24h",
             "review_reminder_48h",
         }:
-            return True
+            return (
+                notification.notification_type != "registration.approved"
+                or member.status == "active"
+            )
         aggregate_id = notification.payload_json.get("aggregate_id")
         if not isinstance(aggregate_id, str):
             return False
