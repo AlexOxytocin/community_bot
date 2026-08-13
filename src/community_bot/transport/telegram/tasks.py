@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from community_bot.application.tasks import AdvanceDraftCommand, PublishTaskCommand
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import StaleTaskDraftError, TaskDraftStep, TaskError
+from community_bot.transport.telegram.task_card import preview_task_card
 
 if TYPE_CHECKING:
     from community_bot.application.tasks import TaskDraft, TaskPreview, TaskService
@@ -37,6 +38,8 @@ def build_task_router(
     router = Router(name="tasks")
 
     async def handle_create(message: Message, event_update: Update) -> None:
+        if not await _require_private_message(message):
+            return
         if message.from_user is None:
             return
         try:
@@ -55,6 +58,8 @@ def build_task_router(
             await message.answer(_friendly_error(error))
 
     async def handle_resume(message: Message, event_update: Update) -> None:
+        if not await _require_private_message(message):
+            return
         if message.from_user is None:
             return
         try:
@@ -68,10 +73,14 @@ def build_task_router(
             await message.answer(_friendly_error(error))
 
     async def handle_answer(message: Message, event_update: Update) -> None:
+        if not await _require_private_message(message):
+            return
         if not await handle_task_text(service, message, event_update):
             raise SkipHandler
 
     async def handle_preview(message: Message, event_update: Update) -> None:
+        if not await _require_private_message(message):
+            return
         if message.from_user is None:
             return
         try:
@@ -89,6 +98,8 @@ def build_task_router(
             await message.answer(_friendly_error(error))
 
     async def handle_publish(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
         try:
             draft_id, revision = _parse_publish_callback(str(callback.data))
             task = await service.publish(
@@ -106,6 +117,8 @@ def build_task_router(
             await callback.answer(_friendly_error(error), show_alert=True)
 
     async def handle_reviewer(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
         try:
             reviewer_id = UUID(hex=str(callback.data).removeprefix(_REVIEWER_PREFIX))
             await service.select_community_reviewer(
@@ -122,6 +135,8 @@ def build_task_router(
             await callback.answer(_friendly_error(error), show_alert=True)
 
     async def handle_step(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
         try:
             action = str(callback.data).removeprefix(_STEP_PREFIX)
             draft = await service.current(actor_telegram_user_id=callback.from_user.id)
@@ -166,6 +181,8 @@ def build_task_router(
             await callback.answer(_friendly_error(error), show_alert=True)
 
     async def replace_reviewer(callback: CallbackQuery) -> None:
+        if not await _require_private_callback(callback):
+            return
         try:
             task_id = _decode_uuid(str(callback.data).removeprefix(_REPLACE_REVIEWER_PREFIX))
             reviewers = await service.community_reviewers(callback.from_user.id)
@@ -194,6 +211,8 @@ def build_task_router(
             await callback.answer(_friendly_error(error), show_alert=True)
 
     async def select_replacement(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
         try:
             raw_task, raw_reviewer = (
                 str(callback.data).removeprefix(_SELECT_REVIEWER_PREFIX).split(":", 1)
@@ -211,6 +230,8 @@ def build_task_router(
             await callback.answer(_friendly_error(error), show_alert=True)
 
     async def handle_owned(message: Message) -> None:
+        if not await _require_private_message(message):
+            return
         if message.from_user is None:
             return
         try:
@@ -228,6 +249,8 @@ def build_task_router(
             await message.answer(_friendly_error(error))
 
     async def handle_cancel(message: Message, event_update: Update) -> None:
+        if not await _require_private_message(message):
+            return
         if message.from_user is None:
             return
         try:
@@ -274,6 +297,8 @@ async def handle_task_text(service: TaskService, message: Message, event_update:
     """Handle a task-draft answer, or return false when no task draft owns the text."""
     if message.from_user is None or message.text is None:
         return False
+    if not await _require_private_message(message):
+        return True
     try:
         draft = await service.current(actor_telegram_user_id=message.from_user.id)
     except (PermissionError, LookupError):
@@ -306,10 +331,8 @@ async def _send_preview(message: Message, preview: TaskPreview) -> None:
         inline_keyboard=[[InlineKeyboardButton(text="Опубликовать", callback_data=callback_data)]]
     )
     await message.answer(
-        f"{preview.template_name}\n"
-        f"{preview.credit_reward_per_performer} кредита × "
-        f"{preview.draft.performer_slots} = {preview.reserved_credit_total}\n"
-        f"Срок: {preview.draft.deadline_at:%d.%m.%Y %H:%M} UTC",
+        preview_task_card(preview),
+        parse_mode=None,
         reply_markup=markup,
     )
 
@@ -454,3 +477,19 @@ def _friendly_error(error: Exception) -> str:
     if isinstance(error, StaleTaskDraftError):
         return "Черновик уже изменился. Откройте его заново."
     return "Не удалось обработать задание. Проверьте данные и попробуйте снова."
+
+
+async def _require_private_message(message: Message) -> bool:
+    if message.chat.type == "private":
+        return True
+    await message.answer("Работа с заданиями доступна только в личном чате с ботом.")
+    return False
+
+
+async def _require_private_callback(callback: CallbackQuery) -> bool:
+    if isinstance(callback.message, Message) and callback.message.chat.type == "private":
+        return True
+    await callback.answer(
+        "Работа с заданиями доступна только в личном чате с ботом.", show_alert=True
+    )
+    return False

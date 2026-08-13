@@ -21,6 +21,7 @@ from community_bot.domain.tasks import (
     validate_acceptance_actor,
     validate_deadline,
     validate_materials,
+    validate_public_text_uris,
     validate_slots,
     validate_task_format,
 )
@@ -64,7 +65,12 @@ class TaskPreview:
     """Read-only publication preview with the exact reserve amount."""
 
     draft: TaskDraft
+    author_display_name: str
     template_name: str
+    template_description: str
+    performer_instructions: str
+    public_input_keys: tuple[str, ...]
+    completion_criteria: str
     credit_reward_per_performer: int
     reserved_credit_total: int
 
@@ -83,6 +89,8 @@ class PublishedTask:
     template_version: int
     title: str
     description: str
+    performer_instructions: str
+    public_input_keys: tuple[str, ...]
     completion_criteria: str
     input_payload: dict[str, object]
     materials: dict[str, object]
@@ -163,6 +171,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         self, *, template_id: UUID, level: int
     ) -> CatalogTemplate | None: ...
     async def catalog_template(self, template_id: UUID) -> CatalogTemplate | None: ...
+    async def member_display_name(self, member_id: UUID) -> str: ...
     async def create_task_draft(
         self, *, creator_id: UUID, template_id: UUID, origin: str = "member"
     ) -> TaskDraft: ...
@@ -481,7 +490,16 @@ class TaskService:
                 raise TaskError("Task preview is incomplete.")
             return TaskPreview(
                 draft,
+                (
+                    "Сообщество"
+                    if draft.origin == "community"
+                    else await uow.member_display_name(draft.creator_id)
+                ),
                 template.name,
+                template.description,
+                template.performer_instructions,
+                _schema_property_keys(template.input_schema),
+                template.completion_criteria,
                 template.credit_reward,
                 0
                 if draft.origin == "community"
@@ -839,6 +857,8 @@ def _validate_publishable(draft: TaskDraft, template: CatalogTemplate) -> None:
     if draft.materials is None or draft.performer_slots is None:
         raise TaskError("Task draft is incomplete.")
     validate_payload(template.input_schema, draft.input_payload)
+    validate_public_text_uris(draft.input_payload)
+    validate_materials(draft.materials)
     validate_deadline(draft.deadline_at, now=_utc_now())
     validate_task_format(draft.format, template_format=template.format, city=draft.city)
     validate_slots(draft.performer_slots, maximum=template.maximum_performers)
@@ -866,6 +886,13 @@ def _plain_input_payload(schema: Mapping[str, object], text: str) -> dict[str, o
         else:
             payload[key] = text
     return payload
+
+
+def _schema_property_keys(schema: Mapping[str, object]) -> tuple[str, ...]:
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        raise TaskError("Task input schema is invalid.")
+    return tuple(key for key in properties if isinstance(key, str))
 
 
 def _replace_draft(draft: TaskDraft, **changes: object) -> TaskDraft:

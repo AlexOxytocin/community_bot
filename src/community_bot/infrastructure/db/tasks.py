@@ -187,6 +187,8 @@ async def insert_published_task(
     if creator is None:
         raise LookupError("Task creator does not exist.")
     community = draft.origin == "community"
+    schema_properties = template.input_schema.get("properties")
+    public_input_keys = list(schema_properties) if isinstance(schema_properties, dict) else []
     model = TaskModel(
         origin=draft.origin,
         template_id=template.id,
@@ -213,6 +215,7 @@ async def insert_published_task(
         safety_snapshot_json={
             "creator_instructions": template.creator_instructions,
             "performer_instructions": template.performer_instructions,
+            "public_input_keys": public_input_keys,
             "moderation_required": template.moderation_required,
         },
         publish_command_id=draft.publish_command_id,
@@ -226,6 +229,16 @@ async def get_task(session: AsyncSession, task_id: uuid.UUID) -> PublishedTask |
     """Read one published task."""
     model = await session.get(TaskModel, task_id)
     return None if model is None else _task(model)
+
+
+async def member_display_name(session: AsyncSession, member_id: uuid.UUID) -> str:
+    """Return the immutable preview author label from the current profile."""
+    value = await session.scalar(
+        select(MemberModel.display_name).where(MemberModel.id == member_id)
+    )
+    if value is None:
+        raise LookupError("Task creator does not exist.")
+    return value
 
 
 async def lock_task(session: AsyncSession, task_id: uuid.UUID) -> PublishedTask | None:
@@ -397,6 +410,12 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
 
 
 def _task(model: TaskModel) -> PublishedTask:
+    stored_public_keys = model.safety_snapshot_json.get("public_input_keys")
+    public_input_keys = (
+        tuple(str(key) for key in stored_public_keys)
+        if isinstance(stored_public_keys, list)
+        else tuple(str(key) for key in model.input_payload_json)
+    )
     return PublishedTask(
         id=model.id,
         creator_id=model.creator_id,
@@ -408,6 +427,13 @@ def _task(model: TaskModel) -> PublishedTask:
         template_version=model.template_version,
         title=model.title,
         description=model.description,
+        performer_instructions=str(
+            model.safety_snapshot_json.get(
+                "performer_instructions",
+                "Следуйте описанию задания и критериям результата.",
+            )
+        ),
+        public_input_keys=public_input_keys,
         completion_criteria=model.completion_criteria,
         input_payload=dict(model.input_payload_json),
         materials=dict(model.materials_json),
@@ -422,3 +448,8 @@ def _task(model: TaskModel) -> PublishedTask:
         publish_command_id=model.publish_command_id,
         created_at=model.created_at,
     )
+
+
+def published_task_from_model(model: TaskModel) -> PublishedTask:
+    """Map a joined task row for assignment projections."""
+    return _task(model)

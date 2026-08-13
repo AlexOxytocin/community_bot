@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import datetime
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
+
+from pydantic import HttpUrl, TypeAdapter, ValidationError
 
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.members import Member, MemberStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from uuid import UUID
 
     from community_bot.domain.economy import ResolvedLevel
@@ -22,6 +26,11 @@ class TaskError(ValueError):
 
 
 _MAX_MATERIAL_LENGTH = 2000
+_MAX_URL_LENGTH = 700
+_HTTP_URL = TypeAdapter(HttpUrl)
+_URI_SCHEME = re.compile(r"\b([a-z][a-z0-9+.-]*):\/\/", re.IGNORECASE)
+_HTTP_URI = re.compile(r"https?:\/\/[^\s]+", re.IGNORECASE)
+_EXECUTABLE_URI = re.compile(r"\b(?:tg|file|intent|javascript|data|vbscript):", re.IGNORECASE)
 
 
 class StaleTaskDraftError(TaskError):
@@ -111,8 +120,48 @@ def validate_materials(value: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(item, str) or not item.strip() or len(item) > _MAX_MATERIAL_LENGTH:
             message = "Task material values must be non-empty strings up to 2000 characters."
             raise TaskError(message)
-        normalized[key] = item.strip()
+        clean = item.strip()
+        validate_public_text_uris(clean)
+        if key == "url" and not _is_safe_http_url(clean):
+            message = "Task material URL must use http or https without credentials."
+            raise TaskError(message)
+        normalized[key] = clean
     return normalized
+
+
+def validate_public_text_uris(value: object) -> None:
+    """Reject executable URI schemes nested in public task input."""
+    if isinstance(value, str):
+        if _EXECUTABLE_URI.search(value) or any(
+            scheme.casefold() not in {"http", "https"} for scheme in _URI_SCHEME.findall(value)
+        ):
+            message = "Task text contains an unsupported URI scheme."
+            raise TaskError(message)
+        if any(not _is_safe_http_url(item.rstrip(".,;!?)")) for item in _HTTP_URI.findall(value)):
+            message = "Task text contains an invalid HTTP URL."
+            raise TaskError(message)
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            validate_public_text_uris(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            validate_public_text_uris(item)
+
+
+def _is_safe_http_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        _HTTP_URL.validate_python(value)
+        return (
+            len(value) <= _MAX_URL_LENGTH
+            and parsed.scheme in {"http", "https"}
+            and parsed.hostname is not None
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except (ValidationError, ValueError):
+        return False
 
 
 def validate_acceptance_actor(

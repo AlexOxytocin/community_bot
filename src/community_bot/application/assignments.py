@@ -107,6 +107,7 @@ class AssignmentCard:
     """Privacy-safe Telegram projection for one assignment and its task."""
 
     assignment: Assignment
+    task: PublishedTask
     task_title: str
     task_origin: str
     task_creator_id: UUID | None
@@ -265,10 +266,21 @@ class AssignmentService:
 
     async def accept(self, command: AcceptAssignmentCommand) -> Assignment:
         """Atomically claim one free slot and enforce the active limit."""
+        assignment, _task = await self.accept_with_task(command)
+        return assignment
+
+    async def accept_with_task(
+        self, command: AcceptAssignmentCommand
+    ) -> tuple[Assignment, PublishedTask]:
+        """Accept one task and return its authoritative display snapshot."""
         async with self._unit_of_work_factory() as uow:
             replay = await _begin(uow, command.update_id)
             if replay is not None:
-                return await _assignment_replay(uow, replay)
+                assignment = await _assignment_replay(uow, replay)
+                task = await uow.lock_task(assignment.task_id)
+                if task is None:
+                    raise LookupError("Assignment task does not exist.")
+                return assignment, task
             await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
             actor = await _actor(uow, command.actor_telegram_user_id)
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.ACCEPT_TASK)
@@ -300,7 +312,7 @@ class AssignmentService:
                 business_key=f"assignment:{assignment.id}:accepted",
             )
             await _finish(uow, command.update_id, actor.id, assignment)
-            return assignment
+            return assignment, task
 
     async def list_owned(self, actor_telegram_user_id: int) -> tuple[Assignment, ...]:
         """Return only assignments owned by the active performer."""
@@ -1013,7 +1025,7 @@ async def _assignment_replay(uow: AssignmentUnitOfWork, outcome: str) -> Assignm
     marker, separator, raw_id = outcome.partition(":")
     if marker != "assignment" or not separator:
         raise AssignmentError("Telegram update belongs to another operation.")
-    assignment = await uow.lock_assignment(UUID(raw_id))
+    assignment = await uow.get_assignment(UUID(raw_id))
     if assignment is None:
         raise LookupError("Stored assignment outcome does not exist.")
     return assignment

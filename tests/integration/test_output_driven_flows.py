@@ -174,6 +174,107 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
     await database.dispose()
 
 
+async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # noqa: PLR0915
+    database_url: str,
+) -> None:
+    """Keep author input and materials visible across the Telegram task journey."""
+    database = Database(database_url)
+    admin = await _member(database, 81_201, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_202)
+    performer = await _member(database, 81_203)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    actors = _actors(author.telegram_user_id, performer.telegram_user_id)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    send_message, send_callback = _transport(dispatcher, bot, actors)
+    details = "Проверьте ясность первого экрана и предложите три улучшения."
+    materials = "https://example.com/landing-review"
+
+    await send_message(81_210, author.telegram_user_id, CREATE_TASK_TEXT)
+    template = _visible(capture, lambda value: value.startswith("nav:create:"))
+    capture.callbacks.clear()
+    await send_callback(81_211, author.telegram_user_id, template)
+    await send_message(81_212, author.telegram_user_id, details)
+    await _click(capture, send_callback, 81_213, author.telegram_user_id, "task:step:days:")
+    await _click(capture, send_callback, 81_214, author.telegram_user_id, "task:step:online")
+    await send_message(81_215, author.telegram_user_id, materials)
+    await _click(capture, send_callback, 81_216, author.telegram_user_id, "task:step:slots:1")
+    capture.texts.clear()
+    capture.callbacks.clear()
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=81_216_1,
+            message=Message(
+                message_id=81_216_1,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=Chat(id=-10081202, type="supergroup"),
+                from_user=actors[author.telegram_user_id],
+                text="/task_preview",
+            ),
+        ),
+    )
+    assert capture.texts == ["Работа с заданиями доступна только в личном чате с ботом."]  # noqa: RUF001
+    capture.texts.clear()
+    await send_callback(81_217, author.telegram_user_id, "task:step:preview")
+
+    preview_text = next(
+        text for text, callback in capture.button_payloads if callback.startswith("task:pub:")
+    )
+    _assert_task_card(capture, preview_text, details, materials)
+    assert "Автор: Member 81202" in preview_text
+    assert "Как выполнить:" in preview_text
+
+    publish = _visible(capture, lambda value: value.startswith("task:pub:"))
+    await send_callback(81_218, author.telegram_user_id, publish)
+    capture.texts.clear()
+    await send_message(81_218_1, author.telegram_user_id, MY_TASKS_TEXT)
+    owned_card = next(text for text in capture.texts if details in text)
+    _assert_task_card(capture, owned_card, details, materials)
+    capture.texts.clear()
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_message(81_219, performer.telegram_user_id, FIND_TASK_TEXT)
+    card_text, accept = next(
+        (text, callback)
+        for text, callback in capture.button_payloads
+        if callback.startswith("task:accept:")
+    )
+    _assert_task_card(capture, card_text, details, materials)
+
+    capture.texts.clear()
+    await send_callback(81_220, performer.telegram_user_id, accept)
+    accepted_text = capture.texts[-1]
+    _assert_task_card(capture, accepted_text, details, materials)
+    assert "Задание принято." in accepted_text
+    capture.texts.clear()
+    await send_message(81_221, performer.telegram_user_id, MY_TASKS_TEXT)
+    recovered_text = next(text for text in capture.texts if details in text)
+    _assert_task_card(capture, recovered_text, details, materials)
+    await bot.session.close()
+    await database.dispose()
+
+
+def _assert_task_card(
+    capture: CapturingSession,
+    text: str,
+    details: str,
+    materials: str,
+) -> None:
+    assert details in text
+    assert materials in text
+    assert "Результат:" in text
+    assert (text, None) in capture.text_payloads
+
+
 async def test_community_journey_and_admin_surfaces_are_reachable(database_url: str) -> None:  # noqa: PLR0915
     """Publish and pay a community task through captured administrator and member buttons."""
     database = Database(database_url)
@@ -202,6 +303,41 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     send_message, send_callback = _transport(dispatcher, bot, actors)
 
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=82_099,
+            message=Message(
+                message_id=82_099,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=Chat(id=-10082101, type="supergroup"),
+                from_user=actors[creator.telegram_user_id],
+                text=ADMIN_TEXT,
+            ),
+        ),
+    )
+    assert "nav:admin:community" not in capture.callbacks
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=82_099_1,
+            callback_query=CallbackQuery(
+                id="group-community-task",
+                from_user=actors[creator.telegram_user_id],
+                chat_instance="group-community-task",
+                data="nav:admin:community",
+                message=Message(
+                    message_id=82_099_1,
+                    date=datetime.datetime.now(datetime.UTC),
+                    chat=Chat(id=-10082101, type="supergroup"),
+                    text="Администрирование",
+                ),
+            ),
+        ),
+    )
+    assert capture.callback_answers[-1] == (
+        "Создавайте задания сообщества в личном чате с ботом."  # noqa: RUF001
+    )
     capture.reply_buttons.clear()
     await send_message(82_100, creator.telegram_user_id, "/start")
     admin_button = next(value for value in capture.reply_buttons if value == ADMIN_TEXT)

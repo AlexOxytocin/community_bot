@@ -31,6 +31,7 @@ from community_bot.infrastructure.db.models import (
     ReliabilityEventModel,
     TaskModel,
 )
+from community_bot.infrastructure.db.tasks import published_task_from_model
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -189,6 +190,7 @@ async def _cards(
         cards.append(
             AssignmentCard(
                 assignment=_assignment(assignment),
+                task=published_task_from_model(task),
                 task_title=task.title,
                 task_origin=task.origin,
                 task_creator_id=task.creator_id,

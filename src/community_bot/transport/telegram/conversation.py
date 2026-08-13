@@ -33,12 +33,18 @@ def build_conversation_router(  # noqa: C901
     """Route one free-form message to the durable flow that currently owns it."""
     router = Router(name="conversation_text")
 
-    async def handle_text(message: Message, event_update: Update) -> None:
+    async def handle_text(message: Message, event_update: Update) -> None:  # noqa: C901
         if message.from_user is None:
             raise SkipHandler
         owner = await conversation_service.current(message.from_user.id)
         if owner is None:
             raise SkipHandler
+        if owner.flow_type in {
+            "task",
+            "assignment_result",
+            "assignment_dispute",
+        } and not await _require_private_task_flow(message):
+            return
         if owner.flow_type in {"registration", "registration_paused", "profile_edit"}:
             if await handle_registration_text(registration_service, message, event_update):
                 return
@@ -60,6 +66,12 @@ def build_conversation_router(  # noqa: C901
         owner = await conversation_service.current(message.from_user.id)
         if owner is None:
             await message.answer("Активного диалога нет.")
+            return
+        if owner.flow_type in {
+            "task",
+            "assignment_result",
+            "assignment_dispute",
+        } and not await _require_private_task_flow(message):
             return
         if owner.flow_type == "task" and owner.reference_id is not None:
             await task_service.cancel_draft(
@@ -89,3 +101,10 @@ def build_conversation_router(  # noqa: C901
     router.message.register(cancel, Command("cancel"))
     router.message.register(handle_text, F.text & ~F.text.startswith("/"))
     return router
+
+
+async def _require_private_task_flow(message: Message) -> bool:
+    if message.chat.type == "private":
+        return True
+    await message.answer("Работа с заданиями доступна только в личном чате с ботом.")  # noqa: RUF001
+    return False

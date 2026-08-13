@@ -15,6 +15,7 @@ from community_bot.domain.tasks import (
     validate_acceptance_actor,
     validate_deadline,
     validate_materials,
+    validate_public_text_uris,
     validate_slots,
     validate_task_format,
 )
@@ -43,6 +44,28 @@ def test_deadline_format_slots_and_materials_boundaries() -> None:
     assert validate_materials({"url": " https://example.com "}) == {"url": "https://example.com"}
     with pytest.raises(TaskError):
         validate_materials({"secret": "value"})
+    for unsafe_url in (
+        "tg://resolve?domain=example",
+        "file:///etc/passwd",
+        "intent://example",
+        "https://user:password@example.com/private",
+    ):
+        with pytest.raises(TaskError):
+            validate_materials({"url": unsafe_url})
+        with pytest.raises(TaskError):
+            validate_public_text_uris({"context": f"Откройте {unsafe_url}"})
+    for executable_uri in ("tg:resolve?domain=x", "file:C:/secret", "intent:open"):
+        with pytest.raises(TaskError):
+            validate_public_text_uris(executable_uri)
+    for invalid_http_url in (
+        "https://exa mple.com",
+        "https://.",
+        "https://example.com:bad",
+        "https://[",
+        "https://example.com/" + "a" * 700,
+    ):
+        with pytest.raises(TaskError):
+            validate_materials({"url": invalid_http_url})
 
 
 def test_acceptance_uses_authoritative_level_and_rejects_creator() -> None:

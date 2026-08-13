@@ -364,6 +364,37 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     await dispatcher.feed_update(bot, message_update(70_001, 7_003, "/start"))
     assert {"Найти задание", "Создать задание", "Баланс", "Помощь"} <= set(session.reply_buttons)
 
+    session.texts.clear()
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=70_000_1,
+            message=Message(
+                message_id=70_000_1,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=Chat(id=-1007003, type="supergroup"),
+                from_user=users[7_003],
+                text="Найти задание",
+            ),
+        ),
+    )
+    assert session.texts == ["Задания доступны только в личном чате с ботом."]  # noqa: RUF001
+    session.texts.clear()
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=70_000_2,
+            message=Message(
+                message_id=70_000_2,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=Chat(id=-1007003, type="supergroup"),
+                from_user=users[7_003],
+                text="Мои задания",
+            ),
+        ),
+    )
+    assert session.texts == ["Задания доступны только в личном чате с ботом."]  # noqa: RUF001
+
     await dispatcher.feed_update(bot, callback_update(70_002, 7_003, "nav:tasks:not-a-uuid"))
     await dispatcher.feed_update(bot, message_update(70_003, 7_003, "Найти задание"))
     task_card = next(
@@ -374,6 +405,27 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     accept_callback = next(
         value for value in session.callbacks if value == f"task:accept:{task.id}"
     )
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=70_003_1,
+            callback_query=CallbackQuery(
+                id="group-accept",
+                from_user=users[7_003],
+                chat_instance="group-navigation-test",
+                data=accept_callback,
+                message=Message(
+                    message_id=70_003_1,
+                    date=datetime.datetime.now(datetime.UTC),
+                    chat=Chat(id=-1007003, type="supergroup"),
+                    from_user=users[7_003],
+                    text=task_card,
+                ),
+            ),
+        ),
+    )
+    async with sessions() as db_session:
+        assert await db_session.scalar(select(func.count()).select_from(AssignmentModel)) == 0
     await dispatcher.feed_update(bot, callback_update(70_004, 7_003, accept_callback))
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     await dispatcher.feed_update(bot, callback_update(70_004, 7_003, accept_callback))

@@ -18,6 +18,7 @@ from community_bot.transport.telegram.assignments import (
     _three_arguments,
     _two_arguments,
     build_assignment_router,
+    handle_assignment_text,
 )
 from tests.integration.test_task_creation import CapturingSession
 
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from typing import Never
 
     from community_bot.application.assignments import AssignmentService
+    from community_bot.application.conversations import TextFlow
 
 
 def test_assignment_command_arguments_are_parsed_without_losing_payload() -> None:
@@ -163,4 +165,90 @@ async def test_assignment_router_reports_invalid_updates_without_effects() -> No
 
     assert len(capture.texts) == 12
     assert all("не" in value.lower() for value in capture.texts)
+    await bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_assignment_routes_and_active_text_flow_reject_group_chat() -> None:
+    """No assignment command, callback, or owned free text mutates from a group."""
+    dispatcher = Dispatcher()
+    service = cast("AssignmentService", _FailingAssignmentService())
+    dispatcher.include_router(build_assignment_router(service))
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    actor = User(id=7002, is_bot=False, first_name="Performer")
+    group = Chat(id=-1007002, type="supergroup")
+
+    def message_update(update_id: int, value: str) -> Update:
+        return Update(
+            update_id=update_id,
+            message=Message(
+                message_id=update_id,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=group,
+                from_user=actor,
+                text=value,
+            ),
+        )
+
+    def callback_update(update_id: int, value: str) -> Update:
+        return Update(
+            update_id=update_id,
+            callback_query=CallbackQuery(
+                id=f"group-{update_id}",
+                from_user=actor,
+                chat_instance="assignments-group",
+                data=value,
+                message=Message(
+                    message_id=update_id,
+                    date=datetime.datetime.now(datetime.UTC),
+                    chat=group,
+                    text="group callback",
+                ),
+            ),
+        )
+
+    assignment_id = uuid4()
+    updates = [
+        message_update(71_001, "/my_assignments"),
+        message_update(71_002, "/reviews"),
+        message_update(71_003, f"/assignment_cancel {assignment_id} reason"),
+        message_update(71_004, f"/assignment_submit {assignment_id}"),
+        message_update(71_005, f'/assignment_result {assignment_id} 1 {{"summary":"done"}}'),
+        message_update(71_006, f"/assignment_dispute {assignment_id} reason"),
+        callback_update(71_007, f"task:accept:{assignment_id}"),
+        callback_update(71_008, f"assign:review:{assignment_id.hex}:full"),
+        callback_update(71_009, f"assign:submit:{assignment_id.hex}:1"),
+        callback_update(71_010, f"as:a:s:{assignment_id.hex}"),
+        callback_update(71_011, f"as:a:c:{assignment_id.hex}"),
+        callback_update(71_012, f"as:a:d:{assignment_id.hex}"),
+    ]
+    for update in updates:
+        await dispatcher.feed_update(bot, update)
+
+    flow_message = message_update(71_013, "Подробный результат задания").message
+    assert flow_message is not None
+    flow_message.as_(bot)
+    consumed = await handle_assignment_text(
+        service,
+        cast(
+            "TextFlow",
+            type(
+                "Flow",
+                (),
+                {
+                    "flow_type": "assignment_result",
+                    "reference_id": assignment_id,
+                    "revision": 1,
+                },
+            )(),
+        ),
+        flow_message,
+        Update(update_id=71_013, message=flow_message),
+    )
+
+    generic = "Работа с заданиями доступна только в личном чате с ботом."  # noqa: RUF001
+    assert consumed is True
+    assert capture.texts == [generic] * 13
+    assert capture.callback_answers == [generic] * 6
     await bot.session.close()
