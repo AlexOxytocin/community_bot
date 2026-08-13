@@ -3,13 +3,24 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import pytest
+from aiogram.types import ReplyKeyboardMarkup
 
 from community_bot.bootstrap.bot import main as bot_main
 from community_bot.bootstrap.runner import run_process
 from community_bot.bootstrap.settings import get_settings
+from community_bot.worker.entrypoint import _notification_reply_markup
 from community_bot.worker.entrypoint import main as worker_main
 
 EntryPoint = Callable[[Sequence[str] | None], int]
+
+
+def test_worker_composes_registration_approval_with_the_main_menu() -> None:
+    markup = _notification_reply_markup("registration.approved")
+
+    assert isinstance(markup, ReplyKeyboardMarkup)
+    assert len(markup.keyboard) == 5
+    assert sum(len(row) for row in markup.keyboard) == 10
+    assert _notification_reply_markup("task.published") is None
 
 
 @pytest.mark.parametrize("entrypoint", [bot_main, worker_main])

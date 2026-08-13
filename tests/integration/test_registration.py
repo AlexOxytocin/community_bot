@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast, override
 from uuid import UUID, uuid4
@@ -10,14 +10,15 @@ from uuid import UUID, uuid4
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.methods import AnswerCallbackQuery, SendMessage
+from aiogram.types import CallbackQuery, Chat, Message, ReplyKeyboardMarkup, Update, User
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from community_bot.application.economy import EconomyService, ProductConfigBootstrapCoordinator
+from community_bot.application.notifications import NotificationWorker
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
@@ -29,6 +30,7 @@ from community_bot.application.registration import (
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.economy import economy_payload_hash, starting_grant
 from community_bot.domain.members import MemberRole, MemberStatus
+from community_bot.domain.notifications import DeliveryWindow
 from community_bot.domain.registration import (
     InvitationError,
     ModerationDecision,
@@ -44,10 +46,14 @@ from community_bot.infrastructure.db.models import (
     InvitationModel,
     InvitationRedemptionModel,
     MemberModel,
+    OutboxEventModel,
     ProcessedTelegramUpdateModel,
     RegistrationApplicationModel,
 )
+from community_bot.infrastructure.outbox import PostgresNotificationQueue
+from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
 from community_bot.transport.telegram.registration import build_registration_router
+from community_bot.worker.entrypoint import _notification_reply_markup
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -831,6 +837,7 @@ class CapturingSession(BaseSession):
         """Initialize an empty collection of outgoing user-facing texts."""
         super().__init__()
         self.texts: list[str] = []
+        self.sent_messages: list[tuple[int | str, str, object | None]] = []
 
     async def close(self) -> None:
         """Close no external resources."""
@@ -846,6 +853,8 @@ class CapturingSession(BaseSession):
         text_value = getattr(method, "text", None)
         if isinstance(text_value, str):
             self.texts.append(text_value)
+        if isinstance(method, SendMessage):
+            self.sent_messages.append((method.chat_id, method.text, method.reply_markup))
         if isinstance(method, AnswerCallbackQuery):
             return cast("TelegramType", True)  # noqa: FBT003 - Bot API success payload.
         return cast(
@@ -870,6 +879,38 @@ class CapturingSession(BaseSession):
         del url, headers, timeout, chunk_size, raise_for_status
         if False:
             yield b""
+
+
+def _registration_notification_worker(database: Database, bot: Bot) -> NotificationWorker:
+    return NotificationWorker(
+        PostgresNotificationQueue(database.session_factory),
+        TelegramNotificationSender(bot, _notification_reply_markup),
+        delivery_window=DeliveryWindow(start=time.min, end=time.max),
+    )
+
+
+def _assert_single_approval_menu(session: CapturingSession, telegram_user_id: int) -> None:
+    approval_messages = [
+        item
+        for item in session.sent_messages
+        if item[0] == telegram_user_id
+        and item[1] == "Регистрация подтверждена. Главное меню уже доступно."
+    ]
+    assert len(approval_messages) == 1
+    approval_markup = approval_messages[0][2]
+    assert isinstance(approval_markup, ReplyKeyboardMarkup)
+    assert [button.text for row in approval_markup.keyboard for button in row] == [
+        "Найти задание",
+        "Создать задание",
+        "Мои задания",
+        "Моя карточка",
+        "Баланс",
+        "Статистика",
+        "Лидерборд",
+        "Участники",
+        "Помощь",
+        "Администрирование",
+    ]
 
 
 async def test_complete_synthetic_telegram_registration_and_profile_smoke(
@@ -960,6 +1001,23 @@ async def test_complete_synthetic_telegram_registration_and_profile_smoke(
         bot,
         callback_update(8_021, admin_user, f"registration:approve:{target_id}"),
     )
+    assert await count(database, OutboxEventModel) == 1
+    assert not any(
+        item[0] == user.id and item[1] == "Регистрация подтверждена. Главное меню уже доступно."
+        for item in session.sent_messages
+    )
+    worker = _registration_notification_worker(database, bot)
+    first_tick = await worker.tick(now=datetime.now(UTC) + timedelta(seconds=1))
+    assert first_tick.notifications_sent == 1
+    _assert_single_approval_menu(session, user.id)
+    await dispatcher.feed_update(
+        bot,
+        callback_update(8_021, admin_user, f"registration:approve:{target_id}"),
+    )
+    second_tick = await worker.tick(now=datetime.now(UTC) + timedelta(seconds=2))
+    assert second_tick.notifications_sent == 0
+    assert await count(database, OutboxEventModel) == 1
+    _assert_single_approval_menu(session, user.id)
     await ProductConfigBootstrapCoordinator(
         database.unit_of_work,
         load_product_config_candidate,

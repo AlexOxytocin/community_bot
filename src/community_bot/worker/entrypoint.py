@@ -20,9 +20,17 @@ from community_bot.infrastructure.db.assignment_deadlines import PostgresAssignm
 from community_bot.infrastructure.observability import configure_logging, configure_sentry
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
+from community_bot.transport.telegram.navigation import main_menu_markup
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from aiogram.types import ReplyKeyboardMarkup
+
+
+def _notification_reply_markup(notification_type: str) -> ReplyKeyboardMarkup | None:
+    """Attach the active-member menu only to a successful registration approval."""
+    return main_menu_markup() if notification_type == "registration.approved" else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -74,7 +82,7 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
     bot = Bot(token=settings.bot_token.get_secret_value())
     worker = NotificationWorker(
         queue,
-        TelegramNotificationSender(bot),
+        TelegramNotificationSender(bot, _notification_reply_markup),
         delivery_window=window,
         batch_size=settings.worker_batch_size,
         lease_duration=datetime.timedelta(seconds=settings.worker_lease_seconds),
