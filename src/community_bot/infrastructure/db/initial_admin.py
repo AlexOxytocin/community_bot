@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Self
 from sqlalchemy import select, text
 
 from community_bot.application.initial_admin import InitialAdministratorMember
+from community_bot.domain.members import ADMINISTRATOR_PERMISSIONS, SUPERADMINISTRATOR_PERMISSION
 from community_bot.infrastructure.db.models import AuditEventModel, MemberModel
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 _BOOTSTRAP_NAMESPACE = "initial_administrator_bootstrap"
 _BOOTSTRAP_ACTION = "initial_administrator_bootstrapped"
 _PROFILE_REPAIR_ACTION = "initial_administrator_profile_repaired"
-_ADMIN_PERMISSIONS = ["interaction_review", "karma_review", "member_read"]
+_ADMIN_PERMISSIONS = sorted(ADMINISTRATOR_PERMISSIONS | {SUPERADMINISTRATOR_PERMISSION})
 
 
 class SqlAlchemyInitialAdministratorUnitOfWork:

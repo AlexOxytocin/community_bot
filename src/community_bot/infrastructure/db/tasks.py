@@ -7,8 +7,9 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, exists, func, or_, select, text, tuple_, update
+from sqlalchemy.orm import aliased
 
-from community_bot.application.tasks import PublishedTask, TaskDraft
+from community_bot.application.tasks import CommunityPublicationRequest, PublishedTask, TaskDraft
 from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import TaskDraftStep, TaskError, TaskStatus
@@ -18,6 +19,7 @@ from community_bot.infrastructure.db.models import (
     OutboxEventModel,
     TaskCreationDraftModel,
     TaskModel,
+    TaskTemplateModel,
 )
 
 if TYPE_CHECKING:
@@ -136,6 +138,9 @@ async def save_task_draft(session: AsyncSession, draft: TaskDraft) -> TaskDraft:
     model.input_payload_json = draft.input_payload
     model.origin = draft.origin
     model.reviewer_admin_id = draft.reviewer_admin_id
+    model.community_approval_requested_at = draft.community_approval_requested_at
+    model.community_approved_by_admin_id = draft.community_approved_by_admin_id
+    model.community_approved_at = draft.community_approved_at
     model.deadline_at = draft.deadline_at
     model.format = None if draft.format is None else draft.format.value
     model.city = draft.city
@@ -146,6 +151,50 @@ async def save_task_draft(session: AsyncSession, draft: TaskDraft) -> TaskDraft:
     model.is_current = draft.is_current
     await session.flush()
     return _draft(model)
+
+
+async def list_pending_community_publications(
+    session: AsyncSession, *, limit: int
+) -> tuple[CommunityPublicationRequest, ...]:
+    """Return community drafts that are ready for superadministrator confirmation."""
+    creator = aliased(MemberModel)
+    reviewer = aliased(MemberModel)
+    rows = (
+        await session.execute(
+            select(
+                TaskCreationDraftModel,
+                creator.display_name,
+                reviewer.display_name,
+                TaskTemplateModel.name,
+            )
+            .join(creator, creator.id == TaskCreationDraftModel.creator_id)
+            .join(reviewer, reviewer.id == TaskCreationDraftModel.reviewer_admin_id)
+            .join(TaskTemplateModel, TaskTemplateModel.id == TaskCreationDraftModel.template_id)
+            .where(
+                TaskCreationDraftModel.origin == "community",
+                TaskCreationDraftModel.current_step == TaskDraftStep.PREVIEW.value,
+                TaskCreationDraftModel.community_approval_requested_at.is_not(None),
+                TaskCreationDraftModel.community_approved_by_admin_id.is_(None),
+            )
+            .order_by(
+                TaskCreationDraftModel.community_approval_requested_at,
+                TaskCreationDraftModel.id,
+            )
+            .limit(limit)
+        )
+    ).all()
+    return tuple(
+        CommunityPublicationRequest(
+            draft_id=draft.id,
+            revision=draft.revision,
+            creator_display_name=str(creator_name),
+            reviewer_display_name=str(reviewer_name),
+            template_name=str(template_name),
+            requested_at=draft.community_approval_requested_at,
+        )
+        for draft, creator_name, reviewer_name, template_name in rows
+        if draft.community_approval_requested_at is not None
+    )
 
 
 async def delete_task_draft(session: AsyncSession, draft_id: uuid.UUID) -> None:
@@ -196,6 +245,9 @@ async def insert_published_task(
         creator_id=None if community else draft.creator_id,
         created_by_admin_id=draft.creator_id if community else None,
         reviewer_admin_id=draft.reviewer_admin_id if community else None,
+        community_approved_by_admin_id=(
+            draft.community_approved_by_admin_id if community else None
+        ),
         author_display_name="Сообщество" if community else creator.display_name,
         category_id=template.category_id,
         title=template.name,
@@ -301,6 +353,7 @@ async def list_owned_tasks(  # noqa: PLR0913 - explicit keyset fields keep the q
             TaskModel.creator_id == creator_id,
             TaskModel.created_by_admin_id == creator_id,
             TaskModel.reviewer_admin_id == creator_id,
+            TaskModel.community_approved_by_admin_id == creator_id,
         )
     )
     if status is not None:
@@ -395,6 +448,9 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
         creator_id=model.creator_id,
         origin=model.origin,
         reviewer_admin_id=model.reviewer_admin_id,
+        community_approval_requested_at=model.community_approval_requested_at,
+        community_approved_by_admin_id=model.community_approved_by_admin_id,
+        community_approved_at=model.community_approved_at,
         template_id=model.template_id,
         input_payload=None if model.input_payload_json is None else dict(model.input_payload_json),
         deadline_at=model.deadline_at,

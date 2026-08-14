@@ -26,7 +26,10 @@ from community_bot.bootstrap.bot import _dispatcher
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.economy import starting_grant
-from community_bot.domain.members import MemberRole
+from community_bot.domain.members import (
+    ADMINISTRATOR_PERMISSIONS,
+    MemberRole,
+)
 from community_bot.domain.tasks import TaskDraftStep
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.models import (
@@ -130,7 +133,11 @@ class CapturingSession(BaseSession):
 
 
 async def _member(
-    database: Database, telegram_user_id: int, role: MemberRole = MemberRole.MEMBER
+    database: Database,
+    telegram_user_id: int,
+    role: MemberRole = MemberRole.MEMBER,
+    *,
+    permissions: list[str] | None = None,
 ) -> MemberModel:
     model = MemberModel(
         id=uuid4(),
@@ -141,7 +148,9 @@ async def _member(
         status="active",
         level_number=9,
         permissions_json=(
-            ["interaction_review", "karma_review", "member_read"]
+            permissions
+            if permissions is not None
+            else sorted(ADMINISTRATOR_PERMISSIONS)
             if role is MemberRole.ADMINISTRATOR
             else []
         ),
@@ -258,7 +267,7 @@ async def _published_task(
         draft_id=current.id,
         expected_revision=current.revision,
     )
-    return await service.publish(
+    publication = await service.publish(
         PublishTaskCommand(
             update_id_base + 7,
             author.telegram_user_id,
@@ -266,6 +275,8 @@ async def _published_task(
             preview.draft.revision,
         )
     )
+    assert isinstance(publication, PublishedTask)
+    return publication
 
 
 async def test_production_navigation_requires_no_user_supplied_uuid(database_url: str) -> None:  # noqa: PLR0915

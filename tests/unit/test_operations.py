@@ -44,20 +44,23 @@ def test_production_compose_is_private_and_uses_one_application_image() -> None:
     assert "webhook" not in serialized
 
 
-def test_deployment_script_keeps_migration_worker_bot_order() -> None:
+def test_deployment_scripts_keep_migration_worker_bot_order() -> None:
     """The bot starts only after migration and worker readiness."""
     root = Path(__file__).parents[2]
+    runtime = (root / "ops" / "_runtime.py").read_text(encoding="utf-8")
+    deploy = (root / "ops" / "deploy_self_hosted.py").read_text(encoding="utf-8")
+    git_deploy = (root / "ops" / "deploy_from_git.py").read_text(encoding="utf-8")
     script = (root / "ops" / "deploy_self_hosted.sh").read_text(encoding="utf-8")
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
-    migrate = script.index('"${compose[@]}" run --rm migrate')
-    config = script.index('"${compose[@]}" run --rm migrate community-bootstrap-product-config')
-    worker = script.index('"${compose[@]}" up -d --no-deps --force-recreate worker')
-    worker_health = script.index("wait_for_health worker community-worker")
-    bot = script.index('"${compose[@]}" up -d --no-deps --force-recreate bot')
-    bot_health = script.index("wait_for_health bot community-bot")
+    migrate = deploy.index('"run", "--rm", "migrate"')
+    config = deploy.index('"community-bootstrap-product-config"')
+    worker = deploy.index('"up", "-d", "--no-deps", "worker"')
+    worker_health = deploy.index('wait_for_health(compose, environment, service="worker"')
+    bot = deploy.index('"up", "-d", "--no-deps", "bot"')
+    bot_health = deploy.index('wait_for_health(compose, environment, service="bot"')
     assert migrate < config < worker < worker_health < bot < bot_health
-    assert "community-bootstrap-admin" in script[migrate:config]
+    assert "community-bootstrap-admin" in deploy[migrate:config]
     assert "COPY config ./config" in dockerfile
     assert "previous-image" in script
     assert "docker pull" in script
@@ -70,34 +73,51 @@ def test_deployment_script_keeps_migration_worker_bot_order() -> None:
     assert script.count("--force-recreate") == 2
     assert "worker_not_before" in script
     assert "bot_not_before" in script
+    assert "previous-image" in deploy
+    assert '"docker", "pull"' in deploy
+    assert "immutable image digest or image ID" in runtime
+    assert "sha256:[0-9a-f]{64}" in runtime
+    assert '"docker", "image", "inspect"' in deploy
+    assert "mode 0600" in runtime
+    assert '"git", "-C", str(source), "fetch"' in git_deploy
+    assert "PRODUCTION_PATHS" in git_deploy
+    assert 'parts[0] == "config" and parts[1] == "testing"' in git_deploy
+    assert "deploy_self_hosted.py" in git_deploy
 
 
 def test_backup_restore_and_release_assets_keep_mvp_boundaries() -> None:
     """Backup is local, restore isolated, and CI records an immutable image."""
     root = Path(__file__).parents[2]
-    backup = (root / "ops" / "backup_postgres.sh").read_text(encoding="utf-8")
-    restore = (root / "ops" / "restore_drill.sh").read_text(encoding="utf-8")
+    runtime = (root / "ops" / "_runtime.py").read_text(encoding="utf-8")
+    backup = (root / "ops" / "backup_postgres.py").read_text(encoding="utf-8")
+    restore = (root / "ops" / "restore_drill.py").read_text(encoding="utf-8")
+    systemd = (root / "ops" / "systemd" / "community-bot-backup.service").read_text(
+        encoding="utf-8"
+    )
     workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
     assert "pg_dump" in backup
     assert "/var/backups/community-bot" in backup
-    assert "-mtime +7 -delete" in backup
+    assert "retention_days=7" in backup
     assert "community_bot_restore_drill" in restore
     assert "pg_restore" in restore
     assert "alembic_version" in restore
+    assert "0018" in restore
     assert "account_transactions" in restore
     assert "credit_balance_cached" in restore
     assert "experience_total_cached" in restore
     assert "Ledger reconciliation failed" in restore
     assert "ledger_mismatch_count" in restore
     assert "ledger_entries" not in restore
-    assert "current-image" in backup
-    assert "COMMUNITY_BOT_ENV_FILE" in backup
-    assert "0:600" in backup
-    assert "current-image" in restore
-    assert "COMMUNITY_BOT_ENV_FILE" in restore
-    assert "0:600" in restore
-    assert "@${DIGEST}" in workflow
+    assert "read_current_image" in backup
+    assert "current-image" in runtime
+    assert "COMMUNITY_BOT_ENV_FILE" in runtime
+    assert "mode 0600" in runtime
+    assert "read_current_image" in restore
+    assert "COMMUNITY_BOT_ENV_FILE" in runtime
+    assert "mode 0600" in runtime
+    assert "python3 /opt/community-bot/current/ops/backup_postgres.py" in systemd
+    assert "@${{ steps.image.outputs.digest }}" in workflow
     assert "platforms: linux/arm64" in workflow
     assert "linux/amd64" not in workflow
     assert "retention-days: 30" in workflow
@@ -267,3 +287,20 @@ def test_forced_deploy_entrypoint_rejects_stale_and_duplicate_sequences(
     unsafe = invoke(21, 1)
     assert unsafe.returncode == 1
     assert "unsafe ownership or mode" in unsafe.stderr
+
+
+def test_host_maintenance_entrypoints_are_python() -> None:
+    """Maintenance stays in Python; shell is limited to the protected release boundary."""
+    root = Path(__file__).parents[2]
+
+    assert {
+        "_runtime.py",
+        "backup_postgres.py",
+        "deploy_from_git.py",
+        "deploy_self_hosted.py",
+        "restore_drill.py",
+    } <= {path.name for path in (root / "ops").glob("*.py")}
+    assert {path.name for path in (root / "ops").glob("*.sh")} == {
+        "deploy_self_hosted.sh",
+        "github_deploy_entrypoint.sh",
+    }

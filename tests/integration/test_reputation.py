@@ -748,7 +748,12 @@ async def test_migration_backfills_only_active_administrators(database_url: str)
         )
         rows = {row[0]: row[1] for row in result}
     await engine.dispose()
-    assert set(rows[active_id]) == {"interaction_review", "karma_review", "member_read"}
+    assert set(rows[active_id]) == {
+        "interaction_review",
+        "karma_review",
+        "member_read",
+        "superadministrator",
+    }
     assert rows[paused_id] == []
     assert rows[member_id] == []
 

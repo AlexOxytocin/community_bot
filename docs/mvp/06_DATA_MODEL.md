@@ -157,6 +157,9 @@ id UUID PK
 creator_id FK NOT NULL
 origin TEXT NOT NULL DEFAULT 'member' CHECK(origin IN ('member', 'community'))
 reviewer_admin_id FK NULL
+community_approval_requested_at TIMESTAMP WITH TIME ZONE NULL
+community_approved_by_admin_id FK NULL
+community_approved_at TIMESTAMP WITH TIME ZONE NULL
 template_id FK NOT NULL
 input_payload_json JSON NULL
 deadline_at TIMESTAMP WITH TIME ZONE NULL
@@ -174,10 +177,13 @@ updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 
 У участника может быть несколько незавершённых черновиков, но только один
 текущий. Каждый ответ сверяет ожидаемые шаг и revision. Community-черновик
-создаёт только active administrator; до публикации в нём сохраняется другой
-active administrator как независимый `reviewer_admin_id`. После публикации
-черновик остаётся исторической связью с заданием, получает terminal-шаг и
-перестаёт быть текущим.
+создаёт active administrator; до публикации в нём сохраняется другой active
+administrator как независимый `reviewer_admin_id`. Если создатель не является
+суперадминистратором, публикация сначала сохраняет
+`community_approval_requested_at`; после подтверждения суперадминистратором
+заполняются `community_approved_by_admin_id` и `community_approved_at`. После
+публикации черновик остаётся исторической связью с заданием, получает
+terminal-шаг и перестаёт быть текущим.
 
 ### `tasks`
 
@@ -189,6 +195,7 @@ template_version INTEGER NULL
 creator_id FK NULL
 created_by_admin_id FK NULL
 reviewer_admin_id FK NULL
+community_approved_by_admin_id FK NULL
 author_display_name TEXT NOT NULL
 category_id FK NOT NULL
 title NOT NULL
@@ -217,6 +224,9 @@ updated_at TIMESTAMP NOT NULL
 
 Для задания участника `creator_id` обязателен, а
 `reserved_credit_total = credit_reward_per_performer * performer_slots`.
+Для нового задания сообщества `creator_id IS NULL`, `reserved_credit_total = 0`,
+`created_by_admin_id`, `reviewer_admin_id` и `community_approved_by_admin_id`
+заполнены; legacy community-строки без provenance остаются читаемыми.
 Поля карточки являются снимком точной версии шаблона и после публикации не
 редактируются. Исключение — операционный указатель `reviewer_admin_id`
 community-задачи: его можно заменить только на другого active administrator,
@@ -510,7 +520,8 @@ UNIQUE(karma_vote_id, revision)
 
 Возобновляемый диалог кармы использует общую `conversation_states` с
 `flow_type=karma` и монотонной `revision`; отдельная draft-таблица не создаётся.
-Поле `members.permissions_json` допускает только `karma_review` и `member_read`.
+Поле `members.permissions_json` допускает только `karma_review`, `member_read`,
+`interaction_review` и `superadministrator`.
 
 Eligibility не дублируется: он выводится из исходной положительной
 `task_reward_earned|partial_task_reward` с `assignment_id` и member-origin task.

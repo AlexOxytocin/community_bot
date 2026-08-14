@@ -13,15 +13,22 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
-from community_bot.application.tasks import AdvanceDraftCommand, OwnedTaskCard, PublishTaskCommand
+from community_bot.application.tasks import (
+    AdvanceDraftCommand,
+    CommunityPublicationRequest,
+    OwnedTaskCard,
+    PublishTaskCommand,
+    TaskDraft,
+)
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import StaleTaskDraftError, TaskDraftStep, TaskError, TaskStatus
 from community_bot.transport.telegram.task_card import preview_task_card, published_task_card
 
 if TYPE_CHECKING:
-    from community_bot.application.tasks import PublishedTask, TaskDraft, TaskPreview, TaskService
+    from community_bot.application.tasks import PublishedTask, TaskPreview, TaskService
 
 _CALLBACK_PREFIX = "task:pub:"
+_APPROVE_PREFIX = "task:approve:"
 _REVIEWER_PREFIX = "task:reviewer:"
 _STEP_PREFIX = "task:step:"
 _REPLACE_REVIEWER_PREFIX = "task:rr:"
@@ -111,7 +118,7 @@ def build_task_router(
             return
         try:
             draft_id, revision = _parse_publish_callback(str(callback.data))
-            task = await service.publish(
+            result = await service.publish(
                 PublishTaskCommand(
                     event_update.update_id,
                     callback.from_user.id,
@@ -119,9 +126,33 @@ def build_task_router(
                     revision,
                 )
             )
+            if isinstance(result, TaskDraft):
+                await callback.answer("Запрос отправлен.")
+                if isinstance(callback.message, Message):
+                    await callback.message.answer(
+                        "Задание отправлено суперадминистратору на подтверждение."
+                    )
+                return
             await callback.answer("Задание опубликовано.")
             if isinstance(callback.message, Message):
-                await callback.message.answer(f"Задание опубликовано: {task.title}")
+                await callback.message.answer(f"Задание опубликовано: {result.title}")
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
+
+    async def handle_community_approval(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
+        try:
+            draft_id, revision = _parse_approval_callback(str(callback.data))
+            task = await service.confirm_community_publication(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                draft_id=draft_id,
+                expected_revision=revision,
+            )
+            await callback.answer("Задание опубликовано.")
+            if isinstance(callback.message, Message):
+                await callback.message.answer(f"Подтверждено и опубликовано: {task.title}")
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await callback.answer(_friendly_error(error), show_alert=True)
 
@@ -436,6 +467,7 @@ def build_task_router(
     router.callback_query.register(toggle_owned_card, F.data.startswith(_VIEW_OPEN_PREFIX))
     router.callback_query.register(toggle_owned_card, F.data.startswith(_VIEW_CLOSE_PREFIX))
     router.callback_query.register(dismiss_cancel, F.data == _CANCEL_DISMISS)
+    router.callback_query.register(handle_community_approval, F.data.startswith(_APPROVE_PREFIX))
     router.callback_query.register(handle_publish, F.data.startswith(_CALLBACK_PREFIX))
     router.callback_query.register(handle_reviewer, F.data.startswith(_REVIEWER_PREFIX))
     router.callback_query.register(handle_step, F.data.startswith(_STEP_PREFIX))
@@ -601,6 +633,36 @@ def _parse_publish_callback(value: str) -> tuple[UUID, int]:
     if not separator:
         raise TaskError("Task publish callback is invalid.")
     return UUID(hex=draft_hex), int(revision)
+
+
+def _parse_approval_callback(value: str) -> tuple[UUID, int]:
+    if not value.startswith(_APPROVE_PREFIX):
+        raise TaskError("Community approval callback is invalid.")
+    payload = value.removeprefix(_APPROVE_PREFIX)
+    draft_hex, separator, revision = payload.partition(":")
+    if not separator:
+        raise TaskError("Community approval callback is invalid.")
+    return UUID(hex=draft_hex), int(revision)
+
+
+def community_publication_approval_keyboard(
+    requests: tuple[CommunityPublicationRequest, ...],
+) -> InlineKeyboardMarkup | None:
+    """Build confirmation buttons for pending community publication requests."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in requests:
+        callback_data = f"{_APPROVE_PREFIX}{item.draft_id.hex}:{item.revision}"
+        if len(callback_data.encode()) > _CALLBACK_LIMIT:
+            raise TaskError("Community approval callback exceeds the Telegram limit.")
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Подтвердить: {item.template_name}",
+                    callback_data=callback_data,
+                )
+            ]
+        )
+    return None if not rows else InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def reviewer_replacement_callback(task_id: UUID) -> str:

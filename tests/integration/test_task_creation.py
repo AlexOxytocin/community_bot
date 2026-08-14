@@ -25,7 +25,12 @@ from community_bot.application.economy import (
     ProductConfigBootstrapCoordinator,
     ProductConfigService,
 )
-from community_bot.application.tasks import AdvanceDraftCommand, PublishTaskCommand, TaskService
+from community_bot.application.tasks import (
+    AdvanceDraftCommand,
+    PublishedTask,
+    PublishTaskCommand,
+    TaskService,
+)
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.economy import (
@@ -756,6 +761,7 @@ async def test_catalog_mutation_and_publish_have_deterministic_gate_order(
         asyncio.gather(publish_first, deactivate_after_publish()),
         timeout=10,
     )
+    assert isinstance(published, PublishedTask)
     assert published.id is not None
     assert published.title == "Первое впечатление от репозитория"
     assert await scalar_count(database, TaskModel) == 1
@@ -825,6 +831,7 @@ async def test_config_activation_and_publish_use_one_resolved_version(
         publication = await service.publish(
             PublishTaskCommand(22_910, member.telegram_user_id, draft_id, revision)
         )
+    assert isinstance(publication, PublishedTask)
     active = await ProductConfigBootstrapCoordinator(
         database.unit_of_work, load_product_config_candidate
     ).prepare(candidate_path=None, actor_member_id=None, activation_command_id=None)

@@ -8,5 +8,6 @@
 dist
 tasks
 tests
+config/testing
 **/__pycache__
 **/*.pyc

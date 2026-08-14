@@ -50,6 +50,10 @@ class AuthorizationError(PermissionError):
     """Raised when a server-side member authorization rule denies an action."""
 
 
+SUPERADMINISTRATOR_PERMISSION = "superadministrator"
+ADMINISTRATOR_PERMISSIONS = frozenset({"interaction_review", "karma_review", "member_read"})
+
+
 @dataclass(frozen=True, slots=True)
 class Member:
     """Security-relevant member snapshot."""
@@ -59,6 +63,14 @@ class Member:
     role: MemberRole
     status: MemberStatus
     permissions: frozenset[str] = frozenset()
+
+
+def is_superadministrator(member: Member) -> bool:
+    """Return whether the administrator has the single top-level system permission."""
+    return (
+        member.role is MemberRole.ADMINISTRATOR
+        and SUPERADMINISTRATOR_PERMISSION in member.permissions
+    )
 
 
 def route_start(member: Member | None) -> StartOutcome:
@@ -95,16 +107,17 @@ def change_member(
     if actor.id == target.id:
         message = "An administrator cannot change their own access state."
         raise AuthorizationError(message)
-    if target.role is MemberRole.ADMINISTRATOR:
-        message = "Administrator targets cannot be changed by this operation."
-        raise AuthorizationError(message)
 
     if kind is ChangeKind.ROLE:
-        return _change_role(target=target, requested_value=requested_value)
-    return _change_status(target=target, requested_value=requested_value)
+        return _change_role(
+            actor=actor,
+            target=target,
+            requested_value=requested_value,
+        )
+    return _change_status(actor=actor, target=target, requested_value=requested_value)
 
 
-def _change_role(*, target: Member, requested_value: str) -> Member:
+def _change_role(*, actor: Member, target: Member, requested_value: str) -> Member:
     if target.status not in {MemberStatus.ACTIVE, MemberStatus.PAUSED}:
         message = "Target status does not allow a role change."
         raise AuthorizationError(message)
@@ -113,18 +126,45 @@ def _change_role(*, target: Member, requested_value: str) -> Member:
     except ValueError as error:
         message = "Requested role is not supported."
         raise AuthorizationError(message) from error
+    superadministrator = is_superadministrator(actor)
+    if (
+        target.role is MemberRole.ADMINISTRATOR or requested is MemberRole.ADMINISTRATOR
+    ) and not superadministrator:
+        message = "Only a superadministrator may change administrator access."
+        raise AuthorizationError(message)
+    if SUPERADMINISTRATOR_PERMISSION in target.permissions:
+        message = "Superadministrator access cannot be changed by this operation."
+        raise AuthorizationError(message)
     allowed = {
         (MemberRole.MEMBER, MemberRole.MODERATOR),
         (MemberRole.MODERATOR, MemberRole.MEMBER),
     }
+    if superadministrator:
+        allowed |= {
+            (MemberRole.MEMBER, MemberRole.ADMINISTRATOR),
+            (MemberRole.MODERATOR, MemberRole.ADMINISTRATOR),
+            (MemberRole.ADMINISTRATOR, MemberRole.MEMBER),
+            (MemberRole.ADMINISTRATOR, MemberRole.MODERATOR),
+        }
     if (target.role, requested) not in allowed:
         message = "Requested role transition is not allowed."
         raise AuthorizationError(message)
-    return replace(target, role=requested)
+    permissions = target.permissions
+    if requested is MemberRole.ADMINISTRATOR:
+        permissions = permissions | ADMINISTRATOR_PERMISSIONS
+    elif target.role is MemberRole.ADMINISTRATOR:
+        permissions = permissions - ADMINISTRATOR_PERMISSIONS - {SUPERADMINISTRATOR_PERMISSION}
+    return replace(target, role=requested, permissions=frozenset(permissions))
 
 
-def _change_status(*, target: Member, requested_value: str) -> Member:
-    if target.role not in {MemberRole.MEMBER, MemberRole.MODERATOR}:
+def _change_status(*, actor: Member, target: Member, requested_value: str) -> Member:
+    if target.role is MemberRole.ADMINISTRATOR and not is_superadministrator(actor):
+        message = "Only a superadministrator may change administrator status."
+        raise AuthorizationError(message)
+    if SUPERADMINISTRATOR_PERMISSION in target.permissions:
+        message = "Superadministrator access cannot be changed by this operation."
+        raise AuthorizationError(message)
+    if target.role not in {MemberRole.MEMBER, MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}:
         message = "Target role does not allow a status change."
         raise AuthorizationError(message)
     try:

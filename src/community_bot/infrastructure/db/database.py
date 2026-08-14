@@ -79,6 +79,7 @@ if TYPE_CHECKING:
         SafeProfile,
     )
     from community_bot.application.tasks import (
+        CommunityPublicationRequest,
         OwnedTaskCard,
         PublishedTask,
         TaskCancellationResponse,
@@ -589,6 +590,15 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             )
         ).all()
         return tuple(AdministratorOption(model.id, model.display_name) for model in models)
+
+    async def list_pending_community_publications(
+        self, *, limit: int
+    ) -> tuple[CommunityPublicationRequest, ...]:
+        """Return community drafts awaiting superadministrator confirmation."""
+        return await task_store.list_pending_community_publications(
+            self._require_session(),
+            limit=limit,
+        )
 
     async def delete_task_draft(self, draft_id: UUID) -> None:
         """Delete one unfinished task creation draft."""
@@ -1223,13 +1233,14 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         await self._require_session().flush()
 
     async def save_member(self, member: Member) -> None:
-        """Persist the member role and status in the locked row."""
+        """Persist the member security state in the locked row."""
         model = await self._require_session().get(MemberModel, member.id)
         if model is None:
             msg = "Member record does not exist."
             raise LookupError(msg)
         model.role = member.role.value
         model.status = member.status.value
+        model.permissions_json = sorted(member.permissions)
 
     async def flush_member_changes(self) -> None:
         """Flush the member UPDATE while retaining the open transaction."""
@@ -1305,5 +1316,10 @@ def _to_domain(model: MemberModel, *, status: MemberStatus | None = None) -> Mem
     )
 
 
-def _member_security_json(member: Member) -> dict[str, str]:
-    return {"id": str(member.id), "role": member.role.value, "status": member.status.value}
+def _member_security_json(member: Member) -> dict[str, object]:
+    return {
+        "id": str(member.id),
+        "role": member.role.value,
+        "status": member.status.value,
+        "permissions": sorted(member.permissions),
+    }

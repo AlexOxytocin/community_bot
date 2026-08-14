@@ -122,11 +122,32 @@ deploy RUN_NUMBER RUN_ATTEMPT COMMIT_SHA ghcr.io/alexgoodman53/community_bot@sha
 Entrypoint сериализует deploy через `flock` и принимает только возрастающую пару
 `RUN_NUMBER/RUN_ATTEMPT` одного workflow. Marker обновляется после успешного deploy.
 
+## Release acceptance в Telegram
+
+Для заявления «исправлено на рабочем экземпляре» после deployment выполнить
+живую проверку через опубликованный `bot`. Если сценарий требует двух
+пользователей, использовать локальные профили `default` и `tg-test`.
+
+Сначала проверить доступность сессий без чтения сообщений:
+
+```powershell
+& 'C:\Users\User\.codex\tools\telegram.ps1' probe
+& 'C:\Users\User\.codex\tools\telegram.ps1' -Profile tg-test probe
+```
+
+В отчёте фиксировать только дату, ярлык профиля и факт
+`ok/authorized/dialogsProbeOk`. Не фиксировать session string, телефон,
+Telegram ID, список чатов, тексты сообщений, callback payload, invite-коды,
+evidence или медиа. Чтение чата с ботом, нажатие live-кнопок и отправка
+сообщений выполняются только по явному запросу пользователя на конкретный
+release acceptance сценарий.
+
 ## Частичный rollback
 
 1. Прочитать предыдущую identity из
    `/opt/community-bot/shared/releases/previous-image`.
-2. Запустить `ops/deploy_self_hosted.sh PREVIOUS_IMAGE`.
+2. Запустить
+   `python3 /opt/community-bot/current/ops/deploy_self_hosted.py PREVIOUS_IMAGE`.
 3. Не выполнять автоматический Alembic downgrade. Release-миграции обязаны быть
    совместимы с предыдущим image.
 4. Если предыдущий image несовместим с текущей схемой, остановить rollback и
@@ -134,14 +155,14 @@ Entrypoint сериализует deploy через `flock` и принимае�
 
 ## Backup и restore drill
 
-Timer ежедневно запускает `ops/backup_postgres.sh`. Скрипт создаёт custom-format
+Timer ежедневно запускает `ops/backup_postgres.py`. Скрипт создаёт custom-format
 `pg_dump` через временный файл, атомарно переименовывает готовый dump и удаляет
 локальные backup старше семи суток. Каталог и файлы доступны только root.
 
 Для drill выбрать свежий файл и выполнить:
 
 ```bash
-/opt/community-bot/current/ops/restore_drill.sh \
+python3 /opt/community-bot/current/ops/restore_drill.py \
   /var/backups/community-bot/community_bot-YYYYMMDDTHHMMSSZ.dump
 ```
 
@@ -171,7 +192,7 @@ restore, Alembic revision и результат проверок. Цели ло�
 ## Preflight допуска когорты
 
 1. Зафиксировать reviewed commit и immutable image digest текущего release.
-2. Подтвердить `0011`, healthy `postgres`, `community-worker` и `community-bot`,
+2. Подтвердить `0018`, healthy `postgres`, `community-worker` и `community-bot`,
    отсутствие terminal `failed` outbox и свежие heartbeat.
 3. Создать свежий backup, выполнить isolated restore drill и получить
    `ledger_mismatch_count = 0`; возраст backup должен быть не более 24 часов, а

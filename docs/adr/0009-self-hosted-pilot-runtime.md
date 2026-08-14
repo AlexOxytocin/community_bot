@@ -23,11 +23,13 @@ backup и документированную эксплуатацию, поэт�
    Compose project и внутреннюю сеть. PostgreSQL не публикует порт наружу;
    long polling не требует HTTP ingress.
 2. `bot`, `worker` и `migrate` используют один проверенный `linux/arm64` image под
-   архитектуру пилотного сервера. Штатный release после зелёного CI
-   идентифицируется GHCR SHA-256 digest. Deployment сначала
-   запускает PostgreSQL и migration gate, затем `worker` и его readiness, после
-   этого `bot` и его readiness. Предыдущая image identity сохраняется для
-   rollback; schema downgrade автоматически не выполняется.
+   архитектуру пилотного сервера. С 2026-08-14 штатный быстрый deploy пилота
+   заменён ADR-0011: сервер получает reviewed GitHub ref, копирует production
+   пути и собирает локальный image. Низкоуровневый release всё равно
+   идентифицируется SHA-256 image identity. Deployment сначала запускает
+   PostgreSQL и migration gate, затем `worker` и его readiness, после этого
+   `bot` и его readiness. Предыдущая image identity сохраняется для rollback;
+   schema downgrade автоматически не выполняется.
 3. Секреты находятся только в root-owned `/opt/community-bot/shared/.env` с
    правами `0600`. Репозиторий, Jira, логи и release metadata не содержат их.
    Существующие приложения сервера, reverse proxy и firewall не изменяются;
@@ -59,7 +61,7 @@ backup и документированную эксплуатацию, поэт�
   а не облачным PITR.
 - Владелец отвечает за доступность одного хоста; ежедневный backup закрывает
   логическую порчу БД, но не потерю хоста.
-- Hosting-специфика остаётся в Compose, shell scripts и runbook; application и
+- Hosting-специфика остаётся в Compose, Python ops scripts и runbook; application и
   domain не зависят от сервера.
 - Положения ADR-0008 о когорте пилота, Sentry privacy и исключении application
   object storage/webhook сохраняются; hosting/release/backup положения заменены
