@@ -76,7 +76,19 @@
 
 - Попытка 1: `Quality` fail на Linux-only Ruff `EXE001` — verifier имел shebang при git
   mode `0644`; shebang удален, поскольку workflow явно вызывает `python`.
-- Повторные checks ожидаются после корректирующего commit.
+- Попытка 2: `Quality` 57s, `PostgreSQL and Alembic` 5m11s и
+  `Verified merge tree` 6s — passed; PR #40 merged.
+
+## Release attempt 1
+
+- Merge commit: `fef71af`.
+- Release остановлен до build: GitHub run API вернул пустой `pull_requests` для
+  фактически связанного PR run.
+- Исправление не ослабляет provenance: run выбирается по exact head SHA/success, а
+  artifact по-прежнему обязан единственно совпасть по PR number, base/head/tree,
+  workflow ref, run ID и attempt.
+- Live verifier для merge `fef71af` вернул exact PR #40, CI run и tree; короткая
+  независимая diff-проверка — `Status: approved`.
 
 ## Остаточный риск
 

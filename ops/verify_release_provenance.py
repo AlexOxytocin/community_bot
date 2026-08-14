@@ -28,6 +28,7 @@ def _git(*arguments: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     ).stdout.strip()
 
 
@@ -36,7 +37,13 @@ def _gh_json(endpoint: str, *, paginate: bool = False) -> object:
     if paginate:
         command.extend(("--paginate", "--slurp"))
     command.append(endpoint)
-    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    completed = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
     return json.loads(completed.stdout)
 
 
@@ -99,16 +106,8 @@ def _pull_matches(
     )
 
 
-def _run_matches(run: dict[str, object], *, head_sha: str, pr_number: int) -> bool:
-    pull_requests = run.get("pull_requests")
-    return (
-        run.get("conclusion") == "success"
-        and run.get("head_sha") == head_sha
-        and isinstance(pull_requests, list)
-        and any(
-            isinstance(item, dict) and item.get("number") == pr_number for item in pull_requests
-        )
-    )
+def _run_matches(run: dict[str, object], *, head_sha: str) -> bool:
+    return run.get("conclusion") == "success" and run.get("head_sha") == head_sha
 
 
 def _evidence_matches(
@@ -159,7 +158,7 @@ def verify(repository: str, commit_sha: str) -> dict[str, object]:
     runs = [
         run
         for run in _flatten_pages(runs_payload, "workflow_runs")
-        if _run_matches(run, head_sha=head_sha, pr_number=pr_number)
+        if _run_matches(run, head_sha=head_sha)
     ]
 
     matches: list[dict[str, object]] = []

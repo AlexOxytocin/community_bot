@@ -76,7 +76,7 @@ def test_verify_accepts_one_exact_current_proof(monkeypatch: pytest.MonkeyPatch)
                             "run_attempt": 1,
                             "conclusion": "success",
                             "head_sha": head,
-                            "pull_requests": [{"number": 38}],
+                            "pull_requests": [],
                         }
                     ]
                 }
@@ -120,7 +120,7 @@ def test_verify_rejects_ambiguous_current_proofs(monkeypatch: pytest.MonkeyPatch
                     "run_attempt": 1,
                     "conclusion": "success",
                     "head_sha": head,
-                    "pull_requests": [{"number": 38}],
+                    "pull_requests": [],
                 }
                 for run_id in (101, 102)
             ]
