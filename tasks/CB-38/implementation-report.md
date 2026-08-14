@@ -72,6 +72,12 @@
 - Merge, provenance release, Environment approval, production deploy и health/outbox check.
 - Два живых Telegram-сценария отмены между `default` и `tg-test` с cleanup.
 
+## PR CI
+
+- Попытка 1: `Quality` fail на Linux-only Ruff `EXE001` — verifier имел shebang при git
+  mode `0644`; shebang удален, поскольку workflow явно вызывает `python`.
+- Повторные checks ожидаются после корректирующего commit.
+
 ## Остаточный риск
 
 Первый production запуск нового workflow одновременно является проверкой реального

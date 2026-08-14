@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # ruff: noqa: S603, S607
 """Fail-closed proof that a main merge tree passed the pull-request CI."""
 
