@@ -28,6 +28,7 @@
 | Генеративные тесты | Hypothesis | инварианты экономики и переходов состояний |
 | Интеграционные тесты | Testcontainers | проверки на настоящем PostgreSQL |
 | Логи | стандартный `logging` + structlog | структурированные JSON-логи |
+| Эксплуатационные скрипты | Python 3.13 host-side scripts | deployment, backup, restore drill и локальные проверки; два узких shell wrapper-а защищают release boundary |
 | Локальная среда | Docker Compose | PostgreSQL и запуск сервисов разработки |
 | CI | GitHub Actions | линтинг, типы, тесты и проверка миграций |
 
@@ -86,8 +87,7 @@ Compose:
   Compose project и внутренней сети;
 - PostgreSQL не публикует порт, а long polling не требует входящего HTTP-порта;
 - GitHub Actions публикует один reviewed `linux/arm64` image в GHCR под архитектуру
-  пилотного сервера, штатный
-  release использует его SHA-256 digest без mutable tags;
+  пилотного сервера, штатный release использует его SHA-256 digest без mutable tags;
 - deployment запускает PostgreSQL, migration gate, `worker` + readiness и лишь
   затем `bot` + readiness;
 - release-миграции expand-only и совместимы с предыдущим image; частичный сбой

@@ -50,6 +50,7 @@ async def list_owned_task_cards(
             TaskModel.creator_id == creator_id,
             TaskModel.created_by_admin_id == creator_id,
             TaskModel.reviewer_admin_id == creator_id,
+            TaskModel.community_approved_by_admin_id == creator_id,
         )
     )
     if status is not None:
@@ -80,6 +81,7 @@ async def get_owned_task_card(
                 TaskModel.creator_id == owner_id,
                 TaskModel.created_by_admin_id == owner_id,
                 TaskModel.reviewer_admin_id == owner_id,
+                TaskModel.community_approved_by_admin_id == owner_id,
             ),
         )
     )

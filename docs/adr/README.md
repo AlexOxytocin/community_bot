@@ -26,3 +26,4 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0009 — Самостоятельное размещение пилота](0009-self-hosted-pilot-runtime.md)
 - [ADR-0010 — Быстрый путь малых багфиксов](0010-small-bugfix-fast-lane.md)
 - [ADR-0011 — Защищенный release после одного полного CI](0011-protected-single-ci-release.md)
+- [ADR-0012 — Python-скрипты эксплуатации и деплой из GitHub ref](0012-python-ops-and-git-deploy.md)

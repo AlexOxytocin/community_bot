@@ -34,7 +34,11 @@ from community_bot.transport.telegram.profile import (
 )
 from community_bot.transport.telegram.reputation import send_member_catalog
 from community_bot.transport.telegram.task_card import published_task_card
-from community_bot.transport.telegram.tasks import owned_task_keyboard, owned_task_summary
+from community_bot.transport.telegram.tasks import (
+    community_publication_approval_keyboard,
+    owned_task_keyboard,
+    owned_task_summary,
+)
 
 if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentService
@@ -278,6 +282,32 @@ def build_navigation_router(  # noqa: PLR0913
             except (PermissionError, LookupError, ValueError):
                 await message.answer("Административное меню недоступно.")
 
+    async def community_approvals_action(callback: CallbackQuery) -> None:
+        try:
+            await navigation.require_active_administrator(callback.from_user.id)
+            requests = await tasks.pending_community_publications(
+                actor_telegram_user_id=callback.from_user.id
+            )
+            body = (
+                "Заданий на подтверждение нет."
+                if not requests
+                else "Задания на подтверждение:\n"
+                + "\n".join(
+                    "• "
+                    f"{item.template_name} от {item.creator_display_name}; "
+                    f"проверяет {item.reviewer_display_name}"
+                    for item in requests
+                )
+            )
+            await callback.answer()
+            if isinstance(callback.message, Message):
+                await callback.message.answer(
+                    body,
+                    reply_markup=community_publication_approval_keyboard(requests),
+                )
+        except (TaskError, PermissionError, LookupError, ValueError):
+            await callback.answer("Административное действие недоступно.", show_alert=True)
+
     async def admin_action(callback: CallbackQuery, event_update: Update) -> None:
         try:
             await navigation.require_active_administrator(callback.from_user.id)
@@ -347,7 +377,7 @@ def build_navigation_router(  # noqa: PLR0913
             await callback.answer()
             if isinstance(callback.message, Message):
                 await callback.message.answer(body)
-        except (PermissionError, LookupError, ValueError):
+        except (TaskError, PermissionError, LookupError, ValueError):
             await callback.answer("Административное действие недоступно.", show_alert=True)
 
     router.message.register(show_tasks, Command("tasks"))
@@ -370,6 +400,10 @@ def build_navigation_router(  # noqa: PLR0913
     router.message.register(show_members, F.text == MEMBERS_TEXT)
     router.message.register(show_admin, Command("admin"))
     router.message.register(show_admin, F.text == ADMIN_TEXT)
+    router.callback_query.register(
+        community_approvals_action,
+        F.data == "nav:admin:community_approvals",
+    )
     router.callback_query.register(admin_action, F.data.startswith(_ADMIN_PREFIX))
     return router
 
@@ -441,6 +475,14 @@ def _admin_markup(*, include_task_creation: bool = True) -> InlineKeyboardMarkup
                 InlineKeyboardButton(
                     text="Создать задание сообщества",
                     callback_data="nav:admin:community",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Подтверждения заданий",
+                    callback_data="nav:admin:community_approvals",
                 )
             ]
         )

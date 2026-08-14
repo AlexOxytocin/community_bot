@@ -7,6 +7,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from community_bot.domain.members import (
+    ADMINISTRATOR_PERMISSIONS,
+    SUPERADMINISTRATOR_PERMISSION,
     AuthorizationError,
     ChangeKind,
     Member,
@@ -23,8 +25,15 @@ def member(
     *,
     role: MemberRole = MemberRole.MEMBER,
     status: MemberStatus = MemberStatus.ACTIVE,
+    permissions: frozenset[str] = frozenset(),
 ) -> Member:
-    return Member(id=uuid4(), telegram_user_id=1, role=role, status=status)
+    return Member(
+        id=uuid4(),
+        telegram_user_id=1,
+        role=role,
+        status=status,
+        permissions=permissions,
+    )
 
 
 @pytest.mark.parametrize(
@@ -152,6 +161,63 @@ def test_allowed_status_transitions(
     assert changed.status is requested
 
 
+def test_only_superadministrator_can_promote_regular_member_to_admin() -> None:
+    actor = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+    )
+    target = member(role=MemberRole.MODERATOR)
+
+    changed = change_member(
+        actor=actor,
+        target=target,
+        kind=ChangeKind.ROLE,
+        requested_value=MemberRole.ADMINISTRATOR.value,
+    )
+
+    assert changed.role is MemberRole.ADMINISTRATOR
+    assert changed.permissions == ADMINISTRATOR_PERMISSIONS
+    assert SUPERADMINISTRATOR_PERMISSION not in changed.permissions
+
+
+def test_superadministrator_can_demote_regular_admin_and_strip_admin_permissions() -> None:
+    actor = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+    )
+    target = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=ADMINISTRATOR_PERMISSIONS,
+    )
+
+    changed = change_member(
+        actor=actor,
+        target=target,
+        kind=ChangeKind.ROLE,
+        requested_value=MemberRole.MEMBER.value,
+    )
+
+    assert changed.role is MemberRole.MEMBER
+    assert changed.permissions == frozenset()
+
+
+def test_superadministrator_can_pause_regular_admin() -> None:
+    actor = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+    )
+    target = member(role=MemberRole.ADMINISTRATOR)
+
+    changed = change_member(
+        actor=actor,
+        target=target,
+        kind=ChangeKind.STATUS,
+        requested_value=MemberStatus.PAUSED.value,
+    )
+
+    assert changed.status is MemberStatus.PAUSED
+
+
 @pytest.mark.parametrize("current", list(MemberStatus))
 @pytest.mark.parametrize("requested", list(MemberStatus))
 def test_status_transition_matrix_denies_every_unlisted_pair(
@@ -208,6 +274,25 @@ def test_administrator_target_is_denied(kind: ChangeKind) -> None:
             target=member(role=MemberRole.ADMINISTRATOR),
             kind=kind,
             requested_value="paused",
+        )
+
+
+@pytest.mark.parametrize("kind", list(ChangeKind))
+def test_superadministrator_target_is_denied(kind: ChangeKind) -> None:
+    with pytest.raises(AuthorizationError):
+        change_member(
+            actor=member(
+                role=MemberRole.ADMINISTRATOR,
+                permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+            ),
+            target=member(
+                role=MemberRole.ADMINISTRATOR,
+                permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+            ),
+            kind=kind,
+            requested_value=MemberRole.MEMBER.value
+            if kind is ChangeKind.ROLE
+            else MemberStatus.PAUSED.value,
         )
 
 

@@ -22,6 +22,8 @@ from community_bot.application.member_foundation import (
     ReadMemberQuery,
 )
 from community_bot.domain.members import (
+    ADMINISTRATOR_PERMISSIONS,
+    SUPERADMINISTRATOR_PERMISSION,
     AuthorizationError,
     ChangeKind,
     MemberRole,
@@ -60,6 +62,7 @@ async def add_member(
     telegram_user_id: int,
     role: MemberRole = MemberRole.MEMBER,
     status: MemberStatus = MemberStatus.ACTIVE,
+    permissions: list[str] | None = None,
 ) -> MemberModel:
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
@@ -70,6 +73,7 @@ async def add_member(
             role=role.value,
             status=status.value,
             level_number=1,
+            permissions_json=[] if permissions is None else permissions,
         )
         session.add(model)
     return model
@@ -177,6 +181,68 @@ async def test_concurrent_duplicate_admin_update_commits_one_effect(database_url
     assert audit.before_json["role"] == MemberRole.MEMBER.value
     assert audit.after_json is not None
     assert audit.after_json["role"] == MemberRole.MODERATOR.value
+    await database.dispose()
+
+
+async def test_superadministrator_promotes_regular_administrator_without_top_permission(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    superadministrator = await add_member(
+        database,
+        telegram_user_id=25,
+        role=MemberRole.ADMINISTRATOR,
+        permissions=[SUPERADMINISTRATOR_PERMISSION],
+    )
+    regular_admin = await add_member(
+        database,
+        telegram_user_id=26,
+        role=MemberRole.ADMINISTRATOR,
+    )
+    target = await add_member(database, telegram_user_id=27)
+    service = MemberFoundationService(database.unit_of_work)
+
+    with pytest.raises(AuthorizationError):
+        await service.change_member(
+            AdministrativeChange(
+                update_id=250,
+                telegram_user_id=regular_admin.telegram_user_id,
+                target_member_id=target.id,
+                kind=ChangeKind.ROLE,
+                requested_value=MemberRole.ADMINISTRATOR.value,
+            )
+        )
+
+    result = await service.change_member(
+        AdministrativeChange(
+            update_id=251,
+            telegram_user_id=superadministrator.telegram_user_id,
+            target_member_id=target.id,
+            kind=ChangeKind.ROLE,
+            requested_value=MemberRole.ADMINISTRATOR.value,
+            reason="Назначить обычного администратора",
+        )
+    )
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        promoted = await session.get(MemberModel, target.id)
+    assert result.outcome_code == "member_changed"
+    assert promoted is not None
+    assert promoted.role == MemberRole.ADMINISTRATOR.value
+    assert set(promoted.permissions_json) == set(ADMINISTRATOR_PERMISSIONS)
+    assert SUPERADMINISTRATOR_PERMISSION not in promoted.permissions_json
+
+    with pytest.raises(AuthorizationError):
+        await service.change_member(
+            AdministrativeChange(
+                update_id=252,
+                telegram_user_id=promoted.telegram_user_id,
+                target_member_id=regular_admin.id,
+                kind=ChangeKind.STATUS,
+                requested_value=MemberStatus.PAUSED.value,
+            )
+        )
     await database.dispose()
 
 

@@ -257,7 +257,12 @@ async def test_profile_repair_is_utf8_safe_idempotent_and_fail_closed(
     assert member.city is None
     assert member.role == "administrator"
     assert member.status == "active"
-    assert member.permissions_json == ["interaction_review", "karma_review", "member_read"]
+    assert member.permissions_json == [
+        "interaction_review",
+        "karma_review",
+        "member_read",
+        "superadministrator",
+    ]
     assert member.credit_balance_cached == 0
     assert member.experience_total_cached == 0
     assert len(repair_events) == 1
@@ -487,7 +492,12 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
     assert admin.display_name == "Алексей Администратор"
     assert admin.timezone == "UTC"
     assert admin.approved_at is not None
-    assert admin.permissions_json == ["interaction_review", "karma_review", "member_read"]
+    assert admin.permissions_json == [
+        "interaction_review",
+        "karma_review",
+        "member_read",
+        "superadministrator",
+    ]
     assert admin.credit_balance_cached == 0
     assert admin.experience_total_cached == 0
     assert invitation is not None
@@ -503,7 +513,12 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
     assert bootstrap_audit.reason == "initial_install"
     assert bootstrap_audit.before_json is None
     assert bootstrap_audit.after_json == {
-        "permissions": ["interaction_review", "karma_review", "member_read"],
+        "permissions": [
+            "interaction_review",
+            "karma_review",
+            "member_read",
+            "superadministrator",
+        ],
         "role": "administrator",
         "status": "active",
     }

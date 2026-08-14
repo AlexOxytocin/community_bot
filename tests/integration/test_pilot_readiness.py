@@ -73,7 +73,7 @@ def test_empty_database_cycles_and_restores_catalog_seed(database_url: str) -> N
     _alembic(url, "base", downgrade=True)
     _alembic(url, "head")
     counts = asyncio.run(_catalog_counts(url))
-    assert counts == (8, 8, "0017")
+    assert counts == (8, 8, "0018")
 
 
 def test_migration_retires_synthetic_pilot_rows(database_url: str) -> None:
@@ -86,7 +86,7 @@ def test_migration_retires_synthetic_pilot_rows(database_url: str) -> None:
     assert asyncio.run(_synthetic_cleanup_snapshot(url)) == (
         ("left", "active"),
         ("cancelled", "published"),
-        "0017",
+        "0018",
     )
 
 
@@ -814,7 +814,7 @@ async def _assert_upgraded_snapshot(
             } <= constraints
             assert {"ix_outbox_due", "ix_notifications_due"} <= indexes
             assert (
-                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0017"
+                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018"
             )
             invalid_states = (
                 "UPDATE outbox_events SET status='processing' WHERE business_key='pilot:pending'",

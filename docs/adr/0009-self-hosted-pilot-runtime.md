@@ -24,10 +24,10 @@ backup и документированную эксплуатацию, поэт�
    long polling не требует HTTP ingress.
 2. `bot`, `worker` и `migrate` используют один проверенный `linux/arm64` image под
    архитектуру пилотного сервера. Штатный release после зелёного CI
-   идентифицируется GHCR SHA-256 digest. Deployment сначала
-   запускает PostgreSQL и migration gate, затем `worker` и его readiness, после
-   этого `bot` и его readiness. Предыдущая image identity сохраняется для
-   rollback; schema downgrade автоматически не выполняется.
+   идентифицируется GHCR SHA-256 digest согласно ADR-0011. Deployment сначала запускает
+   PostgreSQL и migration gate, затем `worker` и его readiness, после этого
+   `bot` и его readiness. Предыдущая image identity сохраняется для rollback;
+   schema downgrade автоматически не выполняется.
 3. Секреты находятся только в root-owned `/opt/community-bot/shared/.env` с
    правами `0600`. Репозиторий, Jira, логи и release metadata не содержат их.
    Существующие приложения сервера, reverse proxy и firewall не изменяются;
@@ -59,7 +59,8 @@ backup и документированную эксплуатацию, поэт�
   а не облачным PITR.
 - Владелец отвечает за доступность одного хоста; ежедневный backup закрывает
   логическую порчу БД, но не потерю хоста.
-- Hosting-специфика остаётся в Compose, shell scripts и runbook; application и
+- Hosting-специфика остаётся в Compose, Python ops scripts, двух узких shell wrappers
+  защищённого release и runbook; application и
   domain не зависят от сервера.
 - Положения ADR-0008 о когорте пилота, Sentry privacy и исключении application
   object storage/webhook сохраняются; hosting/release/backup положения заменены

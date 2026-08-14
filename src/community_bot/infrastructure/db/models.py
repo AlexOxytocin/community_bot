@@ -47,7 +47,7 @@ class MemberModel(Base):
         CheckConstraint(
             "jsonb_typeof(permissions_json) = 'array' AND "
             "permissions_json <@ "
-            '\'["karma_review","member_read","interaction_review"]\'::jsonb',
+            '\'["karma_review","member_read","interaction_review","superadministrator"]\'::jsonb',
             name="ck_members_permissions",
         ),
     )
@@ -305,6 +305,13 @@ class TaskCreationDraftModel(Base):
     reviewer_admin_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
+    community_approval_requested_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    community_approved_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    community_approved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     template_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
     )
@@ -353,9 +360,12 @@ class TaskModel(Base):
         ),
         CheckConstraint(
             "(origin = 'member' AND created_by_admin_id IS NULL "
-            "AND reviewer_admin_id IS NULL) OR (origin = 'community' AND "
-            "((created_by_admin_id IS NULL AND reviewer_admin_id IS NULL) OR "
+            "AND reviewer_admin_id IS NULL AND community_approved_by_admin_id IS NULL) OR "
+            "(origin = 'community' AND "
+            "((created_by_admin_id IS NULL AND reviewer_admin_id IS NULL "
+            "AND community_approved_by_admin_id IS NULL) OR "
             "(created_by_admin_id IS NOT NULL AND reviewer_admin_id IS NOT NULL "
+            "AND community_approved_by_admin_id IS NOT NULL "
             "AND created_by_admin_id <> reviewer_admin_id)))",
             name="ck_tasks_community_provenance",
         ),
@@ -378,6 +388,9 @@ class TaskModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
     reviewer_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    community_approved_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
     author_display_name: Mapped[str] = mapped_column(Text, nullable=False)

@@ -46,7 +46,11 @@ from community_bot.domain.assignments import (
 )
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.economy import starting_grant
-from community_bot.domain.members import MemberRole
+from community_bot.domain.members import (
+    ADMINISTRATOR_PERMISSIONS,
+    SUPERADMINISTRATOR_PERMISSION,
+    MemberRole,
+)
 from community_bot.domain.notifications import DeliveryWindow
 from community_bot.domain.tasks import TaskDraftStep, TaskError
 from community_bot.infrastructure.db import Database
@@ -1486,6 +1490,12 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     performer = await _member(database, 82_003)
     resolver = await _member(database, 82_004, MemberRole.ADMINISTRATOR)
     appeal_resolver = await _member(database, 82_005, MemberRole.ADMINISTRATOR)
+    superadministrator = await _member(
+        database,
+        82_006,
+        MemberRole.ADMINISTRATOR,
+        permissions=sorted(ADMINISTRATOR_PERMISSIONS | {SUPERADMINISTRATOR_PERMISSION}),
+    )
     await ProductConfigBootstrapCoordinator(
         database.unit_of_work, load_product_config_candidate
     ).prepare(
@@ -1502,6 +1512,7 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
         performer.telegram_user_id,
         resolver.telegram_user_id,
         appeal_resolver.telegram_user_id,
+        superadministrator.telegram_user_id,
     )
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     send_message, send_callback = _transport(dispatcher, bot, actors)
@@ -1573,88 +1584,100 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     )
 
     capture.callbacks.clear()
-    await send_message(82_112, performer.telegram_user_id, FIND_TASK_TEXT)
+    capture.reply_buttons.clear()
+    await send_message(82_112, superadministrator.telegram_user_id, "/start")
+    superadmin_button = next(value for value in capture.reply_buttons if value == ADMIN_TEXT)
+    await send_message(82_113, superadministrator.telegram_user_id, superadmin_button)
+    approvals = _visible(capture, lambda value: value == "nav:admin:community_approvals")
+    capture.callbacks.clear()
+    await send_callback(82_114, superadministrator.telegram_user_id, approvals)
+    approve = _visible(capture, lambda value: value.startswith("task:approve:"))
+    capture.callbacks.clear()
+    await send_callback(82_115, superadministrator.telegram_user_id, approve)
+
+    capture.callbacks.clear()
+    await send_message(82_116, performer.telegram_user_id, FIND_TASK_TEXT)
     await send_callback(
-        82_113,
+        82_117,
         performer.telegram_user_id,
         _visible(capture, lambda value: value.startswith("task:accept:")),
     )
     capture.callbacks.clear()
-    await send_message(82_114, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(82_118, performer.telegram_user_id, MY_TASKS_TEXT)
     await send_callback(
-        82_115,
+        82_119,
         performer.telegram_user_id,
         _visible(capture, lambda value: value.startswith("as:a:s:")),
     )
     await send_message(
-        82_116,
+        82_120,
         performer.telegram_user_id,
         "Подготовил полный результат для задания сообщества и проверил детали.",
     )
     confirm = _visible(capture, lambda value: value.startswith("assign:submit:"))
     capture.callbacks.clear()
-    await send_callback(82_117, performer.telegram_user_id, confirm)
+    await send_callback(82_121, performer.telegram_user_id, confirm)
     capture.callbacks.clear()
-    await send_message(82_118, reviewer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(82_122, reviewer.telegram_user_id, MY_TASKS_TEXT)
     full = _visible(capture, lambda value: value.endswith(":full"))
     capture.callbacks.clear()
-    await send_callback(82_119, reviewer.telegram_user_id, full)
+    await send_callback(82_123, reviewer.telegram_user_id, full)
 
     capture.callbacks.clear()
-    await send_message(82_120, creator.telegram_user_id, admin_button)
+    await send_message(82_124, creator.telegram_user_id, admin_button)
     moderation = _visible(capture, lambda value: value == "nav:admin:moderation")
     capture.callbacks.clear()
-    await send_callback(82_121, creator.telegram_user_id, moderation)
+    await send_callback(82_125, creator.telegram_user_id, moderation)
     assert {"mod:list:fraud", "mod:list:alerts", "mod:list:sanctions"} <= set(capture.callbacks)
 
     fraud_list = _visible(capture, lambda value: value == "mod:list:fraud")
     capture.callbacks.clear()
-    await send_callback(82_122, creator.telegram_user_id, fraud_list)
+    await send_callback(82_126, creator.telegram_user_id, fraud_list)
     open_fraud = _visible(capture, lambda value: value.startswith("mod:fraud:"))
     capture.callbacks.clear()
-    await send_callback(82_123, creator.telegram_user_id, open_fraud)
+    await send_callback(82_127, creator.telegram_user_id, open_fraud)
 
     capture.reply_buttons.clear()
-    await send_message(82_124, resolver.telegram_user_id, "/start")
+    await send_message(82_128, resolver.telegram_user_id, "/start")
     resolver_admin = next(value for value in capture.reply_buttons if value == ADMIN_TEXT)
     capture.callbacks.clear()
-    await send_message(82_125, resolver.telegram_user_id, resolver_admin)
+    await send_message(82_129, resolver.telegram_user_id, resolver_admin)
     resolver_moderation = _visible(capture, lambda value: value == "nav:admin:moderation")
     capture.callbacks.clear()
-    await send_callback(82_126, resolver.telegram_user_id, resolver_moderation)
+    await send_callback(82_130, resolver.telegram_user_id, resolver_moderation)
     fraud_resolution = _visible(
         capture,
         lambda value: value.startswith("mod:case:") and value.endswith(":fraud"),
     )
     capture.callbacks.clear()
-    await send_callback(82_127, resolver.telegram_user_id, fraud_resolution)
+    await send_callback(82_131, resolver.telegram_user_id, fraud_resolution)
     confirm_refund = _visible(capture, lambda value: value.startswith("mod:res:"))
     capture.callbacks.clear()
-    await send_callback(82_128, resolver.telegram_user_id, confirm_refund)
+    await send_callback(82_132, resolver.telegram_user_id, confirm_refund)
 
     capture.callbacks.clear()
-    await send_message(82_129, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(82_133, performer.telegram_user_id, MY_TASKS_TEXT)
     appeal = _visible(capture, lambda value: value.startswith("mod:appeal:"))
     capture.callbacks.clear()
-    await send_callback(82_130, performer.telegram_user_id, appeal)
+    await send_callback(82_134, performer.telegram_user_id, appeal)
 
     capture.reply_buttons.clear()
-    await send_message(82_131, appeal_resolver.telegram_user_id, "/start")
+    await send_message(82_135, appeal_resolver.telegram_user_id, "/start")
     appeal_admin = next(value for value in capture.reply_buttons if value == ADMIN_TEXT)
     capture.callbacks.clear()
-    await send_message(82_132, appeal_resolver.telegram_user_id, appeal_admin)
+    await send_message(82_136, appeal_resolver.telegram_user_id, appeal_admin)
     appeal_moderation = _visible(capture, lambda value: value == "nav:admin:moderation")
     capture.callbacks.clear()
-    await send_callback(82_133, appeal_resolver.telegram_user_id, appeal_moderation)
+    await send_callback(82_137, appeal_resolver.telegram_user_id, appeal_moderation)
     full_payment = _visible(
         capture,
         lambda value: value.startswith("mod:case:") and value.endswith(":pay"),
     )
     capture.callbacks.clear()
-    await send_callback(82_134, appeal_resolver.telegram_user_id, full_payment)
+    await send_callback(82_138, appeal_resolver.telegram_user_id, full_payment)
     confirm_appeal = _visible(capture, lambda value: value.startswith("mod:res:"))
     capture.callbacks.clear()
-    await send_callback(82_135, appeal_resolver.telegram_user_id, confirm_appeal)
+    await send_callback(82_139, appeal_resolver.telegram_user_id, confirm_appeal)
 
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
@@ -1683,6 +1706,7 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     assert task is not None
     assert task.creator_id is None
     assert task.reviewer_admin_id == reviewer.id
+    assert task.community_approved_by_admin_id == superadministrator.id
     assert assignment is not None
     assert assignment.status == "approved"
     assert assignment_credit_total == task.credit_reward_per_performer
@@ -1696,7 +1720,12 @@ async def test_unavailable_community_reviewer_is_replaced_from_visible_card(  # 
 ) -> None:
     """A stalled community result reopens with a new independent reviewer."""
     database = Database(database_url)
-    creator = await _member(database, 83_001, MemberRole.ADMINISTRATOR)
+    creator = await _member(
+        database,
+        83_001,
+        MemberRole.ADMINISTRATOR,
+        permissions=sorted(ADMINISTRATOR_PERMISSIONS | {SUPERADMINISTRATOR_PERMISSION}),
+    )
     reviewer = await _member(database, 83_002, MemberRole.ADMINISTRATOR)
     replacement = await _member(database, 83_003, MemberRole.ADMINISTRATOR)
     performer = await _member(database, 83_004)
@@ -2166,8 +2195,17 @@ async def test_community_provenance_survives_exact_migration_cycle(
     await _migrate(database_url, "0012", upgrade=True)
     restored = Database(database_url)
     restored_sessions = async_sessionmaker(restored.engine, expire_on_commit=False)
+    async with restored.engine.connect() as connection:
+        restored_task = (
+            await connection.execute(
+                select(
+                    TaskModel.created_by_admin_id,
+                    TaskModel.reviewer_admin_id,
+                    TaskModel.safety_snapshot_json,
+                ).where(TaskModel.id == task.id)
+            )
+        ).one()
     async with restored_sessions() as session:
-        restored_task = await session.get(TaskModel, task.id)
         restored_assignment = await session.get(AssignmentModel, assignment.id)
         restored_transactions = tuple(
             await session.scalars(
@@ -2176,7 +2214,6 @@ async def test_community_provenance_survives_exact_migration_cycle(
                 .order_by(AccountTransactionModel.id)
             )
         )
-    assert restored_task is not None
     assert restored_task.created_by_admin_id == creator.id
     assert restored_task.reviewer_admin_id == reviewer.id
     assert "_community_created_by_admin_id" not in restored_task.safety_snapshot_json
@@ -2294,6 +2331,13 @@ async def _published_community_task(
     reviewer: MemberModel,
     template_id: UUID,
 ) -> TaskModel:
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        stored_creator = await session.get(MemberModel, creator.id)
+        assert stored_creator is not None
+        stored_creator.permissions_json = sorted(
+            set(stored_creator.permissions_json) | {SUPERADMINISTRATOR_PERMISSION}
+        )
     service = TaskService(database.unit_of_work)
     draft = await service.start(
         update_id=85_010,
@@ -2356,7 +2400,6 @@ async def _published_community_task(
             preview.draft.revision,
         )
     )
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
         task = await session.get(TaskModel, published.id)
     assert task is not None

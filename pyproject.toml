@@ -76,6 +76,19 @@ ignore = [
     "D",
     "INP001",
 ]
+"ops/*.py" = [
+    "ANN401",
+    "E402",
+    "EM101",
+    "EM102",
+    "PLR0913",
+    "PLR2004",
+    "S603",
+    "S607",
+    "T201",
+    "TC003",
+    "TRY003",
+]
 "src/community_bot/bootstrap/settings.py" = ["TC002"]
 "src/community_bot/transport/telegram/registration.py" = [
     "C901",

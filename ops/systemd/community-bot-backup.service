@@ -5,7 +5,7 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/community-bot/current/ops/backup_postgres.sh
+ExecStart=/usr/bin/python3 /opt/community-bot/current/ops/backup_postgres.py
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/backups/community-bot /opt/community-bot/shared
