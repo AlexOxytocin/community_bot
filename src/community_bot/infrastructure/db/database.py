@@ -21,6 +21,7 @@ from community_bot.infrastructure.db import conversations as conversation_store
 from community_bot.infrastructure.db import moderation as moderation_store
 from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db import reputation as reputation_store
+from community_bot.infrastructure.db import task_cancellations as cancellation_store
 from community_bot.infrastructure.db import tasks as task_store
 from community_bot.infrastructure.db.economy import (
     SqlAlchemyEconomyMutation,
@@ -77,7 +78,12 @@ if TYPE_CHECKING:
         RawKarmaVote,
         SafeProfile,
     )
-    from community_bot.application.tasks import PublishedTask, TaskDraft
+    from community_bot.application.tasks import (
+        OwnedTaskCard,
+        PublishedTask,
+        TaskCancellationResponse,
+        TaskDraft,
+    )
     from community_bot.domain.assignments import (
         Assignment,
         AssignmentStatus,
@@ -653,6 +659,117 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             status=status,
             before_created_at=before_created_at,
             before_id=before_id,
+        )
+
+    async def list_owned_task_cards(
+        self,
+        *,
+        creator_id: UUID,
+        limit: int,
+        status: TaskStatus | None,
+        before_created_at: datetime.datetime | None,
+        before_id: UUID | None,
+    ) -> tuple[OwnedTaskCard, ...]:
+        """Return owned tasks with occupancy and cancellation context."""
+        return await cancellation_store.list_owned_task_cards(
+            self._require_session(),
+            creator_id=creator_id,
+            limit=limit,
+            status=status,
+            before_created_at=before_created_at,
+            before_id=before_id,
+        )
+
+    async def get_owned_task_card(self, *, task_id: UUID, owner_id: UUID) -> OwnedTaskCard | None:
+        """Return one exact owned card without page-size coupling."""
+        return await cancellation_store.get_owned_task_card(
+            self._require_session(), task_id=task_id, owner_id=owner_id
+        )
+
+    async def get_pending_task_cancellation(self, task_id: UUID) -> UUID | None:
+        """Return the pending request identity for one task."""
+        return await cancellation_store.get_pending_request(self._require_session(), task_id)
+
+    async def obsolete_pending_task_cancellation(
+        self, task_id: UUID, reason: str, now: datetime.datetime
+    ) -> bool:
+        """Make an active request obsolete after work starts or the deadline passes."""
+        return await cancellation_store.obsolete_pending_request(
+            self._require_session(), task_id, reason, now
+        )
+
+    async def has_declined_task_cancellation(self, task_id: UUID) -> bool:
+        """Return whether cancellation was already declined for this task."""
+        return await cancellation_store.has_declined_request(self._require_session(), task_id)
+
+    async def create_task_cancellation(
+        self, *, task_id: UUID, creator_id: UUID, assignments: Sequence[Assignment]
+    ) -> UUID:
+        """Create a request and one durable response per active assignment."""
+        return await cancellation_store.create_request(
+            self._require_session(),
+            task_id=task_id,
+            creator_id=creator_id,
+            assignments=tuple(assignments),
+        )
+
+    async def get_task_cancellation_response(
+        self, response_id: UUID, *, for_update: bool = False
+    ) -> TaskCancellationResponse | None:
+        """Read or lock one cancellation response context."""
+        return await cancellation_store.get_response(
+            self._require_session(), response_id, for_update=for_update
+        )
+
+    async def answer_task_cancellation(
+        self, *, response_id: UUID, accepted: bool, now: datetime.datetime
+    ) -> TaskCancellationResponse:
+        """Persist one performer's response."""
+        return await cancellation_store.answer_response(
+            self._require_session(), response_id=response_id, accepted=accepted, now=now
+        )
+
+    async def task_cancellation_all_accepted(self, request_id: UUID) -> bool:
+        """Return whether all response rows accepted cancellation."""
+        return await cancellation_store.all_accepted(self._require_session(), request_id)
+
+    async def resolve_task_cancellation(
+        self, *, request_id: UUID, status: str, reason: str, now: datetime.datetime
+    ) -> None:
+        """Resolve a cancellation request and remaining response rows."""
+        await cancellation_store.resolve_request(
+            self._require_session(),
+            request_id=request_id,
+            status=status,
+            reason=reason,
+            now=now,
+        )
+
+    async def cancel_assignment_by_creator(
+        self, assignment_id: UUID, creator_id: UUID, reason: str
+    ) -> None:
+        """Cancel an assignment without penalizing performer reliability."""
+        await cancellation_store.cancel_assignment_by_creator(
+            self._require_session(), assignment_id, creator_id, reason
+        )
+
+    async def add_task_cancellation_outbox(
+        self,
+        *,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        payload: dict[str, object],
+        business_key: str,
+    ) -> None:
+        """Stage a cancellation-specific notification event."""
+        await cancellation_store.add_outbox(
+            self._require_session(),
+            event_type=event_type,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            payload=payload,
+            business_key=business_key,
         )
 
     async def list_available_tasks(

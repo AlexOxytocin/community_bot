@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
+from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.catalog import TaskFormat, validate_payload
 from community_bot.domain.economy import ResolvedLevel, refund_reward, reserve_reward
 from community_bot.domain.members import Member, MemberRole, MemberStatus
@@ -119,6 +120,48 @@ class AvailableTaskPage:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnedTaskAssignee:
+    """Public assignee label and lifecycle state for an owned task."""
+
+    assignment_id: UUID
+    display_name: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedTaskCard:
+    """Owned task plus occupancy and cancellation-request context."""
+
+    task: PublishedTask
+    assignees: tuple[OwnedTaskAssignee, ...]
+    cancellation_status: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCancellationResponse:
+    """One durable performer decision context."""
+
+    id: UUID
+    request_id: UUID
+    task_id: UUID
+    assignment_id: UUID
+    performer_id: UUID
+    request_status: str
+    request_resolution_reason: str | None
+    response_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCancellationOutcome:
+    """Result of an immediate cancellation or a negotiated request."""
+
+    task: PublishedTask
+    request_id: UUID | None
+    status: str
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AdministratorOption:
     """Safe administrator choice shown during community task creation."""
 
@@ -219,6 +262,45 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
     ) -> tuple[PublishedTask, ...]: ...
+    async def list_owned_task_cards(
+        self,
+        *,
+        creator_id: UUID,
+        limit: int,
+        status: TaskStatus | None,
+        before_created_at: datetime.datetime | None,
+        before_id: UUID | None,
+    ) -> tuple[OwnedTaskCard, ...]: ...
+    async def get_owned_task_card(
+        self, *, task_id: UUID, owner_id: UUID
+    ) -> OwnedTaskCard | None: ...
+    async def get_pending_task_cancellation(self, task_id: UUID) -> UUID | None: ...
+    async def has_declined_task_cancellation(self, task_id: UUID) -> bool: ...
+    async def create_task_cancellation(
+        self, *, task_id: UUID, creator_id: UUID, assignments: Sequence[Assignment]
+    ) -> UUID: ...
+    async def get_task_cancellation_response(
+        self, response_id: UUID, *, for_update: bool = False
+    ) -> TaskCancellationResponse | None: ...
+    async def answer_task_cancellation(
+        self, *, response_id: UUID, accepted: bool, now: datetime.datetime
+    ) -> TaskCancellationResponse: ...
+    async def task_cancellation_all_accepted(self, request_id: UUID) -> bool: ...
+    async def resolve_task_cancellation(
+        self, *, request_id: UUID, status: str, reason: str, now: datetime.datetime
+    ) -> None: ...
+    async def cancel_assignment_by_creator(
+        self, assignment_id: UUID, creator_id: UUID, reason: str
+    ) -> None: ...
+    async def add_task_cancellation_outbox(
+        self,
+        *,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: UUID,
+        payload: dict[str, object],
+        business_key: str,
+    ) -> None: ...
     async def list_available_tasks(
         self,
         *,
@@ -635,6 +717,36 @@ class TaskService:
                 before_id=None if cursor is None else cursor[1],
             )
 
+    async def list_owned_cards(
+        self,
+        *,
+        actor_telegram_user_id: int,
+        limit: int = 20,
+        status: TaskStatus | None = None,
+        cursor: tuple[datetime.datetime, UUID] | None = None,
+    ) -> tuple[OwnedTaskCard, ...]:
+        """Return compact-card context for tasks visible to one owner or reviewer."""
+        if not 1 <= limit <= _MAX_OWNED_TASKS:
+            raise TaskError("Owned task page size must be between 1 and 20.")
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            return await uow.list_owned_task_cards(
+                creator_id=actor.id,
+                limit=limit,
+                status=status,
+                before_created_at=None if cursor is None else cursor[0],
+                before_id=None if cursor is None else cursor[1],
+            )
+
+    async def owned_card(self, *, actor_telegram_user_id: int, task_id: UUID) -> OwnedTaskCard:
+        """Return one owned card while enforcing the same visibility boundary."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            card = await uow.get_owned_task_card(task_id=task_id, owner_id=actor.id)
+            if card is None:
+                raise PermissionError("Task is not visible to this member.")
+            return card
+
     async def list_available(
         self,
         *,
@@ -686,9 +798,12 @@ class TaskService:
                 raise TaskError("Task is already cancelled.")
             if task.status is not TaskStatus.PUBLISHED:
                 raise TaskError("Task cannot be cancelled from its current state.")
+            if _utc_now() >= task.deadline_at:
+                raise TaskError("Task cancellation deadline has passed.")
             assignments = await uow.list_task_assignments(task.id, for_update=True)
-            if assignments:
-                raise TaskError("Task with assignment history cannot be cancelled.")
+            active = [item for item in assignments if item.status is not AssignmentStatus.CANCELLED]
+            if active:
+                raise TaskError("Task has an active performer; send a cancellation request.")
             prepared = await uow.economy.prepare_batch(
                 (
                     refund_reward(
@@ -718,6 +833,246 @@ class TaskService:
             )
             await _finish_receipt(uow, update_id, actor, f"task:{task.id}")
             return task
+
+    async def request_cancellation(
+        self, *, update_id: int, actor_telegram_user_id: int, task_id: UUID
+    ) -> TaskCancellationOutcome:
+        """Cancel a free task or ask every accepted performer for consent."""
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin_update(uow, update_id)
+            if replay is not None:
+                return await _cancellation_outcome_from_receipt(uow, replay)
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            preliminary = await uow.get_task(task_id)
+            if preliminary is None:
+                raise TaskError("Task does not exist.")
+            await uow.acquire_assignment_task_gate(task_id)
+            await uow.acquire_task_command_gate(task_id)
+            task = await uow.lock_task(task_id)
+            if task is None or task.creator_id is None:
+                raise PermissionError("Only the member task creator can cancel this task.")
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            if actor.id != task.creator_id:
+                raise PermissionError("Only the task creator can cancel this task.")
+            if task.status is not TaskStatus.PUBLISHED:
+                raise TaskError("Task cannot be cancelled from its current state.")
+            if _utc_now() >= task.deadline_at:
+                raise TaskError("Task cancellation deadline has passed.")
+            assignments = await uow.list_task_assignments(task.id, for_update=True)
+            active = [item for item in assignments if item.status is not AssignmentStatus.CANCELLED]
+            if not active:
+                prepared = await uow.economy.prepare_batch(
+                    (
+                        refund_reward(
+                            member_id=actor.id,
+                            amount=task.reserved_credit_total,
+                            idempotency_key=f"task_cancel:{task.id}:refund",
+                        ),
+                    )
+                )
+                await prepared.apply()
+                task = await uow.save_task_status(task_id=task.id, status=TaskStatus.CANCELLED)
+                await uow.add_task_outbox(
+                    event_type="task.cancelled",
+                    task=task,
+                    business_key=f"task.cancelled:{task.id}",
+                )
+                await uow.append_audit_event(
+                    actor_member_id=actor.id,
+                    action="task_cancelled",
+                    entity_type="task",
+                    entity_id=str(task.id),
+                    reason="assignment_slots_released",
+                )
+                await _finish_receipt(uow, update_id, actor, f"task_cancelled:{task.id}")
+                return TaskCancellationOutcome(task, None, "cancelled")
+            if any(item.status is not AssignmentStatus.ACCEPTED for item in active):
+                raise TaskError("Cancellation is unavailable because work has already started.")
+            pending = await uow.get_pending_task_cancellation(task.id)
+            if pending is not None:
+                raise TaskError("A cancellation request is already awaiting performer responses.")
+            if await uow.has_declined_task_cancellation(task.id):
+                raise TaskError("A performer has already declined cancellation for this task.")
+            request_id = await uow.create_task_cancellation(
+                task_id=task.id, creator_id=actor.id, assignments=active
+            )
+            await uow.append_audit_event(
+                actor_member_id=actor.id,
+                action="task_cancellation_requested",
+                entity_type="task",
+                entity_id=str(task.id),
+                reason=None,
+            )
+            await _finish_receipt(
+                uow, update_id, actor, f"task_cancel_request:{task.id}:{request_id}"
+            )
+            return TaskCancellationOutcome(task, request_id, "pending")
+
+    async def respond_cancellation(  # noqa: PLR0911 - explicit cancellation state machine.
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        response_id: UUID,
+        accepted: bool,
+    ) -> TaskCancellationOutcome:
+        """Record one performer's decision and finalize only unanimous consent."""
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin_update(uow, update_id)
+            if replay is not None:
+                return await _cancellation_outcome_from_receipt(uow, replay)
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            preliminary = await uow.get_task_cancellation_response(response_id)
+            if preliminary is None:
+                raise TaskError("Cancellation response does not exist.")
+            await uow.acquire_assignment_task_gate(preliminary.task_id)
+            task = await uow.lock_task(preliminary.task_id)
+            response = await uow.get_task_cancellation_response(response_id, for_update=True)
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            if task is None or response is None:
+                raise TaskError("Cancellation request is no longer available.")
+            if task.creator_id is None:
+                raise PermissionError("Community tasks do not support member cancellation.")
+            if response.performer_id != actor.id:
+                raise PermissionError("This cancellation request belongs to another performer.")
+            now = _utc_now()
+            if (
+                task.status is TaskStatus.PUBLISHED
+                and response.request_status == "pending"
+                and response.response_status == "pending"
+                and now >= task.deadline_at
+            ):
+                await uow.resolve_task_cancellation(
+                    request_id=response.request_id,
+                    status="obsolete",
+                    reason="deadline_passed",
+                    now=now,
+                )
+                await _finish_receipt(
+                    uow,
+                    update_id,
+                    actor,
+                    f"task_cancel_obsolete:{task.id}:{response.request_id}:deadline_passed",
+                )
+                return TaskCancellationOutcome(
+                    task, response.request_id, "obsolete", "deadline_passed"
+                )
+            if response.request_status == "obsolete":
+                reason = response.request_resolution_reason or "state_changed"
+                await _finish_receipt(
+                    uow,
+                    update_id,
+                    actor,
+                    f"task_cancel_obsolete:{task.id}:{response.request_id}:{reason}",
+                )
+                return TaskCancellationOutcome(task, response.request_id, "obsolete", reason)
+            if (
+                task.status is not TaskStatus.PUBLISHED
+                or response.request_status != "pending"
+                or response.response_status != "pending"
+            ):
+                raise TaskError("Cancellation request is no longer active.")
+            response = await uow.answer_task_cancellation(
+                response_id=response.id, accepted=accepted, now=now
+            )
+            if not accepted:
+                await uow.resolve_task_cancellation(
+                    request_id=response.request_id,
+                    status="declined",
+                    reason="performer_started",
+                    now=now,
+                )
+                await uow.add_task_cancellation_outbox(
+                    event_type="task.cancellation_declined",
+                    aggregate_type="task_cancellation_request",
+                    aggregate_id=response.request_id,
+                    payload={"task_id": str(task.id), "title": task.title},
+                    business_key=f"task_cancel_request:{response.request_id}:declined",
+                )
+                await uow.append_audit_event(
+                    actor_member_id=actor.id,
+                    action="task_cancellation_declined",
+                    entity_type="task",
+                    entity_id=str(task.id),
+                    reason="performer_started",
+                )
+                await _finish_receipt(
+                    uow,
+                    update_id,
+                    actor,
+                    f"task_cancel_declined:{task.id}:{response.request_id}",
+                )
+                return TaskCancellationOutcome(task, response.request_id, "declined")
+            if not await uow.task_cancellation_all_accepted(response.request_id):
+                await _finish_receipt(
+                    uow,
+                    update_id,
+                    actor,
+                    f"task_cancel_pending:{task.id}:{response.request_id}",
+                )
+                return TaskCancellationOutcome(task, response.request_id, "pending")
+            assignments = await uow.list_task_assignments(task.id, for_update=True)
+            started = any(
+                item.status is not AssignmentStatus.ACCEPTED
+                for item in assignments
+                if item.status is not AssignmentStatus.CANCELLED
+            )
+            if started:
+                await uow.resolve_task_cancellation(
+                    request_id=response.request_id,
+                    status="obsolete",
+                    reason="work_started",
+                    now=now,
+                )
+                await _finish_receipt(
+                    uow,
+                    update_id,
+                    actor,
+                    f"task_cancel_obsolete:{task.id}:{response.request_id}:work_started",
+                )
+                return TaskCancellationOutcome(
+                    task, response.request_id, "obsolete", "work_started"
+                )
+            for assignment in assignments:
+                if assignment.status is AssignmentStatus.ACCEPTED:
+                    await uow.cancel_assignment_by_creator(
+                        assignment.id,
+                        task.creator_id,
+                        "creator_cancellation_approved",
+                    )
+            prepared = await uow.economy.prepare_batch(
+                (
+                    refund_reward(
+                        member_id=task.creator_id,
+                        amount=task.reserved_credit_total,
+                        idempotency_key=f"task_cancel:{task.id}:refund",
+                    ),
+                )
+            )
+            await prepared.apply()
+            task = await uow.save_task_status(task_id=task.id, status=TaskStatus.CANCELLED)
+            await uow.resolve_task_cancellation(
+                request_id=response.request_id, status="completed", reason="unanimous", now=now
+            )
+            await uow.add_task_outbox(
+                event_type="task.cancelled",
+                task=task,
+                business_key=f"task.cancelled:{task.id}",
+            )
+            await uow.append_audit_event(
+                actor_member_id=actor.id,
+                action="task_cancelled_by_consent",
+                entity_type="task",
+                entity_id=str(task.id),
+                reason="unanimous_performer_consent",
+            )
+            await _finish_receipt(
+                uow,
+                update_id,
+                actor,
+                f"task_cancelled:{task.id}:{response.request_id}",
+            )
+            return TaskCancellationOutcome(task, response.request_id, "cancelled")
 
     async def replace_community_reviewer(
         self,
@@ -775,6 +1130,33 @@ class TaskService:
 async def _begin_update(uow: TaskUnitOfWork, update_id: int) -> str | None:
     await uow.acquire_update_gate(update_id)
     return await uow.get_receipt_outcome(update_id)
+
+
+async def _cancellation_outcome_from_receipt(
+    uow: TaskUnitOfWork, outcome: str
+) -> TaskCancellationOutcome:
+    statuses = {
+        "task_cancelled:": "cancelled",
+        "task_cancel_pending:": "pending",
+        "task_cancel_declined:": "declined",
+        "task_cancel_obsolete:": "obsolete",
+    }
+    for prefix, status in statuses.items():
+        if outcome.startswith(prefix):
+            task_value, *metadata = outcome.removeprefix(prefix).split(":", 2)
+            task = await uow.get_task(UUID(task_value))
+            if task is None:
+                raise TaskError("Stored cancellation task no longer exists.")
+            request_id = UUID(metadata[0]) if metadata else None
+            reason = metadata[1] if len(metadata) > 1 else None
+            return TaskCancellationOutcome(task, request_id, status, reason)
+    if outcome.startswith("task_cancel_request:"):
+        task_value, request_value = outcome.removeprefix("task_cancel_request:").split(":", 1)
+        task = await uow.get_task(UUID(task_value))
+        if task is None:
+            raise TaskError("Stored cancellation task no longer exists.")
+        return TaskCancellationOutcome(task, UUID(request_value), "pending")
+    raise TaskError("Telegram update belongs to another operation.")
 
 
 async def _active_actor(uow: TaskUnitOfWork, telegram_user_id: int) -> Member:

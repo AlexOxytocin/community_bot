@@ -207,6 +207,7 @@ async def _published_task(
     template_id: UUID,
     *,
     update_id_base: int = 60_000,
+    performer_slots: int = 1,
 ) -> PublishedTask:
     service = TaskService(database.unit_of_work)
     draft = await service.start(
@@ -224,7 +225,7 @@ async def _published_task(
         datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2),
         (TaskFormat.ONLINE, None),
         {"url": "https://example.com/item"},
-        1,
+        performer_slots,
     ]
     current = draft
     for offset, (step, value) in enumerate(

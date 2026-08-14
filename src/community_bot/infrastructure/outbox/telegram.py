@@ -13,8 +13,10 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from community_bot.application.notifications import NotificationProcessingError
+from community_bot.transport.telegram.tasks import cancellation_response_callback
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -35,6 +37,8 @@ _MESSAGES = {
     "registration.approved": "Регистрация подтверждена. Главное меню уже доступно.",
     "task.published": "Опубликовано новое задание в сообществе.",
     "task.cancelled": "Задание отменено.",
+    "task.cancellation_requested": "Автор просит отменить задание.",
+    "task.cancellation_declined": "Исполнитель уже начал работу. Задание остаётся активным.",
     "assignment_accepted": "У задания появился исполнитель.",
     "assignment_submitted": "Результат задания отправлен на проверку.",
     "assignment_cancelled": "Исполнение задания отменено.",
@@ -73,6 +77,33 @@ class TelegramNotificationSender:
             if self._reply_markup_factory is None
             else self._reply_markup_factory(claim.notification_type)
         )
+        if claim.notification_type == "task.cancellation_requested":
+            title = claim.payload.get("title")
+            response_id = claim.payload.get("aggregate_id")
+            if not isinstance(response_id, str):
+                raise NotificationProcessingError(_UNSUPPORTED_NOTIFICATION_TYPE, permanent=True)
+            text = (
+                f"Автор просит отменить задание «{title}».\n"
+                "Если вы ещё не начали работу, подтвердите отмену."
+            )
+            reply_markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Согласен отменить",
+                            callback_data=cancellation_response_callback(
+                                response_id, accepted=True
+                            ),
+                        ),
+                        InlineKeyboardButton(
+                            text="Уже начал(а)",
+                            callback_data=cancellation_response_callback(
+                                response_id, accepted=False
+                            ),
+                        ),
+                    ]
+                ]
+            )
         try:
             await self._bot.send_message(
                 chat_id=claim.telegram_user_id,

@@ -13,10 +13,10 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
-from community_bot.application.tasks import AdvanceDraftCommand, PublishTaskCommand
+from community_bot.application.tasks import AdvanceDraftCommand, OwnedTaskCard, PublishTaskCommand
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import StaleTaskDraftError, TaskDraftStep, TaskError, TaskStatus
-from community_bot.transport.telegram.task_card import preview_task_card
+from community_bot.transport.telegram.task_card import preview_task_card, published_task_card
 
 if TYPE_CHECKING:
     from community_bot.application.tasks import PublishedTask, TaskDraft, TaskPreview, TaskService
@@ -28,7 +28,12 @@ _REPLACE_REVIEWER_PREFIX = "task:rr:"
 _SELECT_REVIEWER_PREFIX = "task:rs:"
 _CANCEL_REQUEST_PREFIX = "task:cancel:ask:"
 _CANCEL_CONFIRM_PREFIX = "task:cancel:do:"
+_CANCEL_NEGOTIATE_PREFIX = "task:cancel:req:"
+_CANCEL_ACCEPT_PREFIX = "task:cancel:yes:"
+_CANCEL_DECLINE_PREFIX = "task:cancel:nope:"
 _CANCEL_DISMISS = "task:cancel:no"
+_VIEW_OPEN_PREFIX = "task:view:open:"
+_VIEW_CLOSE_PREFIX = "task:view:close:"
 _CALLBACK_LIMIT = 64
 _SINGULAR_CREDIT_TEEN = 11
 
@@ -239,16 +244,16 @@ def build_task_router(
         if message.from_user is None:
             return
         try:
-            tasks = await service.list_owned(actor_telegram_user_id=message.from_user.id)
-            if not tasks:
+            cards = await service.list_owned_cards(actor_telegram_user_id=message.from_user.id)
+            if not cards:
                 await message.answer("У вас пока нет опубликованных заданий.")
                 return
-            await message.answer(
-                "\n\n".join(
-                    f"{task.title}\n{task.status.value} · {task.reserved_credit_total} кредита"
-                    for task in tasks
+            for card in cards:
+                await message.answer(
+                    owned_task_summary(card),
+                    parse_mode=None,
+                    reply_markup=owned_task_keyboard(card),
                 )
-            )
         except (TaskError, PermissionError, LookupError) as error:
             await message.answer(_friendly_error(error))
 
@@ -281,21 +286,32 @@ def build_task_router(
             return
         try:
             task_id = _decode_uuid(str(callback.data).removeprefix(_CANCEL_REQUEST_PREFIX))
-            owned = await service.list_owned(actor_telegram_user_id=callback.from_user.id)
-            task = next((item for item in owned if item.id == task_id), None)
-            if task is None or task.creator_id is None:
+            card = await service.owned_card(
+                actor_telegram_user_id=callback.from_user.id, task_id=task_id
+            )
+            task = card.task
+            if task.creator_id is None:
                 raise PermissionError("Only the task creator can cancel this task.")
             if task.status is not TaskStatus.PUBLISHED:
                 raise TaskError("Task cannot be cancelled from its current state.")
-            await callback.answer()
-            if isinstance(callback.message, Message):
-                await callback.message.answer(
+            if card.assignees:
+                if any(item.status != "accepted" for item in card.assignees):
+                    raise TaskError("Cancellation is unavailable because work has already started.")
+                text = (
+                    f"Запросить отмену «{task.title}» у исполнителя?\n"
+                    "Задание отменится только после согласия всех исполнителей."
+                )
+                markup = _cancel_confirmation_keyboard(task.id, negotiated=True)
+            else:
+                text = (
                     f"Отменить «{task.title}»?\n"
                     "Задание исчезнет из каталога, а "
-                    f"{_credits(task.reserved_credit_total)} вернутся в доступный баланс.\n"
-                    "Если задание уже взяли, отмена будет недоступна.",
-                    reply_markup=_cancel_confirmation_keyboard(task.id),
+                    f"{_credits(task.reserved_credit_total)} вернутся в доступный баланс."
                 )
+                markup = _cancel_confirmation_keyboard(task.id)
+            await callback.answer()
+            if isinstance(callback.message, Message):
+                await callback.message.answer(text, reply_markup=markup)
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await callback.answer(_cancel_error(error), show_alert=True)
 
@@ -318,6 +334,88 @@ def build_task_router(
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await callback.answer(_cancel_error(error), show_alert=True)
 
+    async def confirm_negotiated_cancel(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
+        try:
+            task_id = _decode_uuid(str(callback.data).removeprefix(_CANCEL_NEGOTIATE_PREFIX))
+            outcome = await service.request_cancellation(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                task_id=task_id,
+            )
+            if outcome.status == "cancelled":
+                answer = "Задание отменено."
+                message = (
+                    f"Задание «{outcome.task.title}» отменено. "
+                    f"{_credits(outcome.task.reserved_credit_total)} возвращены в доступный баланс."
+                )
+            else:
+                answer = "Запрос отправлен исполнителю."
+                message = (
+                    f"Запрос на отмену «{outcome.task.title}» отправлен. "
+                    "Задание останется активным до ответа всех исполнителей."
+                )
+            await callback.answer(answer)
+            if isinstance(callback.message, Message):
+                await callback.message.answer(message)
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_cancel_error(error), show_alert=True)
+
+    async def respond_cancel(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
+        data = str(callback.data)
+        accepted = data.startswith(_CANCEL_ACCEPT_PREFIX)
+        prefix = _CANCEL_ACCEPT_PREFIX if accepted else _CANCEL_DECLINE_PREFIX
+        try:
+            response_id = _decode_uuid(data.removeprefix(prefix))
+            outcome = await service.respond_cancellation(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                response_id=response_id,
+                accepted=accepted,
+            )
+            if outcome.status == "cancelled":
+                message = "Отмена подтверждена. Задание отменено."
+            elif outcome.status == "declined":
+                message = "Понятно. Задание остаётся активным."
+            elif outcome.status == "obsolete":
+                message = _obsolete_cancellation_message(outcome.reason)
+            else:
+                message = "Согласие сохранено. Ждём ответы остальных исполнителей."
+            await callback.answer(message, show_alert=True)
+            if isinstance(callback.message, Message):
+                await callback.message.edit_reply_markup(reply_markup=None)
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_cancellation_response_error(error), show_alert=True)
+
+    async def toggle_owned_card(callback: CallbackQuery) -> None:
+        if not await _require_private_callback(callback):
+            return
+        data = str(callback.data)
+        expanded = data.startswith(_VIEW_OPEN_PREFIX)
+        prefix = _VIEW_OPEN_PREFIX if expanded else _VIEW_CLOSE_PREFIX
+        try:
+            task_id = _decode_uuid(data.removeprefix(prefix))
+            card = await service.owned_card(
+                actor_telegram_user_id=callback.from_user.id, task_id=task_id
+            )
+            text = (
+                f"{published_task_card(card.task)}\n{owned_task_summary(card, include_title=False)}"
+                if expanded
+                else owned_task_summary(card)
+            )
+            if isinstance(callback.message, Message):
+                await callback.message.edit_text(
+                    text,
+                    parse_mode=None,
+                    reply_markup=owned_task_keyboard(card, expanded=expanded),
+                )
+            await callback.answer()
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_cancel_error(error), show_alert=True)
+
     async def dismiss_cancel(callback: CallbackQuery) -> None:
         if not await _require_private_callback(callback):
             return
@@ -330,6 +428,13 @@ def build_task_router(
     router.message.register(handle_cancel, Command("task_cancel"))
     router.callback_query.register(request_cancel, F.data.startswith(_CANCEL_REQUEST_PREFIX))
     router.callback_query.register(confirm_cancel, F.data.startswith(_CANCEL_CONFIRM_PREFIX))
+    router.callback_query.register(
+        confirm_negotiated_cancel, F.data.startswith(_CANCEL_NEGOTIATE_PREFIX)
+    )
+    router.callback_query.register(respond_cancel, F.data.startswith(_CANCEL_ACCEPT_PREFIX))
+    router.callback_query.register(respond_cancel, F.data.startswith(_CANCEL_DECLINE_PREFIX))
+    router.callback_query.register(toggle_owned_card, F.data.startswith(_VIEW_OPEN_PREFIX))
+    router.callback_query.register(toggle_owned_card, F.data.startswith(_VIEW_CLOSE_PREFIX))
     router.callback_query.register(dismiss_cancel, F.data == _CANCEL_DISMISS)
     router.callback_query.register(handle_publish, F.data.startswith(_CALLBACK_PREFIX))
     router.callback_query.register(handle_reviewer, F.data.startswith(_REVIEWER_PREFIX))
@@ -515,8 +620,11 @@ def task_cancellation_keyboard(task: PublishedTask) -> InlineKeyboardMarkup | No
     )
 
 
-def _cancel_confirmation_keyboard(task_id: UUID) -> InlineKeyboardMarkup:
-    callback_data = f"{_CANCEL_CONFIRM_PREFIX}{_encode_uuid(task_id)}"
+def _cancel_confirmation_keyboard(
+    task_id: UUID, *, negotiated: bool = False
+) -> InlineKeyboardMarkup:
+    prefix = _CANCEL_NEGOTIATE_PREFIX if negotiated else _CANCEL_CONFIRM_PREFIX
+    callback_data = f"{prefix}{_encode_uuid(task_id)}"
     if len(callback_data.encode()) > _CALLBACK_LIMIT:
         raise TaskError("Task cancellation callback exceeds the Telegram limit.")
     return InlineKeyboardMarkup(
@@ -529,8 +637,59 @@ def _cancel_confirmation_keyboard(task_id: UUID) -> InlineKeyboardMarkup:
     )
 
 
+def owned_task_summary(card: OwnedTaskCard, *, include_title: bool = True) -> str:
+    """Render the stable compact information needed before expansion."""
+    lines = [card.task.title] if include_title else []
+    if card.assignees:
+        lines.append(f"Взято: {len(card.assignees)}/{card.task.performer_slots}")
+        lines.append("Исполнитель: " + ", ".join(item.display_name for item in card.assignees))
+    else:
+        lines.append("Свободно")
+    if card.cancellation_status == "pending":
+        lines.append("Запрос отмены: ожидает ответа")
+    elif card.task.status is not TaskStatus.PUBLISHED:
+        lines.append(f"Статус: {card.task.status.value}")
+    return "\n".join(lines)
+
+
+def owned_task_keyboard(card: OwnedTaskCard, *, expanded: bool = False) -> InlineKeyboardMarkup:
+    """Build expand/collapse and creator cancellation controls."""
+    prefix = _VIEW_CLOSE_PREFIX if expanded else _VIEW_OPEN_PREFIX
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="−" if expanded else "+",
+                callback_data=f"{prefix}{_encode_uuid(card.task.id)}",
+            )
+        ]
+    ]
+    if (
+        card.task.creator_id is not None
+        and card.task.status is TaskStatus.PUBLISHED
+        and card.cancellation_status != "pending"
+    ):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Отменить",
+                    callback_data=f"{_CANCEL_REQUEST_PREFIX}{_encode_uuid(card.task.id)}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _encode_uuid(value: UUID) -> str:
     return base64.urlsafe_b64encode(value.bytes).decode().rstrip("=")
+
+
+def cancellation_response_callback(response_id: str, *, accepted: bool) -> str:
+    """Build a stable allowlisted performer response callback."""
+    prefix = _CANCEL_ACCEPT_PREFIX if accepted else _CANCEL_DECLINE_PREFIX
+    callback_data = f"{prefix}{_encode_uuid(UUID(response_id))}"
+    if len(callback_data.encode()) > _CALLBACK_LIMIT:
+        raise TaskError("Task cancellation response callback exceeds the Telegram limit.")
+    return callback_data
 
 
 def _decode_uuid(value: str) -> UUID:
@@ -563,13 +722,44 @@ def _cancel_error(error: Exception) -> str:
     if isinstance(error, PermissionError):
         return "Отменить задание может только его автор."
     detail = str(error)
-    if "assignment history" in detail:
-        return "Задание уже взял исполнитель, поэтому отменить его нельзя."
-    if "already cancelled" in detail:
-        return "Это задание уже отменено."
-    if "current state" in detail:
-        return "Задание уже завершено или недоступно для отмены."
+    messages = (
+        ("assignment history", "Задание уже взял исполнитель, поэтому отменить его нельзя."),
+        ("already cancelled", "Это задание уже отменено."),
+        ("deadline has passed", "Срок задания уже истёк. Отмена больше недоступна."),
+        ("already awaiting", "Запрос отмены уже отправлен исполнителю."),
+        ("already declined", "Исполнитель уже отказал в отмене. Задание остаётся активным."),
+        ("work has already started", "Исполнитель уже начал работу. Отмена больше недоступна."),
+        ("no longer active", "Запрос отмены больше не актуален."),
+        ("no longer available", "Запрос отмены больше не актуален."),
+        ("current state", "Задание уже завершено или недоступно для отмены."),
+    )
+    for marker, message in messages:
+        if marker in detail:
+            return message
     return "Не удалось отменить задание. Откройте «Мои задания» и попробуйте снова."
+
+
+def _cancellation_response_error(error: Exception) -> str:
+    if isinstance(error, PermissionError):
+        return "Этот запрос на отмену адресован другому исполнителю."
+    detail = str(error)
+    if "does not exist" in detail:
+        return "Запрос отмены не найден."
+    if "no longer active" in detail or "no longer available" in detail:
+        return "Запрос отмены больше не актуален."
+    return "Не удалось сохранить ответ на отмену. Попробуйте открыть новое уведомление."
+
+
+def _obsolete_cancellation_message(reason: str | None) -> str:
+    messages = {
+        "deadline_passed": "Срок задания истёк. Запрос отмены больше не актуален.",
+        "deadline_reached": "Срок задания истёк. Запрос отмены больше не актуален.",
+        "work_started": "Работа уже началась. Запрос отмены больше не актуален.",
+        "assignment_cancelled": (
+            "Исполнение задания уже отменено. Запрос автора больше не актуален."
+        ),
+    }
+    return messages.get(reason, "Состояние задания изменилось. Запрос отмены больше не актуален.")
 
 
 def _credits(value: int) -> str:

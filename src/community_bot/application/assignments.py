@@ -139,6 +139,10 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def lock_task(self, task_id: UUID) -> PublishedTask | None: ...
     async def catalog_template(self, template_id: UUID) -> CatalogTemplate | None: ...
     async def count_active_assignments(self, performer_id: UUID) -> int: ...
+    async def get_pending_task_cancellation(self, task_id: UUID) -> UUID | None: ...
+    async def obsolete_pending_task_cancellation(
+        self, task_id: UUID, reason: str, now: datetime.datetime
+    ) -> bool: ...
     async def create_assignment(
         self, *, task_id: UUID, performer_id: UUID, slots: int
     ) -> Assignment: ...
@@ -289,6 +293,8 @@ class AssignmentService:
             task = await uow.lock_task(command.task_id)
             if task is None:
                 raise LookupError("Task does not exist.")
+            if await uow.get_pending_task_cancellation(task.id) is not None:
+                raise AssignmentError("Task is awaiting cancellation responses.")
             actor = (await uow.lock_members((actor.id,)))[actor.id]
             if task.origin == "community" and task.reviewer_admin_id == actor.id:
                 raise PermissionError("Community reviewer cannot perform the task.")
@@ -528,6 +534,7 @@ class AssignmentService:
                 raise AssignmentError("Submission draft has no preview payload.")
             now = datetime.datetime.now(datetime.UTC)
             require_submit_allowed(assignment, task_deadline=task.deadline_at, now=now)
+            await uow.obsolete_pending_task_cancellation(task.id, "work_started", now)
             result = await uow.append_assignment_result(
                 assignment_id=assignment.id,
                 command_id=draft.submit_command_id,
@@ -579,6 +586,11 @@ class AssignmentService:
                 raise PermissionError("Assignment is not owned by this member.")
             if assignment.status is not AssignmentStatus.ACCEPTED:
                 raise AssignmentError("Only an accepted assignment can be cancelled.")
+            await uow.obsolete_pending_task_cancellation(
+                assignment.task_id,
+                "assignment_cancelled",
+                datetime.datetime.now(datetime.UTC),
+            )
             assignment = await uow.cancel_assignment(assignment.id, normalized)
             await uow.add_assignment_outbox(
                 assignment=assignment,
@@ -617,6 +629,7 @@ class AssignmentService:
                 raise LookupError("Assignment task does not exist.")
             now = datetime.datetime.now(datetime.UTC)
             require_submit_allowed(assignment, task_deadline=task.deadline_at, now=now)
+            await uow.obsolete_pending_task_cancellation(task.id, "work_started", now)
             template = await uow.catalog_template(task.template_id)
             if template is None:
                 raise LookupError("Historical task template does not exist.")
@@ -939,6 +952,7 @@ class AssignmentService:
                 raise LookupError("Task does not exist.")
             if now < task.deadline_at:
                 raise AssignmentError("Task deadline has not arrived.")
+            await uow.obsolete_pending_task_cancellation(task.id, "deadline_reached", now)
             assignments = await uow.list_task_assignments(task.id, for_update=True)
             pending = tuple(
                 item for item in assignments if item.status is AssignmentStatus.ACCEPTED

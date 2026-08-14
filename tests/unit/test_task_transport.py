@@ -15,7 +15,12 @@ from community_bot.application.tasks import TaskDraft
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import TaskDraftStep, TaskError, TaskStatus
 from community_bot.transport.telegram.tasks import (
+    _cancel_error,
+    _credits,
     _encode_uuid,
+    _friendly_error,
+    _obsolete_cancellation_message,
+    _required_tail,
     build_task_router,
     task_cancellation_keyboard,
 )
@@ -201,3 +206,22 @@ def test_task_cancellation_button_is_hidden_for_community_and_terminal_tasks(
     )
 
     assert task_cancellation_keyboard(task) is None
+
+
+def test_task_transport_formats_credit_forms_and_safe_errors() -> None:
+    """Compact task controls keep Russian forms and do not expose exception details."""
+    assert _credits(1).endswith("кредит")
+    assert _credits(2).endswith("кредита")
+    assert _credits(5).endswith("кредитов")
+    assert _credits(11).endswith("кредитов")
+    assert _required_tail("/task_cancel value") == "value"
+    with pytest.raises(TaskError, match="argument is required"):
+        _required_tail("/task_cancel")
+    assert "автор" in _cancel_error(PermissionError()).lower()
+    assert "уже отменено" in _cancel_error(TaskError("already cancelled")).lower()
+    assert "недоступно" in _cancel_error(TaskError("current state")).lower()
+    assert "исполнитель" in _cancel_error(TaskError("assignment history")).lower()
+    assert "недоступно" in _friendly_error(PermissionError()).lower()
+    assert "срок" in _obsolete_cancellation_message("deadline_reached").lower()
+    assert "работа уже началась" in _obsolete_cancellation_message("work_started").lower()
+    assert "исполнение" in _obsolete_cancellation_message("assignment_cancelled").lower()

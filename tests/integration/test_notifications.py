@@ -21,6 +21,8 @@ from community_bot.infrastructure.db.models import (
     MemberModel,
     NotificationModel,
     OutboxEventModel,
+    TaskCancellationRequestModel,
+    TaskCancellationResponseModel,
     TaskCategoryModel,
     TaskModel,
     TaskTemplateModel,
@@ -290,6 +292,124 @@ async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notificat
     assert empty_event is not None
     assert empty_event.status == "materialized"
     assert total_notifications == 1
+    await database.dispose()
+
+
+async def test_cancellation_request_materializes_actions_and_becomes_obsolete(  # noqa: PLR0915
+    database_url: str,
+) -> None:
+    """Only the assigned performer receives a current durable cancellation prompt."""
+    database = Database(database_url)
+    task, performer = await _seed_published_task(database, now=_IN_WINDOW_UTC)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    response_id = uuid4()
+    request_id = uuid4()
+    async with sessions.begin() as session:
+        assignment = AssignmentModel(
+            id=uuid4(), task_id=task.id, performer_id=performer.id, slot_number=1
+        )
+        request = TaskCancellationRequestModel(
+            id=request_id,
+            task_id=task.id,
+            requested_by_member_id=task.creator_id,
+            status="pending",
+        )
+        response = TaskCancellationResponseModel(
+            id=response_id,
+            request_id=request_id,
+            assignment_id=assignment.id,
+            performer_id=performer.id,
+            status="pending",
+        )
+        session.add_all((assignment, request))
+        await session.flush()
+        session.add(response)
+        await session.flush()
+        session.add(
+            OutboxEventModel(
+                id=uuid4(),
+                event_type="task.cancellation_requested",
+                aggregate_type="task_cancellation_response",
+                aggregate_id=response_id,
+                payload_json={
+                    "task_id": str(task.id),
+                    "title": task.title,
+                    "private": "must-not-be-copied",
+                },
+                business_key="notification-test:cancellation-requested",
+                created_at=_IN_WINDOW_UTC,
+                next_attempt_at=_IN_WINDOW_UTC,
+            )
+        )
+    queue = PostgresNotificationQueue(database.session_factory)
+    claims = await queue.claim_outbox(
+        now=_IN_WINDOW_UTC,
+        limit=1,
+        lease_duration=datetime.timedelta(minutes=2),
+    )
+    assert len(claims) == 1
+    await queue.materialize(claims[0], now=_IN_WINDOW_UTC, window=DeliveryWindow())
+    async with sessions() as session:
+        notification = await session.scalar(
+            select(NotificationModel).where(
+                NotificationModel.notification_type == "task.cancellation_requested"
+            )
+        )
+    assert notification is not None
+    assert notification.member_id == performer.id
+    assert notification.payload_json["aggregate_id"] == str(response_id)
+    assert notification.payload_json["title"] == task.title
+    assert "private" not in notification.payload_json
+
+    async with sessions.begin() as session:
+        stored_request = await session.get(TaskCancellationRequestModel, request_id)
+        stored_response = await session.get(TaskCancellationResponseModel, response_id)
+        assert stored_request is not None
+        assert stored_response is not None
+        stored_request.status = "declined"
+        stored_response.status = "declined"
+    deliveries = await queue.claim_notifications(
+        now=_IN_WINDOW_UTC + datetime.timedelta(seconds=1),
+        limit=1,
+        lease_duration=datetime.timedelta(minutes=2),
+    )
+    assert deliveries == ()
+    async with sessions() as session:
+        obsolete = await session.get(NotificationModel, notification.id)
+    assert obsolete is not None
+    assert obsolete.status == "failed"
+    assert obsolete.last_error_code == "notification_obsolete"
+
+    after_deadline = task.deadline_at + datetime.timedelta(seconds=1)
+    deadline_notification_id = uuid4()
+    async with sessions.begin() as session:
+        stored_request = await session.get(TaskCancellationRequestModel, request_id)
+        stored_response = await session.get(TaskCancellationResponseModel, response_id)
+        assert stored_request is not None
+        assert stored_response is not None
+        stored_request.status = "pending"
+        stored_response.status = "pending"
+        session.add(
+            NotificationModel(
+                id=deadline_notification_id,
+                member_id=performer.id,
+                notification_type="task.cancellation_requested",
+                payload_json={"aggregate_id": str(response_id), "title": task.title},
+                scheduled_at=after_deadline,
+                next_attempt_at=after_deadline,
+                deduplication_key="notification-test:cancellation-after-deadline",
+            )
+        )
+    assert not await queue.claim_notifications(
+        now=after_deadline,
+        limit=1,
+        lease_duration=datetime.timedelta(minutes=2),
+    )
+    async with sessions() as session:
+        deadline_obsolete = await session.get(NotificationModel, deadline_notification_id)
+    assert deadline_obsolete is not None
+    assert deadline_obsolete.status == "failed"
+    assert deadline_obsolete.last_error_code == "notification_obsolete"
     await database.dispose()
 
 

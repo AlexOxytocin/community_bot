@@ -16,22 +16,39 @@ from alembic.config import Config
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from community_bot.application import tasks as task_application
 from community_bot.application.assignments import (
     AcceptAssignmentCommand,
     AssignmentDeadlineWorker,
     AssignmentService,
+    BeginSubmissionCommand,
+    ConfirmSubmissionDraftCommand,
     DecideAssignmentCommand,
+    SaveSubmissionDraftCommand,
     SubmitResultCommand,
 )
 from community_bot.application.economy import EconomyService, ProductConfigBootstrapCoordinator
-from community_bot.application.tasks import AdvanceDraftCommand, PublishTaskCommand, TaskService
+from community_bot.application.notifications import NotificationWorker
+from community_bot.application.tasks import (
+    AdvanceDraftCommand,
+    PublishedTask,
+    PublishTaskCommand,
+    TaskCancellationOutcome,
+    TaskService,
+)
 from community_bot.bootstrap.bot import _dispatcher
 from community_bot.bootstrap.product_config import load_product_config_candidate
-from community_bot.domain.assignments import AssignmentDecision
+from community_bot.domain.assignments import (
+    Assignment,
+    AssignmentDecision,
+    AssignmentError,
+    SubmissionDraft,
+)
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.economy import starting_grant
 from community_bot.domain.members import MemberRole
-from community_bot.domain.tasks import TaskDraftStep
+from community_bot.domain.notifications import DeliveryWindow
+from community_bot.domain.tasks import TaskDraftStep, TaskError
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.assignment_deadlines import PostgresAssignmentDeadlineSource
 from community_bot.infrastructure.db.models import (
@@ -46,9 +63,14 @@ from community_bot.infrastructure.db.models import (
     ModerationCaseModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
+    ReliabilityEventModel,
+    TaskCancellationRequestModel,
+    TaskCancellationResponseModel,
     TaskModel,
     TaskTemplateModel,
 )
+from community_bot.infrastructure.outbox import PostgresNotificationQueue
+from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
 from community_bot.transport.telegram.navigation import (
     ADMIN_TEXT,
     CREATE_TASK_TEXT,
@@ -232,6 +254,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     preview_text = next(
         text for text, callback in capture.button_payloads if callback.startswith("task:pub:")
     )
+    task_title = preview_text.splitlines()[0]
     _assert_task_card(capture, preview_text, details, materials)
     assert "Автор: Member 81202" in preview_text
     assert "Как выполнить:" in preview_text
@@ -239,14 +262,33 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     publish = _visible(capture, lambda value: value.startswith("task:pub:"))
     await send_callback(81_218, author.telegram_user_id, publish)
     capture.texts.clear()
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
     await send_message(81_218_1, author.telegram_user_id, MY_TASKS_TEXT)
-    owned_card = next(text for text in capture.texts if details in text)
-    _assert_task_card(capture, owned_card, details, materials)
-    _visible_on_text(
+    owned_summary = next(text for text in capture.texts if task_title in text)
+    assert "Свободно" in owned_summary
+    assert details not in owned_summary
+    assert materials not in owned_summary
+    expand = _visible_on_text(
         capture,
-        lambda text: details in text,
-        lambda value: value.startswith("task:cancel:ask:"),
+        lambda text: text == owned_summary,
+        lambda value: value.startswith("task:view:open:"),
     )
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_callback(81_218_2, author.telegram_user_id, expand)
+    expanded = next(text for text in capture.texts if details in text)
+    _assert_task_card(capture, expanded, details, materials)
+    collapse = _visible_on_text(
+        capture,
+        lambda text: text == expanded,
+        lambda value: value.startswith("task:view:close:"),
+    )
+    assert len(expand.encode()) <= 64
+    assert len(collapse.encode()) <= 64
+    capture.callbacks.clear()
+    await send_callback(81_218_3, author.telegram_user_id, collapse)
+    assert capture.texts[-1] == owned_summary
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
@@ -267,25 +309,61 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     await send_message(81_221, performer.telegram_user_id, MY_TASKS_TEXT)
     recovered_text = next(text for text in capture.texts if details in text)
     _assert_task_card(capture, recovered_text, details, materials)
+    capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
     await send_message(81_222, author.telegram_user_id, MY_TASKS_TEXT)
+    occupied_summary = next(text for text in capture.texts if task_title in text)
+    assert "Member 81203" in occupied_summary
+    assert "1/1" in occupied_summary
+    assert details not in occupied_summary
     cancel_request = _visible_on_text(
         capture,
-        lambda text: details in text,
+        lambda text: text == occupied_summary,
         lambda value: value.startswith("task:cancel:ask:"),
     )
     capture.callbacks.clear()
     await send_callback(81_223, author.telegram_user_id, cancel_request)
     cancel_confirm = _visible_on_text(
         capture,
-        lambda text: "Если задание уже взяли" in text,
-        lambda value: value.startswith("task:cancel:do:"),
+        lambda text: "Запросить отмену" in text,
+        lambda value: value.startswith("task:cancel:req:"),
     )
     await send_callback(81_224, author.telegram_user_id, cancel_confirm)
-    assert capture.callback_answers[-1] == (
-        "Задание уже взял исполнитель, поэтому отменить его нельзя."  # noqa: RUF001
+    assert capture.callback_answers[-1] == "Запрос отправлен исполнителю."
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    worker = NotificationWorker(
+        PostgresNotificationQueue(database.session_factory),
+        TelegramNotificationSender(bot),
+        delivery_window=DeliveryWindow(start=datetime.time.min, end=datetime.time.max),
+        batch_size=100,
     )
+    tick = await worker.tick(now=datetime.datetime.now(datetime.UTC))
+    assert tick.notifications_sent > 0
+    performer_confirmation = _visible_on_text(
+        capture,
+        lambda text: "Автор просит отменить задание" in text,
+        lambda value: value.startswith("task:cancel:yes:"),
+    )
+    await send_callback(81_225, performer.telegram_user_id, performer_confirmation)
+    await send_callback(81_226, performer.telegram_user_id, performer_confirmation)
+    assert capture.callback_answers[-1] == "Запрос отмены больше не актуален."
+    async with sessions() as session:
+        cancelled_task = await session.scalar(select(TaskModel))
+        creator_cancellations = await session.scalar(
+            select(func.count())
+            .select_from(ReliabilityEventModel)
+            .where(ReliabilityEventModel.event_type == "cancelled_creator")
+        )
+        performer_cancellations = await session.scalar(
+            select(func.count())
+            .select_from(ReliabilityEventModel)
+            .where(ReliabilityEventModel.event_type == "cancelled_performer")
+        )
+    assert cancelled_task is not None
+    assert cancelled_task.status == "cancelled"
+    assert creator_cancellations == 1
+    assert performer_cancellations == 0
     await bot.session.close()
     await database.dispose()
 
@@ -412,6 +490,979 @@ async def test_author_cancels_published_task_through_visible_confirmation(  # no
     await send_message(81_323, author.telegram_user_id, MY_TASKS_TEXT)
     assert not any(value.startswith("task:cancel:ask:") for value in capture.callbacks)
     await bot.session.close()
+    await database.dispose()
+
+
+async def test_old_owned_task_callback_survives_more_than_twenty_newer_tasks(
+    database_url: str,
+) -> None:
+    """An already rendered card remains addressable after it leaves the first page."""
+    database = Database(database_url)
+    admin = await _member(database, 81_351, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_352)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    oldest = await _published_task(database, author, template_id, update_id_base=81_360)
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    send_message, send_callback = _transport(
+        dispatcher,
+        bot,
+        _actors(author.telegram_user_id),
+    )
+    await send_message(81_370, author.telegram_user_id, MY_TASKS_TEXT)
+    old_expand = _visible_on_text(
+        capture,
+        lambda text: oldest.title in text,
+        lambda value: value.startswith("task:view:open:"),
+    )
+
+    async with sessions.begin() as session:
+        source = await session.get(TaskModel, oldest.id)
+        assert source is not None
+        excluded = {"id", "title", "publish_command_id", "created_at", "updated_at"}
+        source_values = {
+            column.name: getattr(source, column.name)
+            for column in TaskModel.__table__.columns
+            if column.name not in excluded
+        }
+        for index in range(20):
+            created_at = source.created_at + datetime.timedelta(seconds=index + 1)
+            session.add(
+                TaskModel(
+                    **source_values,
+                    id=uuid4(),
+                    title=f"Newer task {index}",
+                    publish_command_id=uuid4(),
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+
+    capture.texts.clear()
+    await send_callback(81_371, author.telegram_user_id, old_expand)
+    assert any(text.startswith(oldest.title) and "Описание:" in text for text in capture.texts)
+    await bot.session.close()
+    await database.dispose()
+
+
+async def test_performer_declines_creator_cancellation_and_task_stays_active(
+    database_url: str,
+) -> None:
+    """A pending request blocks acceptance; a decline preserves task and assignment."""
+    database = Database(database_url)
+    admin = await _member(database, 81_401, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_402)
+    performer = await _member(database, 81_403)
+    outsider = await _member(database, 81_404)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    task = await _published_task(database, author, template_id, update_id_base=81_410)
+    assignments = AssignmentService(database.unit_of_work)
+    assignment = await assignments.accept(
+        AcceptAssignmentCommand(81_420, performer.telegram_user_id, task.id)
+    )
+    tasks = TaskService(database.unit_of_work)
+    requested = await tasks.request_cancellation(
+        update_id=81_421,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+    assert requested.status == "pending"
+    with pytest.raises(AssignmentError, match="awaiting cancellation responses"):
+        await assignments.accept(
+            AcceptAssignmentCommand(81_422, outsider.telegram_user_id, task.id)
+        )
+    async with sessions() as session:
+        response_id = await session.scalar(select(TaskCancellationResponseModel.id))
+    assert response_id is not None
+    declined = await tasks.respond_cancellation(
+        update_id=81_423,
+        actor_telegram_user_id=performer.telegram_user_id,
+        response_id=response_id,
+        accepted=False,
+    )
+    assert declined.status == "declined"
+    async with sessions() as session:
+        stored_task = await session.get(TaskModel, task.id)
+        stored_assignment = await session.get(AssignmentModel, assignment.id)
+    assert stored_task is not None
+    assert stored_task.status == "published"
+    assert stored_assignment is not None
+    assert stored_assignment.status == "accepted"
+    with pytest.raises(TaskError, match="already declined"):
+        await tasks.request_cancellation(
+            update_id=81_424,
+            actor_telegram_user_id=author.telegram_user_id,
+            task_id=task.id,
+        )
+    await database.dispose()
+
+
+async def test_accept_and_creator_cancel_are_serialized_in_both_orders(
+    database_url: str,
+) -> None:
+    """The shared PostgreSQL task gate prevents a cancelled occupied task."""
+    database = Database(database_url)
+    admin = await _member(database, 81_501, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_502)
+    performer = await _member(database, 81_503)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    cancel_first = await _published_task(database, author, template_id, update_id_base=81_510)
+    accept_first = await _published_task(database, author, template_id, update_id_base=81_530)
+    tasks = TaskService(database.unit_of_work)
+    assignments = AssignmentService(database.unit_of_work)
+
+    async with database.unit_of_work() as gate:
+        await gate.acquire_assignment_task_gate(cancel_first.id)
+        cancel_operation = asyncio.create_task(
+            tasks.request_cancellation(
+                update_id=81_550,
+                actor_telegram_user_id=author.telegram_user_id,
+                task_id=cancel_first.id,
+            )
+        )
+        await asyncio.sleep(0.05)
+        accept_operation = asyncio.create_task(
+            assignments.accept(
+                AcceptAssignmentCommand(81_551, performer.telegram_user_id, cancel_first.id)
+            )
+        )
+        await gate.commit()
+    cancel_result, accept_result = await asyncio.gather(
+        cancel_operation, accept_operation, return_exceptions=True
+    )
+    assert isinstance(cancel_result, TaskCancellationOutcome)
+    assert cancel_result.status == "cancelled"
+    assert isinstance(accept_result, TaskError)
+
+    async with database.unit_of_work() as gate:
+        await gate.acquire_assignment_task_gate(accept_first.id)
+        accepted_operation = asyncio.create_task(
+            assignments.accept(
+                AcceptAssignmentCommand(81_552, performer.telegram_user_id, accept_first.id)
+            )
+        )
+        await asyncio.sleep(0.05)
+        requested_operation = asyncio.create_task(
+            tasks.request_cancellation(
+                update_id=81_553,
+                actor_telegram_user_id=author.telegram_user_id,
+                task_id=accept_first.id,
+            )
+        )
+        await gate.commit()
+    accepted_result, requested_result = await asyncio.gather(
+        accepted_operation, requested_operation
+    )
+    assert accepted_result.task_id == accept_first.id
+    assert requested_result.status == "pending"
+    async with sessions() as session:
+        first_task = await session.get(TaskModel, cancel_first.id)
+        second_task = await session.get(TaskModel, accept_first.id)
+        second_assignment = await session.get(AssignmentModel, accepted_result.id)
+    assert first_task is not None
+    assert first_task.status == "cancelled"
+    assert second_task is not None
+    assert second_task.status == "published"
+    assert second_assignment is not None
+    assert second_assignment.status == "accepted"
+    await database.dispose()
+
+
+async def test_multislot_cancellation_waits_for_every_performer_and_replays(
+    database_url: str,
+) -> None:
+    """Partial consent changes no assignment; the final consent settles exactly once."""
+    database = Database(database_url)
+    admin = await _member(database, 81_601, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_602)
+    first = await _member(database, 81_603)
+    second = await _member(database, 81_604)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        source = await session.scalar(
+            select(TaskTemplateModel).where(TaskTemplateModel.code == "repository_first_impression")
+        )
+        assert source is not None
+        template = TaskTemplateModel(
+            id=uuid4(),
+            category_id=source.category_id,
+            code=f"multislot-cancellation-{uuid4().hex}",
+            version=1,
+            name=source.name,
+            description=source.description,
+            creator_instructions=source.creator_instructions,
+            performer_instructions=source.performer_instructions,
+            completion_criteria=source.completion_criteria,
+            input_schema_json=source.input_schema_json,
+            result_schema_json=source.result_schema_json,
+            credit_reward=source.credit_reward,
+            estimated_minutes=source.estimated_minutes,
+            format=source.format,
+            minimum_level=source.minimum_level,
+            maximum_performers=2,
+            moderation_required=source.moderation_required,
+            is_active=True,
+        )
+        session.add(template)
+        template_id = template.id
+    task = await _published_task(
+        database,
+        author,
+        template_id,
+        update_id_base=81_610,
+        performer_slots=2,
+    )
+    assignments = AssignmentService(database.unit_of_work)
+    await assignments.accept(AcceptAssignmentCommand(81_620, first.telegram_user_id, task.id))
+    await assignments.accept(AcceptAssignmentCommand(81_621, second.telegram_user_id, task.id))
+    tasks = TaskService(database.unit_of_work)
+    request = await tasks.request_cancellation(
+        update_id=81_622,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+    replayed_request = await tasks.request_cancellation(
+        update_id=81_622,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+    assert replayed_request == request
+    async with sessions() as session:
+        response_rows = (
+            await session.execute(
+                select(
+                    TaskCancellationResponseModel.performer_id,
+                    TaskCancellationResponseModel.id,
+                )
+            )
+        ).all()
+    responses = {row[0]: row[1] for row in response_rows}
+    partial = await tasks.respond_cancellation(
+        update_id=81_623,
+        actor_telegram_user_id=first.telegram_user_id,
+        response_id=responses[first.id],
+        accepted=True,
+    )
+    replayed_partial = await tasks.respond_cancellation(
+        update_id=81_623,
+        actor_telegram_user_id=first.telegram_user_id,
+        response_id=responses[first.id],
+        accepted=True,
+    )
+    assert partial.status == "pending"
+    assert replayed_partial == partial
+    async with sessions() as session:
+        before_final = await session.get(TaskModel, task.id)
+        active_before_final = await session.scalar(
+            select(func.count())
+            .select_from(AssignmentModel)
+            .where(AssignmentModel.task_id == task.id, AssignmentModel.status == "accepted")
+        )
+    assert before_final is not None
+    assert before_final.status == "published"
+    assert active_before_final == 2
+    final = await tasks.respond_cancellation(
+        update_id=81_624,
+        actor_telegram_user_id=second.telegram_user_id,
+        response_id=responses[second.id],
+        accepted=True,
+    )
+    replayed_final = await tasks.respond_cancellation(
+        update_id=81_624,
+        actor_telegram_user_id=second.telegram_user_id,
+        response_id=responses[second.id],
+        accepted=True,
+    )
+    assert final.status == "cancelled"
+    assert replayed_final == final
+    async with sessions() as session:
+        cancelled_assignments = await session.scalar(
+            select(func.count())
+            .select_from(AssignmentModel)
+            .where(AssignmentModel.task_id == task.id, AssignmentModel.status == "cancelled")
+        )
+        creator_events = await session.scalar(
+            select(func.count())
+            .select_from(ReliabilityEventModel)
+            .where(ReliabilityEventModel.event_type == "cancelled_creator")
+        )
+        creator_event_actors = set(
+            await session.scalars(
+                select(ReliabilityEventModel.actor_member_id).where(
+                    ReliabilityEventModel.event_type == "cancelled_creator"
+                )
+            )
+        )
+    assert cancelled_assignments == 2
+    assert creator_events == 2
+    assert creator_event_actors == {author.id}
+    await database.dispose()
+
+
+async def test_result_submission_obsoletes_pending_cancellation(
+    database_url: str,
+) -> None:
+    """A result that wins the task gate prevents later consent from cancelling work."""
+    database = Database(database_url)
+    admin = await _member(database, 81_701, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_702)
+    performer = await _member(database, 81_703)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    task = await _published_task(database, author, template_id, update_id_base=81_710)
+    assignments = AssignmentService(database.unit_of_work)
+    assignment = await assignments.accept(
+        AcceptAssignmentCommand(81_720, performer.telegram_user_id, task.id)
+    )
+    tasks = TaskService(database.unit_of_work)
+    await tasks.request_cancellation(
+        update_id=81_721,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+    async with sessions() as session:
+        response_id = await session.scalar(select(TaskCancellationResponseModel.id))
+    assert response_id is not None
+    await assignments.submit(
+        SubmitResultCommand(
+            81_722,
+            performer.telegram_user_id,
+            assignment.id,
+            uuid4(),
+            {
+                "summary": "Работа начата и результат подготовлен.",
+                "findings": ["Проверен основной пользовательский путь."],
+                "evidence": [],
+            },
+        )
+    )
+    obsolete = await tasks.respond_cancellation(
+        update_id=81_723,
+        actor_telegram_user_id=performer.telegram_user_id,
+        response_id=response_id,
+        accepted=True,
+    )
+    replayed = await tasks.respond_cancellation(
+        update_id=81_723,
+        actor_telegram_user_id=performer.telegram_user_id,
+        response_id=response_id,
+        accepted=True,
+    )
+    assert obsolete.status == "obsolete"
+    assert obsolete.reason == "work_started"
+    assert replayed == obsolete
+    async with sessions() as session:
+        request = await session.scalar(select(TaskCancellationRequestModel))
+        stored_assignment = await session.get(AssignmentModel, assignment.id)
+        stored_task = await session.get(TaskModel, task.id)
+    assert request is not None
+    assert request.status == "obsolete"
+    assert stored_assignment is not None
+    assert stored_assignment.status == "submitted"
+    assert stored_task is not None
+    assert stored_task.status == "published"
+    await database.dispose()
+
+
+async def test_deadline_blocks_new_request_and_makes_pending_response_obsolete(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither side may negotiate cancellation after the task deadline."""
+    database = Database(database_url)
+    admin = await _member(database, 81_801, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_802)
+    performer = await _member(database, 81_803)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    pending_task = await _published_task(database, author, template_id, update_id_base=81_810)
+    expired_free_task = await _published_task(database, author, template_id, update_id_base=81_820)
+    assignments = AssignmentService(database.unit_of_work)
+    await assignments.accept(
+        AcceptAssignmentCommand(81_830, performer.telegram_user_id, pending_task.id)
+    )
+    tasks = TaskService(database.unit_of_work)
+    requested = await tasks.request_cancellation(
+        update_id=81_831,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=pending_task.id,
+    )
+    async with sessions() as session:
+        response_id = await session.scalar(
+            select(TaskCancellationResponseModel.id).where(
+                TaskCancellationResponseModel.request_id == requested.request_id
+            )
+        )
+    assert response_id is not None
+    latest_deadline = max(pending_task.deadline_at, expired_free_task.deadline_at)
+    after_deadline = latest_deadline + datetime.timedelta(seconds=1)
+    monkeypatch.setattr(task_application, "_utc_now", lambda: after_deadline)
+
+    with pytest.raises(TaskError, match="deadline has passed"):
+        await tasks.request_cancellation(
+            update_id=81_832,
+            actor_telegram_user_id=author.telegram_user_id,
+            task_id=expired_free_task.id,
+        )
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    send_message, send_callback = _transport(
+        dispatcher,
+        bot,
+        _actors(author.telegram_user_id, performer.telegram_user_id),
+    )
+    await send_message(81_832_1, author.telegram_user_id, MY_TASKS_TEXT)
+    ask = _visible_on_text(
+        capture,
+        lambda text: expired_free_task.title in text,
+        lambda value: value.startswith("task:cancel:ask:"),
+    )
+    await send_callback(81_832_2, author.telegram_user_id, ask)
+    confirm = _visible_on_text(
+        capture,
+        lambda text: f"Отменить «{expired_free_task.title}»?" in text,
+        lambda value: value.startswith("task:cancel:do:"),
+    )
+    await send_callback(81_832_3, author.telegram_user_id, confirm)
+    assert capture.callback_answers[-1] == "Срок задания уже истёк. Отмена больше недоступна."
+    obsolete = await tasks.respond_cancellation(
+        update_id=81_833,
+        actor_telegram_user_id=performer.telegram_user_id,
+        response_id=response_id,
+        accepted=True,
+    )
+    replayed = await tasks.respond_cancellation(
+        update_id=81_833,
+        actor_telegram_user_id=performer.telegram_user_id,
+        response_id=response_id,
+        accepted=True,
+    )
+    assert obsolete.status == "obsolete"
+    assert obsolete.reason == "deadline_passed"
+    assert replayed == obsolete
+    async with sessions() as session:
+        stored_request = await session.get(TaskCancellationRequestModel, requested.request_id)
+        stored_response = await session.get(TaskCancellationResponseModel, response_id)
+    assert stored_request is not None
+    assert stored_request.status == "obsolete"
+    assert stored_request.resolution_reason == "deadline_passed"
+    assert stored_response is not None
+    assert stored_response.status == "obsolete"
+    await bot.session.close()
+    await database.dispose()
+
+
+async def test_performer_self_cancel_obsoletes_request_then_author_cancels_free_task(
+    database_url: str,
+) -> None:
+    """A vacated slot turns a pending negotiation into an immediate creator cancellation."""
+    database = Database(database_url)
+    admin = await _member(database, 81_901, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_902)
+    performer = await _member(database, 81_903)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        template_id = await session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template_id is not None
+    task = await _published_task(database, author, template_id, update_id_base=81_910)
+    assignments = AssignmentService(database.unit_of_work)
+    assignment = await assignments.accept(
+        AcceptAssignmentCommand(81_920, performer.telegram_user_id, task.id)
+    )
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    send_message, send_callback = _transport(
+        dispatcher,
+        bot,
+        _actors(author.telegram_user_id, performer.telegram_user_id),
+    )
+    await send_message(81_920_1, author.telegram_user_id, MY_TASKS_TEXT)
+    request_button = _visible_on_text(
+        capture,
+        lambda text: task.title in text,
+        lambda value: value.startswith("task:cancel:ask:"),
+    )
+    await send_callback(81_920_2, author.telegram_user_id, request_button)
+    confirm_button = _visible_on_text(
+        capture,
+        lambda text: "Запросить отмену" in text,
+        lambda value: value.startswith("task:cancel:req:"),
+    )
+    tasks = TaskService(database.unit_of_work)
+    requested = await tasks.request_cancellation(
+        update_id=81_921,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+    await assignments.cancel(
+        update_id=81_922,
+        actor_telegram_user_id=performer.telegram_user_id,
+        assignment_id=assignment.id,
+        reason="Cannot start the work.",
+    )
+    await send_callback(81_923, author.telegram_user_id, confirm_button)
+    assert capture.callback_answers[-1] == "Задание отменено."
+    assert any("возвращены в доступный баланс" in text for text in capture.texts)
+    async with sessions() as session:
+        stored_request = await session.get(TaskCancellationRequestModel, requested.request_id)
+        stored_task = await session.get(TaskModel, task.id)
+        cancellation_audits = await session.scalar(
+            select(func.count())
+            .select_from(AuditEventModel)
+            .where(
+                AuditEventModel.entity_id == str(task.id),
+                AuditEventModel.action == "task_cancelled",
+                AuditEventModel.actor_member_id == author.id,
+            )
+        )
+    assert stored_request is not None
+    assert stored_request.status == "obsolete"
+    assert stored_request.resolution_reason == "assignment_cancelled"
+    assert stored_task is not None
+    assert stored_task.status == "cancelled"
+    assert cancellation_audits == 1
+    await bot.session.close()
+    await database.dispose()
+
+
+async def test_last_cancellation_consent_and_draft_confirmation_serialize_both_orders(  # noqa: PLR0915
+    database_url: str,
+) -> None:
+    """A partially approved multislot request has one atomic final winner."""
+    database = Database(database_url)
+    admin = await _member(database, 82_001, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 82_002)
+    first_performer = await _member(database, 82_003)
+    last_performer = await _member(database, 82_004)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        source = await session.scalar(
+            select(TaskTemplateModel).where(TaskTemplateModel.code == "repository_first_impression")
+        )
+        assert source is not None
+        template = TaskTemplateModel(
+            id=uuid4(),
+            category_id=source.category_id,
+            code=f"multislot-race-{uuid4().hex}",
+            version=1,
+            name=source.name,
+            description=source.description,
+            creator_instructions=source.creator_instructions,
+            performer_instructions=source.performer_instructions,
+            completion_criteria=source.completion_criteria,
+            input_schema_json=source.input_schema_json,
+            result_schema_json=source.result_schema_json,
+            credit_reward=source.credit_reward,
+            estimated_minutes=source.estimated_minutes,
+            format=source.format,
+            minimum_level=source.minimum_level,
+            maximum_performers=2,
+            moderation_required=source.moderation_required,
+            is_active=True,
+        )
+        session.add(template)
+        template_id = template.id
+    tasks = TaskService(database.unit_of_work)
+    assignments = AssignmentService(database.unit_of_work)
+
+    async def prepared_case(
+        update_base: int,
+    ) -> tuple[PublishedTask, SubmissionDraft, Assignment, Assignment, UUID, UUID]:
+        task = await _published_task(
+            database,
+            author,
+            template_id,
+            update_id_base=update_base,
+            performer_slots=2,
+        )
+        first_assignment = await assignments.accept(
+            AcceptAssignmentCommand(update_base + 10, first_performer.telegram_user_id, task.id)
+        )
+        last_assignment = await assignments.accept(
+            AcceptAssignmentCommand(update_base + 11, last_performer.telegram_user_id, task.id)
+        )
+        draft = await assignments.begin_submission(
+            BeginSubmissionCommand(
+                update_base + 12, last_performer.telegram_user_id, last_assignment.id
+            )
+        )
+        draft = await assignments.save_submission_draft(
+            SaveSubmissionDraftCommand(
+                update_base + 13,
+                last_performer.telegram_user_id,
+                draft.id,
+                draft.revision,
+                {
+                    "summary": "Подготовлен подробный результат для проверки задания.",
+                    "findings": ["Проверен основной пользовательский путь."],
+                    "evidence": [],
+                },
+            )
+        )
+        request = await tasks.request_cancellation(
+            update_id=update_base + 14,
+            actor_telegram_user_id=author.telegram_user_id,
+            task_id=task.id,
+        )
+        assert request.request_id is not None
+        async with sessions() as session:
+            response_rows = (
+                await session.execute(
+                    select(
+                        TaskCancellationResponseModel.performer_id,
+                        TaskCancellationResponseModel.id,
+                    ).where(TaskCancellationResponseModel.request_id == request.request_id)
+                )
+            ).all()
+        response_ids = {row[0]: row[1] for row in response_rows}
+        partial = await tasks.respond_cancellation(
+            update_id=update_base + 15,
+            actor_telegram_user_id=first_performer.telegram_user_id,
+            response_id=response_ids[first_performer.id],
+            accepted=True,
+        )
+        assert partial.status == "pending"
+        return (
+            task,
+            draft,
+            first_assignment,
+            last_assignment,
+            request.request_id,
+            response_ids[last_performer.id],
+        )
+
+    (
+        cancel_first_task,
+        cancel_first_draft,
+        cancel_first_assignment,
+        cancel_last_assignment,
+        cancel_request_id,
+        cancel_last_response,
+    ) = await prepared_case(82_010)
+    assert cancel_request_id is not None
+    async with database.unit_of_work() as gate:
+        await gate.acquire_assignment_task_gate(cancel_first_task.id)
+        cancellation = asyncio.create_task(
+            tasks.respond_cancellation(
+                update_id=82_030,
+                actor_telegram_user_id=last_performer.telegram_user_id,
+                response_id=cancel_last_response,
+                accepted=True,
+            )
+        )
+        await asyncio.sleep(0.05)
+        confirmation = asyncio.create_task(
+            assignments.confirm_submission_draft(
+                ConfirmSubmissionDraftCommand(
+                    82_031,
+                    last_performer.telegram_user_id,
+                    cancel_first_draft.id,
+                    cancel_first_draft.revision,
+                )
+            )
+        )
+        await gate.commit()
+    cancellation_result, confirmation_result = await asyncio.gather(
+        cancellation, confirmation, return_exceptions=True
+    )
+    assert isinstance(cancellation_result, TaskCancellationOutcome)
+    assert cancellation_result.status == "cancelled"
+    assert isinstance(confirmation_result, AssignmentError)
+
+    (
+        submit_first_task,
+        submit_first_draft,
+        submit_first_assignment,
+        submit_last_assignment,
+        submit_request_id,
+        submit_last_response,
+    ) = await prepared_case(82_100)
+    assert submit_request_id is not None
+    async with database.unit_of_work() as gate:
+        await gate.acquire_assignment_task_gate(submit_first_task.id)
+        confirmation = asyncio.create_task(
+            assignments.confirm_submission_draft(
+                ConfirmSubmissionDraftCommand(
+                    82_130,
+                    last_performer.telegram_user_id,
+                    submit_first_draft.id,
+                    submit_first_draft.revision,
+                )
+            )
+        )
+        await asyncio.sleep(0.05)
+        cancellation = asyncio.create_task(
+            tasks.respond_cancellation(
+                update_id=82_131,
+                actor_telegram_user_id=last_performer.telegram_user_id,
+                response_id=submit_last_response,
+                accepted=True,
+            )
+        )
+        await gate.commit()
+    confirmation_result, cancellation_result = await asyncio.gather(
+        confirmation, cancellation, return_exceptions=True
+    )
+    assert getattr(confirmation_result, "version", None) == 1
+    assert isinstance(cancellation_result, TaskCancellationOutcome)
+    assert cancellation_result.status == "obsolete"
+    assert cancellation_result.reason == "work_started"
+
+    cancel_assignment_ids = {cancel_first_assignment.id, cancel_last_assignment.id}
+    submit_assignment_ids = {submit_first_assignment.id, submit_last_assignment.id}
+    async with sessions() as session:
+        stored_tasks = {
+            item.id: item
+            for item in await session.scalars(
+                select(TaskModel).where(
+                    TaskModel.id.in_((cancel_first_task.id, submit_first_task.id))
+                )
+            )
+        }
+        stored_assignments = {
+            item.id: item
+            for item in await session.scalars(
+                select(AssignmentModel).where(
+                    AssignmentModel.id.in_(cancel_assignment_ids | submit_assignment_ids)
+                )
+            )
+        }
+        stored_requests = {
+            item.id: item
+            for item in await session.scalars(
+                select(TaskCancellationRequestModel).where(
+                    TaskCancellationRequestModel.id.in_((cancel_request_id, submit_request_id))
+                )
+            )
+        }
+        stored_responses = {
+            (item.request_id, item.performer_id): item.status
+            for item in await session.scalars(
+                select(TaskCancellationResponseModel).where(
+                    TaskCancellationResponseModel.request_id.in_(
+                        (cancel_request_id, submit_request_id)
+                    )
+                )
+            )
+        }
+        refund_rows = (
+            await session.execute(
+                select(
+                    AccountTransactionModel.idempotency_key,
+                    func.count(),
+                    func.sum(AccountTransactionModel.credit_delta),
+                )
+                .where(
+                    AccountTransactionModel.idempotency_key.in_(
+                        (
+                            f"task_cancel:{cancel_first_task.id}:refund",
+                            f"task_cancel:{submit_first_task.id}:refund",
+                        )
+                    ),
+                    AccountTransactionModel.transaction_type == "task_reward_refunded",
+                )
+                .group_by(AccountTransactionModel.idempotency_key)
+            )
+        ).all()
+        refund_by_key = {row[0]: (row[1], row[2]) for row in refund_rows}
+        cancellation_audits = (
+            await session.scalars(
+                select(AuditEventModel).where(
+                    AuditEventModel.action == "task_cancelled_by_consent",
+                    AuditEventModel.entity_id.in_(
+                        (str(cancel_first_task.id), str(submit_first_task.id))
+                    ),
+                )
+            )
+        ).all()
+        reliability_rows = (
+            await session.execute(
+                select(
+                    ReliabilityEventModel.assignment_id,
+                    ReliabilityEventModel.event_type,
+                    ReliabilityEventModel.actor_member_id,
+                ).where(
+                    ReliabilityEventModel.assignment_id.in_(
+                        cancel_assignment_ids | submit_assignment_ids
+                    ),
+                    ReliabilityEventModel.event_type.in_(
+                        ("cancelled_creator", "cancelled_performer")
+                    ),
+                )
+            )
+        ).all()
+        cancel_outbox = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEventModel)
+            .where(
+                OutboxEventModel.event_type == "task.cancelled",
+                OutboxEventModel.aggregate_id == cancel_first_task.id,
+            )
+        )
+        submit_cancel_outbox = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEventModel)
+            .where(
+                OutboxEventModel.event_type == "task.cancelled",
+                OutboxEventModel.aggregate_id == submit_first_task.id,
+            )
+        )
+        submit_outbox = await session.scalar(
+            select(func.count())
+            .select_from(OutboxEventModel)
+            .where(
+                OutboxEventModel.event_type == "assignment_submitted",
+                OutboxEventModel.aggregate_id == submit_last_assignment.id,
+            )
+        )
+        cancel_receipt = await session.get(ProcessedTelegramUpdateModel, 82_030)
+        failed_confirmation_receipt = await session.get(ProcessedTelegramUpdateModel, 82_031)
+        submit_receipt = await session.get(ProcessedTelegramUpdateModel, 82_130)
+        obsolete_receipt = await session.get(ProcessedTelegramUpdateModel, 82_131)
+
+    assert stored_tasks[cancel_first_task.id].status == "cancelled"
+    assert stored_tasks[submit_first_task.id].status == "published"
+    assert {stored_assignments[item].status for item in cancel_assignment_ids} == {"cancelled"}
+    assert stored_assignments[submit_first_assignment.id].status == "accepted"
+    assert stored_assignments[submit_last_assignment.id].status == "submitted"
+    assert stored_requests[cancel_request_id].status == "completed"
+    assert stored_requests[submit_request_id].status == "obsolete"
+    assert stored_requests[submit_request_id].resolution_reason == "work_started"
+    assert stored_responses == {
+        (cancel_request_id, first_performer.id): "accepted",
+        (cancel_request_id, last_performer.id): "accepted",
+        (submit_request_id, first_performer.id): "accepted",
+        (submit_request_id, last_performer.id): "obsolete",
+    }
+    assert refund_by_key == {
+        f"task_cancel:{cancel_first_task.id}:refund": (
+            1,
+            cancel_first_task.reserved_credit_total,
+        )
+    }
+    assert len(cancellation_audits) == 1
+    assert cancellation_audits[0].entity_id == str(cancel_first_task.id)
+    assert cancellation_audits[0].actor_member_id == last_performer.id
+    assert {row[0] for row in reliability_rows} == cancel_assignment_ids
+    assert {row[1] for row in reliability_rows} == {"cancelled_creator"}
+    assert {row[2] for row in reliability_rows} == {author.id}
+    assert cancel_outbox == 1
+    assert submit_cancel_outbox == 0
+    assert submit_outbox == 1
+    assert cancel_receipt is not None
+    assert cancel_receipt.outcome_code == (
+        f"task_cancelled:{cancel_first_task.id}:{cancel_request_id}"
+    )
+    assert failed_confirmation_receipt is None
+    assert submit_receipt is not None
+    assert submit_receipt.outcome_code.startswith("result:")
+    assert obsolete_receipt is not None
+    assert obsolete_receipt.outcome_code == (
+        f"task_cancel_obsolete:{submit_first_task.id}:{submit_request_id}:work_started"
+    )
     await database.dispose()
 
 
@@ -1044,11 +2095,6 @@ async def test_community_provenance_survives_exact_migration_cycle(
     database_url: str,
 ) -> None:
     """Run 0011→0012→0011→0012 and preserve a paid community exchange."""
-    initial = Database(database_url)
-    await initial.dispose()
-    await _migrate(database_url, "0011")
-    await _migrate(database_url, "0012", upgrade=True)
-
     database = Database(database_url)
     creator = await _member(database, 87_001, MemberRole.ADMINISTRATOR)
     reviewer = await _member(database, 87_002, MemberRole.ADMINISTRATOR)
