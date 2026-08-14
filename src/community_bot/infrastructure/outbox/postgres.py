@@ -24,6 +24,8 @@ from community_bot.infrastructure.db.models import (
     NotificationModel,
     OutboxEventModel,
     ProcessHeartbeatModel,
+    TaskCancellationRequestModel,
+    TaskCancellationResponseModel,
     TaskModel,
 )
 
@@ -126,6 +128,12 @@ class PostgresNotificationQueue:
             if event is None:
                 raise NotificationProcessingError(_STALE_OUTBOX_LEASE, permanent=True)
             recipients = await self._event_recipients(session, event)
+            safe_payload: dict[str, object] = {}
+            if event.event_type == "task.cancellation_requested":
+                title = event.payload_json.get("title")
+                task_id = event.payload_json.get("task_id")
+                if isinstance(title, str) and isinstance(task_id, str):
+                    safe_payload = {"title": title, "task_id": task_id}
             for recipient in recipients:
                 if event.event_type == "registration.approved":
                     scheduled_at = now
@@ -147,6 +155,7 @@ class PostgresNotificationQueue:
                         "event_type": event.event_type,
                         "aggregate_type": event.aggregate_type,
                         "aggregate_id": str(event.aggregate_id),
+                        **safe_payload,
                     },
                     scheduled_at=scheduled_at,
                     deduplication_key=f"outbox:{event.id}:member:{recipient.member_id}",
@@ -375,7 +384,7 @@ class PostgresNotificationQueue:
         async with self._sessions() as session, session.begin():
             await session.execute(statement)
 
-    async def _event_recipients(  # noqa: C901, PLR0912 - small explicit event map.
+    async def _event_recipients(  # noqa: C901, PLR0912, PLR0915 - explicit event map.
         self, session: AsyncSession, event: OutboxEventModel
     ) -> tuple[_Recipient, ...]:
         member_ids: set[UUID] = set()
@@ -409,6 +418,16 @@ class PostgresNotificationQueue:
             task = await session.get(TaskModel, assignment.task_id)
             if task is not None and task.creator_id is not None:
                 member_ids.add(task.creator_id)
+        elif event.aggregate_type == "task_cancellation_response":
+            response = await session.get(TaskCancellationResponseModel, event.aggregate_id)
+            if response is None:
+                raise NotificationProcessingError(_OUTBOX_AGGREGATE_MISSING, permanent=True)
+            member_ids.add(response.performer_id)
+        elif event.aggregate_type == "task_cancellation_request":
+            request = await session.get(TaskCancellationRequestModel, event.aggregate_id)
+            if request is None:
+                raise NotificationProcessingError(_OUTBOX_AGGREGATE_MISSING, permanent=True)
+            member_ids.add(request.requested_by_member_id)
         elif event.aggregate_type == "moderation_case":
             case = await session.get(ModerationCaseModel, event.aggregate_id)
             if case is None:
@@ -471,7 +490,7 @@ class PostgresNotificationQueue:
         ).all()
         return tuple(administrators)
 
-    async def _notification_is_current(
+    async def _notification_is_current(  # noqa: PLR0911 - explicit lifecycle checks.
         self,
         session: AsyncSession,
         notification: NotificationModel,
@@ -480,6 +499,45 @@ class PostgresNotificationQueue:
         now: datetime.datetime,
     ) -> bool:
         """Suppress a scheduled reminder after its domain state becomes terminal."""
+        if notification.notification_type == "task.cancellation_requested":
+            aggregate_id = notification.payload_json.get("aggregate_id")
+            if not isinstance(aggregate_id, str):
+                return False
+            try:
+                response_id = uuid.UUID(aggregate_id)
+            except ValueError:
+                return False
+            row = (
+                await session.execute(
+                    select(
+                        TaskCancellationResponseModel,
+                        TaskCancellationRequestModel,
+                        AssignmentModel,
+                        TaskModel,
+                    )
+                    .join(
+                        TaskCancellationRequestModel,
+                        TaskCancellationRequestModel.id == TaskCancellationResponseModel.request_id,
+                    )
+                    .join(
+                        AssignmentModel,
+                        AssignmentModel.id == TaskCancellationResponseModel.assignment_id,
+                    )
+                    .join(TaskModel, TaskModel.id == TaskCancellationRequestModel.task_id)
+                    .where(TaskCancellationResponseModel.id == response_id)
+                )
+            ).one_or_none()
+            if row is None:
+                return False
+            response, request, assignment, task = row
+            return (
+                response.performer_id == member.id
+                and response.status == "pending"
+                and request.status == "pending"
+                and assignment.status == "accepted"
+                and task.status == "published"
+                and task.deadline_at > now
+            )
         if notification.notification_type not in {
             "task_deadline_reminder",
             "review_reminder_24h",

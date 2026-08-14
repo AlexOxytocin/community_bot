@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.methods import SendMessage
+from aiogram.types import InlineKeyboardMarkup
 
 from community_bot.application.notifications import (
     DeliveryClaim,
@@ -225,6 +226,44 @@ async def test_telegram_sender_rejects_unknown_notification_type() -> None:
     assert captured.value.error_code == "unsupported_notification_type"
     assert captured.value.permanent
     assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_notification_has_stable_performer_actions() -> None:
+    """A retry renders the same response identity and no arbitrary persisted text."""
+    bot = _TelegramBotStub()
+    sender = TelegramNotificationSender(cast("Bot", bot))
+    response_id = uuid4()
+    claim = DeliveryClaim(
+        id=uuid4(),
+        member_id=uuid4(),
+        telegram_user_id=42,
+        notification_type="task.cancellation_requested",
+        payload={
+            "aggregate_id": str(response_id),
+            "title": "Проверка лендинга",
+            "private": "не отправлять",
+        },
+        attempt_count=2,
+        lease_token=uuid4(),
+    )
+
+    await sender.send(claim)
+    await sender.send(claim)
+
+    assert len(bot.sent) == 2
+    assert "Проверка лендинга" in bot.sent[0][1]
+    assert "не отправлять" not in bot.sent[0][1]
+    assert bot.reply_markups[0] == bot.reply_markups[1]
+    markup = bot.reply_markups[0]
+    assert isinstance(markup, InlineKeyboardMarkup)
+    callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+    first, second = callbacks
+    assert isinstance(first, str)
+    assert isinstance(second, str)
+    assert first.startswith("task:cancel:yes:")
+    assert second.startswith("task:cancel:nope:")
+    assert all(len(value.encode()) <= 64 for value in (first, second))
 
 
 @pytest.mark.parametrize(

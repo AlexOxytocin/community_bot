@@ -586,6 +586,73 @@ class AssignmentModel(Base):
     slot_ever_paid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
+class TaskCancellationRequestModel(Base):
+    """Durable creator request to cancel all still-unstarted assignments."""
+
+    __tablename__ = "task_cancellation_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','completed','declined','obsolete')",
+            name="ck_task_cancellation_requests_status",
+        ),
+        Index(
+            "uq_task_cancellation_requests_pending",
+            "task_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
+    )
+    requested_by_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    resolution_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    resolved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TaskCancellationResponseModel(Base):
+    """One performer's durable response to a task cancellation request."""
+
+    __tablename__ = "task_cancellation_responses"
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id", "assignment_id", name="uq_task_cancellation_response_assignment"
+        ),
+        CheckConstraint(
+            "status IN ('pending','accepted','declined','obsolete')",
+            name="ck_task_cancellation_responses_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("task_cancellation_requests.id"),
+        nullable=False,
+        index=True,
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id"), nullable=False
+    )
+    performer_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    responded_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AssignmentResultVersionModel(Base):
     """Append-only result version submitted by a performer."""
 

@@ -34,7 +34,7 @@ from community_bot.transport.telegram.profile import (
 )
 from community_bot.transport.telegram.reputation import send_member_catalog
 from community_bot.transport.telegram.task_card import published_task_card
-from community_bot.transport.telegram.tasks import task_cancellation_keyboard
+from community_bot.transport.telegram.tasks import owned_task_keyboard, owned_task_summary
 
 if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentService
@@ -206,14 +206,14 @@ def build_navigation_router(  # noqa: PLR0913
             await message.answer("Задания доступны только в личном чате с ботом.")
             return
         try:
-            owned = await tasks.list_owned(actor_telegram_user_id=message.from_user.id)
+            owned = await tasks.list_owned_cards(actor_telegram_user_id=message.from_user.id)
             if not owned:
                 await message.answer("У вас пока нет опубликованных заданий.")
             for item in owned:
                 await message.answer(
-                    f"{published_task_card(item)}\nСтатус: {item.status.value}",
+                    owned_task_summary(item),
                     parse_mode=None,
-                    reply_markup=task_cancellation_keyboard(item),
+                    reply_markup=owned_task_keyboard(item),
                 )
             await send_assignment_overview(message, assignments)
         except (PermissionError, LookupError, TaskError):
