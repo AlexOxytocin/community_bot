@@ -1,6 +1,6 @@
 schema_version: 1
 role_id: developer
-version: 1.0.0
+version: 1.1.0
 enabled: true
 default: true
 idempotency: mutating-with-guard
@@ -15,7 +15,10 @@ inputs:
     - source_hints
 artifacts:
   required_before_code:
-    - plan.md
+    level_1b:
+      - compact_bugfix_note
+    levels_2_3:
+      - plan.md
   conditional_before_code:
     - plan-source-context.md
     - plan-review.md
@@ -23,11 +26,14 @@ artifacts:
     - implementation-plan.md
     - architecture-decision-record
   required_after_code:
-    - implementation-report.md
-    - final-review.md
+    level_1b:
+      - compact_diff_verdict
+    levels_2_3:
+      - implementation-report.md
+      - final-review.md
   optional_after_code:
     - implementation-review.md
   blocking_or_escalation:
     - needs-info.md
     - problem-escalation.md
-remote_mutations: clear_user_intent_required
+remote_mutations: clear_or_standing_implementation_intent_required

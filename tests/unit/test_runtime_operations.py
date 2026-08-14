@@ -28,11 +28,15 @@ def test_health_entrypoint_reports_readiness(
         *,
         process_name: str,
         heartbeat_max_age: object,
+        expected_release: str,
+        heartbeat_not_before: object,
     ) -> object:
         captured.update(
             database_url=database_url,
             process_name=process_name,
             heartbeat_max_age=heartbeat_max_age,
+            expected_release=expected_release,
+            heartbeat_not_before=heartbeat_not_before,
         )
         return SimpleNamespace(
             healthy=healthy,
@@ -42,14 +46,31 @@ def test_health_entrypoint_reports_readiness(
     monkeypatch.setattr(
         health_module,
         "get_settings",
-        lambda: SimpleNamespace(database_url="postgresql://db", heartbeat_max_age_seconds=45),
+        lambda: SimpleNamespace(
+            database_url="postgresql://db",
+            heartbeat_max_age_seconds=45,
+            release="sha256:release",
+        ),
     )
     monkeypatch.setattr(health_module, "readiness_report", fake_readiness_report)
 
-    assert health_module.main(["--process", "community-worker"]) == expected_code
+    assert (
+        health_module.main(
+            ["--process", "community-worker", "--not-before", "2026-08-14T12:00:00Z"]
+        )
+        == expected_code
+    )
     assert captured["process_name"] == "community-worker"
+    assert captured["expected_release"] == "sha256:release"
+    assert str(captured["heartbeat_not_before"]) == "2026-08-14 12:00:00+00:00"
     assert "45" in str(captured["heartbeat_max_age"])
     assert f'"healthy": {str(healthy).lower()}' in capsys.readouterr().out
+
+
+def test_health_entrypoint_rejects_naive_not_before() -> None:
+    """Deployment freshness must use an unambiguous aware timestamp."""
+    with pytest.raises(SystemExit):
+        health_module.main(["--process", "community-worker", "--not-before", "2026-08-14T12:00:00"])
 
 
 @pytest.mark.parametrize("raises", [False, True])

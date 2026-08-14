@@ -646,6 +646,23 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
         database_url,
         process_name="community-worker",
         heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="sha",
+        heartbeat_not_before=now - datetime.timedelta(seconds=1),
+        now=now,
+    )
+    wrong_release = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="other-sha",
+        now=now,
+    )
+    before_deploy = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="sha",
+        heartbeat_not_before=now + datetime.timedelta(seconds=1),
         now=now,
     )
     stale = await readiness_report(
@@ -671,6 +688,10 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
     assert healthy.healthy
     assert healthy.product_config
     assert healthy.code == "ready"
+    assert not wrong_release.healthy
+    assert wrong_release.code == "heartbeat_release_mismatch"
+    assert not before_deploy.healthy
+    assert before_deploy.code == "heartbeat_before_deploy"
     assert not stale.healthy
     assert stale.code == "heartbeat_stale"
     assert not stale_config.healthy

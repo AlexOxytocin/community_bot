@@ -4,9 +4,11 @@ language: ru
 
 applicability:
   default_process_levels:
+    - 1B
     - 2
     - 3
   level_1: follow_adr_0004_without_jira_or_task_artifact_requirements
+  level_1b: follow_adr_0010_small_reproducible_bugfix_fast_lane
 
 source_of_truth:
   current_work: jira_CB
@@ -37,8 +39,16 @@ phases:
         trigger: external_dependency_or_technical_gate
         action: record_blocker_and_stop
 
+  - id: risk_classification
+    owner: developer
+    checks:
+      - classify_level_1b_before_planning
+      - upgrade_to_level_2_or_3_when_high_risk_gate_is_present
+
   - id: planning_start
     owner: developer
+    skip_for_levels:
+      - 1B
     checks:
       - discover_exact_jira_transitions
       - clear_user_intent_before_status_change
@@ -47,7 +57,10 @@ phases:
   - id: planning
     owner: developer
     required_outputs:
-      - plan.md
+      level_1b:
+        - compact_bugfix_note
+      levels_2_3:
+        - plan.md
     conditional_outputs:
       - plan-source-context.md
       - plan-review.md
@@ -77,7 +90,8 @@ phases:
   - id: plan_publication
     owner: developer
     checks:
-      - show_plan_to_user
+      - record_level_1b_note_without_blocking_checkpoint
+      - show_plan_to_user_for_levels_2_3
       - show_plan_review_to_user_when_required
       - show_proposed_adr_to_owner_when_required
       - record_owner_adr_acceptance_before_implementation
@@ -99,6 +113,7 @@ phases:
       - clear_user_intent_to_start_implementation
       - discover_exact_jira_transition
       - move_to_real_in_progress_equivalent_when_available
+      - planning_and_ready_transitions_optional_for_level_1b
       - required_adr_status_is_accepted
 
   - id: implementation
@@ -113,6 +128,8 @@ phases:
   - id: verification
     owner: developer
     checks:
+      - level_1b_reproduction_or_targeted_test
+      - level_1b_minimal_smoke_when_applicable
       - targeted_tests
       - required_task_scope_integration_tests
       - key_scenario_smoke
@@ -123,7 +140,10 @@ phases:
   - id: report
     owner: developer
     required_outputs:
-      - implementation-report.md
+      level_1b:
+        - compact_bugfix_note
+      levels_2_3:
+        - implementation-report.md
     gate: each_acceptance_and_test_item_has_evidence
 
   - id: final_review
@@ -137,6 +157,9 @@ phases:
     level_required_inputs:
       level_1:
         - exact_change_description
+      level_1b:
+        - compact_bugfix_note
+        - reproduction_or_targeted_test
       level_2:
         - jira_issue
         - plan.md
@@ -153,13 +176,17 @@ phases:
     level_outputs:
       level_1:
         - direct_verdict
+      level_1b:
+        - compact_diff_verdict
       level_2:
         - final-review.md
       level_3:
         - final-review.md
     checks:
       - determine_process_level_from_adr_0004
+      - determine_level_1b_from_adr_0010
       - verify_all_conditional_gates_for_process_level
+      - reject_level_1b_if_high_risk_gates_are_present
       - require_approved_plan_review_for_level_3
       - complete_implemented_scope_only
       - full_product_regression_is_not_a_per_task_gate
@@ -180,8 +207,8 @@ phases:
     owner: developer
     checks:
       - wait_for_ci_and_code_review
-      - fixes_require_tests_report_update_and_new_final_review
-      - merge_to_main_is_separate_explicit_action
+      - fixes_require_tests_report_update_and_new_final_review_or_compact_diff_verdict
+      - merge_uses_standing_intent_after_required_checks_or_explicit_request
 
   - id: memory
     owner: developer
@@ -191,12 +218,46 @@ phases:
 
 mutation_policy:
   jira_read: allowed_when_requested
-  jira_write: clear_user_intent_required
+  standing_implementation_intent:
+    authorizes:
+      - jira_create_or_update_and_transitions_through_review
+      - task_branch_push_pull_request
+      - merge_after_required_checks
+      - release_and_deploy
+    stops_on:
+      - state_conflict
+      - risk_escalation
+      - failed_gate
+      - destructive_action
+      - explicit_owner_stop
+    never_authorizes:
+      - bypass_required_gate
+      - arbitrary_telegram_read_or_write
+      - final_done_without_production_acceptance
+  jira_write: clear_or_standing_implementation_intent_required
   telegram_read: explicit_specific_request_required
   telegram_write: explicit_recipient_and_content_required
-  git_push: clear_user_intent_required
-  pull_request: clear_user_intent_required
-  merge: explicit_user_request_required
+  git_push: clear_or_standing_implementation_intent_required
+  pull_request: clear_or_standing_implementation_intent_required
+  merge: standing_intent_and_required_checks_or_explicit_request
+  release_deploy: standing_intent_and_required_checks_or_explicit_request
+
+telegram_testing:
+  live_profile_labels:
+    - default
+    - tg-test
+  tg_test_profile_config: config/testing/tg-test.yaml
+  safe_probe_command: telegram.ps1 -Profile tg-test probe
+  multi_user_live_checks:
+    before_use:
+      - probe_default_profile_without_message_read
+      - probe_tg_test_profile_without_message_read
+    evidence_policy:
+      - record_profile_label_and_probe_status_only
+      - do_not_record_session_strings_phone_numbers_telegram_ids_chat_lists_or_message_text
+    live_interactions_require:
+      - explicit_user_request_for_the_specific_bot_or_chat
+      - deployment_gate_when_claiming_working_instance_acceptance
 
 branching:
   task_flow: task/{issue_key} -> main
@@ -215,6 +276,7 @@ task_sizing:
     - independent_blocker
     - infrastructure_result_with_own_acceptance
     - bug_first_found_during_full_mvp_regression
+    - level_1b_small_reproducible_bugfix
 
 review_retry_policy:
   first_failed_review: fix_all_findings_in_one_cycle_then_one_recheck
@@ -230,12 +292,17 @@ regression_policy:
 
 process_budget:
   normal_task_planning_verification_and_review_target_percent: 25
+  level_1b_planning_verification_and_review_target_percent: 15
+  level_1b_max_overhead_minutes: 10
   action_when_exceeded: consolidate_checks_or_escalate
 
 artifacts:
   root: tasks/{issue_key}
   required_before_code:
-    - plan.md
+    level_1b:
+      - compact_bugfix_note
+    levels_2_3:
+      - plan.md
   conditional_before_code:
     - plan-source-context.md
     - plan-review.md
@@ -243,8 +310,11 @@ artifacts:
     - implementation-plan.md
     - architecture-decision-record
   required_after_code:
-    - implementation-report.md
-    - final-review.md
+    level_1b:
+      - compact_diff_verdict
+    levels_2_3:
+      - implementation-report.md
+      - final-review.md
   optional_after_code:
     - implementation-review.md
   blocking_or_escalation:
