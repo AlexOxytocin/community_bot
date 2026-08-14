@@ -1,4 +1,3 @@
-# ruff: noqa: S603, S607
 """Fail-closed proof that a main merge tree passed the pull-request CI."""
 
 from __future__ import annotations
@@ -129,7 +128,7 @@ def verify(repository: str, commit_sha: str) -> dict[str, object]:
         raise ProvenanceError(message)
 
     parents = _git("show", "-s", "--format=%P", commit_sha).split()
-    if len(parents) != 2:  # noqa: PLR2004 - merge commits have exactly two parents here.
+    if len(parents) != 2:
         message = "release commit must be a two-parent merge commit"
         raise ProvenanceError(message)
     base_sha, head_sha = parents
@@ -209,9 +208,9 @@ def main() -> int:
     try:
         evidence = verify(arguments.repository, arguments.commit)
     except (ProvenanceError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
-        print(f"Release provenance rejected: {error}", file=sys.stderr)  # noqa: T201
+        print(f"Release provenance rejected: {error}", file=sys.stderr)
         return 1
-    print(  # noqa: T201
+    print(
         json.dumps(
             {
                 "pr_number": evidence["pr_number"],

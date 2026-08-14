@@ -117,7 +117,7 @@ def test_backup_restore_and_release_assets_keep_mvp_boundaries() -> None:
     assert "COMMUNITY_BOT_ENV_FILE" in runtime
     assert "mode 0600" in runtime
     assert "python3 /opt/community-bot/current/ops/backup_postgres.py" in systemd
-    assert "@${{ steps.image.outputs.digest }}" in workflow
+    assert "@${DIGEST}" in workflow
     assert "platforms: linux/arm64" in workflow
     assert "linux/amd64" not in workflow
     assert "retention-days: 30" in workflow
