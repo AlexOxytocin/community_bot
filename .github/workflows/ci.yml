@@ -2,9 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -30,7 +27,7 @@ jobs:
       - name: Lint
         run: uv run ruff check --output-format=github .
       - name: Type check
-        run: uv run ty check src tests
+        run: uv run ty check src tests ops/verify_release_provenance.py
       - name: Test without PostgreSQL
         run: uv run pytest -m "not integration" --no-cov
 
@@ -65,3 +62,48 @@ jobs:
       - name: Stop PostgreSQL
         if: always()
         run: docker compose down -v
+
+  verified-merge-tree:
+    name: Verified merge tree
+    needs: [quality, postgresql]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out synthetic merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Record reviewed tree provenance
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${MERGE_SHA}"
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          jq -n \
+            --arg repository "${REPOSITORY}" \
+            --arg event "pull_request" \
+            --argjson pr_number "${PR_NUMBER}" \
+            --arg base_sha "${BASE_SHA}" \
+            --arg head_sha "${HEAD_SHA}" \
+            --arg synthetic_merge_sha "${MERGE_SHA}" \
+            --arg tree_sha "${tree_sha}" \
+            --arg workflow_ref "${WORKFLOW_REF}" \
+            --argjson run_id "${RUN_ID}" \
+            --argjson run_attempt "${RUN_ATTEMPT}" \
+            '{repository: $repository, event: $event, pr_number: $pr_number,
+              base_sha: $base_sha, head_sha: $head_sha,
+              synthetic_merge_sha: $synthetic_merge_sha, tree_sha: $tree_sha,
+              workflow_ref: $workflow_ref, run_id: $run_id,
+              run_attempt: $run_attempt}' > provenance.json
+      - name: Upload reviewed tree provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-merge-tree
+          path: provenance.json
+          if-no-files-found: error
+          retention-days: 30

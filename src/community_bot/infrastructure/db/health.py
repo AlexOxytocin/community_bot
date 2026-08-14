@@ -42,11 +42,13 @@ class ReadinessReport:
         return asdict(self)
 
 
-async def readiness_report(
+async def readiness_report(  # noqa: PLR0913 - independent deployment gates.
     database_url: str,
     *,
     process_name: str,
     heartbeat_max_age: datetime.timedelta,
+    expected_release: str | None = None,
+    heartbeat_not_before: datetime.datetime | None = None,
     now: datetime.datetime | None = None,
 ) -> ReadinessReport:
     """Check PostgreSQL, Alembic head, heartbeat freshness, and poison events."""
@@ -57,12 +59,14 @@ async def readiness_report(
             if await connection.scalar(text("SELECT 1")) != 1:
                 return _unhealthy("database_unavailable")
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-            heartbeat_at = await connection.scalar(
+            heartbeat_result = await connection.execute(
                 text(
-                    "SELECT observed_at FROM process_heartbeats WHERE process_name = :process_name"
+                    "SELECT observed_at, release FROM process_heartbeats "
+                    "WHERE process_name = :process_name"
                 ),
                 {"process_name": process_name},
             )
+            heartbeat_row = heartbeat_result.one_or_none()
             failed_count = int(
                 await connection.scalar(
                     text("SELECT count(*) FROM outbox_events WHERE status = 'failed'")
@@ -106,16 +110,31 @@ async def readiness_report(
         and level_count == _EXPECTED_LEVEL_COUNT
         and stale_member_count == 0
     )
-    heartbeat_ok = (
+    heartbeat_at = heartbeat_row.observed_at if heartbeat_row is not None else None
+    heartbeat_release = heartbeat_row.release if heartbeat_row is not None else None
+    heartbeat_fresh = (
         isinstance(heartbeat_at, datetime.datetime)
         and observed_now - heartbeat_at.astimezone(datetime.UTC) <= heartbeat_max_age
     )
+    release_ok = expected_release is None or heartbeat_release == expected_release
+    not_before = (
+        heartbeat_not_before.astimezone(datetime.UTC) if heartbeat_not_before is not None else None
+    )
+    heartbeat_started_after_deploy = not_before is None or (
+        isinstance(heartbeat_at, datetime.datetime)
+        and heartbeat_at.astimezone(datetime.UTC) >= not_before
+    )
+    heartbeat_ok = heartbeat_fresh and release_ok and heartbeat_started_after_deploy
     if not migration_ok:
         code = "migration_mismatch"
     elif not product_config_ok:
         code = "product_config_incomplete"
-    elif not heartbeat_ok:
+    elif not heartbeat_fresh:
         code = "heartbeat_stale"
+    elif not release_ok:
+        code = "heartbeat_release_mismatch"
+    elif not heartbeat_started_after_deploy:
+        code = "heartbeat_before_deploy"
     elif failed_count:
         code = "outbox_failed"
     else:

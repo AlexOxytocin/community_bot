@@ -22,3 +22,7 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0005 — Технологический стек MVP](0005-mvp-technology-stack.md)
 - [ADR-0006 — Транзакционная граница обработки Telegram updates](0006-telegram-update-transaction-boundary.md)
 - [ADR-0007 — Соразмерный цикл задач, ревью и регрессии MVP](0007-review-escalation-after-two-failures.md)
+- [ADR-0008 — Runtime и эксплуатационный профиль пилота](0008-pilot-runtime-and-operations.md)
+- [ADR-0009 — Самостоятельное размещение пилота](0009-self-hosted-pilot-runtime.md)
+- [ADR-0010 — Быстрый путь малых багфиксов](0010-small-bugfix-fast-lane.md)
+- [ADR-0011 — Защищенный release после одного полного CI](0011-protected-single-ci-release.md)

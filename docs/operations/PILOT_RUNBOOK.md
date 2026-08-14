@@ -12,6 +12,8 @@ logical backup. External backup, R2, application object storage и webhook в MV
 - `/opt/community-bot/current` — текущий deployment-пакет без секретов;
 - `/opt/community-bot/shared/.env` — root-owned секреты и конфигурация `0600`;
 - `/opt/community-bot/shared/releases` — текущая и предыдущая image identity;
+- `/opt/community-bot/shared/bin/github_deploy_entrypoint.sh` — root-owned forced-command entrypoint `0700`;
+- `/opt/community-bot/shared/bin/deploy_self_hosted.sh` — root-owned trusted deploy runner `0700`;
 - `/var/backups/community-bot` — root-only backup с хранением семь суток;
 - Compose services: `postgres`, `migrate`, `worker`, `bot`;
 - systemd timer: `community-bot-backup.timer`.
@@ -28,8 +30,9 @@ logical backup. External backup, R2, application object storage и webhook в MV
    `shared` и backup разрешить только root.
 3. Скопировать deployment-пакет в `current`. Создать `shared/.env` с
    `POSTGRES_DB`, `POSTGRES_USER`, случайным `POSTGRES_PASSWORD`, внутренним
-   `DATABASE_URL`, `BOT_TOKEN`, случайным `INVITE_TOKEN_SECRET`, `ENVIRONMENT`,
-   `RELEASE` и необязательным `SENTRY_DSN`.
+   `DATABASE_URL`, `BOT_TOKEN`, случайным `INVITE_TOKEN_SECRET`, `ENVIRONMENT`
+   и необязательным `SENTRY_DSN`. Штатный deploy переопределяет `RELEASE` уникальной
+   identity `<digest>.run<run_number>.<run_attempt>`.
 4. Для штатного release выполнить
    `ops/deploy_self_hosted.sh GHCR_IMAGE@sha256:DIGEST`. Для первого запуска пустой
    базы передать вторым аргументом Telegram user ID первого администратора:
@@ -66,14 +69,58 @@ success. Конфликт — защитная остановка, а не по�
 
 ## Обычный выпуск
 
-1. Дождаться зелёного CI на `main` и взять image reference из release artifact.
-   Штатная identity имеет вид `ghcr.io/...@sha256:...`.
-2. Выполнить `ops/deploy_self_hosted.sh IMAGE_REFERENCE` на сервере.
+1. Дождаться трёх обязательных PR checks: `Quality`, `PostgreSQL and Alembic` и
+   `Verified merge tree`.
+2. После merge workflow `Release image` доказывает совпадение PR/base/head/tree и
+   собирает linux/arm64 image actual merge commit. Привилегированный deploy job ожидает
+   подтверждения владельца в Environment `production`, затем передает immutable digest
+   forced-command entrypoint. Ручной SSH для штатного выпуска не требуется.
 3. Убедиться, что `docker compose ps` показывает healthy `postgres`, `worker` и
    `bot`, а `migrate` завершился с code 0.
-4. Проверить свежие логи каждого процесса и отсутствие terminal `failed` в
+4. Проверить, что worker и bot были принудительно пересозданы, а `community-health`
+   принял heartbeat каждого процесса с release текущего digest и временем не раньше
+   его post-recreate порога.
+5. Проверить свежие логи каждого процесса и отсутствие terminal `failed` в
    outbox. Логи не должны содержать токены, connection string, Telegram payload,
    comments, evidence или materials.
+
+## Первичная настройка GitHub deployment
+
+Это отдельное контролируемое операционное событие. Оно выполняется один раз и при
+ротации ключа; приватный ключ и host key не выводятся в Jira, git или отчёт.
+
+1. Создать отдельную пару SSH-ключей только для GitHub Actions. Не использовать личный
+   ключ оператора.
+2. Установить `ops/github_deploy_entrypoint.sh` и `ops/deploy_self_hosted.sh` как
+   `/opt/community-bot/shared/bin/github_deploy_entrypoint.sh` и
+   `/opt/community-bot/shared/bin/deploy_self_hosted.sh`. Каталоги `shared`/`shared/bin`
+   и оба файла должны принадлежать `root:root`, иметь mode `0700` и не быть symlink.
+   `/opt/community-bot` должен принадлежать root и не иметь group/other write. Forced
+   entrypoint fail-closed перепроверяет этот контракт перед каждым deploy.
+3. Добавить public key в `/root/.ssh/authorized_keys` одной строкой с префиксом
+   `restrict,command="/opt/community-bot/shared/bin/github_deploy_entrypoint.sh"`.
+4. Локально проверить, что точная parser-only команда принимается, а mutable tag,
+   другой repository, лишний аргумент, перенос строки и shell-разделитель отклоняются.
+5. Создать защищенное Environment `production` с владельцем как required reviewer. В его
+   secrets записать `PRODUCTION_HOST`, новый
+   `PRODUCTION_SSH_PRIVATE_KEY` и заранее проверенную строку
+   `PRODUCTION_KNOWN_HOSTS`. Workflow использует `StrictHostKeyChecking=yes`; получать
+   host key динамическим `ssh-keyscan` внутри release запрещено.
+6. `CODEOWNERS` делает изменения privileged release surfaces видимыми владельцу;
+   независимую runtime-границу обеспечивает обязательное Environment approval.
+7. Включить protection `main`: PR обязателен, strict checks актуальной базы, три checks
+   привязаны к GitHub Actions App, enforce administrators, запрет bypass/force push/
+   deletion. Оставить только merge commits; squash и rebase выключить.
+8. Только после подтверждения protection удалить повторный полный CI на `push main`.
+
+Forced command принимает только:
+
+```text
+deploy RUN_NUMBER RUN_ATTEMPT COMMIT_SHA ghcr.io/alexgoodman53/community_bot@sha256:DIGEST
+```
+
+Entrypoint сериализует deploy через `flock` и принимает только возрастающую пару
+`RUN_NUMBER/RUN_ATTEMPT` одного workflow. Marker обновляется после успешного deploy.
 
 ## Частичный rollback
 
@@ -110,6 +157,8 @@ restore, Alembic revision и результат проверок. Цели ло�
 ## Диагностика
 
 - `heartbeat_stale` — процесс не обновлялся дольше настроенного предела;
+- `heartbeat_release_mismatch` — heartbeat принадлежит другому image release;
+- `heartbeat_before_deploy` — heartbeat создан до начала текущего deployment;
 - `migration_mismatch` — image и схема имеют разные Alembic revision;
 - `outbox_failed` — событие исчерпало пять попыток; исправить причину и только
   затем документированно вернуть запись в `pending`;

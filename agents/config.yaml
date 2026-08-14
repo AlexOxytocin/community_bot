@@ -25,6 +25,18 @@ memory:
   wing: community_bot
   canonical_source: git_documentation
 
+telegram_testing:
+  connector: C:\Users\User\.codex\tools\telegram.ps1
+  live_profiles:
+    default: primary_local_user_session
+    tg-test: secondary_local_test_user_session
+  profile_config: config/testing/tg-test.yaml
+  repository_storage_policy: labels_probe_status_and_non_secret_results_only
+  multi_user_checks_require:
+    - probe_each_profile_before_live_use
+    - no_private_chat_text_in_artifacts
+    - explicit_user_request_for_reads_writes_downloads_or_button_clicks
+
 roles:
   developer:
     enabled: true
@@ -49,7 +61,7 @@ roles:
   final-review:
     enabled: true
     default: false
-    activation: required_after_implementation_report_for_levels_2_and_3_optional_for_level_1
+    activation: required_after_implementation_report_for_levels_2_and_3_compact_for_level_1b_optional_for_level_1
     path: final-review
     idempotency: idempotent
     output_schema: community_bot.final_review.verdict.v1

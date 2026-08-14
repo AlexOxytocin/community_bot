@@ -37,6 +37,7 @@ fi
 
 export COMMUNITY_BOT_IMAGE="${image_reference}"
 export COMMUNITY_BOT_ENV_FILE="${env_file}"
+export COMMUNITY_BOT_RELEASE="${COMMUNITY_BOT_RELEASE:-${image_reference##*@}}"
 compose=(docker compose --project-directory "${root_dir}/current" --env-file "${env_file}" -f "${compose_file}")
 
 if [[ "${image_reference}" == ghcr.io/* ]]; then
@@ -54,14 +55,18 @@ if [[ $# -eq 2 ]]; then
     --reason "${COMMUNITY_BOT_BOOTSTRAP_REASON:-initial_install}"
 fi
 "${compose[@]}" run --rm migrate community-bootstrap-product-config
-"${compose[@]}" up -d --no-deps worker
+"${compose[@]}" up -d --no-deps --force-recreate worker
+worker_not_before="$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')"
 
 wait_for_health() {
   local service="$1"
   local expected_process="$2"
+  local not_before="$3"
   local attempt
   for attempt in {1..30}; do
-    if "${compose[@]}" exec -T "${service}" community-health --process "${expected_process}" >/dev/null 2>&1; then
+    if "${compose[@]}" exec -T "${service}" community-health \
+      --process "${expected_process}" \
+      --not-before "${not_before}" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -70,9 +75,10 @@ wait_for_health() {
   return 1
 }
 
-wait_for_health worker community-worker
-"${compose[@]}" up -d --no-deps bot
-wait_for_health bot community-bot
+wait_for_health worker community-worker "${worker_not_before}"
+"${compose[@]}" up -d --no-deps --force-recreate bot
+bot_not_before="$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')"
+wait_for_health bot community-bot "${bot_not_before}"
 printf '%s\n' "${image_reference}" >"${current_file}"
 chmod 600 "${current_file}"
 "${compose[@]}" ps

@@ -1,0 +1,6 @@
+# Privileged release surfaces remain visibly owned even in the single-owner pilot.
+/.github/workflows/ @alexgoodman53
+/ops/deploy_self_hosted.sh @alexgoodman53
+/ops/github_deploy_entrypoint.sh @alexgoodman53
+/ops/verify_release_provenance.py @alexgoodman53
+/compose.production.yaml @alexgoodman53
