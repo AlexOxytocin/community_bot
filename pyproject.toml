@@ -25,6 +25,7 @@ community-bootstrap-product-config = "community_bot.bootstrap.product_config_cli
 community-health = "community_bot.bootstrap.health:main"
 community-migrate = "community_bot.bootstrap.migrate:main"
 community-pilot-report = "community_bot.bootstrap.pilot_report:main"
+community-test-run = "community_bot.bootstrap.test_run:main"
 community-worker = "community_bot.worker.entrypoint:main"
 
 [build-system]

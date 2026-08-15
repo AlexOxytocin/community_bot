@@ -15,6 +15,7 @@ from community_bot.application.assignments import AssignmentService
 from community_bot.application.catalog import CatalogService
 from community_bot.application.conversations import ConversationService
 from community_bot.application.economy import EconomyQueryService
+from community_bot.application.member_foundation import MemberFoundationService
 from community_bot.application.moderation import ModerationService
 from community_bot.application.navigation import NavigationService
 from community_bot.application.registration import InviteTokenCodec, RegistrationService
@@ -104,6 +105,7 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
     registration = RegistrationService(unit_of_work, InviteTokenCodec(invite_token_secret))
     reputation = ReputationService(unit_of_work)
     tasks = TaskService(unit_of_work)
+    foundation = MemberFoundationService(unit_of_work)
     dispatcher.include_router(
         build_navigation_router(
             navigation=NavigationService(unit_of_work),
@@ -114,6 +116,7 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
             reputation=reputation,
             moderation=moderation,
             assignments=assignments,
+            foundation=foundation,
         )
     )
     dispatcher.include_router(
@@ -141,7 +144,7 @@ async def _heartbeat_loop(queue: PostgresNotificationQueue) -> None:
         await queue.heartbeat(
             process_name="community-bot",
             release=settings.release,
-            migration_revision="0018",
+            migration_revision="0019",
             now=datetime.datetime.now(datetime.UTC),
         )
         await asyncio.sleep(60)

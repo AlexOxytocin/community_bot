@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """Boundary tests for canonical Telegram task cards."""
 
 from __future__ import annotations
@@ -31,6 +32,14 @@ def test_task_card_deduplicates_payload_values_and_preserves_plain_url() -> None
     assert "Результат:" in text
     assert "context" not in text
     assert "constraints" not in text
+
+
+def test_test_task_card_has_an_explicit_marker() -> None:
+    """Test cards are visibly marked in every Telegram projection."""
+    task = _task()
+    cast("Any", task).test_run_id = uuid4()
+
+    assert published_task_card(task).startswith("ТЕСТ · ")
 
 
 def test_task_card_stays_inside_telegram_text_limit() -> None:

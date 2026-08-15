@@ -21,6 +21,7 @@ from community_bot.infrastructure.db.models import (
     TaskModel,
     TaskTemplateModel,
 )
+from community_bot.infrastructure.db.test_runs import active_scope
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,8 +66,10 @@ async def create_task_draft(
         .where(TaskCreationDraftModel.is_current.is_(True))
         .values(is_current=False)
     )
+    scope = await active_scope(session, creator_id)
     model = TaskCreationDraftModel(
         creator_id=creator_id,
+        test_run_id=None if scope is None else scope.id,
         template_id=template_id,
         origin=origin,
         current_step=TaskDraftStep.INPUT.value,
@@ -154,11 +157,17 @@ async def save_task_draft(session: AsyncSession, draft: TaskDraft) -> TaskDraft:
 
 
 async def list_pending_community_publications(
-    session: AsyncSession, *, limit: int
+    session: AsyncSession, *, actor_id: uuid.UUID, limit: int
 ) -> tuple[CommunityPublicationRequest, ...]:
     """Return community drafts that are ready for superadministrator confirmation."""
     creator = aliased(MemberModel)
     reviewer = aliased(MemberModel)
+    scope = await active_scope(session, actor_id)
+    test_scope = (
+        TaskCreationDraftModel.test_run_id.is_(None)
+        if scope is None
+        else TaskCreationDraftModel.test_run_id == scope.id
+    )
     rows = (
         await session.execute(
             select(
@@ -175,6 +184,7 @@ async def list_pending_community_publications(
                 TaskCreationDraftModel.current_step == TaskDraftStep.PREVIEW.value,
                 TaskCreationDraftModel.community_approval_requested_at.is_not(None),
                 TaskCreationDraftModel.community_approved_by_admin_id.is_(None),
+                test_scope,
             )
             .order_by(
                 TaskCreationDraftModel.community_approval_requested_at,
@@ -240,6 +250,7 @@ async def insert_published_task(
     public_input_keys = list(schema_properties) if isinstance(schema_properties, dict) else []
     model = TaskModel(
         origin=draft.origin,
+        test_run_id=draft.test_run_id,
         template_id=template.id,
         template_version=template.version,
         creator_id=None if community else draft.creator_id,
@@ -348,13 +359,18 @@ async def list_owned_tasks(  # noqa: PLR0913 - explicit keyset fields keep the q
     before_id: uuid.UUID | None,
 ) -> tuple[PublishedTask, ...]:
     """Return the latest owned tasks without exposing other creators."""
+    scope = await active_scope(session, creator_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+    )
     statement = select(TaskModel).where(
         or_(
             TaskModel.creator_id == creator_id,
             TaskModel.created_by_admin_id == creator_id,
             TaskModel.reviewer_admin_id == creator_id,
             TaskModel.community_approved_by_admin_id == creator_id,
-        )
+        ),
+        test_scope,
     )
     if status is not None:
         statement = statement.where(TaskModel.status == status.value)
@@ -394,6 +410,10 @@ async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inp
         AssignmentModel.performer_id == performer_id,
         AssignmentModel.status != AssignmentStatus.CANCELLED.value,
     )
+    scope = await active_scope(session, performer_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+    )
     availability = (
         TaskModel.status == TaskStatus.PUBLISHED.value,
         TaskModel.deadline_at > now,
@@ -401,6 +421,7 @@ async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inp
         (TaskModel.creator_id.is_(None) | (TaskModel.creator_id != performer_id)),
         occupied < TaskModel.performer_slots,
         ~already_assigned,
+        test_scope,
     )
     statement = select(TaskModel).where(*availability)
     if cursor_task_id is not None:
@@ -442,6 +463,16 @@ async def add_task_outbox(
     )
 
 
+async def ensure_test_access(
+    session: AsyncSession, *, task_id: uuid.UUID, member_id: uuid.UUID
+) -> None:
+    """Require the task and actor to share the same active test scope."""
+    task_run_id = await session.scalar(select(TaskModel.test_run_id).where(TaskModel.id == task_id))
+    scope = await active_scope(session, member_id)
+    if task_run_id != (None if scope is None else scope.id):
+        raise PermissionError("Task is outside the actor test scope.")
+
+
 def _draft(model: TaskCreationDraftModel) -> TaskDraft:
     return TaskDraft(
         id=model.id,
@@ -462,6 +493,7 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
         revision=model.revision,
         is_current=model.is_current,
         publish_command_id=model.publish_command_id,
+        test_run_id=getattr(model, "test_run_id", None),
     )
 
 
@@ -503,6 +535,7 @@ def _task(model: TaskModel) -> PublishedTask:
         status=TaskStatus(model.status),
         publish_command_id=model.publish_command_id,
         created_at=model.created_at,
+        test_run_id=getattr(model, "test_run_id", None),
     )
 
 

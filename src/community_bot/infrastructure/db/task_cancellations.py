@@ -24,6 +24,7 @@ from community_bot.infrastructure.db.models import (
     TaskModel,
 )
 from community_bot.infrastructure.db.tasks import published_task_from_model
+from community_bot.infrastructure.db.test_runs import active_scope
 
 if TYPE_CHECKING:
     import uuid
@@ -45,13 +46,18 @@ async def list_owned_task_cards(
     before_id: uuid.UUID | None,
 ) -> tuple[OwnedTaskCard, ...]:
     """Return tasks with active assignee labels and the pending request state."""
+    scope = await active_scope(session, creator_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+    )
     statement = select(TaskModel).where(
         or_(
             TaskModel.creator_id == creator_id,
             TaskModel.created_by_admin_id == creator_id,
             TaskModel.reviewer_admin_id == creator_id,
             TaskModel.community_approved_by_admin_id == creator_id,
-        )
+        ),
+        test_scope,
     )
     if status is not None:
         statement = statement.where(TaskModel.status == status.value)
@@ -74,9 +80,14 @@ async def get_owned_task_card(
     owner_id: uuid.UUID,
 ) -> OwnedTaskCard | None:
     """Return one task visible to its member owner or community administrator."""
+    scope = await active_scope(session, owner_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+    )
     task = await session.scalar(
         select(TaskModel).where(
             TaskModel.id == task_id,
+            test_scope,
             or_(
                 TaskModel.creator_id == owner_id,
                 TaskModel.created_by_admin_id == owner_id,

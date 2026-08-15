@@ -21,9 +21,10 @@ from aiogram.types import (
 from aiogram.utils.deep_linking import create_start_link
 
 from community_bot.application.catalog import CatalogQuery
+from community_bot.application.member_foundation import AdministrativeChange
 from community_bot.application.registration import InvitationCreateCommand
 from community_bot.domain.catalog import CatalogError
-from community_bot.domain.members import AuthorizationError
+from community_bot.domain.members import AuthorizationError, ChangeKind
 from community_bot.domain.tasks import TaskError
 from community_bot.transport.telegram.assignments import send_assignment_overview
 from community_bot.transport.telegram.moderation import send_moderation_overview
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentService
     from community_bot.application.catalog import CatalogPage, CatalogService
     from community_bot.application.economy import EconomyQueryService, LedgerHistoryItem
+    from community_bot.application.member_foundation import MemberFoundationService
     from community_bot.application.moderation import ModerationService
     from community_bot.application.navigation import NavigationService
     from community_bot.application.registration import RegistrationService
@@ -89,6 +91,7 @@ def build_navigation_router(  # noqa: PLR0913
     reputation: ReputationService,
     moderation: ModerationService,
     assignments: AssignmentService,
+    foundation: MemberFoundationService | None = None,
 ) -> Router:
     """Build exact commands, button mappings, and navigation callbacks."""
     router = Router(name="navigation")
@@ -265,7 +268,28 @@ def build_navigation_router(  # noqa: PLR0913
             await message.answer("Лидерборд сейчас недоступен.")
 
     async def show_members(message: Message) -> None:
-        await send_member_catalog(message, reputation, moderation)
+        await send_member_catalog(message, reputation, moderation, foundation)
+
+    async def change_member_role(callback: CallbackQuery, event_update: Update) -> None:
+        """Apply a superadministrator-only role change from a visible member card."""
+        if foundation is None:
+            await callback.answer("Изменение роли недоступно.", show_alert=True)
+            return
+        try:
+            raw_role, raw_member_id = str(callback.data).removeprefix("member:role:").split(":", 1)
+            await foundation.change_member(
+                AdministrativeChange(
+                    update_id=event_update.update_id,
+                    telegram_user_id=callback.from_user.id,
+                    target_member_id=UUID(hex=raw_member_id),
+                    kind=ChangeKind.ROLE,
+                    requested_value=raw_role,
+                    reason="Изменение роли через Telegram",
+                )
+            )
+            await callback.answer("Роль участника изменена.", show_alert=True)
+        except (AuthorizationError, PermissionError, LookupError, ValueError):
+            await callback.answer("Изменение роли недоступно.", show_alert=True)
 
     async def show_admin(message: Message) -> None:
         if message.from_user is None:
@@ -405,6 +429,7 @@ def build_navigation_router(  # noqa: PLR0913
         F.data == "nav:admin:community_approvals",
     )
     router.callback_query.register(admin_action, F.data.startswith(_ADMIN_PREFIX))
+    router.callback_query.register(change_member_role, F.data.startswith("member:role:"))
     return router
 
 

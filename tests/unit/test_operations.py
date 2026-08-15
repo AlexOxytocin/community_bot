@@ -102,7 +102,7 @@ def test_backup_restore_and_release_assets_keep_mvp_boundaries() -> None:
     assert "community_bot_restore_drill" in restore
     assert "pg_restore" in restore
     assert "alembic_version" in restore
-    assert "0018" in restore
+    assert "0019" in restore
     assert "account_transactions" in restore
     assert "credit_balance_cached" in restore
     assert "experience_total_cached" in restore
@@ -299,6 +299,7 @@ def test_host_maintenance_entrypoints_are_python() -> None:
         "deploy_from_git.py",
         "deploy_self_hosted.py",
         "restore_drill.py",
+        "smoke_production.py",
     } <= {path.name for path in (root / "ops").glob("*.py")}
     assert {path.name for path in (root / "ops").glob("*.sh")} == {
         "deploy_self_hosted.sh",

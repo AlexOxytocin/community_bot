@@ -32,6 +32,7 @@ from community_bot.infrastructure.db.models import (
     TaskModel,
 )
 from community_bot.infrastructure.db.tasks import published_task_from_model
+from community_bot.infrastructure.db.test_runs import active_scope
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -109,10 +110,16 @@ async def list_assignments(
     session: AsyncSession, performer_id: uuid.UUID
 ) -> tuple[Assignment, ...]:
     """List a performer's latest assignments."""
+    scope = await active_scope(session, performer_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+    )
     models = (
         await session.scalars(
             select(AssignmentModel)
+            .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
             .where(AssignmentModel.performer_id == performer_id)
+            .where(test_scope)
             .order_by(AssignmentModel.accepted_at.desc())
             .limit(20)
         )
@@ -127,6 +134,7 @@ async def list_assignment_cards(
     return await _cards(
         session,
         AssignmentModel.performer_id == performer_id,
+        scope_member_id=performer_id,
     )
 
 
@@ -141,6 +149,7 @@ async def list_review_cards(
             TaskModel.created_by_admin_id == actor_id,
             TaskModel.reviewer_admin_id == actor_id,
         ),
+        scope_member_id=actor_id,
         statuses=(AssignmentStatus.SUBMITTED.value, AssignmentStatus.REVIEWER_REQUIRED.value),
     )
 
@@ -149,6 +158,7 @@ async def _cards(
     session: AsyncSession,
     predicate: ColumnElement[bool],
     *,
+    scope_member_id: uuid.UUID,
     statuses: tuple[str, ...] | None = None,
 ) -> tuple[AssignmentCard, ...]:
     latest_payload = (
@@ -158,6 +168,10 @@ async def _cards(
         .limit(1)
         .correlate(AssignmentModel)
         .scalar_subquery()
+    )
+    scope = await active_scope(session, scope_member_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
     )
     statement = (
         select(
@@ -175,7 +189,7 @@ async def _cards(
             ModerationCaseModel,
             ModerationCaseModel.assignment_id == AssignmentModel.id,
         )
-        .where(predicate)
+        .where(predicate, test_scope)
         .order_by(AssignmentModel.accepted_at.desc(), AssignmentModel.id)
         .limit(50)
     )
