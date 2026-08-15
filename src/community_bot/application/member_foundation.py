@@ -9,9 +9,11 @@ from community_bot.domain.members import (
     AuthorizationError,
     ChangeKind,
     Member,
+    MemberStatus,
     StartOutcome,
     can_read_member,
     change_member,
+    is_superadministrator,
     route_start,
 )
 
@@ -149,6 +151,16 @@ class MemberFoundationService:
             )
             await unit_of_work.commit()
         return outcome
+
+    async def is_active_superadministrator(self, telegram_user_id: int) -> bool:
+        """Return whether the current persisted actor owns top-level administration."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member_by_telegram_user_id(telegram_user_id)
+            return bool(
+                member is not None
+                and member.status is MemberStatus.ACTIVE
+                and is_superadministrator(member)
+            )
 
     async def read_member(self, query: ReadMemberQuery) -> Member:
         """Read a member after checking current persisted actor and target rows."""

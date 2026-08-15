@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from community_bot.application.pilot import (
     AlertFact,
@@ -112,7 +112,7 @@ async def _tasks(session: AsyncSession, to_at: datetime.datetime) -> tuple[TaskF
                 TaskModel.published_at,
                 TaskModel.deadline_at,
                 TaskModel.cancelled_at,
-            ).where(TaskModel.published_at < to_at)
+            ).where(TaskModel.published_at < to_at, TaskModel.test_run_id.is_(None))
         )
     ).all()
     return tuple(TaskFact(*row) for row in rows)
@@ -131,7 +131,12 @@ async def _assignments(
                 AssignmentModel.accepted_at,
                 AssignmentModel.submitted_at,
                 AssignmentModel.cancelled_at,
-            ).where(AssignmentModel.accepted_at < to_at)
+            )
+            .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+            .where(
+                AssignmentModel.accepted_at < to_at,
+                TaskModel.test_run_id.is_(None),
+            )
         )
     ).all()
     return tuple(AssignmentFact(*row) for row in rows)
@@ -141,6 +146,12 @@ async def _transactions(
     session: AsyncSession,
     to_at: datetime.datetime,
 ) -> tuple[TransactionFact, ...]:
+    test_task_ids = select(TaskModel.id).where(TaskModel.test_run_id.is_not(None))
+    test_assignment_ids = (
+        select(AssignmentModel.id)
+        .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+        .where(TaskModel.test_run_id.is_not(None))
+    )
     rows = (
         await session.execute(
             select(
@@ -153,7 +164,17 @@ async def _transactions(
                 AccountTransactionModel.assignment_id,
                 AccountTransactionModel.reversed_transaction_id,
                 AccountTransactionModel.created_at,
-            ).where(AccountTransactionModel.created_at < to_at)
+            ).where(
+                AccountTransactionModel.created_at < to_at,
+                or_(
+                    AccountTransactionModel.task_id.is_(None),
+                    AccountTransactionModel.task_id.not_in(test_task_ids),
+                ),
+                or_(
+                    AccountTransactionModel.assignment_id.is_(None),
+                    AccountTransactionModel.assignment_id.not_in(test_assignment_ids),
+                ),
+            )
         )
     ).all()
     return tuple(TransactionFact(*row) for row in rows)
@@ -178,7 +199,13 @@ async def _disputes(
 ) -> tuple[datetime.datetime, ...]:
     return tuple(
         await session.scalars(
-            select(AssignmentDisputeModel.opened_at).where(AssignmentDisputeModel.opened_at < to_at)
+            select(AssignmentDisputeModel.opened_at)
+            .join(AssignmentModel, AssignmentModel.id == AssignmentDisputeModel.assignment_id)
+            .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+            .where(
+                AssignmentDisputeModel.opened_at < to_at,
+                TaskModel.test_run_id.is_(None),
+            )
         )
     )
 

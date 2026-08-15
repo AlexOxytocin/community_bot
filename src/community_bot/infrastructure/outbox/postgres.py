@@ -27,7 +27,10 @@ from community_bot.infrastructure.db.models import (
     TaskCancellationRequestModel,
     TaskCancellationResponseModel,
     TaskModel,
+    TestRunModel,
+    TestRunParticipantModel,
 )
+from community_bot.infrastructure.db.test_runs import participant_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -393,11 +396,35 @@ class PostgresNotificationQueue:
             if task is None:
                 raise NotificationProcessingError(_OUTBOX_AGGREGATE_MISSING, permanent=True)
             if event.event_type == "task.published":
-                member_ids.update(
-                    await session.scalars(
-                        select(MemberModel.id).where(MemberModel.status == "active")
+                if task.test_run_id is not None:
+                    member_ids.update(
+                        await session.scalars(
+                            select(TestRunParticipantModel.member_id)
+                            .join(TestRunModel, TestRunModel.id == TestRunParticipantModel.run_id)
+                            .where(
+                                TestRunParticipantModel.run_id == task.test_run_id,
+                                TestRunParticipantModel.is_active.is_(True),
+                                TestRunModel.status == "active",
+                            )
+                        )
                     )
-                )
+                else:
+                    active_test_member = (
+                        select(TestRunParticipantModel.member_id)
+                        .join(TestRunModel, TestRunModel.id == TestRunParticipantModel.run_id)
+                        .where(
+                            TestRunParticipantModel.is_active.is_(True),
+                            TestRunModel.status == "active",
+                        )
+                    )
+                    member_ids.update(
+                        await session.scalars(
+                            select(MemberModel.id).where(
+                                MemberModel.status == "active",
+                                MemberModel.id.not_in(active_test_member),
+                            )
+                        )
+                    )
                 if task.creator_id is not None:
                     member_ids.discard(task.creator_id)
             else:
@@ -488,6 +515,9 @@ class PostgresNotificationQueue:
                 )
             )
         ).all()
+        if task.test_run_id is not None:
+            participant_set = set(await participant_ids(session, task.test_run_id))
+            administrators = [item for item in administrators if item.id in participant_set]
         return tuple(administrators)
 
     async def _notification_is_current(  # noqa: PLR0911 - explicit lifecycle checks.

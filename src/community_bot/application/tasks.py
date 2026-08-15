@@ -63,6 +63,7 @@ class TaskDraft:
     revision: int
     is_current: bool
     publish_command_id: UUID
+    test_run_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +110,7 @@ class PublishedTask:
     status: TaskStatus
     publish_command_id: UUID
     created_at: datetime.datetime
+    test_run_id: UUID | None = None
 
     def acceptance_snapshot(self) -> AcceptanceTaskSnapshot:
         """Return the transport-neutral static acceptance input."""
@@ -240,10 +242,10 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
     async def select_task_draft(self, *, creator_id: UUID, draft_id: UUID) -> TaskDraft: ...
     async def save_task_draft(self, draft: TaskDraft) -> TaskDraft: ...
     async def list_active_administrators(
-        self, *, exclude_id: UUID
+        self, *, exclude_id: UUID, test_run_id: UUID | None
     ) -> tuple[AdministratorOption, ...]: ...
     async def list_pending_community_publications(
-        self, *, limit: int
+        self, *, actor_id: UUID, limit: int
     ) -> tuple[CommunityPublicationRequest, ...]: ...
     async def claim_text_flow(  # noqa: PLR0913
         self,
@@ -329,6 +331,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         cursor_task_id: UUID | None,
         now: datetime.datetime,
     ) -> tuple[PublishedTask, ...]: ...
+    async def ensure_task_test_access(self, *, task_id: UUID, member_id: UUID) -> None: ...
     async def add_task_outbox(
         self, *, event_type: str, task: PublishedTask, business_key: str
     ) -> None: ...
@@ -423,7 +426,11 @@ class TaskService:
             actor = await _active_actor(uow, actor_telegram_user_id)
             if actor.role is not MemberRole.ADMINISTRATOR:
                 raise PermissionError("Only an administrator may select a community reviewer.")
-            return await uow.list_active_administrators(exclude_id=actor.id)
+            draft = await uow.get_current_task_draft(actor.id)
+            return await uow.list_active_administrators(
+                exclude_id=actor.id,
+                test_run_id=None if draft is None else draft.test_run_id,
+            )
 
     async def pending_community_publications(
         self, *, actor_telegram_user_id: int, limit: int = 10
@@ -434,7 +441,7 @@ class TaskService:
         async with self._unit_of_work_factory() as uow:
             actor = await _active_actor(uow, actor_telegram_user_id)
             _require_superadministrator(actor)
-            return await uow.list_pending_community_publications(limit=limit)
+            return await uow.list_pending_community_publications(actor_id=actor.id, limit=limit)
 
     async def select_community_reviewer(
         self,

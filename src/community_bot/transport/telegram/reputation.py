@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
     from community_bot.application.conversations import TextFlow
+    from community_bot.application.member_foundation import MemberFoundationService
     from community_bot.application.moderation import ModerationService
     from community_bot.application.reputation import (
         KarmaDraft,
@@ -264,6 +265,7 @@ async def send_member_catalog(
     message: Message,
     service: ReputationService,
     moderation: ModerationService | None = None,
+    foundation: MemberFoundationService | None = None,
 ) -> None:
     """Render member cards and the actions available to the current actor."""
     if message.from_user is None:
@@ -272,6 +274,10 @@ async def send_member_catalog(
         page = await service.members(telegram_user_id=message.from_user.id)
         admin_actions = bool(
             moderation is not None and await moderation.is_administrator(message.from_user.id)
+        )
+        superadmin_actions = bool(
+            foundation is not None
+            and await foundation.is_active_superadministrator(message.from_user.id)
         )
         if not page.items:
             await message.answer("Каталог участников пока пуст.")
@@ -299,6 +305,19 @@ async def send_member_catalog(
                         InlineKeyboardButton(
                             text="Ограничить на 7 дней",
                             callback_data=f"mod:restrict:{item.member_id.hex}",
+                        ),
+                    ]
+                )
+            if superadmin_actions:
+                buttons.extend(
+                    [
+                        InlineKeyboardButton(
+                            text="Назначить администратором",
+                            callback_data=f"member:role:administrator:{item.member_id.hex}",
+                        ),
+                        InlineKeyboardButton(
+                            text="Снять права администратора",
+                            callback_data=f"member:role:member:{item.member_id.hex}",
                         ),
                     ]
                 )
