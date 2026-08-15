@@ -421,6 +421,171 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     await database.dispose()
 
 
+async def test_freeform_draft_edits_every_preview_field_and_uses_slot_counter(  # noqa: PLR0915
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    admin = await _member(database, 81_301, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_302)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    actors = _actors(author.telegram_user_id)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    send_message, send_callback = _transport(dispatcher, bot, actors)
+    next_update = 81_310
+
+    async def press(callback_data: str) -> None:
+        nonlocal next_update
+        capture.callbacks.clear()
+        await send_callback(next_update, author.telegram_user_id, callback_data)
+        next_update += 1
+
+    async def press_visible(predicate: Callable[[str], bool]) -> None:
+        await press(_visible(capture, predicate))
+
+    async def answer(text: str) -> None:
+        nonlocal next_update
+        capture.callbacks.clear()
+        await send_message(next_update, author.telegram_user_id, text)
+        next_update += 1
+
+    async def open_preview() -> None:
+        await press_visible(lambda value: value == "task:step:preview")
+
+    await send_message(next_update, author.telegram_user_id, CREATE_TASK_COMMAND)
+    next_update += 1
+    await press_visible(lambda value: value == "task:step:kind:group")
+    await press_visible(lambda value: value.startswith("task:step:cat:"))
+    await press_visible(lambda value: value == "task:step:size:s")
+
+    await press_visible(
+        lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":-5")
+    )
+    assert capture.callback_answers[-1] == "Минимум — 2 исполнителя."
+    assert capture.texts[-1].startswith("Количество исполнителей: 2.")
+    await press_visible(
+        lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":5")
+    )
+    await press_visible(
+        lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":-1")
+    )
+    await press_visible(
+        lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":1")
+    )
+    assert capture.texts[-1].startswith("Количество исполнителей: 7.")
+    await press_visible(lambda value: value.startswith("task:step:slots:confirm:"))
+    await press_visible(lambda value: value == "task:step:reward:2")
+    for value in (
+        "Первоначальное название",
+        "Первоначальное описание задания.",
+        "Первоначальные критерии результата.",
+        "https://example.com/initial",
+    ):
+        await answer(value)
+    await press_visible(lambda value: value.startswith("task:step:days:"))
+    await press_visible(lambda value: value == "task:step:online")
+    await open_preview()
+
+    original_edit_callbacks = {
+        callback.rsplit(":", 1)[-1]: callback
+        for callback in capture.callbacks
+        if callback.startswith("task:edit:")
+    }
+    assert set(original_edit_callbacks) == {
+        "tk",
+        "cat",
+        "ts",
+        "sl",
+        "rw",
+        "ti",
+        "ds",
+        "cc",
+        "mt",
+        "dl",
+        "fm",
+    }
+
+    async def edit(code: str) -> None:
+        await press(original_edit_callbacks[code])
+        assert capture.callback_answers[-1] == "Можно изменить пункт."
+
+    async def finish_edit() -> None:
+        assert "task:step:preview" in capture.callbacks
+        await open_preview()
+
+    await edit("tk")
+    await press_visible(lambda value: value == "task:step:kind:group")
+    await finish_edit()
+
+    await edit("cat")
+    await press_visible(lambda value: value.startswith("task:step:cat:"))
+    await finish_edit()
+
+    await edit("ts")
+    await press_visible(lambda value: value == "task:step:size:m")
+    await press_visible(lambda value: value == "task:step:reward:4")
+    await finish_edit()
+
+    await edit("sl")
+    await press_visible(
+        lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":1")
+    )
+    await press_visible(lambda value: value.startswith("task:step:slots:confirm:"))
+    await finish_edit()
+
+    await edit("rw")
+    await press_visible(lambda value: value == "task:step:reward:5")
+    await finish_edit()
+
+    for code, value in (
+        ("ti", "Обновлённое название"),
+        ("ds", "Обновлённое описание задания."),
+        ("cc", "Обновлённые критерии результата."),
+        ("mt", "https://example.com/updated"),
+    ):
+        await edit(code)
+        await answer(value)
+        await finish_edit()
+
+    await edit("dl")
+    await press_visible(lambda value: value.startswith("task:step:days:"))
+    await finish_edit()
+
+    await edit("fm")
+    await press_visible(lambda value: value == "task:step:online")
+    await finish_edit()
+
+    await edit("ds")
+    await press(original_edit_callbacks["ti"])
+    assert capture.callback_answers[-1] == (
+        "Черновик уже изменился. Откройте его заново."  # noqa: RUF001
+    )
+    await answer("Финальное описание после проверки конфликта.")
+    await finish_edit()
+
+    draft = await TaskService(database.unit_of_work).current(
+        actor_telegram_user_id=author.telegram_user_id
+    )
+    assert draft is not None
+    assert draft.current_step is TaskDraftStep.PREVIEW
+    assert draft.performer_slots == 8
+    assert draft.credit_reward_per_performer == 5
+    assert draft.title == "Обновлённое название"
+    assert draft.description == "Финальное описание после проверки конфликта."
+    assert draft.completion_criteria == "Обновлённые критерии результата."
+    assert draft.materials == {"text": "https://example.com/updated"}
+    assert all(len(value.encode()) <= 64 for value in capture.callbacks)
+    await bot.session.close()
+    await database.dispose()
+
+
 async def test_author_cancels_published_task_through_visible_confirmation(  # noqa: PLR0915
     database_url: str,
 ) -> None:
@@ -1582,8 +1747,34 @@ async def _complete_freeform_creation(  # noqa: PLR0913
     await _click(capture, send_callback, next_update, actor_id, "task:step:size:s")
     next_update += 1
     if group_slots is not None:
+        if group_slots < 2:
+            message = "Group slot count must be at least two."
+            raise ValueError(message)
+        remaining = group_slots - 2
+        while remaining >= 5:
+            callback = _visible(
+                capture,
+                lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":5"),
+            )
+            capture.callbacks.clear()
+            await send_callback(next_update, actor_id, callback)
+            remaining -= 5
+            next_update += 1
+        while remaining:
+            callback = _visible(
+                capture,
+                lambda value: value.startswith("task:step:slots:adjust:") and value.endswith(":1"),
+            )
+            capture.callbacks.clear()
+            await send_callback(next_update, actor_id, callback)
+            remaining -= 1
+            next_update += 1
         await _click(
-            capture, send_callback, next_update, actor_id, f"task:step:slots:{group_slots}"
+            capture,
+            send_callback,
+            next_update,
+            actor_id,
+            "task:step:slots:confirm:",
         )
         next_update += 1
     await _click(capture, send_callback, next_update, actor_id, "task:step:reward:2")

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 
@@ -62,6 +63,7 @@ _VIEW_CLOSE_PREFIX = "task:view:close:"
 _CALLBACK_LIMIT = 64
 _PREVIEW_EDIT_ROW_SIZE = 2
 _SINGULAR_CREDIT_TEEN = 11
+_SLOT_ADJUSTMENTS = (-5, -1, 1, 5)
 
 
 def build_task_router(
@@ -222,6 +224,63 @@ def build_task_router(
                 value = TaskTimeSize(action.removeprefix("size:"))
             elif action.startswith("reward:"):
                 value = int(action.removeprefix("reward:"))
+            elif action.startswith("slots:adjust:"):
+                raw_draft_id, raw_revision, raw_delta = action.removeprefix("slots:adjust:").split(
+                    ":", 2
+                )
+                callback_draft_id = _decode_uuid(raw_draft_id)
+                if callback_draft_id != draft.id:
+                    raise StaleTaskDraftError("Task draft step or revision is stale.")
+                previous_slots = draft.performer_slots
+                updated = await service.adjust_draft_slots(
+                    update_id=event_update.update_id,
+                    actor_telegram_user_id=callback.from_user.id,
+                    draft_id=callback_draft_id,
+                    expected_revision=int(raw_revision),
+                    delta=int(raw_delta),
+                )
+                answer = (
+                    "Минимум — 2 исполнителя."
+                    if int(raw_delta) < 0 and updated.performer_slots == previous_slots
+                    else f"Исполнителей: {updated.performer_slots}"
+                )
+                await callback.answer(answer)
+                if isinstance(callback.message, Message):
+                    await _refresh_slot_counter(
+                        callback.message,
+                        updated,
+                        service=service,
+                        actor_telegram_user_id=callback.from_user.id,
+                    )
+                return
+            elif action.startswith("slots:confirm:"):
+                raw_draft_id, raw_revision = action.removeprefix("slots:confirm:").split(":", 1)
+                callback_draft_id = _decode_uuid(raw_draft_id)
+                if callback_draft_id != draft.id:
+                    raise StaleTaskDraftError("Task draft step or revision is stale.")
+                expected_revision = int(raw_revision)
+                if draft.performer_slots is None:
+                    raise TaskError("Task performer slots are missing.")
+                updated = await service.advance(
+                    AdvanceDraftCommand(
+                        event_update.update_id,
+                        callback.from_user.id,
+                        callback_draft_id,
+                        TaskDraftStep.SLOTS,
+                        expected_revision,
+                        draft.performer_slots,
+                    )
+                )
+                await callback.answer("Количество сохранено.")
+                if isinstance(callback.message, Message):
+                    await _clear_callback_markup(callback.message)
+                    await _send_draft_prompt(
+                        callback.message,
+                        updated,
+                        service=service,
+                        actor_telegram_user_id=callback.from_user.id,
+                    )
+                return
             elif action.startswith("days:"):
                 days = int(action.removeprefix("days:"))
                 value: object = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=days)
@@ -256,6 +315,7 @@ def build_task_router(
             )
             await callback.answer()
             if isinstance(callback.message, Message):
+                await _clear_callback_markup(callback.message)
                 await _send_draft_prompt(
                     callback.message,
                     updated,
@@ -279,6 +339,7 @@ def build_task_router(
             )
             await callback.answer("Можно изменить пункт.")
             if isinstance(callback.message, Message):
+                await _clear_callback_markup(callback.message)
                 await _send_draft_prompt(
                     callback.message,
                     updated,
@@ -645,6 +706,7 @@ def _preview_edit_rows(draft: TaskDraft) -> list[list[InlineKeyboardButton]]:
         (
             (TaskDraftStep.INPUT, "Данные"),
             (TaskDraftStep.MATERIALS, "Материалы"),
+            (TaskDraftStep.SLOTS, "Исполнители"),
         )
         if draft.template_id is not None
         else (
@@ -773,7 +835,12 @@ def _draft_prompt(draft: TaskDraft) -> str:
         TaskDraftStep.DEADLINE: "Выберите срок выполнения.",
         TaskDraftStep.FORMAT: "Выберите онлайн или отправьте город для очного задания.",
         TaskDraftStep.MATERIALS: "Отправьте материалы или нажмите «Не нужны».",
-        TaskDraftStep.SLOTS: "Выберите число исполнителей.",
+        TaskDraftStep.SLOTS: (
+            f"Количество исполнителей: {draft.performer_slots or 2}.\n"
+            "Минимум для группового задания — 2."
+            if draft.template_id is None and draft.task_kind is TaskKind.GROUP
+            else "Выберите число исполнителей."
+        ),
         TaskDraftStep.PREVIEW: "Черновик готов. Откройте предпросмотр.",
         TaskDraftStep.PUBLISHED: "Этот черновик уже опубликован.",
     }
@@ -855,17 +922,9 @@ async def _send_draft_prompt(  # noqa: PLR0912
             ]
         ]
     elif draft.current_step is TaskDraftStep.SLOTS:
-        if draft.template_id is None and draft.performer_slots is None:
-            rows = [
-                [
-                    InlineKeyboardButton(
-                        text=str(value),
-                        callback_data=f"{_STEP_PREFIX}slots:{value}",
-                    )
-                    for value in (2, 3, 5)
-                ]
-            ]
-        elif draft.performer_slots is None:
+        if draft.template_id is None and draft.task_kind is TaskKind.GROUP:
+            rows = _slot_counter_rows(draft)
+        elif draft.template_id is not None:
             rows = [
                 [
                     InlineKeyboardButton(
@@ -875,15 +934,15 @@ async def _send_draft_prompt(  # noqa: PLR0912
                     for value in range(1, 4)
                 ]
             ]
-        else:
-            rows = [
-                [
-                    InlineKeyboardButton(
-                        text="Предпросмотр",
-                        callback_data=f"{_STEP_PREFIX}preview",
-                    )
-                ]
-            ]
+            if draft.performer_slots is not None:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text="Предпросмотр",
+                            callback_data=f"{_STEP_PREFIX}preview",
+                        )
+                    ]
+                )
     elif draft.current_step is TaskDraftStep.PREVIEW:
         rows = [
             [
@@ -897,6 +956,57 @@ async def _send_draft_prompt(  # noqa: PLR0912
         prompt,
         reply_markup=None if not rows else InlineKeyboardMarkup(inline_keyboard=rows),
     )
+
+
+def _slot_counter_rows(draft: TaskDraft) -> list[list[InlineKeyboardButton]]:
+    adjustment_row = [
+        InlineKeyboardButton(
+            text=f"{value:+d}".replace("-", "−"),
+            callback_data=(
+                f"{_STEP_PREFIX}slots:adjust:{_encode_uuid(draft.id)}:{draft.revision}:{value}"
+            ),
+        )
+        for value in _SLOT_ADJUSTMENTS
+    ]
+    return [
+        adjustment_row,
+        [
+            InlineKeyboardButton(
+                text="Готово",
+                callback_data=(
+                    f"{_STEP_PREFIX}slots:confirm:{_encode_uuid(draft.id)}:{draft.revision}"
+                ),
+            )
+        ],
+    ]
+
+
+async def _refresh_slot_counter(
+    message: Message,
+    draft: TaskDraft,
+    *,
+    service: TaskService,
+    actor_telegram_user_id: int,
+) -> None:
+    try:
+        await message.edit_text(
+            _draft_prompt(draft),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=_slot_counter_rows(draft)),
+        )
+    except TelegramAPIError:
+        await _send_draft_prompt(
+            message,
+            draft,
+            service=service,
+            actor_telegram_user_id=actor_telegram_user_id,
+        )
+
+
+async def _clear_callback_markup(message: Message) -> None:
+    try:
+        await message.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError:
+        return
 
 
 def _parse_publish_callback(value: str) -> tuple[UUID, int]:
