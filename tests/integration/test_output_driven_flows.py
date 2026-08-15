@@ -52,7 +52,7 @@ from community_bot.domain.members import (
     MemberRole,
 )
 from community_bot.domain.notifications import DeliveryWindow
-from community_bot.domain.tasks import TaskDraftStep, TaskError
+from community_bot.domain.tasks import TaskDraftStep, TaskError, TaskStatus
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.assignment_deadlines import PostgresAssignmentDeadlineSource
 from community_bot.infrastructure.db.models import (
@@ -160,22 +160,19 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
 
     capture.callbacks.clear()
     await send_message(81_108, performer.telegram_user_id, CREATE_TASK_COMMAND)
-    template = _visible(capture, lambda value: value.startswith("nav:create:"))
-    capture.callbacks.clear()
-    await send_callback(81_109, performer.telegram_user_id, template)
-    await send_message(
-        81_110,
-        performer.telegram_user_id,
-        "Нужно внимательно посмотреть материал и дать практичную обратную связь.",
+    await _complete_freeform_creation(
+        capture,
+        send_message,
+        send_callback,
+        update_base=81_130,
+        actor_id=performer.telegram_user_id,
+        title="Практичная обратная связь",
+        details="Нужно внимательно посмотреть материал и дать практичную обратную связь.",
+        criteria="Есть понятный список наблюдений и конкретный итоговый вывод.",
+        materials="Ссылка будет в описании задания.",
     )
-    await _click(capture, send_callback, 81_111, performer.telegram_user_id, "task:step:days:")
-    await _click(capture, send_callback, 81_112, performer.telegram_user_id, "task:step:online")
-    capture.callbacks.clear()
-    await send_message(81_113, performer.telegram_user_id, "Ссылка будет в описании задания.")
-    await _click(capture, send_callback, 81_114, performer.telegram_user_id, "task:step:slots:")
-    await _click(capture, send_callback, 81_115, performer.telegram_user_id, "task:step:preview")
     publish = _visible(capture, lambda value: value.startswith("task:pub:"))
-    await send_callback(81_116, performer.telegram_user_id, publish)
+    await send_callback(81_140, performer.telegram_user_id, publish)
 
     async with sessions() as session:
         assignment = await session.scalar(
@@ -229,14 +226,17 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     materials = "https://example.com/landing-review"
 
     await send_message(81_210, author.telegram_user_id, CREATE_TASK_COMMAND)
-    template = _visible(capture, lambda value: value.startswith("nav:create:"))
-    capture.callbacks.clear()
-    await send_callback(81_211, author.telegram_user_id, template)
-    await send_message(81_212, author.telegram_user_id, details)
-    await _click(capture, send_callback, 81_213, author.telegram_user_id, "task:step:days:")
-    await _click(capture, send_callback, 81_214, author.telegram_user_id, "task:step:online")
-    await send_message(81_215, author.telegram_user_id, materials)
-    await _click(capture, send_callback, 81_216, author.telegram_user_id, "task:step:slots:1")
+    await _complete_freeform_creation(
+        capture,
+        send_message,
+        send_callback,
+        update_base=81_230,
+        actor_id=author.telegram_user_id,
+        title="Проверить первый экран",
+        details=details,
+        criteria="Есть три конкретных улучшения и короткий вывод о ясности.",  # noqa: RUF001
+        materials=materials,
+    )
     capture.texts.clear()
     capture.callbacks.clear()
     await dispatcher.feed_update(
@@ -343,25 +343,42 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     await send_callback(81_223, author.telegram_user_id, cancel_request)
     cancel_confirm = _visible_on_text(
         capture,
-        lambda text: "Запросить отмену" in text,
+        lambda text: "Завершить набор" in text,
         lambda value: value.startswith("task:cancel:req:"),
     )
     await send_callback(81_224, author.telegram_user_id, cancel_confirm)
-    assert capture.callback_answers[-1] == "Запрос отправлен исполнителю."
+    assert capture.callback_answers[-1] == "Набор завершён."  # noqa: RUF001
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        assert await session.scalar(select(TaskCancellationResponseModel.id)) is not None
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutboxEventModel)
+                .where(OutboxEventModel.event_type == "task.cancellation_requested")
+            )
+        ) == 1
+    capture.texts.clear()
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
     worker = NotificationWorker(
         PostgresNotificationQueue(database.session_factory),
         TelegramNotificationSender(bot),
         delivery_window=DeliveryWindow(start=datetime.time.min, end=datetime.time.max),
         batch_size=100,
     )
-    tick = await worker.tick(now=datetime.datetime.now(datetime.UTC))
-    assert tick.notifications_sent > 0
-    performer_confirmation = _visible_on_text(
-        capture,
-        lambda text: "Автор просит отменить задание" in text,
-        lambda value: value.startswith("task:cancel:yes:"),
-    )
+    notifications_sent = 0
+    for _ in range(3):
+        tick = await worker.tick(now=datetime.datetime.now(datetime.UTC))
+        notifications_sent += tick.notifications_sent
+        if any(value.startswith("task:cancel:yes:") for value in capture.callbacks):
+            break
+        capture.texts.clear()
+        capture.callbacks.clear()
+        capture.button_payloads.clear()
+    assert notifications_sent > 0
+    assert any("сдать результат" in text for text in capture.texts), capture.texts
+    performer_confirmation = _visible(capture, lambda value: value.startswith("task:cancel:yes:"))
     await send_callback(81_225, performer.telegram_user_id, performer_confirmation)
     await send_callback(81_226, performer.telegram_user_id, performer_confirmation)
     assert capture.callback_answers[-1] == "Запрос отмены больше не актуален."
@@ -652,10 +669,10 @@ async def test_performer_declines_creator_cancellation_and_task_stays_active(
         stored_task = await session.get(TaskModel, task.id)
         stored_assignment = await session.get(AssignmentModel, assignment.id)
     assert stored_task is not None
-    assert stored_task.status == "published"
+    assert stored_task.status == TaskStatus.CLOSED_FOR_NEW_PERFORMERS.value
     assert stored_assignment is not None
     assert stored_assignment.status == "accepted"
-    with pytest.raises(TaskError, match="already declined"):
+    with pytest.raises(TaskError, match="current state"):
         await tasks.request_cancellation(
             update_id=81_424,
             actor_telegram_user_id=author.telegram_user_id,
@@ -744,7 +761,7 @@ async def test_accept_and_creator_cancel_are_serialized_in_both_orders(
     assert first_task is not None
     assert first_task.status == "cancelled"
     assert second_task is not None
-    assert second_task.status == "published"
+    assert second_task.status == TaskStatus.CLOSED_FOR_NEW_PERFORMERS.value
     assert second_assignment is not None
     assert second_assignment.status == "accepted"
     await database.dispose()
@@ -849,8 +866,8 @@ async def test_multislot_cancellation_waits_for_every_performer_and_replays(
             .where(AssignmentModel.task_id == task.id, AssignmentModel.status == "accepted")
         )
     assert before_final is not None
-    assert before_final.status == "published"
-    assert active_before_final == 2
+    assert before_final.status == TaskStatus.CLOSED_FOR_NEW_PERFORMERS.value
+    assert active_before_final == 1
     final = await tasks.respond_cancellation(
         update_id=81_624,
         actor_telegram_user_id=second.telegram_user_id,
@@ -964,7 +981,7 @@ async def test_result_submission_obsoletes_pending_cancellation(
     assert stored_assignment is not None
     assert stored_assignment.status == "submitted"
     assert stored_task is not None
-    assert stored_task.status == "published"
+    assert stored_task.status == TaskStatus.CLOSED_FOR_NEW_PERFORMERS.value
     await database.dispose()
 
 
@@ -1116,7 +1133,7 @@ async def test_performer_self_cancel_obsoletes_request_then_author_cancels_free_
     await send_callback(81_920_2, author.telegram_user_id, request_button)
     confirm_button = _visible_on_text(
         capture,
-        lambda text: "Запросить отмену" in text,
+        lambda text: "Завершить набор" in text,
         lambda value: value.startswith("task:cancel:req:"),
     )
     tasks = TaskService(database.unit_of_work)
@@ -1394,8 +1411,22 @@ async def test_last_cancellation_consent_and_draft_confirmation_serialize_both_o
                 .where(
                     AccountTransactionModel.idempotency_key.in_(
                         (
-                            f"task_cancel:{cancel_first_task.id}:refund",
-                            f"task_cancel:{submit_first_task.id}:refund",
+                            (
+                                f"task_cancel:{cancel_first_task.id}:"
+                                f"{cancel_first_assignment.id}:refund"
+                            ),
+                            (
+                                f"task_cancel:{cancel_first_task.id}:"
+                                f"{cancel_last_assignment.id}:refund"
+                            ),
+                            (
+                                f"task_cancel:{submit_first_task.id}:"
+                                f"{submit_first_assignment.id}:refund"
+                            ),
+                            (
+                                f"task_cancel:{submit_first_task.id}:"
+                                f"{submit_last_assignment.id}:refund"
+                            ),
                         )
                     ),
                     AccountTransactionModel.transaction_type == "task_reward_refunded",
@@ -1460,9 +1491,9 @@ async def test_last_cancellation_consent_and_draft_confirmation_serialize_both_o
         obsolete_receipt = await session.get(ProcessedTelegramUpdateModel, 82_131)
 
     assert stored_tasks[cancel_first_task.id].status == "cancelled"
-    assert stored_tasks[submit_first_task.id].status == "published"
+    assert stored_tasks[submit_first_task.id].status == TaskStatus.CLOSED_FOR_NEW_PERFORMERS.value
     assert {stored_assignments[item].status for item in cancel_assignment_ids} == {"cancelled"}
-    assert stored_assignments[submit_first_assignment.id].status == "accepted"
+    assert stored_assignments[submit_first_assignment.id].status == "cancelled"
     assert stored_assignments[submit_last_assignment.id].status == "submitted"
     assert stored_requests[cancel_request_id].status == "completed"
     assert stored_requests[submit_request_id].status == "obsolete"
@@ -1474,15 +1505,25 @@ async def test_last_cancellation_consent_and_draft_confirmation_serialize_both_o
         (submit_request_id, last_performer.id): "obsolete",
     }
     assert refund_by_key == {
-        f"task_cancel:{cancel_first_task.id}:refund": (
+        f"task_cancel:{cancel_first_task.id}:{cancel_first_assignment.id}:refund": (
             1,
-            cancel_first_task.reserved_credit_total,
-        )
+            cancel_first_task.credit_reward_per_performer,
+        ),
+        f"task_cancel:{cancel_first_task.id}:{cancel_last_assignment.id}:refund": (
+            1,
+            cancel_first_task.credit_reward_per_performer,
+        ),
+        f"task_cancel:{submit_first_task.id}:{submit_first_assignment.id}:refund": (
+            1,
+            submit_first_task.credit_reward_per_performer,
+        ),
     }
     assert len(cancellation_audits) == 1
     assert cancellation_audits[0].entity_id == str(cancel_first_task.id)
     assert cancellation_audits[0].actor_member_id == last_performer.id
-    assert {row[0] for row in reliability_rows} == cancel_assignment_ids
+    assert {row[0] for row in reliability_rows} == (
+        cancel_assignment_ids | {submit_first_assignment.id}
+    )
     assert {row[1] for row in reliability_rows} == {"cancelled_creator"}
     assert {row[2] for row in reliability_rows} == {author.id}
     assert cancel_outbox == 1
@@ -1512,6 +1553,50 @@ def _assert_task_card(
     assert materials in text
     assert "Результат:" in text
     assert (text, None) in capture.text_payloads
+
+
+async def _complete_freeform_creation(  # noqa: PLR0913
+    capture: CapturingSession,
+    send_message: MessageSender,
+    send_callback: CallbackSender,
+    *,
+    update_base: int,
+    actor_id: int,
+    title: str,
+    details: str,
+    criteria: str,
+    materials: str,
+    group_slots: int | None = None,
+) -> None:
+    next_update = update_base
+    await _click(
+        capture,
+        send_callback,
+        next_update,
+        actor_id,
+        "task:step:kind:group" if group_slots is not None else "task:step:kind:solo",
+    )
+    next_update += 1
+    await _click(capture, send_callback, next_update, actor_id, "task:step:cat:")
+    next_update += 1
+    await _click(capture, send_callback, next_update, actor_id, "task:step:size:s")
+    next_update += 1
+    if group_slots is not None:
+        await _click(
+            capture, send_callback, next_update, actor_id, f"task:step:slots:{group_slots}"
+        )
+        next_update += 1
+    await _click(capture, send_callback, next_update, actor_id, "task:step:reward:2")
+    next_update += 1
+    for answer in (title, details, criteria, materials):
+        capture.callbacks.clear()
+        await send_message(next_update, actor_id, answer)
+        next_update += 1
+    await _click(capture, send_callback, next_update, actor_id, "task:step:days:")
+    next_update += 1
+    await _click(capture, send_callback, next_update, actor_id, "task:step:online")
+    next_update += 1
+    await _click(capture, send_callback, next_update, actor_id, "task:step:preview")
 
 
 async def test_community_journey_and_admin_surfaces_are_reachable(database_url: str) -> None:  # noqa: PLR0915

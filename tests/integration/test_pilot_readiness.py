@@ -68,12 +68,12 @@ def test_supported_schema_upgrade_preserves_outbox_semantics(
 
 
 def test_empty_database_cycles_and_restores_catalog_seed(database_url: str) -> None:
-    """An empty database returns to head with the canonical eight-by-eight seed."""
+    """An empty database returns to head with the canonical template and free-form seed."""
     url = make_url(database_url)
     _alembic(url, "base", downgrade=True)
     _alembic(url, "head")
     counts = asyncio.run(_catalog_counts(url))
-    assert counts == (8, 8, "0019")
+    assert counts == (15, 8, "0020")
 
 
 def test_migration_retires_synthetic_pilot_rows(database_url: str) -> None:
@@ -86,7 +86,7 @@ def test_migration_retires_synthetic_pilot_rows(database_url: str) -> None:
     assert asyncio.run(_synthetic_cleanup_snapshot(url)) == (
         ("left", "active"),
         ("cancelled", "published"),
-        "0019",
+        "0020",
     )
 
 
@@ -814,7 +814,7 @@ async def _assert_upgraded_snapshot(
             } <= constraints
             assert {"ix_outbox_due", "ix_notifications_due"} <= indexes
             assert (
-                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0019"
+                await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0020"
             )
             invalid_states = (
                 "UPDATE outbox_events SET status='processing' WHERE business_key='pilot:pending'",

@@ -19,6 +19,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from community_bot.application.assignments import (
+    AcceptAssignmentCommand,
+    AssignmentService,
+    SubmitResultCommand,
+)
 from community_bot.application.economy import (
     EconomyService,
     ProductConfigActivationCommand,
@@ -44,15 +49,20 @@ from community_bot.domain.tasks import (
     StaleTaskDraftError,
     TaskDraftStep,
     TaskError,
+    TaskKind,
     TaskStatus,
+    TaskTimeSize,
 )
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
+    AssignmentModel,
     AuditEventModel,
     MemberModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
+    TaskCancellationResponseModel,
+    TaskCategoryModel,
     TaskCreationDraftModel,
     TaskModel,
     TaskTemplateModel,
@@ -176,6 +186,81 @@ async def complete_preview(
     return preview.draft.id, preview.draft.revision
 
 
+async def category_id(database: Database, code: str) -> UUID:
+    async with database.engine.connect() as connection:
+        value = await connection.scalar(
+            select(TaskCategoryModel.id).where(TaskCategoryModel.code == code)
+        )
+    assert value is not None
+    return value
+
+
+async def complete_freeform_preview(  # noqa: PLR0913
+    service: TaskService,
+    *,
+    member: MemberModel,
+    selected_category_id: UUID,
+    update_base: int,
+    kind: TaskKind = TaskKind.SOLO,
+    time_size: TaskTimeSize = TaskTimeSize.S,
+    performer_slots: int = 1,
+    reward: int = 3,
+) -> tuple[UUID, int]:
+    draft = await service.start(
+        update_id=update_base,
+        actor_telegram_user_id=member.telegram_user_id,
+        template_id=None,
+    )
+    assert draft is not None
+    steps: list[tuple[TaskDraftStep, object]] = [
+        (TaskDraftStep.TASK_KIND, kind),
+        (TaskDraftStep.CATEGORY, selected_category_id),
+        (TaskDraftStep.TIME_SIZE, time_size),
+    ]
+    if kind is TaskKind.GROUP:
+        steps.append((TaskDraftStep.SLOTS, performer_slots))
+    steps.extend(
+        [
+            (TaskDraftStep.REWARD, reward),
+            (TaskDraftStep.TITLE, "Проверить новый сценарий"),
+            (
+                TaskDraftStep.DESCRIPTION,
+                "Нужно пройти сценарий и кратко описать понятные и сложные места.",
+            ),
+            (
+                TaskDraftStep.COMPLETION_CRITERIA,
+                "Есть конкретный список наблюдений и итоговый вывод.",
+            ),
+            (TaskDraftStep.MATERIALS, {"text": "Дополнительные материалы не требуются"}),
+            (
+                TaskDraftStep.DEADLINE,
+                datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1),
+            ),
+            (TaskDraftStep.FORMAT, (TaskFormat.ONLINE, None)),
+        ]
+    )
+    current = draft
+    for offset, (step, value) in enumerate(steps, start=1):
+        current = await service.advance(
+            AdvanceDraftCommand(
+                update_base + offset,
+                member.telegram_user_id,
+                current.id,
+                step,
+                current.revision,
+                value,
+            )
+        )
+    preview = await service.preview(
+        update_id=update_base + len(steps) + 1,
+        actor_telegram_user_id=member.telegram_user_id,
+        draft_id=current.id,
+        expected_revision=current.revision,
+    )
+    assert preview.reserved_credit_total == performer_slots * reward
+    return preview.draft.id, preview.draft.revision
+
+
 async def scalar_count(database: Database, model: type[object]) -> int:
     async with database.engine.connect() as connection:
         value = await connection.scalar(select(func.count()).select_from(model))
@@ -238,6 +323,123 @@ class CapturingSession(BaseSession):
         del url, headers, timeout, chunk_size, raise_for_status
         if False:
             yield b""
+
+
+async def test_freeform_task_publishes_without_template_and_reserves_full_budget(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=19_500)
+    service = TaskService(database.unit_of_work)
+    selected_category = await category_id(database, "evaluation_testing")
+
+    categories = await service.task_categories(member.telegram_user_id)
+    assert "evaluation_testing" in {item.code for item in categories}
+    assert "community_development" not in {item.code for item in categories}
+
+    draft_id, revision = await complete_freeform_preview(
+        service,
+        member=member,
+        selected_category_id=selected_category,
+        update_base=19_500,
+        kind=TaskKind.GROUP,
+        time_size=TaskTimeSize.M,
+        performer_slots=2,
+        reward=4,
+    )
+    task = await service.publish(
+        PublishTaskCommand(19_600, member.telegram_user_id, draft_id, revision)
+    )
+    replay = await service.publish(
+        PublishTaskCommand(19_600, member.telegram_user_id, draft_id, revision)
+    )
+
+    assert isinstance(task, PublishedTask)
+    assert isinstance(replay, PublishedTask)
+    assert replay.id == task.id
+    assert task.template_id is None
+    assert task.template_version is None
+    assert task.category_name == "Оценка и тестирование"
+    assert task.time_size is TaskTimeSize.M
+    assert task.performer_slots == 2
+    assert task.credit_reward_per_performer == 4
+    assert task.reserved_credit_total == 8
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        persisted = await session.get(MemberModel, member.id)
+    assert persisted is not None
+    assert persisted.credit_balance_cached == 2
+    await database.dispose()
+
+
+async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    author = await prepare_member(database, telegram_user_id=19_700)
+    performer = await prepare_member(database, telegram_user_id=19_701)
+    stranger = await prepare_member(database, telegram_user_id=19_702)
+    task_service = TaskService(database.unit_of_work)
+    assignment_service = AssignmentService(database.unit_of_work)
+    selected_category = await category_id(database, "promotion")
+    draft_id, revision = await complete_freeform_preview(
+        task_service,
+        member=author,
+        selected_category_id=selected_category,
+        update_base=19_700,
+        kind=TaskKind.GROUP,
+        time_size=TaskTimeSize.S,
+        performer_slots=3,
+        reward=2,
+    )
+    task = await task_service.publish(
+        PublishTaskCommand(19_800, author.telegram_user_id, draft_id, revision)
+    )
+    assignment = await assignment_service.accept(
+        AcceptAssignmentCommand(19_801, performer.telegram_user_id, task.id)
+    )
+
+    outcome = await task_service.request_cancellation(
+        update_id=19_802,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+
+    assert outcome.status == "pending"
+    assert outcome.task.status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
+    available_to_stranger = await task_service.list_available(
+        actor_telegram_user_id=stranger.telegram_user_id
+    )
+    assert not available_to_stranger.items
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        response_id = await session.scalar(select(TaskCancellationResponseModel.id))
+        persisted_author = await session.get(MemberModel, author.id)
+    assert response_id is not None
+    assert persisted_author is not None
+    assert persisted_author.credit_balance_cached == 8
+
+    decline = await task_service.respond_cancellation(
+        update_id=19_803,
+        actor_telegram_user_id=performer.telegram_user_id,
+        response_id=response_id,
+        accepted=False,
+    )
+    assert decline.status == "declined"
+    assert decline.task.status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
+    result = await assignment_service.submit(
+        SubmitResultCommand(
+            19_804,
+            performer.telegram_user_id,
+            assignment.id,
+            uuid4(),
+            {"result": "Подробно описал выполненную работу и приложил вывод."},
+        )
+    )
+    assert result.version == 1
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        stored_assignment = await session.get(AssignmentModel, assignment.id)
+    assert stored_assignment is not None
+    assert stored_assignment.status == "submitted"
+    await database.dispose()
 
 
 async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -> None:

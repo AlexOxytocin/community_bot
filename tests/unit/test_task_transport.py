@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Never, cast
 from uuid import uuid4
@@ -11,17 +12,46 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
-from community_bot.application.tasks import TaskDraft
+from community_bot.application.tasks import (
+    CommunityPublicationRequest,
+    OwnedTaskAssignee,
+    OwnedTaskCard,
+    TaskCategoryOption,
+    TaskDraft,
+)
 from community_bot.domain.catalog import TaskFormat
-from community_bot.domain.tasks import TaskDraftStep, TaskError, TaskStatus
+from community_bot.domain.tasks import (
+    TaskDraftStep,
+    TaskError,
+    TaskKind,
+    TaskStatus,
+    TaskTimeSize,
+)
+from community_bot.transport.telegram import tasks as task_transport
 from community_bot.transport.telegram.tasks import (
+    _cancel_confirmation_keyboard,
     _cancel_error,
+    _cancellation_response_error,
+    _category_prompt,
     _credits,
+    _decode_uuid,
+    _draft_prompt,
+    _edit_callback,
     _encode_uuid,
     _friendly_error,
     _obsolete_cancellation_message,
+    _parse_approval_callback,
+    _parse_edit_callback,
+    _parse_publish_callback,
+    _parse_step_value,
     _required_tail,
+    _reward_prompt,
     build_task_router,
+    cancellation_response_callback,
+    community_publication_approval_keyboard,
+    owned_task_keyboard,
+    owned_task_summary,
+    reviewer_replacement_callback,
     task_cancellation_keyboard,
 )
 from tests.integration.test_task_creation import CapturingSession
@@ -53,6 +83,14 @@ class _DeniedTaskService:
             community_approved_by_admin_id=None,
             community_approved_at=None,
             template_id=uuid4(),
+            category_id=None,
+            task_kind=None,
+            time_size=None,
+            title=None,
+            description=None,
+            completion_criteria=None,
+            credit_reward_per_performer=None,
+            estimated_minutes=None,
             input_payload=None,
             deadline_at=None,
             format=TaskFormat.ONLINE,
@@ -228,3 +266,189 @@ def test_task_transport_formats_credit_forms_and_safe_errors() -> None:
     assert "срок" in _obsolete_cancellation_message("deadline_reached").lower()
     assert "работа уже началась" in _obsolete_cancellation_message("work_started").lower()
     assert "исполнение" in _obsolete_cancellation_message("assignment_cancelled").lower()
+    assert "не найден" in _cancellation_response_error(LookupError("does not exist")).lower()
+    assert "другому" in _cancellation_response_error(PermissionError()).lower()
+
+
+def test_task_transport_parses_freeform_text_steps_and_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text fallback and compact callbacks decode only allowlisted task values."""
+    category_id = uuid4()
+    draft_id = uuid4()
+
+    assert _parse_step_value(TaskDraftStep.TASK_KIND, " GROUP ") is TaskKind.GROUP
+    assert _parse_step_value(TaskDraftStep.CATEGORY, str(category_id)) == category_id
+    assert _parse_step_value(TaskDraftStep.TIME_SIZE, "m") is TaskTimeSize.M
+    assert _parse_step_value(TaskDraftStep.REWARD, "7") == 7
+    assert _parse_step_value(TaskDraftStep.TITLE, "  title  ") == "title"
+    assert _parse_step_value(TaskDraftStep.INPUT, '{"context":"value"}') == {"context": "value"}
+    assert _parse_step_value(TaskDraftStep.INPUT, "plain") == {"_plain_text": "plain"}
+    assert _parse_step_value(TaskDraftStep.MATERIALS, '{"url":"https://example.com"}') == {
+        "url": "https://example.com"
+    }
+    assert _parse_step_value(TaskDraftStep.MATERIALS, "notes") == {"text": "notes"}
+    assert _parse_step_value(TaskDraftStep.FORMAT, "online") == (TaskFormat.ONLINE, None)
+    assert _parse_step_value(TaskDraftStep.FORMAT, "offline Buenos Aires") == (
+        TaskFormat.OFFLINE,
+        "Buenos Aires",
+    )
+    assert _parse_step_value(TaskDraftStep.FORMAT, "Buenos Aires") == (
+        TaskFormat.OFFLINE,
+        "Buenos Aires",
+    )
+    assert _parse_step_value(TaskDraftStep.SLOTS, "42") == 42
+    deadline = cast(
+        "datetime.datetime",
+        _parse_step_value(TaskDraftStep.DEADLINE, "2026-08-15T12:00:00+00:00"),
+    )
+    assert deadline.tzinfo
+
+    with pytest.raises(ValueError, match="Expecting"):
+        _parse_step_value(TaskDraftStep.MATERIALS, "{")
+    monkeypatch.setattr(task_transport.json, "loads", lambda _value: [])
+    with pytest.raises(TaskError, match="object"):
+        _parse_step_value(TaskDraftStep.INPUT, "{}")
+    with pytest.raises(TaskError, match="object"):
+        _parse_step_value(TaskDraftStep.MATERIALS, "{}")
+    with pytest.raises(TaskError):
+        _parse_publish_callback("wrong")
+    with pytest.raises(TaskError):
+        _parse_publish_callback("task:pub:no-separator")
+    with pytest.raises(TaskError):
+        _parse_edit_callback("task:edit:bad")
+    with pytest.raises(TaskError):
+        _parse_edit_callback(f"task:edit:{_encode_uuid(draft_id)}:1:bad")
+    with pytest.raises(TaskError):
+        _parse_approval_callback("task:approve:bad")
+    with pytest.raises(TaskError):
+        _parse_approval_callback("task:approve:no-separator")
+    with pytest.raises(TaskError):
+        _parse_step_value(TaskDraftStep.PUBLISHED, "ignored")
+
+    publish = f"task:pub:{draft_id.hex}:3"
+    assert _parse_publish_callback(publish) == (draft_id, 3)
+    edit = _edit_callback(draft_id, 4, TaskDraftStep.DESCRIPTION)
+    assert _parse_edit_callback(edit) == (draft_id, 4, TaskDraftStep.DESCRIPTION)
+    approval = f"task:approve:{draft_id.hex}:5"
+    assert _parse_approval_callback(approval) == (draft_id, 5)
+
+
+def test_task_transport_builds_task_action_keyboards_and_summaries() -> None:
+    """Creator controls stay compact across free, pending, and closed cards."""
+    task_id = uuid4()
+    creator_id = uuid4()
+    assignee_id = uuid4()
+    task = cast(
+        "PublishedTask",
+        SimpleNamespace(
+            id=task_id,
+            creator_id=creator_id,
+            title="Group task",
+            status=TaskStatus.PUBLISHED,
+            performer_slots=3,
+        ),
+    )
+    assignee = OwnedTaskAssignee(assignee_id, "Performer", "accepted")
+    card = OwnedTaskCard(task=task, assignees=(assignee,), cancellation_status=None)
+
+    summary = owned_task_summary(card)
+    keyboard = owned_task_keyboard(card)
+    cancellation = task_cancellation_keyboard(task)
+    confirmation = _cancel_confirmation_keyboard(task_id, negotiated=True)
+
+    assert "Взято: 1/3" in summary
+    assert "Performer" in summary
+    assert keyboard.inline_keyboard[1][0].text == "Завершить набор"
+    assert cancellation is not None
+    assert cancellation.inline_keyboard[0][0].text == "Завершить набор"
+    assert confirmation.inline_keyboard[0][0].text == "Завершить набор"
+
+    pending = OwnedTaskCard(task=task, assignees=(), cancellation_status="pending")
+    assert "Свободно" in owned_task_summary(pending)
+    assert len(owned_task_keyboard(pending).inline_keyboard) == 1
+
+    closed_task = cast(
+        "PublishedTask",
+        SimpleNamespace(
+            id=uuid4(),
+            creator_id=creator_id,
+            title="Closed task",
+            status=TaskStatus.CLOSED_FOR_NEW_PERFORMERS,
+            performer_slots=2,
+        ),
+    )
+    assert "closed_for_new_performers" in owned_task_summary(
+        OwnedTaskCard(task=closed_task, assignees=(), cancellation_status=None)
+    )
+
+
+def test_task_transport_builds_approval_and_cancellation_callbacks() -> None:
+    """Compact UUID encoding round-trips through public helper callbacks."""
+    draft_id = uuid4()
+    response_id = uuid4()
+    request = CommunityPublicationRequest(
+        draft_id=draft_id,
+        revision=2,
+        creator_display_name="Creator",
+        reviewer_display_name="Reviewer",
+        template_name="Community task",
+        requested_at=datetime.datetime(2026, 8, 15, tzinfo=datetime.UTC),
+    )
+
+    approval = community_publication_approval_keyboard((request,))
+    assert approval is not None
+    callback = approval.inline_keyboard[0][0].callback_data
+    assert callback is not None
+    assert _parse_approval_callback(callback) == (draft_id, 2)
+    assert community_publication_approval_keyboard(()) is None
+
+    replacement = reviewer_replacement_callback(draft_id)
+    assert _decode_uuid(replacement.removeprefix("task:rr:")) == draft_id
+    accepted = cancellation_response_callback(str(response_id), accepted=True)
+    declined = cancellation_response_callback(str(response_id), accepted=False)
+    assert _decode_uuid(accepted.removeprefix("task:cancel:yes:")) == response_id
+    assert _decode_uuid(declined.removeprefix("task:cancel:nope:")) == response_id
+
+
+def test_task_transport_renders_freeform_prompt_texts() -> None:
+    """Draft prompts explain current choices while keeping buttons compact."""
+    draft = _DeniedTaskService().draft
+    freeform = replace(draft, template_id=None, task_kind=TaskKind.GROUP)
+
+    assert "тип задания" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.TASK_KIND))
+    assert "категорию" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.CATEGORY))
+    assert "примерное время" in _draft_prompt(
+        replace(freeform, current_step=TaskDraftStep.TIME_SIZE)
+    )
+    assert "Лимит: 80" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.TITLE))
+    assert "Лимит: 1200" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.DESCRIPTION))
+    assert "Лимит: 700" in _draft_prompt(
+        replace(freeform, current_step=TaskDraftStep.COMPLETION_CRITERIA)
+    )
+    assert "обычным сообщением" in _draft_prompt(replace(draft, current_step=TaskDraftStep.INPUT))
+    assert "срок" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.DEADLINE))
+    assert "онлайн" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.FORMAT))
+    assert "материалы" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.MATERIALS))
+    assert "число исполнителей" in _draft_prompt(
+        replace(freeform, current_step=TaskDraftStep.SLOTS)
+    )
+    assert "предпросмотр" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.PREVIEW))
+    assert "опубликован" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.PUBLISHED))
+
+    assert "награду" in _reward_prompt(replace(freeform, time_size=None))
+    assert "2, 3, 4" in _reward_prompt(replace(freeform, time_size=TaskTimeSize.S))
+    assert "больше 10" in _reward_prompt(replace(freeform, time_size=TaskTimeSize.XL))
+
+    category = TaskCategoryOption(
+        id=uuid4(),
+        code="other",
+        name="Other",
+        description="Fallback category",
+        icon="🧩",
+        visibility="public",
+    )
+    category_prompt = _category_prompt((category,))
+    assert "Выберите категорию" in category_prompt
+    assert "🧩 Other" in category_prompt
+    assert "Fallback category" in category_prompt

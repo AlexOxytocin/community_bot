@@ -27,6 +27,8 @@ class TaskError(ValueError):
 
 _MAX_MATERIAL_LENGTH = 2000
 _MAX_URL_LENGTH = 700
+_MIN_FREEFORM_RESULT_LENGTH = 10
+_XL_MIN_REWARD_EXCLUSIVE = 10
 _HTTP_URL = TypeAdapter(HttpUrl)
 _URI_SCHEME = re.compile(r"\b([a-z][a-z0-9+.-]*):\/\/", re.IGNORECASE)
 _HTTP_URI = re.compile(r"https?:\/\/[^\s]+", re.IGNORECASE)
@@ -40,6 +42,13 @@ class StaleTaskDraftError(TaskError):
 class TaskDraftStep(StrEnum):
     """Persistent creation flow steps."""
 
+    TASK_KIND = "task_kind"
+    CATEGORY = "category"
+    TIME_SIZE = "time_size"
+    REWARD = "reward"
+    TITLE = "title"
+    DESCRIPTION = "description"
+    COMPLETION_CRITERIA = "completion_criteria"
     INPUT = "input"
     DEADLINE = "deadline"
     FORMAT = "format"
@@ -53,6 +62,7 @@ class TaskStatus(StrEnum):
     """Task states owned by the creation workflow."""
 
     PUBLISHED = "published"
+    CLOSED_FOR_NEW_PERFORMERS = "closed_for_new_performers"
     SETTLING = "settling"
     EXPIRED = "expired"
     PARTIALLY_COMPLETED = "partially_completed"
@@ -67,6 +77,50 @@ class AcceptanceTaskSnapshot:
     creator_id: UUID | None
     status: TaskStatus
     minimum_level: int
+
+
+class TaskKind(StrEnum):
+    """Free-form task audience shape selected by the creator."""
+
+    SOLO = "solo"
+    GROUP = "group"
+
+
+class TaskTimeSize(StrEnum):
+    """Creator-facing approximate duration bucket."""
+
+    XS = "xs"
+    S = "s"
+    M = "m"
+    L = "l"
+    XL = "xl"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskTimeSizeSpec:
+    """Display and validation rules for one free-form task size."""
+
+    icon: str
+    code: str
+    label: str
+    estimated_minutes: int
+    reward_options: tuple[int, ...] | None
+    minimum_reward: int
+
+
+TITLE_LIMIT = 80
+DESCRIPTION_LIMIT = 1200
+COMPLETION_CRITERIA_LIMIT = 700
+FREEFORM_MATERIALS_TEXT_LIMIT = 1000
+FREEFORM_RESULT_LIMIT = 2000
+
+TASK_TIME_SIZE_SPECS: dict[TaskTimeSize, TaskTimeSizeSpec] = {
+    TaskTimeSize.XS: TaskTimeSizeSpec("⚡", "XS", "до 15 минут", 15, (1, 2), 1),
+    TaskTimeSize.S: TaskTimeSizeSpec("⭐", "S", "15-40 минут", 40, (2, 3, 4), 2),
+    TaskTimeSize.M: TaskTimeSizeSpec("💎", "M", "40-75 минут", 75, (4, 5, 6, 7), 4),
+    TaskTimeSize.L: TaskTimeSizeSpec("🏆", "L", "75-120 минут", 120, (6, 7, 8, 9, 10), 6),
+    TaskTimeSize.XL: TaskTimeSizeSpec("👑", "XL", "больше 120 минут", 121, None, 11),
+}
 
 
 def validate_deadline(value: datetime.datetime, *, now: datetime.datetime) -> datetime.datetime:
@@ -107,6 +161,112 @@ def validate_slots(value: int, *, maximum: int) -> int:
         message = "Task performer slots exceed the template limit."
         raise TaskError(message)
     return value
+
+
+def validate_task_kind(value: object) -> TaskKind:
+    """Normalize the free-form task kind chosen by the creator."""
+    try:
+        kind = value if isinstance(value, TaskKind) else TaskKind(str(value))
+    except ValueError as error:
+        message = "Task kind must be solo or group."
+        raise TaskError(message) from error
+    return kind
+
+
+def validate_time_size(value: object) -> TaskTimeSize:
+    """Normalize the free-form task duration bucket."""
+    try:
+        return value if isinstance(value, TaskTimeSize) else TaskTimeSize(str(value).lower())
+    except ValueError as error:
+        message = "Task time size is invalid."
+        raise TaskError(message) from error
+
+
+def validate_freeform_slots(value: int, *, kind: TaskKind) -> int:
+    """Validate unconstrained performer slots for a free-form task."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        message = "Task performer slots must be a positive integer."
+        raise TaskError(message)
+    if kind is TaskKind.SOLO and value != 1:
+        message = "Solo task must have exactly one performer."
+        raise TaskError(message)
+    if kind is TaskKind.GROUP and value <= 1:
+        message = "Group task must have at least two performers."
+        raise TaskError(message)
+    return value
+
+
+def validate_freeform_reward(size: TaskTimeSize, value: int) -> int:
+    """Validate one creator-selected reward against the selected size bucket."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        message = "Task reward must be an integer."
+        raise TaskError(message)
+    spec = TASK_TIME_SIZE_SPECS[size]
+    if spec.reward_options is not None:
+        if value not in spec.reward_options:
+            message = "Task reward is outside the selected size options."
+            raise TaskError(message)
+    elif value <= _XL_MIN_REWARD_EXCLUSIVE:
+        message = "XL task reward must be greater than 10."
+        raise TaskError(message)
+    return value
+
+
+def validate_freeform_text(value: object, *, field: str) -> str:
+    """Validate creator-authored text fields with field-specific limits."""
+    limits = {
+        "title": TITLE_LIMIT,
+        "description": DESCRIPTION_LIMIT,
+        "completion_criteria": COMPLETION_CRITERIA_LIMIT,
+    }
+    if field not in limits:
+        message = "Task text field is invalid."
+        raise TaskError(message)
+    if not isinstance(value, str):
+        message = "Task text must be a string."
+        raise TaskError(message)
+    normalized = value.strip()
+    if not normalized:
+        message = "Task text cannot be empty."
+        raise TaskError(message)
+    if len(normalized) > limits[field]:
+        message = "Task text exceeds the configured character limit."
+        raise TaskError(message)
+    validate_public_text_uris(normalized)
+    return normalized
+
+
+def validate_freeform_materials(value: Mapping[str, object]) -> dict[str, object]:
+    """Validate optional creator-supplied materials for a free-form task."""
+    normalized = validate_materials(value)
+    text_value = normalized.get("text")
+    if isinstance(text_value, str) and len(text_value) > FREEFORM_MATERIALS_TEXT_LIMIT:
+        message = "Task material text exceeds the configured character limit."
+        raise TaskError(message)
+    return normalized
+
+
+def validate_freeform_result_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Validate the standard result payload used by free-form tasks."""
+    if set(payload) != {"result"}:
+        message = "Free-form task result must contain only result."
+        raise TaskError(message)
+    result = payload.get("result")
+    if not isinstance(result, str):
+        message = "Free-form task result must be text."
+        raise TaskError(message)
+    normalized = result.strip()
+    if len(normalized) < _MIN_FREEFORM_RESULT_LENGTH or len(normalized) > FREEFORM_RESULT_LIMIT:
+        message = "Free-form task result length is invalid."
+        raise TaskError(message)
+    validate_public_text_uris(normalized)
+    return {"result": normalized}
+
+
+def task_time_size_label(size: TaskTimeSize) -> str:
+    """Return the compact creator-facing duration label."""
+    spec = TASK_TIME_SIZE_SPECS[size]
+    return f"{spec.icon} {spec.code} · {spec.label}"
 
 
 def validate_materials(value: Mapping[str, object]) -> dict[str, object]:

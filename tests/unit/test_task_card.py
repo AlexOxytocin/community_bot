@@ -8,9 +8,17 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+import pytest
+
+from community_bot.application.tasks import TaskDraft, TaskPreview
 from community_bot.domain.catalog import TaskFormat
+from community_bot.domain.tasks import TaskDraftStep, TaskKind, TaskTimeSize
 from community_bot.infrastructure.db.tasks import published_task_from_model
-from community_bot.transport.telegram.task_card import published_task_card
+from community_bot.transport.telegram.task_card import (
+    TaskCardError,
+    preview_task_card,
+    published_task_card,
+)
 
 if TYPE_CHECKING:
     from community_bot.application.tasks import PublishedTask
@@ -131,6 +139,91 @@ def test_task_card_omits_unsafe_uris_from_legacy_published_snapshot() -> None:
     assert "tg:resolve" not in text
     assert "javascript:" not in text
     assert "file:C:" not in text
+
+
+def test_task_card_renders_freeform_metadata_and_nested_leaf_values() -> None:
+    """Free-form metadata and primitive leaf values survive card rendering."""
+    task = _task(
+        category_icon="💎",
+        category_name="Evaluation",
+        time_size=TaskTimeSize.XL,
+        performer_slots=4,
+        input_payload={
+            "context": {
+                "confirmed": True,
+                "rejected": False,
+                "count": 3,
+                "score": 1.5,
+                "items": ["nested value", ("tuple value",)],
+                "unsafe": "javascript:alert(1)",
+            }
+        },
+        public_input_keys=("context",),
+        materials={"text": "safe public material"},
+    )
+
+    text = published_task_card(task)
+
+    assert "Категория: 💎 Evaluation" in text
+    assert "Размер: 👑 XL · больше 120 минут" in text
+    assert "Исполнителей: 4" in text
+    assert "Да" in text
+    assert "Нет" in text
+    assert "3" in text
+    assert "1.5" in text
+    assert "nested value" in text
+    assert "tuple value" in text
+    assert "javascript:" not in text
+
+
+def test_preview_card_rejects_incomplete_internal_projection() -> None:
+    """Preview rendering fails loudly when required draft fields are absent."""
+    draft = TaskDraft(
+        id=uuid4(),
+        creator_id=uuid4(),
+        origin="member",
+        reviewer_admin_id=None,
+        community_approval_requested_at=None,
+        community_approved_by_admin_id=None,
+        community_approved_at=None,
+        template_id=None,
+        category_id=uuid4(),
+        task_kind=TaskKind.SOLO,
+        time_size=TaskTimeSize.S,
+        title="Title",
+        description="Description",
+        completion_criteria="Criteria",
+        credit_reward_per_performer=2,
+        estimated_minutes=40,
+        input_payload={"description": "Description"},
+        deadline_at=datetime.datetime(2026, 8, 14, 19, 7, tzinfo=datetime.UTC),
+        format=TaskFormat.ONLINE,
+        city=None,
+        materials=None,
+        performer_slots=1,
+        current_step=TaskDraftStep.PREVIEW,
+        revision=1,
+        is_current=True,
+        publish_command_id=uuid4(),
+    )
+    preview = TaskPreview(
+        draft=draft,
+        author_display_name="Author",
+        category_name="Evaluation",
+        category_icon="💎",
+        task_kind=TaskKind.SOLO,
+        time_size=TaskTimeSize.S,
+        template_name="Title",
+        template_description="Description",
+        performer_instructions="Do the work.",
+        public_input_keys=("description",),
+        completion_criteria="Criteria",
+        credit_reward_per_performer=2,
+        reserved_credit_total=2,
+    )
+
+    with pytest.raises(TaskCardError):
+        preview_task_card(preview)
 
 
 def test_legacy_snapshot_uses_all_previously_validated_input_fields() -> None:

@@ -84,7 +84,7 @@ class TelegramNotificationSender:
                 raise NotificationProcessingError(_UNSUPPORTED_NOTIFICATION_TYPE, permanent=True)
             text = (
                 f"Автор просит отменить задание «{title}».\n"
-                "Если вы ещё не начали работу, подтвердите отмену."
+                "Можно согласиться отменить или продолжить и сдать результат автору."
             )
             reply_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -96,7 +96,7 @@ class TelegramNotificationSender:
                             ),
                         ),
                         InlineKeyboardButton(
-                            text="Уже начал(а)",
+                            text="Сдать результат",
                             callback_data=cancellation_response_callback(
                                 response_id, accepted=False
                             ),
