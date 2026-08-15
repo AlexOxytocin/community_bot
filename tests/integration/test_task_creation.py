@@ -371,6 +371,162 @@ async def test_freeform_task_publishes_without_template_and_reserves_full_budget
     await database.dispose()
 
 
+async def test_template_draft_edits_return_directly_to_preview(database_url: str) -> None:
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=19_650)
+    service = TaskService(database.unit_of_work)
+    selected_template = await template_id(database, "repository_first_impression")
+    draft_id, original_revision = await complete_preview(
+        service,
+        member=member,
+        selected_template_id=selected_template,
+        update_base=19_650,
+    )
+    changes: tuple[tuple[TaskDraftStep, object], ...] = (
+        (
+            TaskDraftStep.INPUT,
+            {
+                "context": "Updated practical review context.",
+                "materials": "https://example.com/updated-item",
+                "constraints": "Keep private information private.",
+            },
+        ),
+        (TaskDraftStep.MATERIALS, {"url": "https://example.com/updated-item"}),
+        (
+            TaskDraftStep.DEADLINE,
+            datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2),
+        ),
+        (TaskDraftStep.FORMAT, (TaskFormat.ONLINE, None)),
+        (TaskDraftStep.SLOTS, 1),
+    )
+    next_update = 19_670
+    for step, value in changes:
+        editing = await service.edit_draft_step(
+            update_id=next_update,
+            actor_telegram_user_id=member.telegram_user_id,
+            draft_id=draft_id,
+            expected_revision=original_revision,
+            step=step,
+        )
+        next_update += 1
+        assert editing.current_step is step
+        updated = await service.advance(
+            AdvanceDraftCommand(
+                next_update,
+                member.telegram_user_id,
+                draft_id,
+                step,
+                editing.revision,
+                value,
+            )
+        )
+        next_update += 1
+        assert updated.current_step is TaskDraftStep.PREVIEW
+    await database.dispose()
+
+
+async def test_template_draft_edit_buttons_work_through_telegram(database_url: str) -> None:
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=19_680)
+    selected_template = await template_id(database, "repository_first_impression")
+    service = TaskService(database.unit_of_work)
+    await complete_preview(
+        service,
+        member=member,
+        selected_template_id=selected_template,
+        update_base=19_680,
+    )
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_task_router(service))
+    actor = User(id=member.telegram_user_id, is_bot=False, first_name="Member")
+    next_update = 19_700
+
+    async def send_text(text_value: str) -> None:
+        nonlocal next_update
+        capture.callbacks.clear()
+        await dispatcher.feed_update(
+            bot,
+            Update(
+                update_id=next_update,
+                message=Message(
+                    message_id=next_update,
+                    date=datetime.datetime.now(datetime.UTC),
+                    chat=Chat(id=actor.id, type="private"),
+                    from_user=actor,
+                    text=text_value,
+                ),
+            ),
+        )
+        next_update += 1
+
+    async def press(callback_data: str) -> None:
+        nonlocal next_update
+        capture.callbacks.clear()
+        await dispatcher.feed_update(
+            bot,
+            Update(
+                update_id=next_update,
+                callback_query=CallbackQuery(
+                    id=f"template-edit-{next_update}",
+                    from_user=actor,
+                    chat_instance="template-edit",
+                    data=callback_data,
+                    message=Message(
+                        message_id=next_update,
+                        date=datetime.datetime.now(datetime.UTC),
+                        chat=Chat(id=actor.id, type="private"),
+                        text="draft",
+                    ),
+                ),
+            ),
+        )
+        next_update += 1
+
+    async def press_visible(prefix: str) -> None:
+        await press(next(value for value in capture.callbacks if value.startswith(prefix)))
+
+    async def open_preview() -> None:
+        await press_visible("task:step:preview")
+
+    await send_text("/task_preview")
+    original_edit_callbacks = {
+        callback.rsplit(":", 1)[-1]: callback
+        for callback in capture.callbacks
+        if callback.startswith("task:edit:")
+    }
+    assert set(original_edit_callbacks) == {"in", "mt", "dl", "fm", "sl"}
+
+    await press(original_edit_callbacks["in"])
+    await send_text("Обновлённые данные для проверки репозитория.")
+    await open_preview()
+
+    await press(original_edit_callbacks["mt"])
+    await send_text("https://example.com/template-updated")
+    await open_preview()
+
+    await press(original_edit_callbacks["dl"])
+    await press_visible("task:step:days:")
+    await open_preview()
+
+    await press(original_edit_callbacks["fm"])
+    await press_visible("task:step:online")
+    await open_preview()
+
+    await press(original_edit_callbacks["sl"])
+    assert any(value == "task:step:slots:1" for value in capture.callbacks)
+    await press_visible("task:step:slots:1")
+    await open_preview()
+
+    assert (
+        "Черновик уже изменился. Откройте его заново."  # noqa: RUF001
+        not in capture.callback_answers
+    )
+    await bot.session.close()
+    await database.dispose()
+
+
 async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
     database_url: str,
 ) -> None:

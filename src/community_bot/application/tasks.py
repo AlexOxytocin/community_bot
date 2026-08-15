@@ -655,7 +655,10 @@ class TaskService:
             draft = await uow.lock_task_draft(draft_id)
             if draft is None or draft.creator_id != actor.id:
                 raise PermissionError("Task draft is not owned by this member.")
-            _expect(draft, TaskDraftStep.PREVIEW, expected_revision)
+            if draft.current_step is not TaskDraftStep.PREVIEW:
+                raise StaleTaskDraftError("Task draft step or revision is stale.")
+            if expected_revision > draft.revision:
+                raise StaleTaskDraftError("Task draft step or revision is stale.")
             if draft.template_id is None and step is TaskDraftStep.INPUT:
                 raise TaskError("Free-form task input is not editable.")
             if draft.template_id is not None and step not in {
@@ -674,6 +677,51 @@ class TaskService:
                 raise TaskError("Solo task performer count is fixed.")
             updated = await uow.save_task_draft(
                 _replace_draft(draft, current_step=step, revision=draft.revision + 1)
+            )
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="task",
+                step=updated.current_step.value,
+                reference_id=updated.id,
+                revision=updated.revision,
+            )
+            await _finish(uow, update_id, actor, f"task_draft:{updated.id}", "task_draft")
+            return updated
+
+    async def adjust_draft_slots(
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        draft_id: UUID,
+        expected_revision: int,
+        delta: int,
+    ) -> TaskDraft:
+        """Adjust a free-form group slot counter without leaving its draft step."""
+        if delta not in {-5, -1, 1, 5}:
+            raise TaskError("Task performer slot adjustment is invalid.")
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin_update(uow, update_id)
+            if replay is not None:
+                draft = await _draft_from_outcome(uow, replay)
+                if draft is None:
+                    raise TaskError("Stored task draft does not exist.")
+                return draft
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            draft = await uow.lock_task_draft(draft_id)
+            if draft is None or draft.creator_id != actor.id:
+                raise PermissionError("Task draft is not owned by this member.")
+            _expect(draft, TaskDraftStep.SLOTS, expected_revision)
+            if draft.template_id is not None or draft.task_kind is not TaskKind.GROUP:
+                raise TaskError("Task performer slot counter is unavailable.")
+            current = validate_freeform_slots(draft.performer_slots or 2, kind=draft.task_kind)
+            updated = await uow.save_task_draft(
+                _replace_draft(
+                    draft,
+                    performer_slots=max(2, current + delta),
+                    revision=draft.revision + 1,
+                )
             )
             await uow.claim_text_flow(
                 member_id=actor.id,
@@ -1579,26 +1627,46 @@ def _expect(draft: TaskDraft, step: TaskDraftStep, revision: int) -> None:
 
 
 def _advance_freeform_draft(draft: TaskDraft, value: object) -> TaskDraft:
+    editing_complete_draft = _has_complete_freeform_values(draft)
     changes: dict[str, object]
     if draft.current_step is TaskDraftStep.TASK_KIND:
         kind = validate_task_kind(value)
         changes = {
             "task_kind": kind,
-            "performer_slots": 1 if kind is TaskKind.SOLO else None,
-            "current_step": TaskDraftStep.CATEGORY,
+            "performer_slots": 1 if kind is TaskKind.SOLO else max(2, draft.performer_slots or 2),
+            "current_step": (
+                TaskDraftStep.SLOTS
+                if editing_complete_draft
+                and draft.task_kind is TaskKind.SOLO
+                and kind is TaskKind.GROUP
+                else TaskDraftStep.PREVIEW
+                if editing_complete_draft
+                else TaskDraftStep.CATEGORY
+            ),
         }
     elif draft.current_step is TaskDraftStep.CATEGORY:
         if not isinstance(value, UUID):
             raise TaskError("Task category is invalid.")
-        changes = {"category_id": value, "current_step": TaskDraftStep.TIME_SIZE}
+        changes = {
+            "category_id": value,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.TIME_SIZE
+            ),
+        }
     elif draft.current_step is TaskDraftStep.TIME_SIZE:
         size = validate_time_size(value)
         changes = {
             "time_size": size,
             "estimated_minutes": TASK_TIME_SIZE_SPECS[size].estimated_minutes,
-            "credit_reward_per_performer": None,
+            "credit_reward_per_performer": (
+                draft.credit_reward_per_performer if editing_complete_draft else None
+            ),
             "current_step": (
-                TaskDraftStep.SLOTS if draft.task_kind is TaskKind.GROUP else TaskDraftStep.REWARD
+                TaskDraftStep.REWARD
+                if editing_complete_draft
+                else TaskDraftStep.SLOTS
+                if draft.task_kind is TaskKind.GROUP
+                else TaskDraftStep.REWARD
             ),
         }
     elif draft.current_step is TaskDraftStep.SLOTS:
@@ -1608,24 +1676,34 @@ def _advance_freeform_draft(draft: TaskDraft, value: object) -> TaskDraft:
             raise TaskError("Task performer slots must be an integer.")
         changes = {
             "performer_slots": validate_freeform_slots(value, kind=draft.task_kind),
-            "current_step": TaskDraftStep.REWARD,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.REWARD
+            ),
         }
     elif draft.current_step is TaskDraftStep.REWARD:
         if draft.time_size is None or not isinstance(value, int):
             raise TaskError("Task reward cannot be selected before size.")
         changes = {
             "credit_reward_per_performer": validate_freeform_reward(draft.time_size, value),
-            "current_step": TaskDraftStep.TITLE,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.TITLE
+            ),
         }
     elif draft.current_step is TaskDraftStep.TITLE:
         changes = {
             "title": validate_freeform_text(value, field="title"),
-            "current_step": TaskDraftStep.DESCRIPTION,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.DESCRIPTION
+            ),
         }
     elif draft.current_step is TaskDraftStep.DESCRIPTION:
         changes = {
             "description": validate_freeform_text(value, field="description"),
-            "current_step": TaskDraftStep.COMPLETION_CRITERIA,
+            "current_step": (
+                TaskDraftStep.PREVIEW
+                if editing_complete_draft
+                else TaskDraftStep.COMPLETION_CRITERIA
+            ),
         }
     elif draft.current_step is TaskDraftStep.COMPLETION_CRITERIA:
         changes = {
@@ -1633,21 +1711,27 @@ def _advance_freeform_draft(draft: TaskDraft, value: object) -> TaskDraft:
                 value,
                 field="completion_criteria",
             ),
-            "current_step": TaskDraftStep.MATERIALS,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.MATERIALS
+            ),
         }
     elif draft.current_step is TaskDraftStep.MATERIALS:
         if not isinstance(value, Mapping):
             raise TaskError("Task materials must be an object.")
         changes = {
             "materials": validate_freeform_materials(value),
-            "current_step": TaskDraftStep.DEADLINE,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.DEADLINE
+            ),
         }
     elif draft.current_step is TaskDraftStep.DEADLINE:
         if not isinstance(value, datetime.datetime):
             raise TaskError("Task deadline must be a datetime.")
         changes = {
             "deadline_at": validate_deadline(value, now=_utc_now()),
-            "current_step": TaskDraftStep.FORMAT,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.FORMAT
+            ),
         }
     elif draft.current_step is TaskDraftStep.FORMAT:
         if not isinstance(value, tuple) or len(value) != _FORMAT_VALUE_SIZE:
@@ -1672,6 +1756,7 @@ def _advance_freeform_draft(draft: TaskDraft, value: object) -> TaskDraft:
 
 
 def _advance_draft(draft: TaskDraft, template: CatalogTemplate, value: object) -> TaskDraft:
+    editing_complete_draft = _has_complete_template_values(draft)
     changes: dict[str, object]
     if draft.current_step is TaskDraftStep.INPUT:
         if not isinstance(value, Mapping):
@@ -1683,14 +1768,18 @@ def _advance_draft(draft: TaskDraft, template: CatalogTemplate, value: object) -
         )
         changes = {
             "input_payload": validate_payload(template.input_schema, normalized),
-            "current_step": TaskDraftStep.DEADLINE,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.DEADLINE
+            ),
         }
     elif draft.current_step is TaskDraftStep.DEADLINE:
         if not isinstance(value, datetime.datetime):
             raise TaskError("Task deadline must be a datetime.")
         changes = {
             "deadline_at": validate_deadline(value, now=_utc_now()),
-            "current_step": TaskDraftStep.FORMAT,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.FORMAT
+            ),
         }
     elif draft.current_step is TaskDraftStep.FORMAT:
         if not isinstance(value, tuple) or len(value) != _FORMAT_VALUE_SIZE:
@@ -1704,12 +1793,19 @@ def _advance_draft(draft: TaskDraft, template: CatalogTemplate, value: object) -
         changes = {
             "format": selected,
             "city": normalized_city,
-            "current_step": TaskDraftStep.MATERIALS,
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.MATERIALS
+            ),
         }
     elif draft.current_step is TaskDraftStep.MATERIALS:
         if not isinstance(value, Mapping):
             raise TaskError("Task materials must be an object.")
-        changes = {"materials": validate_materials(value), "current_step": TaskDraftStep.SLOTS}
+        changes = {
+            "materials": validate_materials(value),
+            "current_step": (
+                TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.SLOTS
+            ),
+        }
     elif draft.current_step is TaskDraftStep.SLOTS:
         if value is None:
             if draft.performer_slots is None:
@@ -1719,12 +1815,43 @@ def _advance_draft(draft: TaskDraft, template: CatalogTemplate, value: object) -
             if not isinstance(value, int) or isinstance(value, bool):
                 raise TaskError("Task performer slots must be an integer.")
             changes = {
-                "performer_slots": validate_slots(value, maximum=template.maximum_performers)
+                "performer_slots": validate_slots(value, maximum=template.maximum_performers),
+                "current_step": (
+                    TaskDraftStep.PREVIEW if editing_complete_draft else TaskDraftStep.SLOTS
+                ),
             }
     else:
         raise TaskError("Task draft cannot advance from its current step.")
     changes["revision"] = draft.revision + 1
     return _replace_draft(draft, **changes)
+
+
+def _has_complete_freeform_values(draft: TaskDraft) -> bool:
+    return (
+        draft.template_id is None
+        and draft.task_kind is not None
+        and draft.category_id is not None
+        and draft.time_size is not None
+        and draft.credit_reward_per_performer is not None
+        and draft.title is not None
+        and draft.description is not None
+        and draft.completion_criteria is not None
+        and draft.materials is not None
+        and draft.performer_slots is not None
+        and draft.deadline_at is not None
+        and draft.format is not None
+    )
+
+
+def _has_complete_template_values(draft: TaskDraft) -> bool:
+    return (
+        draft.template_id is not None
+        and draft.input_payload is not None
+        and draft.materials is not None
+        and draft.performer_slots is not None
+        and draft.deadline_at is not None
+        and draft.format is not None
+    )
 
 
 def _validate_publishable(draft: TaskDraft, template: CatalogTemplate) -> None:

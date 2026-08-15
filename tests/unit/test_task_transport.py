@@ -46,6 +46,7 @@ from community_bot.transport.telegram.tasks import (
     _parse_step_value,
     _required_tail,
     _reward_prompt,
+    _slot_counter_rows,
     build_task_router,
     cancellation_response_callback,
     community_publication_approval_keyboard,
@@ -430,7 +431,7 @@ def test_task_transport_renders_freeform_prompt_texts() -> None:
     assert "срок" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.DEADLINE))
     assert "онлайн" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.FORMAT))
     assert "материалы" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.MATERIALS))
-    assert "число исполнителей" in _draft_prompt(
+    assert "Количество исполнителей: 2" in _draft_prompt(
         replace(freeform, current_step=TaskDraftStep.SLOTS)
     )
     assert "предпросмотр" in _draft_prompt(replace(freeform, current_step=TaskDraftStep.PREVIEW))
@@ -439,6 +440,33 @@ def test_task_transport_renders_freeform_prompt_texts() -> None:
     assert "награду" in _reward_prompt(replace(freeform, time_size=None))
     assert "2, 3, 4" in _reward_prompt(replace(freeform, time_size=TaskTimeSize.S))
     assert "больше 10" in _reward_prompt(replace(freeform, time_size=TaskTimeSize.XL))
+
+    slot_draft = replace(
+        freeform,
+        current_step=TaskDraftStep.SLOTS,
+        performer_slots=2,
+        revision=17,
+    )
+    assert "Количество исполнителей: 2" in _draft_prompt(slot_draft)
+    buttons = [button for row in _slot_counter_rows(slot_draft) for button in row]
+    assert [button.text for button in buttons] == [
+        "−5",  # noqa: RUF001
+        "−1",  # noqa: RUF001
+        "+1",
+        "+5",
+        "Готово",
+    ]
+    encoded_draft_id = _encode_uuid(slot_draft.id)
+    assert [button.callback_data for button in buttons] == [
+        f"task:step:slots:adjust:{encoded_draft_id}:17:-5",
+        f"task:step:slots:adjust:{encoded_draft_id}:17:-1",
+        f"task:step:slots:adjust:{encoded_draft_id}:17:1",
+        f"task:step:slots:adjust:{encoded_draft_id}:17:5",
+        f"task:step:slots:confirm:{encoded_draft_id}:17",
+    ]
+    for button in buttons:
+        assert button.callback_data is not None
+        assert len(button.callback_data.encode()) <= 64
 
     category = TaskCategoryOption(
         id=uuid4(),
