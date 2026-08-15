@@ -900,15 +900,10 @@ def _assert_single_approval_menu(session: CapturingSession, telegram_user_id: in
     approval_markup = approval_messages[0][2]
     assert isinstance(approval_markup, ReplyKeyboardMarkup)
     assert [button.text for row in approval_markup.keyboard for button in row] == [
-        "Найти задание",
-        "Создать задание",
-        "Созданные задания",
-        "Принятые задания",
-        "Моя карточка",
-        "Баланс",
-        "Статистика",
-        "Лидерборд",
+        "Задания",
         "Участники",
+        "Моя карточка",
+        "Баланс и статистика",
         "Помощь",
         "Администрирование",
     ]

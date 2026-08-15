@@ -69,6 +69,7 @@ class Assignment:
     review_deadline_at: datetime.datetime | None = None
     rejected_at: datetime.datetime | None = None
     reject_dispute_deadline_at: datetime.datetime | None = None
+    reviewed_at: datetime.datetime | None = None
     terminal_outcome: str | None = None
     terminal_command_id: UUID | None = None
 

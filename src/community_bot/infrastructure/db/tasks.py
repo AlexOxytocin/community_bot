@@ -317,10 +317,10 @@ async def save_task_status(
     model = await session.get(TaskModel, task_id)
     if model is None:
         raise LookupError("Task does not exist.")
+    now = datetime.datetime.now(datetime.UTC)
     model.status = status.value
-    model.cancelled_at = (
-        datetime.datetime.now(datetime.UTC) if status is TaskStatus.CANCELLED else None
-    )
+    model.cancelled_at = now if status is TaskStatus.CANCELLED else None
+    model.updated_at = now
     await session.flush()
     return _task(model)
 
@@ -337,6 +337,7 @@ async def save_community_reviewer(
     if model is None:
         raise LookupError("Task does not exist.")
     model.reviewer_admin_id = reviewer_id
+    model.updated_at = now
     await session.execute(
         update(AssignmentModel)
         .where(
@@ -535,6 +536,7 @@ def _task(model: TaskModel) -> PublishedTask:
         status=TaskStatus(model.status),
         publish_command_id=model.publish_command_id,
         created_at=model.created_at,
+        updated_at=getattr(model, "updated_at", model.created_at),
         test_run_id=getattr(model, "test_run_id", None),
     )
 

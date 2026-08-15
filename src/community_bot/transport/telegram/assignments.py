@@ -1,4 +1,4 @@
-# ruff: noqa: C901, EM101, PLR0915, RUF001, TRY003, TRY004, TRY301
+# ruff: noqa: C901, EM101, PLR0913, PLR0915, RUF001, TRY003, TRY004, TRY301
 """Telegram routes for accepting, delivering, and reviewing assignments."""
 
 from __future__ import annotations
@@ -20,11 +20,13 @@ from community_bot.application.assignments import (
     DecideAssignmentCommand,
     SaveSubmissionDraftCommand,
 )
-from community_bot.domain.assignments import AssignmentDecision, AssignmentError
+from community_bot.domain.assignments import AssignmentDecision, AssignmentError, AssignmentStatus
 from community_bot.transport.telegram.task_card import published_task_card
 from community_bot.transport.telegram.tasks import reviewer_replacement_callback
 
 if TYPE_CHECKING:
+    import datetime
+
     from community_bot.application.assignments import AssignmentService
     from community_bot.application.conversations import TextFlow
 
@@ -35,6 +37,7 @@ _ACTION_PREFIX = "as:a:"
 _DISPUTE_PREFIX = "as:d:"
 _VIEW_OPEN_PREFIX = "as:view:open:"
 _VIEW_CLOSE_PREFIX = "as:view:close:"
+_MAX_CARD_PAGE_SIZE = 50
 
 
 def build_assignment_router(service: AssignmentService) -> Router:
@@ -289,23 +292,45 @@ def build_assignment_router(service: AssignmentService) -> Router:
     return router
 
 
-async def send_assignment_overview(message: Message, service: AssignmentService) -> None:
+async def send_assignment_overview(
+    message: Message,
+    service: AssignmentService,
+    *,
+    actor_telegram_user_id: int | None = None,
+    statuses: frozenset[AssignmentStatus] | None = None,
+    limit: int = 50,
+    cursor: tuple[datetime.datetime, UUID] | None = None,
+    order_by_reviewed_at: bool = False,
+    empty_message: str = "У вас пока нет принятых заданий.",
+) -> AssignmentCard | None:
     """Send accepted performer assignment cards."""
-    if message.from_user is None:
-        return
+    actor_id = actor_telegram_user_id
+    if actor_id is None:
+        if message.from_user is None:
+            return None
+        actor_id = message.from_user.id
     if message.chat.type != "private":
         await message.answer("Задания доступны только в личном чате с ботом.")
-        return
-    cards = await service.cards(message.from_user.id)
+        return None
+    fetch_limit = limit + 1 if limit < _MAX_CARD_PAGE_SIZE else limit
+    cards = await service.cards(
+        actor_id,
+        limit=fetch_limit,
+        statuses=statuses,
+        cursor=cursor,
+        order_by_reviewed_at=order_by_reviewed_at,
+    )
     if not cards:
-        await message.answer("У вас пока нет принятых заданий.")
-        return
-    for card in cards:
+        await message.answer(empty_message)
+        return None
+    visible = cards[:limit]
+    for card in visible:
         await message.answer(
             _assignment_card_text(card, expanded=False),
             parse_mode=None,
             reply_markup=_assignment_card_keyboard(card),
         )
+    return visible[-1] if len(cards) > limit else None
 
 
 async def send_assignment_review_overview(
@@ -475,10 +500,7 @@ async def _assignment_card(
     actor_telegram_user_id: int,
     assignment_id: UUID,
 ) -> AssignmentCard:
-    for card in await service.cards(actor_telegram_user_id):
-        if card.assignment.id == assignment_id:
-            return card
-    raise PermissionError("Assignment is not visible to this member.")
+    return await service.card(actor_telegram_user_id, assignment_id)
 
 
 def _assignment_card_text(card: AssignmentCard, *, expanded: bool) -> str:

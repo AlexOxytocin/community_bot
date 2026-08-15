@@ -76,12 +76,8 @@ from community_bot.infrastructure.db.models import (
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
 from community_bot.transport.telegram.navigation import (
-    ACCEPTED_TASKS_TEXT,
     ADMIN_TEXT,
-    CREATE_TASK_TEXT,
-    FIND_TASK_TEXT,
     MEMBERS_TEXT,
-    MY_TASKS_TEXT,
 )
 from tests.integration.test_navigation import (
     CONFIG_PATH,
@@ -94,6 +90,10 @@ from tests.integration.test_reputation import add_paid_interaction
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 MessageSender = Callable[[int, int, str], Awaitable[None]]
 CallbackSender = Callable[[int, int, str], Awaitable[None]]
+FIND_TASK_COMMAND = "/tasks"
+CREATE_TASK_COMMAND = "/create"
+MY_TASKS_COMMAND = "/my_tasks"
+ACCEPTED_TASKS_COMMAND = "/my_assignments"
 
 
 async def test_member_journey_uses_only_visible_outputs(database_url: str) -> None:  # noqa: PLR0915
@@ -128,7 +128,7 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
     send_message, send_callback = _transport(dispatcher, bot, actors)
 
     capture.callbacks.clear()
-    await send_message(81_100, performer.telegram_user_id, FIND_TASK_TEXT)
+    await send_message(81_100, performer.telegram_user_id, FIND_TASK_COMMAND)
     accept = _visible(capture, lambda value: value.startswith("task:accept:"))
     capture.callbacks.clear()
     await send_callback(81_101, performer.telegram_user_id, accept)
@@ -137,7 +137,7 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     send_message, send_callback = _transport(dispatcher, bot, actors)
     capture.callbacks.clear()
-    await send_message(81_102, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(81_102, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     resumed_submit = _visible(capture, lambda value: value.startswith("as:a:s:"))
     assert resumed_submit == submit
     capture.callbacks.clear()
@@ -153,13 +153,13 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
     await send_callback(81_105, performer.telegram_user_id, confirm)
 
     capture.callbacks.clear()
-    await send_message(81_106, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_106, author.telegram_user_id, MY_TASKS_COMMAND)
     review = _visible(capture, lambda value: value.endswith(":partial"))
     capture.callbacks.clear()
     await send_callback(81_107, author.telegram_user_id, review)
 
     capture.callbacks.clear()
-    await send_message(81_108, performer.telegram_user_id, CREATE_TASK_TEXT)
+    await send_message(81_108, performer.telegram_user_id, CREATE_TASK_COMMAND)
     template = _visible(capture, lambda value: value.startswith("nav:create:"))
     capture.callbacks.clear()
     await send_callback(81_109, performer.telegram_user_id, template)
@@ -228,7 +228,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     details = "Проверьте ясность первого экрана и предложите три улучшения."
     materials = "https://example.com/landing-review"
 
-    await send_message(81_210, author.telegram_user_id, CREATE_TASK_TEXT)
+    await send_message(81_210, author.telegram_user_id, CREATE_TASK_COMMAND)
     template = _visible(capture, lambda value: value.startswith("nav:create:"))
     capture.callbacks.clear()
     await send_callback(81_211, author.telegram_user_id, template)
@@ -269,7 +269,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
-    await send_message(81_218_1, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_218_1, author.telegram_user_id, MY_TASKS_COMMAND)
     owned_summary = next(text for text in capture.texts if task_title in text)
     assert "Свободно" in owned_summary
     assert details not in owned_summary
@@ -297,7 +297,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
-    await send_message(81_219, performer.telegram_user_id, FIND_TASK_TEXT)
+    await send_message(81_219, performer.telegram_user_id, FIND_TASK_COMMAND)
     card_text, accept = next(
         (text, callback)
         for text, callback in capture.button_payloads
@@ -311,7 +311,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     _assert_task_card(capture, accepted_text, details, materials)
     assert "Задание принято." in accepted_text
     capture.texts.clear()
-    await send_message(81_221, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(81_221, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     recovered_summary = next(text for text in capture.texts if task_title in text)
     assert "Статус: в работе" in recovered_summary
     assert details not in recovered_summary
@@ -329,7 +329,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
-    await send_message(81_222, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_222, author.telegram_user_id, MY_TASKS_COMMAND)
     occupied_summary = next(text for text in capture.texts if task_title in text)
     assert "Member 81203" in occupied_summary
     assert "1/1" in occupied_summary
@@ -368,7 +368,7 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
-    await send_message(81_227, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(81_227, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     cancelled_summary = next(text for text in capture.texts if "Статус: cancelled" in text)
     assert "Статус: отменено" not in cancelled_summary
     assert details not in cancelled_summary
@@ -441,7 +441,7 @@ async def test_author_cancels_published_task_through_visible_confirmation(  # no
     actors = _actors(author.telegram_user_id, outsider.telegram_user_id)
     send_message, send_callback = _transport(dispatcher, bot, actors)
 
-    await send_message(81_320, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_320, author.telegram_user_id, MY_TASKS_COMMAND)
     request = _visible_on_text(
         capture,
         lambda text: published.title in text,
@@ -523,7 +523,7 @@ async def test_author_cancels_published_task_through_visible_confirmation(  # no
 
     capture.callbacks.clear()
     capture.button_payloads.clear()
-    await send_message(81_323, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_323, author.telegram_user_id, MY_TASKS_COMMAND)
     assert not any(value.startswith("task:cancel:ask:") for value in capture.callbacks)
     await bot.session.close()
     await database.dispose()
@@ -561,7 +561,7 @@ async def test_old_owned_task_callback_survives_more_than_twenty_newer_tasks(
         bot,
         _actors(author.telegram_user_id),
     )
-    await send_message(81_370, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_370, author.telegram_user_id, MY_TASKS_COMMAND)
     old_expand = _visible_on_text(
         capture,
         lambda text: oldest.title in text,
@@ -1029,7 +1029,7 @@ async def test_deadline_blocks_new_request_and_makes_pending_response_obsolete(
         bot,
         _actors(author.telegram_user_id, performer.telegram_user_id),
     )
-    await send_message(81_832_1, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_832_1, author.telegram_user_id, MY_TASKS_COMMAND)
     ask = _visible_on_text(
         capture,
         lambda text: expired_free_task.title in text,
@@ -1107,7 +1107,7 @@ async def test_performer_self_cancel_obsoletes_request_then_author_cancels_free_
         bot,
         _actors(author.telegram_user_id, performer.telegram_user_id),
     )
-    await send_message(81_920_1, author.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_920_1, author.telegram_user_id, MY_TASKS_COMMAND)
     request_button = _visible_on_text(
         capture,
         lambda text: task.title in text,
@@ -1628,14 +1628,14 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     await send_callback(82_115, superadministrator.telegram_user_id, approve)
 
     capture.callbacks.clear()
-    await send_message(82_116, performer.telegram_user_id, FIND_TASK_TEXT)
+    await send_message(82_116, performer.telegram_user_id, FIND_TASK_COMMAND)
     await send_callback(
         82_117,
         performer.telegram_user_id,
         _visible(capture, lambda value: value.startswith("task:accept:")),
     )
     capture.callbacks.clear()
-    await send_message(82_118, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(82_118, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     await send_callback(
         82_119,
         performer.telegram_user_id,
@@ -1650,7 +1650,7 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     capture.callbacks.clear()
     await send_callback(82_121, performer.telegram_user_id, confirm)
     capture.callbacks.clear()
-    await send_message(82_122, reviewer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(82_122, reviewer.telegram_user_id, MY_TASKS_COMMAND)
     full = _visible(capture, lambda value: value.endswith(":full"))
     capture.callbacks.clear()
     await send_callback(82_123, reviewer.telegram_user_id, full)
@@ -1688,7 +1688,7 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     await send_callback(82_132, resolver.telegram_user_id, confirm_refund)
 
     capture.callbacks.clear()
-    await send_message(82_133, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(82_133, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     appeal = _visible(capture, lambda value: value.startswith("mod:appeal:"))
     capture.callbacks.clear()
     await send_callback(82_134, performer.telegram_user_id, appeal)
@@ -1875,7 +1875,7 @@ async def test_unavailable_community_reviewer_is_replaced_from_visible_card(  # 
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     actors = _actors(creator.telegram_user_id)
     send_message, send_callback = _transport(dispatcher, bot, actors)
-    await send_message(83_111, creator.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(83_111, creator.telegram_user_id, MY_TASKS_COMMAND)
     replace = _visible(capture, lambda value: value.startswith("task:rr:"))
     capture.callbacks.clear()
     await send_callback(83_112, creator.telegram_user_id, replace)
@@ -2047,7 +2047,7 @@ async def test_no_show_is_visible_after_deadline_worker(database_url: str) -> No
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     actors = _actors(performer.telegram_user_id)
     send_message, send_callback = _transport(dispatcher, bot, actors)
-    await send_message(86_100, performer.telegram_user_id, FIND_TASK_TEXT)
+    await send_message(86_100, performer.telegram_user_id, FIND_TASK_COMMAND)
     await _click(capture, send_callback, 86_101, performer.telegram_user_id, "task:accept:")
 
     finalized = await AssignmentDeadlineWorker(
@@ -2059,7 +2059,7 @@ async def test_no_show_is_visible_after_deadline_worker(database_url: str) -> No
     assert finalized == 1
     capture.callbacks.clear()
     capture.texts.clear()
-    await send_message(86_102, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(86_102, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     assert any("неявка" in text for text in capture.texts)
     async with sessions() as session:
         assignment = await session.scalar(
@@ -2293,10 +2293,10 @@ async def test_reject_dispute_and_moderator_resolution_use_visible_outputs(  # n
     )
     send_message, send_callback = _transport(dispatcher, bot, actors)
 
-    await send_message(85_100, performer.telegram_user_id, FIND_TASK_TEXT)
+    await send_message(85_100, performer.telegram_user_id, FIND_TASK_COMMAND)
     await _click(capture, send_callback, 85_101, performer.telegram_user_id, "task:accept:")
     capture.callbacks.clear()
-    await send_message(85_102, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(85_102, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     await _click(capture, send_callback, 85_103, performer.telegram_user_id, "as:a:s:")
     await send_message(
         85_104,
@@ -2306,13 +2306,13 @@ async def test_reject_dispute_and_moderator_resolution_use_visible_outputs(  # n
     await _click(capture, send_callback, 85_105, performer.telegram_user_id, "assign:submit:")
 
     capture.callbacks.clear()
-    await send_message(85_106, reviewer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(85_106, reviewer.telegram_user_id, MY_TASKS_COMMAND)
     reject = _visible(capture, lambda value: value.endswith(":reject"))
     capture.callbacks.clear()
     await send_callback(85_107, reviewer.telegram_user_id, reject)
 
     capture.callbacks.clear()
-    await send_message(85_108, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    await send_message(85_108, performer.telegram_user_id, ACCEPTED_TASKS_COMMAND)
     begin_dispute = _visible(capture, lambda value: value.startswith("as:a:d:"))
     capture.callbacks.clear()
     await send_callback(85_109, performer.telegram_user_id, begin_dispute)
