@@ -401,7 +401,7 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
                 date=datetime.datetime.now(datetime.UTC),
                 chat=Chat(id=-1007003, type="supergroup"),
                 from_user=users[7_003],
-                text="Мои задания",
+                text="Созданные задания",
             ),
         ),
     )

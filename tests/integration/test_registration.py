@@ -902,7 +902,8 @@ def _assert_single_approval_menu(session: CapturingSession, telegram_user_id: in
     assert [button.text for row in approval_markup.keyboard for button in row] == [
         "Найти задание",
         "Создать задание",
-        "Мои задания",
+        "Созданные задания",
+        "Принятые задания",
         "Моя карточка",
         "Баланс",
         "Статистика",

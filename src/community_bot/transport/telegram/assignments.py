@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from community_bot.application.assignments import (
     AcceptAssignmentCommand,
+    AssignmentCard,
     BeginSubmissionCommand,
     ConfirmSubmissionDraftCommand,
     DecideAssignmentCommand,
@@ -32,6 +33,8 @@ _DECIDE_PREFIX = "assign:review:"
 _SUBMIT_PREFIX = "assign:submit:"
 _ACTION_PREFIX = "as:a:"
 _DISPUTE_PREFIX = "as:d:"
+_VIEW_OPEN_PREFIX = "as:view:open:"
+_VIEW_CLOSE_PREFIX = "as:view:close:"
 
 
 def build_assignment_router(service: AssignmentService) -> Router:
@@ -216,6 +219,26 @@ def build_assignment_router(service: AssignmentService) -> Router:
         except (AssignmentError, PermissionError, LookupError, ValueError):
             await callback.answer("Действие недоступно или уже выполнено.", show_alert=True)
 
+    async def toggle_assignment_card(callback: CallbackQuery) -> None:
+        try:
+            if not await _require_private_callback(callback):
+                return
+            data = str(callback.data)
+            expanded = data.startswith(_VIEW_OPEN_PREFIX)
+            prefix = _VIEW_OPEN_PREFIX if expanded else _VIEW_CLOSE_PREFIX
+            assignment_id = UUID(hex=data.removeprefix(prefix))
+            card = await _assignment_card(service, callback.from_user.id, assignment_id)
+            if not isinstance(callback.message, Message):
+                return
+            await callback.message.edit_text(
+                _assignment_card_text(card, expanded=expanded),
+                parse_mode=None,
+                reply_markup=_assignment_card_keyboard(card, expanded=expanded),
+            )
+            await callback.answer()
+        except (AssignmentError, PermissionError, LookupError, ValueError):
+            await callback.answer("Не удалось открыть задание.", show_alert=True)
+
     async def reviews(message: Message) -> None:
         if message.from_user is None:
             return
@@ -227,11 +250,7 @@ def build_assignment_router(service: AssignmentService) -> Router:
                 await message.answer("Результатов на проверку сейчас нет.")
                 return
             for card in cards:
-                summary = card.result_summary or "Результат без краткого описания"
-                await message.answer(
-                    f"{card.task_title}\nИсполнитель: {card.performer_display_name}\n{summary}",
-                    reply_markup=_review_keyboard(card.assignment.id),
-                )
+                await _send_review_card(message, card, include_queue_label=False)
         except (AssignmentError, PermissionError, LookupError):
             await message.answer("Результаты на проверку сейчас недоступны.")
 
@@ -257,6 +276,8 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
     router.callback_query.register(accept, F.data.startswith(_ACCEPT_PREFIX))
     router.callback_query.register(action, F.data.startswith(_ACTION_PREFIX))
+    router.callback_query.register(toggle_assignment_card, F.data.startswith(_VIEW_OPEN_PREFIX))
+    router.callback_query.register(toggle_assignment_card, F.data.startswith(_VIEW_CLOSE_PREFIX))
     router.callback_query.register(decide, F.data.startswith(_DECIDE_PREFIX))
     router.callback_query.register(confirm_submit, F.data.startswith(_SUBMIT_PREFIX))
     router.message.register(owned, Command("my_assignments"))
@@ -269,49 +290,38 @@ def build_assignment_router(service: AssignmentService) -> Router:
 
 
 async def send_assignment_overview(message: Message, service: AssignmentService) -> None:
-    """Send performer and reviewer cards through one visible entry point."""
+    """Send accepted performer assignment cards."""
     if message.from_user is None:
         return
     if message.chat.type != "private":
         await message.answer("Задания доступны только в личном чате с ботом.")
         return
     cards = await service.cards(message.from_user.id)
-    reviews = await service.review_cards(message.from_user.id)
-    if not cards and not reviews:
-        await message.answer("У вас пока нет принятых заданий или результатов на проверку.")
+    if not cards:
+        await message.answer("У вас пока нет принятых заданий.")
         return
     for card in cards:
         await message.answer(
-            f"{published_task_card(card.task)}\nСтатус: {_status(card.assignment.status.value)}",
+            _assignment_card_text(card, expanded=False),
             parse_mode=None,
-            reply_markup=_assignment_actions(
-                card.assignment.id,
-                card.assignment.status.value,
-                case_id=card.case_id,
-                case_status=card.case_status,
-            ),
+            reply_markup=_assignment_card_keyboard(card),
         )
+
+
+async def send_assignment_review_overview(
+    message: Message,
+    service: AssignmentService,
+) -> bool:
+    """Send assignment results waiting for this author's or reviewer's decision."""
+    if message.from_user is None:
+        return False
+    if message.chat.type != "private":
+        await message.answer("Задания доступны только в личном чате с ботом.")
+        return False
+    reviews = await service.review_cards(message.from_user.id)
     for card in reviews:
-        summary = card.result_summary or "Результат без краткого описания"
-        markup = (
-            InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="Выбрать нового проверяющего",
-                            callback_data=reviewer_replacement_callback(card.assignment.task_id),
-                        )
-                    ]
-                ]
-            )
-            if card.assignment.status.value == "reviewer_required"
-            else _review_keyboard(card.assignment.id)
-        )
-        await message.answer(
-            f"На проверку: {card.task_title}\n"
-            f"Исполнитель: {card.performer_display_name}\n{summary}",
-            reply_markup=markup,
-        )
+        await _send_review_card(message, card, include_queue_label=True)
+    return bool(reviews)
 
 
 async def handle_assignment_text(
@@ -374,6 +384,34 @@ async def handle_assignment_text(
     return False
 
 
+async def _send_review_card(
+    message: Message,
+    card: AssignmentCard,
+    *,
+    include_queue_label: bool,
+) -> None:
+    summary = card.result_summary or "Результат без краткого описания"
+    title = f"На проверку: {card.task_title}" if include_queue_label else card.task_title
+    markup = (
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Выбрать нового проверяющего",
+                        callback_data=reviewer_replacement_callback(card.assignment.task_id),
+                    )
+                ]
+            ]
+        )
+        if card.assignment.status.value == "reviewer_required"
+        else _review_keyboard(card.assignment.id)
+    )
+    await message.answer(
+        f"{title}\nИсполнитель: {card.performer_display_name}\n{summary}",
+        reply_markup=markup,
+    )
+
+
 async def _require_private_message(message: Message) -> bool:
     if message.chat.type == "private":
         return True
@@ -432,6 +470,54 @@ def _assignment_actions(
     return None if not buttons else InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+async def _assignment_card(
+    service: AssignmentService,
+    actor_telegram_user_id: int,
+    assignment_id: UUID,
+) -> AssignmentCard:
+    for card in await service.cards(actor_telegram_user_id):
+        if card.assignment.id == assignment_id:
+            return card
+    raise PermissionError("Assignment is not visible to this member.")
+
+
+def _assignment_card_text(card: AssignmentCard, *, expanded: bool) -> str:
+    status = _status(card.assignment.status.value)
+    if expanded:
+        return f"{published_task_card(card.task)}\nСтатус: {status}"
+    lines = [
+        card.task.title,
+        f"Автор: {card.task.author_display_name}",
+        f"Статус: {status}",
+    ]
+    if card.result_summary:
+        lines.append(f"Результат: {_short(card.result_summary)}")
+    return "\n".join(lines)
+
+
+def _assignment_card_keyboard(
+    card: AssignmentCard, *, expanded: bool = False
+) -> InlineKeyboardMarkup:
+    prefix = _VIEW_CLOSE_PREFIX if expanded else _VIEW_OPEN_PREFIX
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="−" if expanded else "+",
+                callback_data=f"{prefix}{card.assignment.id.hex}",
+            )
+        ]
+    ]
+    actions = _assignment_actions(
+        card.assignment.id,
+        card.assignment.status.value,
+        case_id=card.case_id,
+        case_status=card.case_status,
+    )
+    if actions is not None:
+        rows.extend(actions.inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _review_keyboard(assignment_id: UUID) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -472,7 +558,7 @@ def _status(value: str) -> str:
         "approved": "выполнено",
         "partially_approved": "выполнено частично",
         "rejected": "отклонено",
-        "cancelled": "отменено",
+        "cancelled": "cancelled",
         "no_show": "неявка",
         "reviewer_required": "нужен новый проверяющий",
     }.get(value, value)
@@ -506,6 +592,13 @@ def _three_arguments(text: str | None) -> tuple[str, str, str]:
     if not separator or not first or not second or not third.strip():
         raise ValueError("Three command arguments are required.")
     return first, second, third.strip()
+
+
+def _short(value: str, limit: int = 180) -> str:
+    clean = " ".join(value.split())
+    if len(clean) <= limit:
+        return clean
+    return f"{clean[: limit - 3].rstrip()}..."
 
 
 def _parse_decision(value: str) -> tuple[UUID, AssignmentDecision]:
