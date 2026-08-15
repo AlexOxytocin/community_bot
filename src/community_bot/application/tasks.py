@@ -110,6 +110,7 @@ class PublishedTask:
     status: TaskStatus
     publish_command_id: UUID
     created_at: datetime.datetime
+    updated_at: datetime.datetime
     test_run_id: UUID | None = None
 
     def acceptance_snapshot(self) -> AcceptanceTaskSnapshot:
@@ -283,7 +284,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
     ) -> tuple[PublishedTask, ...]: ...
-    async def list_owned_task_cards(
+    async def list_owned_task_cards(  # noqa: PLR0913
         self,
         *,
         creator_id: UUID,
@@ -291,6 +292,8 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         status: TaskStatus | None,
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
+        creator_only: bool = False,
+        order_by_updated_at: bool = False,
     ) -> tuple[OwnedTaskCard, ...]: ...
     async def get_owned_task_card(
         self, *, task_id: UUID, owner_id: UUID
@@ -848,13 +851,15 @@ class TaskService:
                 before_id=None if cursor is None else cursor[1],
             )
 
-    async def list_owned_cards(
+    async def list_owned_cards(  # noqa: PLR0913
         self,
         *,
         actor_telegram_user_id: int,
         limit: int = 20,
         status: TaskStatus | None = None,
         cursor: tuple[datetime.datetime, UUID] | None = None,
+        creator_only: bool = False,
+        order_by_updated_at: bool = False,
     ) -> tuple[OwnedTaskCard, ...]:
         """Return compact-card context for tasks visible to one owner or reviewer."""
         if not 1 <= limit <= _MAX_OWNED_TASKS:
@@ -867,6 +872,8 @@ class TaskService:
                 status=status,
                 before_created_at=None if cursor is None else cursor[0],
                 before_id=None if cursor is None else cursor[1],
+                creator_only=creator_only,
+                order_by_updated_at=order_by_updated_at,
             )
 
     async def owned_card(self, *, actor_telegram_user_id: int, task_id: UUID) -> OwnedTaskCard:

@@ -30,6 +30,8 @@ from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import TaskStatus
 
+_MAX_ASSIGNMENT_CARDS = 50
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
@@ -150,7 +152,19 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def lock_assignment(self, assignment_id: UUID) -> Assignment | None: ...
     async def get_assignment(self, assignment_id: UUID) -> Assignment | None: ...
     async def list_assignments(self, performer_id: UUID) -> tuple[Assignment, ...]: ...
-    async def list_assignment_cards(self, performer_id: UUID) -> tuple[AssignmentCard, ...]: ...
+    async def get_assignment_card(
+        self, performer_id: UUID, assignment_id: UUID
+    ) -> AssignmentCard | None: ...
+    async def list_assignment_cards(  # noqa: PLR0913
+        self,
+        performer_id: UUID,
+        *,
+        limit: int = 50,
+        statuses: tuple[str, ...] | None = None,
+        before_order_at: datetime.datetime | None = None,
+        before_id: UUID | None = None,
+        order_by_reviewed_at: bool = False,
+    ) -> tuple[AssignmentCard, ...]: ...
     async def list_review_cards(self, actor_id: UUID) -> tuple[AssignmentCard, ...]: ...
     async def list_task_assignments(
         self, task_id: UUID, *, for_update: bool = False
@@ -328,11 +342,39 @@ class AssignmentService:
             actor = await _actor(uow, actor_telegram_user_id)
             return await uow.list_assignments(actor.id)
 
-    async def cards(self, actor_telegram_user_id: int) -> tuple[AssignmentCard, ...]:
+    async def cards(
+        self,
+        actor_telegram_user_id: int,
+        *,
+        limit: int = 50,
+        statuses: frozenset[AssignmentStatus] | None = None,
+        cursor: tuple[datetime.datetime, UUID] | None = None,
+        order_by_reviewed_at: bool = False,
+    ) -> tuple[AssignmentCard, ...]:
         """Return visible performer cards without exposing internal identifiers."""
+        if not 1 <= limit <= _MAX_ASSIGNMENT_CARDS:
+            raise AssignmentError("Assignment card page size must be between 1 and 50.")
         async with self._unit_of_work_factory() as uow:
             actor = await _actor(uow, actor_telegram_user_id)
-            return await uow.list_assignment_cards(actor.id)
+            return await uow.list_assignment_cards(
+                actor.id,
+                limit=limit,
+                statuses=None
+                if statuses is None
+                else tuple(sorted(status.value for status in statuses)),
+                before_order_at=None if cursor is None else cursor[0],
+                before_id=None if cursor is None else cursor[1],
+                order_by_reviewed_at=order_by_reviewed_at,
+            )
+
+    async def card(self, actor_telegram_user_id: int, assignment_id: UUID) -> AssignmentCard:
+        """Return one exact performer card without coupling visibility to page size."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _actor(uow, actor_telegram_user_id)
+            card = await uow.get_assignment_card(actor.id, assignment_id)
+            if card is None:
+                raise PermissionError("Assignment is not visible to this member.")
+            return card
 
     async def begin_dispute(
         self, *, update_id: int, actor_telegram_user_id: int, assignment_id: UUID

@@ -18,8 +18,11 @@ def test_worker_composes_registration_approval_with_the_main_menu() -> None:
     markup = _notification_reply_markup("registration.approved")
 
     assert isinstance(markup, ReplyKeyboardMarkup)
-    assert len(markup.keyboard) == 6
-    assert sum(len(row) for row in markup.keyboard) == 11
+    assert [[button.text for button in row] for row in markup.keyboard] == [
+        ["Задания", "Участники"],
+        ["Моя карточка", "Баланс и статистика"],
+        ["Помощь", "Администрирование"],
+    ]
     assert _notification_reply_markup("task.published") is None
 
 

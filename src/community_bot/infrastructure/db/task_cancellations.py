@@ -44,31 +44,32 @@ async def list_owned_task_cards(
     status: TaskStatus | None,
     before_created_at: datetime.datetime | None,
     before_id: uuid.UUID | None,
+    creator_only: bool = False,
+    order_by_updated_at: bool = False,
 ) -> tuple[OwnedTaskCard, ...]:
     """Return tasks with active assignee labels and the pending request state."""
     scope = await active_scope(session, creator_id)
     test_scope = (
         TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
     )
-    statement = select(TaskModel).where(
-        or_(
+    ownership = (
+        or_(TaskModel.creator_id == creator_id, TaskModel.created_by_admin_id == creator_id)
+        if creator_only
+        else or_(
             TaskModel.creator_id == creator_id,
             TaskModel.created_by_admin_id == creator_id,
             TaskModel.reviewer_admin_id == creator_id,
             TaskModel.community_approved_by_admin_id == creator_id,
-        ),
-        test_scope,
+        )
     )
+    order_at = TaskModel.updated_at if order_by_updated_at else TaskModel.created_at
+    statement = select(TaskModel).where(ownership, test_scope)
     if status is not None:
         statement = statement.where(TaskModel.status == status.value)
     if before_created_at is not None and before_id is not None:
-        statement = statement.where(
-            tuple_(TaskModel.created_at, TaskModel.id) < (before_created_at, before_id)
-        )
+        statement = statement.where(tuple_(order_at, TaskModel.id) < (before_created_at, before_id))
     tasks = (
-        await session.scalars(
-            statement.order_by(TaskModel.created_at.desc(), TaskModel.id.desc()).limit(limit)
-        )
+        await session.scalars(statement.order_by(order_at.desc(), TaskModel.id.desc()).limit(limit))
     ).all()
     return await _owned_task_cards(session, tasks)
 

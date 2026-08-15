@@ -8,7 +8,7 @@ import hashlib
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select, text, tuple_
 
 from community_bot.application.assignments import AssignmentCard
 from community_bot.domain.assignments import (
@@ -128,14 +128,42 @@ async def list_assignments(
 
 
 async def list_assignment_cards(
-    session: AsyncSession, performer_id: uuid.UUID
+    session: AsyncSession,
+    performer_id: uuid.UUID,
+    *,
+    limit: int = 50,
+    statuses: tuple[str, ...] | None = None,
+    before_order_at: datetime.datetime | None = None,
+    before_id: uuid.UUID | None = None,
+    order_by_reviewed_at: bool = False,
 ) -> tuple[AssignmentCard, ...]:
     """List performer cards with task and current case context."""
     return await _cards(
         session,
         AssignmentModel.performer_id == performer_id,
         scope_member_id=performer_id,
+        statuses=statuses,
+        limit=limit,
+        before_order_at=before_order_at,
+        before_id=before_id,
+        order_by_reviewed_at=order_by_reviewed_at,
     )
+
+
+async def get_assignment_card(
+    session: AsyncSession,
+    performer_id: uuid.UUID,
+    assignment_id: uuid.UUID,
+) -> AssignmentCard | None:
+    """Return one performer card by exact assignment identity."""
+    cards = await _cards(
+        session,
+        AssignmentModel.performer_id == performer_id,
+        scope_member_id=performer_id,
+        assignment_id=assignment_id,
+        limit=1,
+    )
+    return None if not cards else cards[0]
 
 
 async def list_review_cards(
@@ -160,6 +188,11 @@ async def _cards(
     *,
     scope_member_id: uuid.UUID,
     statuses: tuple[str, ...] | None = None,
+    limit: int = 50,
+    before_order_at: datetime.datetime | None = None,
+    before_id: uuid.UUID | None = None,
+    order_by_reviewed_at: bool = False,
+    assignment_id: uuid.UUID | None = None,
 ) -> tuple[AssignmentCard, ...]:
     latest_payload = (
         select(AssignmentResultVersionModel.payload_json)
@@ -173,6 +206,7 @@ async def _cards(
     test_scope = (
         TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
     )
+    order_at = AssignmentModel.reviewed_at if order_by_reviewed_at else AssignmentModel.accepted_at
     statement = (
         select(
             AssignmentModel,
@@ -190,11 +224,17 @@ async def _cards(
             ModerationCaseModel.assignment_id == AssignmentModel.id,
         )
         .where(predicate, test_scope)
-        .order_by(AssignmentModel.accepted_at.desc(), AssignmentModel.id)
-        .limit(50)
+        .order_by(order_at.desc(), AssignmentModel.id.desc())
+        .limit(limit)
     )
+    if assignment_id is not None:
+        statement = statement.where(AssignmentModel.id == assignment_id)
     if statuses is not None:
         statement = statement.where(AssignmentModel.status.in_(statuses))
+    if before_order_at is not None and before_id is not None:
+        statement = statement.where(
+            tuple_(order_at, AssignmentModel.id) < (before_order_at, before_id)
+        )
     rows = (await session.execute(statement)).all()
     cards = []
     for assignment, task, display_name, case_id, case_status, case_revision, payload in rows:
@@ -520,6 +560,7 @@ def _assignment(model: AssignmentModel) -> Assignment:
         review_deadline_at=model.review_deadline_at,
         rejected_at=model.rejected_at,
         reject_dispute_deadline_at=model.reject_dispute_deadline_at,
+        reviewed_at=model.reviewed_at,
         terminal_outcome=model.terminal_outcome,
         terminal_command_id=model.terminal_command_id,
     )

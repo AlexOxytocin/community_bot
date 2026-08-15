@@ -67,6 +67,7 @@ class CapturingSession(BaseSession):
         self.callbacks: list[str] = []
         self.callback_answers: list[str] = []
         self.button_payloads: list[tuple[str, str]] = []
+        self.inline_buttons: list[tuple[str, str]] = []
         self.reply_buttons: list[str] = []
 
     async def close(self) -> None:
@@ -90,6 +91,7 @@ class CapturingSession(BaseSession):
                 for button in row:
                     if button.callback_data is not None:
                         self.callbacks.append(button.callback_data)
+                        self.inline_buttons.append((button.text, button.callback_data))
                         if isinstance(text_value, str):
                             self.button_payloads.append((text_value, button.callback_data))
         if markup is not None and hasattr(markup, "keyboard"):
@@ -374,7 +376,29 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     assert set(session.callbacks) == profile_callbacks
 
     await dispatcher.feed_update(bot, message_update(70_001, 7_003, "/start"))
-    assert {"Найти задание", "Создать задание", "Баланс", "Помощь"} <= set(session.reply_buttons)
+    assert session.reply_buttons == [
+        "Задания",
+        "Участники",
+        "Моя карточка",
+        "Баланс и статистика",
+        "Помощь",
+        "Администрирование",
+    ]
+    session.texts.clear()
+    await dispatcher.feed_update(bot, message_update(70_001_1, 7_003, "Найти задание"))
+    assert session.texts == []
+
+    session.inline_buttons.clear()
+    await dispatcher.feed_update(bot, message_update(70_001_2, 7_003, "Баланс и статистика"))
+    assert session.inline_buttons == [
+        ("Баланс", "nav:menu:balance"),
+        ("Статистика", "nav:menu:statistics"),
+        ("Лидерборд", "nav:menu:leaderboard"),
+        ("Назад", "nav:menu:root"),
+    ]
+    session.texts.clear()
+    await dispatcher.feed_update(bot, callback_update(70_001_3, 7_003, "nav:menu:balance"))
+    assert any("Баланс: 10 кредитов" in text for text in session.texts)
 
     session.texts.clear()
     await dispatcher.feed_update(
@@ -386,29 +410,38 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
                 date=datetime.datetime.now(datetime.UTC),
                 chat=Chat(id=-1007003, type="supergroup"),
                 from_user=users[7_003],
-                text="Найти задание",
+                text="Задания",
             ),
         ),
     )
     assert session.texts == ["Задания доступны только в личном чате с ботом."]  # noqa: RUF001
-    session.texts.clear()
-    await dispatcher.feed_update(
-        bot,
-        Update(
-            update_id=70_000_2,
-            message=Message(
-                message_id=70_000_2,
-                date=datetime.datetime.now(datetime.UTC),
-                chat=Chat(id=-1007003, type="supergroup"),
-                from_user=users[7_003],
-                text="Созданные задания",
-            ),
-        ),
-    )
-    assert session.texts == ["Задания доступны только в личном чате с ботом."]  # noqa: RUF001
-
     await dispatcher.feed_update(bot, callback_update(70_002, 7_003, "nav:tasks:not-a-uuid"))
-    await dispatcher.feed_update(bot, message_update(70_003, 7_003, "Найти задание"))
+    session.inline_buttons.clear()
+    await dispatcher.feed_update(bot, message_update(70_003, 7_003, "Задания"))
+    assert session.inline_buttons == [
+        ("Найти", "nav:menu:find"),
+        ("Создать", "nav:menu:create"),
+        ("Мои задания", "nav:menu:mine"),
+        ("Назад", "nav:menu:root"),
+    ]
+    session.inline_buttons.clear()
+    await dispatcher.feed_update(bot, callback_update(70_003_1, 7_003, "nav:menu:mine"))
+    assert session.inline_buttons == [
+        ("Созданные мной", "nav:menu:created"),
+        ("Взятые мной", "nav:menu:taken"),
+        ("Назад", "nav:menu:tasks"),
+    ]
+    session.inline_buttons.clear()
+    await dispatcher.feed_update(bot, callback_update(70_003_2, 7_003, "nav:menu:created"))
+    assert session.inline_buttons == [
+        ("Активные", "nav:menu:created:active"),
+        ("Последние завершённые", "nav:menu:created:completed"),
+        ("Архив", "nav:menu:created:archive"),
+        ("Назад", "nav:menu:mine"),
+    ]
+    session.callbacks.clear()
+    await dispatcher.feed_update(bot, callback_update(70_003_3, 7_003, "nav:menu:tasks"))
+    await dispatcher.feed_update(bot, callback_update(70_003_4, 7_003, "nav:menu:find"))
     task_card = next(
         text for text, callback in session.button_payloads if callback == f"task:accept:{task.id}"
     )
@@ -420,14 +453,14 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     await dispatcher.feed_update(
         bot,
         Update(
-            update_id=70_003_1,
+            update_id=70_003_5,
             callback_query=CallbackQuery(
                 id="group-accept",
                 from_user=users[7_003],
                 chat_instance="group-navigation-test",
                 data=accept_callback,
                 message=Message(
-                    message_id=70_003_1,
+                    message_id=70_003_5,
                     date=datetime.datetime.now(datetime.UTC),
                     chat=Chat(id=-1007003, type="supergroup"),
                     from_user=users[7_003],
@@ -442,7 +475,8 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     await dispatcher.feed_update(bot, callback_update(70_004, 7_003, accept_callback))
 
-    await dispatcher.feed_update(bot, message_update(70_005, 7_003, "/create"))
+    session.callbacks.clear()
+    await dispatcher.feed_update(bot, callback_update(70_005, 7_003, "nav:menu:create"))
     await dispatcher.feed_update(bot, callback_update(70_006, 7_003, "nav:create:not-a-uuid"))
     create_callback = next(value for value in session.callbacks if value.startswith("nav:create:"))
     await dispatcher.feed_update(bot, callback_update(70_007, 7_003, create_callback))
@@ -621,6 +655,238 @@ async def test_task_discovery_paginates_and_stale_cursor_restarts(database_url: 
     at_limit = await service.list_available(actor_telegram_user_id=performer.telegram_user_id)
     assert at_limit.items == ()
     assert at_limit.next_cursor_task_id is None
+    await database.dispose()
+
+
+async def test_nested_task_history_limits_recent_and_paginates_archive(  # noqa: PLR0915
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    admin = await _member(database, 8_101, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 8_102)
+    performer = await _member(database, 8_103)
+    reviewer = await _member(database, 8_104, MemberRole.ADMINISTRATOR)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        template = await db_session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template is not None
+    published = await _published_task(database, author, template, update_id_base=61_000)
+    statuses = ["completed"] * 52 + ["partially_completed", "cancelled", "expired"]
+    assignment_statuses = ["approved"] * 52 + [
+        "partially_approved",
+        "cancelled",
+        "no_show",
+    ]
+    history_titles: set[str] = set()
+    assignment_models: list[AssignmentModel] = []
+    now = datetime.datetime.now(datetime.UTC)
+    async with sessions.begin() as db_session:
+        source = await db_session.get(TaskModel, published.id)
+        assert source is not None
+        db_session.add(
+            TaskModel(
+                id=uuid4(),
+                origin="community",
+                template_id=source.template_id,
+                template_version=source.template_version,
+                creator_id=None,
+                created_by_admin_id=admin.id,
+                reviewer_admin_id=reviewer.id,
+                community_approved_by_admin_id=admin.id,
+                author_display_name="Сообщество",
+                category_id=source.category_id,
+                title="Reviewer only",
+                description=source.description,
+                completion_criteria=source.completion_criteria,
+                materials_json=source.materials_json,
+                input_payload_json=source.input_payload_json,
+                credit_reward_per_performer=source.credit_reward_per_performer,
+                performer_slots=source.performer_slots,
+                reserved_credit_total=0,
+                estimated_minutes=source.estimated_minutes,
+                minimum_level=source.minimum_level,
+                format=source.format,
+                city=source.city,
+                deadline_at=source.deadline_at,
+                status="completed",
+                safety_snapshot_json=source.safety_snapshot_json,
+                publish_command_id=uuid4(),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        for index, (task_status, assignment_status) in enumerate(
+            zip(statuses, assignment_statuses, strict=True)
+        ):
+            task_id = uuid4()
+            title = f"History {index:02d}"
+            history_titles.add(title)
+            completion_at = now - datetime.timedelta(minutes=index + 1)
+            created_at = now - datetime.timedelta(days=len(statuses) - index)
+            db_session.add(
+                TaskModel(
+                    id=task_id,
+                    origin=source.origin,
+                    template_id=source.template_id,
+                    template_version=source.template_version,
+                    creator_id=source.creator_id,
+                    author_display_name=source.author_display_name,
+                    category_id=source.category_id,
+                    title=title,
+                    description=source.description,
+                    completion_criteria=source.completion_criteria,
+                    materials_json=source.materials_json,
+                    input_payload_json=source.input_payload_json,
+                    credit_reward_per_performer=source.credit_reward_per_performer,
+                    performer_slots=source.performer_slots,
+                    reserved_credit_total=source.reserved_credit_total,
+                    estimated_minutes=source.estimated_minutes,
+                    minimum_level=source.minimum_level,
+                    format=source.format,
+                    city=source.city,
+                    deadline_at=source.deadline_at,
+                    status=task_status,
+                    safety_snapshot_json=source.safety_snapshot_json,
+                    publish_command_id=uuid4(),
+                    created_at=created_at,
+                    updated_at=completion_at,
+                )
+            )
+            assignment_models.append(
+                AssignmentModel(
+                    task_id=task_id,
+                    performer_id=performer.id,
+                    slot_number=1,
+                    status=assignment_status,
+                    accepted_at=created_at,
+                    reviewed_at=(
+                        completion_at
+                        if assignment_status in {"approved", "partially_approved"}
+                        else None
+                    ),
+                )
+            )
+        await db_session.flush()
+        db_session.add_all(assignment_models)
+
+    reviewer_cards = await TaskService(database.unit_of_work).list_owned_cards(
+        actor_telegram_user_id=reviewer.telegram_user_id,
+        creator_only=True,
+    )
+    assert reviewer_cards == ()
+
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    session = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=session)
+    users = {
+        author.telegram_user_id: User(
+            id=author.telegram_user_id,
+            is_bot=False,
+            first_name="Author",
+        ),
+        performer.telegram_user_id: User(
+            id=performer.telegram_user_id,
+            is_bot=False,
+            first_name="Performer",
+        ),
+    }
+
+    def callback_update(update_id: int, actor_id: int, data: str) -> Update:
+        actor = users[actor_id]
+        return Update(
+            update_id=update_id,
+            callback_query=CallbackQuery(
+                id=str(update_id),
+                from_user=actor,
+                chat_instance="history-test",
+                data=data,
+                message=Message(
+                    message_id=update_id,
+                    date=datetime.datetime.now(datetime.UTC),
+                    chat=Chat(id=actor_id, type="private"),
+                    from_user=actor,
+                    text="Мои задания",
+                ),
+            ),
+        )
+
+    async def assert_history(*, actor_id: int, list_kind: str, update_id_base: int) -> None:
+        session.texts.clear()
+        session.callbacks.clear()
+        session.button_payloads.clear()
+        await dispatcher.feed_update(
+            bot,
+            callback_update(
+                update_id_base,
+                actor_id,
+                f"nav:menu:{list_kind}:completed",
+            ),
+        )
+        recent = {text.splitlines()[0] for text in session.texts if text.startswith("History ")}
+        assert recent == {f"History {index:02d}" for index in range(10)}
+        assert not any(value.startswith("nav:list:") for value in session.callbacks)
+
+        session.texts.clear()
+        session.callbacks.clear()
+        await dispatcher.feed_update(
+            bot,
+            callback_update(
+                update_id_base + 1,
+                actor_id,
+                f"nav:menu:{list_kind}:archive",
+            ),
+        )
+        first_page = {text.splitlines()[0] for text in session.texts if text.startswith("History ")}
+        assert len(first_page) == 10
+        archive = set(first_page)
+        page_number = 0
+        while next_pages := [value for value in session.callbacks if value.startswith("nav:list:")]:
+            page_number += 1
+            session.callbacks.clear()
+            await dispatcher.feed_update(
+                bot,
+                callback_update(update_id_base + 1 + page_number, actor_id, next_pages[-1]),
+            )
+            archive.update(
+                text.splitlines()[0] for text in session.texts if text.startswith("History ")
+            )
+        assert archive == history_titles
+        assert not any(value.startswith("nav:list:") for value in session.callbacks)
+
+    await assert_history(
+        actor_id=author.telegram_user_id,
+        list_kind="created",
+        update_id_base=71_100,
+    )
+    await assert_history(
+        actor_id=performer.telegram_user_id,
+        list_kind="taken",
+        update_id_base=71_200,
+    )
+    old_assignment = next(
+        callback
+        for text, callback in session.button_payloads
+        if text.startswith("History 00\n") and callback.startswith("as:view:open:")
+    )
+    session.texts.clear()
+    await dispatcher.feed_update(
+        bot,
+        callback_update(71_300, performer.telegram_user_id, old_assignment),
+    )
+    assert any(text.startswith("History 00\n") and "Результат:" in text for text in session.texts)
+    await bot.session.close()
     await database.dispose()
 
 

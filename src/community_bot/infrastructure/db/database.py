@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from types import TracebackType
     from uuid import UUID
 
+    from community_bot.application.assignments import AssignmentCard
     from community_bot.application.catalog import CatalogPage, CatalogQuery, CatalogTemplate
     from community_bot.application.economy import (
         ActiveProductConfig,
@@ -346,9 +347,34 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """List one performer's assignments."""
         return await assignment_store.list_assignments(self._require_session(), performer_id)
 
-    async def list_assignment_cards(self, performer_id: UUID):  # noqa: ANN201
+    async def list_assignment_cards(  # noqa: PLR0913
+        self,
+        performer_id: UUID,
+        *,
+        limit: int = 50,
+        statuses: tuple[str, ...] | None = None,
+        before_order_at: datetime.datetime | None = None,
+        before_id: UUID | None = None,
+        order_by_reviewed_at: bool = False,
+    ) -> tuple[AssignmentCard, ...]:
         """List performer assignment cards."""
-        return await assignment_store.list_assignment_cards(self._require_session(), performer_id)
+        return await assignment_store.list_assignment_cards(
+            self._require_session(),
+            performer_id,
+            limit=limit,
+            statuses=statuses,
+            before_order_at=before_order_at,
+            before_id=before_id,
+            order_by_reviewed_at=order_by_reviewed_at,
+        )
+
+    async def get_assignment_card(
+        self, performer_id: UUID, assignment_id: UUID
+    ) -> AssignmentCard | None:
+        """Return one exact performer assignment card."""
+        return await assignment_store.get_assignment_card(
+            self._require_session(), performer_id, assignment_id
+        )
 
     async def list_review_cards(self, actor_id: UUID):  # noqa: ANN201
         """List reviewable assignment cards for one actor."""
@@ -682,7 +708,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             before_id=before_id,
         )
 
-    async def list_owned_task_cards(
+    async def list_owned_task_cards(  # noqa: PLR0913
         self,
         *,
         creator_id: UUID,
@@ -690,6 +716,8 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         status: TaskStatus | None,
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
+        creator_only: bool = False,
+        order_by_updated_at: bool = False,
     ) -> tuple[OwnedTaskCard, ...]:
         """Return owned tasks with occupancy and cancellation context."""
         return await cancellation_store.list_owned_task_cards(
@@ -699,6 +727,8 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             status=status,
             before_created_at=before_created_at,
             before_id=before_id,
+            creator_only=creator_only,
+            order_by_updated_at=order_by_updated_at,
         )
 
     async def get_owned_task_card(self, *, task_id: UUID, owner_id: UUID) -> OwnedTaskCard | None:
