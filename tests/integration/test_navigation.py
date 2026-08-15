@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast, override
@@ -8,7 +9,8 @@ from uuid import UUID, uuid4
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import AnswerCallbackQuery, DeleteMessages
 from aiogram.methods.get_me import GetMe
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from sqlalchemy import func, select
@@ -69,18 +71,30 @@ class CapturingSession(BaseSession):
         self.button_payloads: list[tuple[str, str]] = []
         self.inline_buttons: list[tuple[str, str]] = []
         self.reply_buttons: list[str] = []
+        self.deleted_message_ids: list[int] = []
+        self.deleted_message_batches: list[tuple[int, ...]] = []
+        self.delete_failures = 0
+        self.api_failure_after = 0
+        self.sent_text_message_ids: list[tuple[str, int]] = []
+        self.next_message_id = 900
 
     async def close(self) -> None:
         """Close no external resources."""
 
     @override
-    async def make_request(  # noqa: C901 - one fake Bot API capture boundary.
+    async def make_request(  # noqa: C901, PLR0912 - one fake Bot API capture boundary.
         self,
         bot: Bot,
         method: TelegramMethod[TelegramType],
         timeout: int | None = None,
     ) -> TelegramType:
         del bot, timeout
+        if self.api_failure_after:
+            self.api_failure_after -= 1
+            if not self.api_failure_after:
+                raise TelegramBadRequest(
+                    method=cast("TelegramMethod[bool]", method), message="temporary API failure"
+                )
         text_value = getattr(method, "text", None)
         if isinstance(text_value, str):
             self.texts.append(text_value)
@@ -100,6 +114,15 @@ class CapturingSession(BaseSession):
             if method.text is not None:
                 self.callback_answers.append(method.text)
             return cast("TelegramType", True)  # noqa: FBT003
+        if isinstance(method, DeleteMessages):
+            self.deleted_message_ids.extend(method.message_ids)
+            self.deleted_message_batches.append(tuple(method.message_ids))
+            if self.delete_failures:
+                self.delete_failures -= 1
+                raise TelegramBadRequest(
+                    method=cast("TelegramMethod[bool]", method), message="delete failed"
+                )
+            return cast("TelegramType", True)  # noqa: FBT003
         if isinstance(method, GetMe):
             return cast(
                 "TelegramType",
@@ -110,10 +133,13 @@ class CapturingSession(BaseSession):
                     username="humanquest_bot",
                 ),
             )
+        self.next_message_id += 1
+        if isinstance(text_value, str):
+            self.sent_text_message_ids.append((text_value, self.next_message_id))
         return cast(
             "TelegramType",
             Message(
-                message_id=999,
+                message_id=self.next_message_id,
                 date=datetime.datetime.now(datetime.UTC),
                 chat=Chat(id=1, type="private"),
                 text="ok",
@@ -683,8 +709,8 @@ async def test_nested_task_history_limits_recent_and_paginates_archive(  # noqa:
         )
     assert template is not None
     published = await _published_task(database, author, template, update_id_base=61_000)
-    statuses = ["completed"] * 52 + ["partially_completed", "cancelled", "expired"]
-    assignment_statuses = ["approved"] * 52 + [
+    statuses = ["completed"] * 102 + ["partially_completed", "cancelled", "expired"]
+    assignment_statuses = ["approved"] * 102 + [
         "partially_approved",
         "cancelled",
         "no_show",
@@ -822,10 +848,13 @@ async def test_nested_task_history_limits_recent_and_paginates_archive(  # noqa:
             ),
         )
 
-    async def assert_history(*, actor_id: int, list_kind: str, update_id_base: int) -> None:
+    async def assert_history(  # noqa: PLR0915
+        *, actor_id: int, list_kind: str, update_id_base: int
+    ) -> None:
         session.texts.clear()
         session.callbacks.clear()
         session.button_payloads.clear()
+        sent_before = len(session.sent_text_message_ids)
         await dispatcher.feed_update(
             bot,
             callback_update(
@@ -837,9 +866,16 @@ async def test_nested_task_history_limits_recent_and_paginates_archive(  # noqa:
         recent = {text.splitlines()[0] for text in session.texts if text.startswith("History ")}
         assert recent == {f"History {index:02d}" for index in range(10)}
         assert not any(value.startswith("nav:list:") for value in session.callbacks)
+        recent_message_ids = {
+            message_id
+            for text, message_id in session.sent_text_message_ids[sent_before:]
+            if text.startswith("History ")
+        }
 
         session.texts.clear()
         session.callbacks.clear()
+        deleted_before = len(session.deleted_message_ids)
+        archive_sent_before = len(session.sent_text_message_ids)
         await dispatcher.feed_update(
             bot,
             callback_update(
@@ -850,20 +886,90 @@ async def test_nested_task_history_limits_recent_and_paginates_archive(  # noqa:
         )
         first_page = {text.splitlines()[0] for text in session.texts if text.startswith("History ")}
         assert len(first_page) == 10
+        assert set(session.deleted_message_ids[deleted_before:]) == recent_message_ids
         archive = set(first_page)
         page_number = 0
+        first_archive_page_callback: str | None = None
+        deleted_during_pagination = len(session.deleted_message_ids)
         while next_pages := [value for value in session.callbacks if value.startswith("nav:list:")]:
             page_number += 1
+            opened_page = next_pages[-1]
+            if first_archive_page_callback is None:
+                first_archive_page_callback = opened_page
             session.callbacks.clear()
             await dispatcher.feed_update(
                 bot,
-                callback_update(update_id_base + 1 + page_number, actor_id, next_pages[-1]),
+                callback_update(update_id_base + 1 + page_number, actor_id, opened_page),
             )
             archive.update(
                 text.splitlines()[0] for text in session.texts if text.startswith("History ")
             )
+            if page_number == 1:
+                sent_after_page = len(session.sent_text_message_ids)
+                await dispatcher.feed_update(
+                    bot,
+                    callback_update(update_id_base + 100, actor_id, opened_page),
+                )
+                assert len(session.sent_text_message_ids) == sent_after_page
+                assert session.callback_answers[-1] == "Эта страница уже открыта."
         assert archive == history_titles
         assert not any(value.startswith("nav:list:") for value in session.callbacks)
+        assert len(session.deleted_message_ids) == deleted_during_pagination
+        archive_message_ids = {
+            message_id
+            for text, message_id in session.sent_text_message_ids[archive_sent_before:]
+            if text.startswith("History ") or text == "\u0412 архиве есть ещё задания."
+        }
+        batches_before_exit = len(session.deleted_message_batches)
+        await dispatcher.feed_update(
+            bot,
+            callback_update(update_id_base + 20, actor_id, "nav:menu:mine"),
+        )
+        exit_batches = session.deleted_message_batches[batches_before_exit:]
+        deleted_archive_ids = set().union(*map(set, exit_batches))
+        assert deleted_archive_ids == archive_message_ids, [
+            (text, message_id)
+            for text, message_id in session.sent_text_message_ids[archive_sent_before:]
+            if message_id in deleted_archive_ids - archive_message_ids
+        ]
+        assert all(len(batch) <= 100 for batch in exit_batches)
+        assert len(exit_batches) >= 2
+
+        assert first_archive_page_callback is not None
+        await dispatcher.feed_update(
+            bot,
+            callback_update(
+                update_id_base + 21,
+                actor_id,
+                f"nav:menu:{list_kind}:archive",
+            ),
+        )
+        current_page_callback = next(
+            value for value in session.callbacks if value.startswith("nav:list:")
+        )
+        session.api_failure_after = 2
+        await dispatcher.feed_update(
+            bot,
+            callback_update(update_id_base + 22, actor_id, current_page_callback),
+        )
+        sent_after_failure = len(session.sent_text_message_ids)
+        await dispatcher.feed_update(
+            bot,
+            callback_update(update_id_base + 23, actor_id, current_page_callback),
+        )
+        assert len(session.sent_text_message_ids) > sent_after_failure
+
+        sent_after_retry = len(session.sent_text_message_ids)
+        await dispatcher.feed_update(
+            bot,
+            callback_update(update_id_base + 24, actor_id, first_archive_page_callback),
+        )
+        assert len(session.sent_text_message_ids) == sent_after_retry
+        assert session.callback_answers[-1] == "Этот список уже обновлён."
+        await dispatcher.feed_update(
+            bot,
+            callback_update(update_id_base + 25, actor_id, "nav:menu:mine"),
+        )
 
     await assert_history(
         actor_id=author.telegram_user_id,
@@ -875,6 +981,47 @@ async def test_nested_task_history_limits_recent_and_paginates_archive(  # noqa:
         list_kind="taken",
         update_id_base=71_200,
     )
+
+    concurrent_sent_before = len(session.sent_text_message_ids)
+    concurrent_deleted_before = len(session.deleted_message_ids)
+    await asyncio.gather(
+        dispatcher.feed_update(
+            bot,
+            callback_update(71_250, author.telegram_user_id, "nav:menu:created:active"),
+        ),
+        dispatcher.feed_update(
+            bot,
+            callback_update(71_251, author.telegram_user_id, "nav:menu:created:archive"),
+        ),
+    )
+    deleted_concurrently = set(session.deleted_message_ids[concurrent_deleted_before:])
+    live_texts = {
+        text
+        for text, message_id in session.sent_text_message_ids[concurrent_sent_before:]
+        if message_id not in deleted_concurrently and text.startswith(("History ", published.title))
+    }
+    assert live_texts
+    assert not (
+        any(text.startswith("History ") for text in live_texts)
+        and any(text.startswith(published.title) for text in live_texts)
+    )
+
+    session.delete_failures = 1
+    session.texts.clear()
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=71_252,
+            message=Message(
+                message_id=71_252,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=Chat(id=author.telegram_user_id, type="private"),
+                from_user=users[author.telegram_user_id],
+                text="Помощь",
+            ),
+        ),
+    )
+    assert any("Как пользоваться ботом" in text for text in session.texts)
     old_assignment = next(
         callback
         for text, callback in session.button_payloads

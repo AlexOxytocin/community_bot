@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 
 from community_bot.transport.telegram.navigation import (
+    _encode_uuid,
     _insights_menu_markup,
     _parse_archive_cursor,
     _section_back_markup,
@@ -42,10 +43,14 @@ def test_selected_nested_menu_controls_are_stable() -> None:
 
 def test_archive_cursor_parsing_rejects_unknown_list_kind() -> None:
     cursor_id = UUID("01234567-89ab-cdef-0123-456789abcdef")
-    list_kind, (cursor_at, parsed_id) = _parse_archive_cursor(f"nav:list:ca:f4240:{cursor_id.hex}")
+    encoded_id = _encode_uuid(cursor_id)
+    value = f"nav:list:ca:f4240:{encoded_id}:00000000002a"
+    list_kind, (cursor_at, parsed_id), generation = _parse_archive_cursor(value)
 
     assert list_kind == "created"
     assert cursor_at.timestamp() == 1
     assert parsed_id == cursor_id
+    assert generation == 42
+    assert len(value.encode()) <= 64
     with pytest.raises(ValueError, match="invalid"):
-        _parse_archive_cursor(f"nav:list:xx:f4240:{cursor_id.hex}")
+        _parse_archive_cursor(f"nav:list:xx:f4240:{encoded_id}:00000000002a")

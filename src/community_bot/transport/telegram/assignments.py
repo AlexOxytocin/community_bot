@@ -302,6 +302,7 @@ async def send_assignment_overview(
     cursor: tuple[datetime.datetime, UUID] | None = None,
     order_by_reviewed_at: bool = False,
     empty_message: str = "У вас пока нет принятых заданий.",
+    sent_message_ids: list[int] | None = None,
 ) -> AssignmentCard | None:
     """Send accepted performer assignment cards."""
     actor_id = actor_telegram_user_id
@@ -310,7 +311,8 @@ async def send_assignment_overview(
             return None
         actor_id = message.from_user.id
     if message.chat.type != "private":
-        await message.answer("Задания доступны только в личном чате с ботом.")
+        sent = await message.answer("Задания доступны только в личном чате с ботом.")
+        _capture_message_id(sent_message_ids, sent)
         return None
     fetch_limit = limit + 1 if limit < _MAX_CARD_PAGE_SIZE else limit
     cards = await service.cards(
@@ -321,31 +323,37 @@ async def send_assignment_overview(
         order_by_reviewed_at=order_by_reviewed_at,
     )
     if not cards:
-        await message.answer(empty_message)
+        sent = await message.answer(empty_message)
+        _capture_message_id(sent_message_ids, sent)
         return None
     visible = cards[:limit]
     for card in visible:
-        await message.answer(
+        sent = await message.answer(
             _assignment_card_text(card, expanded=False),
             parse_mode=None,
             reply_markup=_assignment_card_keyboard(card),
         )
+        _capture_message_id(sent_message_ids, sent)
     return visible[-1] if len(cards) > limit else None
 
 
 async def send_assignment_review_overview(
     message: Message,
     service: AssignmentService,
+    *,
+    sent_message_ids: list[int] | None = None,
 ) -> bool:
     """Send assignment results waiting for this author's or reviewer's decision."""
     if message.from_user is None:
         return False
     if message.chat.type != "private":
-        await message.answer("Задания доступны только в личном чате с ботом.")
+        sent = await message.answer("Задания доступны только в личном чате с ботом.")
+        _capture_message_id(sent_message_ids, sent)
         return False
     reviews = await service.review_cards(message.from_user.id)
     for card in reviews:
-        await _send_review_card(message, card, include_queue_label=True)
+        sent = await _send_review_card(message, card, include_queue_label=True)
+        _capture_message_id(sent_message_ids, sent)
     return bool(reviews)
 
 
@@ -414,7 +422,7 @@ async def _send_review_card(
     card: AssignmentCard,
     *,
     include_queue_label: bool,
-) -> None:
+) -> Message:
     summary = card.result_summary or "Результат без краткого описания"
     title = f"На проверку: {card.task_title}" if include_queue_label else card.task_title
     markup = (
@@ -431,10 +439,15 @@ async def _send_review_card(
         if card.assignment.status.value == "reviewer_required"
         else _review_keyboard(card.assignment.id)
     )
-    await message.answer(
+    return await message.answer(
         f"{title}\nИсполнитель: {card.performer_display_name}\n{summary}",
         reply_markup=markup,
     )
+
+
+def _capture_message_id(message_ids: list[int] | None, message: Message) -> None:
+    if message_ids is not None:
+        message_ids.append(message.message_id)
 
 
 async def _require_private_message(message: Message) -> bool:

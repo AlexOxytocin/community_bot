@@ -3,11 +3,16 @@
 
 from __future__ import annotations
 
+from asyncio import Lock
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from secrets import randbits
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -72,9 +77,12 @@ _ADMIN_PREFIX = "nav:admin:"
 _MENU_PREFIX = "nav:menu:"
 _LIST_PAGE_PREFIX = "nav:list:"
 _LIST_PAGE_SIZE = 10
+_DELETE_BATCH_SIZE = 100
+_MAX_RESULT_GENERATION = 0xFFFFFFFFFFFF
 _CALLBACK_LIMIT = 64
 _ARCHIVE_CALLBACK_TOO_LONG = "Archive pagination callback exceeds the Telegram limit."
 _ARCHIVE_CALLBACK_INVALID = "Archive pagination callback is invalid."
+_UNBOUND_MESSAGE = "Telegram message is not bound to a bot."
 
 _CREATED_STATUS_GROUPS = {
     "active": (TaskStatus.PUBLISHED, TaskStatus.SETTLING),
@@ -132,41 +140,122 @@ def build_navigation_router(  # noqa: PLR0913
 ) -> Router:
     """Build exact commands, button mappings, and navigation callbacks."""
     router = Router(name="navigation")
+    task_result_message_ids: dict[int, list[int]] = {}
+    task_result_views: dict[int, tuple[str, int]] = {}
+    task_result_generations: dict[int, int] = {}
+    consumed_pagination_callbacks: dict[int, set[str]] = {}
+    task_result_locks: dict[int, Lock] = {}
+    generation_seed = randbits(48)
+
+    async def clear_task_results(message: Message) -> None:
+        task_result_views.pop(message.chat.id, None)
+        consumed_pagination_callbacks.pop(message.chat.id, None)
+        message_ids = task_result_message_ids.pop(message.chat.id, [])
+        if not message_ids:
+            return
+        bot = message.bot
+        if bot is None:
+            raise RuntimeError(_UNBOUND_MESSAGE)
+        for offset in range(0, len(message_ids), _DELETE_BATCH_SIZE):
+            try:
+                await bot.delete_messages(
+                    chat_id=message.chat.id,
+                    message_ids=message_ids[offset : offset + _DELETE_BATCH_SIZE],
+                )
+            except TelegramAPIError:
+                continue
+
+    def current_task_results(message: Message) -> list[int]:
+        return task_result_message_ids.setdefault(message.chat.id, [])
+
+    def start_task_results(message: Message, view: str) -> list[int]:
+        generation = (
+            task_result_generations.get(message.chat.id, generation_seed) + 1
+        ) & _MAX_RESULT_GENERATION
+        task_result_generations[message.chat.id] = generation
+        task_result_views[message.chat.id] = (view, generation)
+        return current_task_results(message)
+
+    def current_task_generation(message: Message) -> int:
+        return task_result_generations[message.chat.id]
+
+    def task_result_lock(message: Message) -> Lock:
+        return task_result_locks.setdefault(message.chat.id, Lock())
 
     async def show_task_menu(message: Message) -> None:
         if not await _require_private_message(message):
             return
-        await message.answer("Задания", reply_markup=_task_menu_markup())
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await message.answer("Задания", reply_markup=_task_menu_markup())
 
     async def show_tasks(message: Message) -> None:
         if message.from_user is None:
             return
         if not await _require_private_message(message):
             return
-        await send_available_tasks(message, message.from_user.id)
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await send_available_tasks(
+                message,
+                message.from_user.id,
+                sent_message_ids=start_task_results(message, "find"),
+                result_generation=current_task_generation(message),
+            )
 
-    async def send_available_tasks(message: Message, actor_telegram_user_id: int) -> None:
+    async def send_available_tasks(
+        message: Message,
+        actor_telegram_user_id: int,
+        *,
+        sent_message_ids: list[int] | None = None,
+        result_generation: int | None = None,
+    ) -> None:
         try:
             await _send_task_page(
                 message,
                 await tasks.list_available(actor_telegram_user_id=actor_telegram_user_id),
+                sent_message_ids=sent_message_ids,
+                result_generation=result_generation,
             )
         except (PermissionError, LookupError, TaskError):
-            await message.answer("Доступные задания сейчас не открываются.")
+            sent = await message.answer("Доступные задания сейчас не открываются.")
+            _capture_message_id(sent_message_ids, sent)
 
     async def next_tasks(callback: CallbackQuery) -> None:
+        message = callback.message
+        if not isinstance(message, Message):
+            return
+        lock = task_result_lock(message)
+        await lock.acquire()
         try:
-            if not isinstance(callback.message, Message) or callback.message.chat.type != "private":
+            if message.chat.type != "private":
                 await callback.answer("Откройте задания в личном чате с ботом.", show_alert=True)
                 return
-            cursor = UUID(str(callback.data).removeprefix(_TASK_PAGE_PREFIX))
+            callback_data = str(callback.data)
+            cursor, generation = _parse_task_cursor(callback_data)
+            if task_result_views.get(message.chat.id) != ("find", generation):
+                await callback.answer("Этот список уже обновлён.", show_alert=True)
+                return
+            consumed = consumed_pagination_callbacks.setdefault(message.chat.id, set())
+            if callback_data in consumed:
+                await callback.answer("Эта страница уже открыта.", show_alert=True)
+                return
+            consumed.add(callback_data)
             page = await tasks.list_available(
                 actor_telegram_user_id=callback.from_user.id, cursor_task_id=cursor
             )
             await callback.answer()
-            await _send_task_page(callback.message, page)
-        except (PermissionError, LookupError, TaskError, ValueError):
+            await _send_task_page(
+                message,
+                page,
+                sent_message_ids=current_task_results(message),
+                result_generation=generation,
+            )
+        except (PermissionError, LookupError, TaskError, TelegramAPIError, ValueError):
+            consumed_pagination_callbacks.get(message.chat.id, set()).discard(str(callback.data))
             await callback.answer("Не удалось открыть страницу заданий.", show_alert=True)
+        finally:
+            lock.release()
 
     async def show_create(message: Message) -> None:
         if message.from_user is None:
@@ -176,16 +265,33 @@ def build_navigation_router(  # noqa: PLR0913
             error="Создание заданий доступно только в личном чате с ботом.",
         ):
             return
-        await send_creation_catalog(message, message.from_user.id)
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await send_creation_catalog(
+                message,
+                message.from_user.id,
+                sent_message_ids=start_task_results(message, "create"),
+            )
 
-    async def send_creation_catalog(message: Message, actor_telegram_user_id: int) -> None:
+    async def send_creation_catalog(
+        message: Message,
+        actor_telegram_user_id: int,
+        *,
+        sent_message_ids: list[int] | None = None,
+    ) -> None:
         try:
             page = await catalog.browse(
                 CatalogQuery(actor_telegram_user_id=actor_telegram_user_id, limit=20)
             )
-            await _send_creation_catalog(message, page, prefix=_CREATE_PREFIX)
+            await _send_creation_catalog(
+                message,
+                page,
+                prefix=_CREATE_PREFIX,
+                sent_message_ids=sent_message_ids,
+            )
         except (CatalogError, PermissionError, LookupError):
-            await message.answer("Каталог создания сейчас недоступен.")
+            sent = await message.answer("Каталог создания сейчас недоступен.")
+            _capture_message_id(sent_message_ids, sent)
 
     async def choose_template(callback: CallbackQuery, event_update: Update) -> None:
         try:
@@ -238,10 +344,12 @@ def build_navigation_router(  # noqa: PLR0913
     async def show_balance(message: Message) -> None:
         if message.from_user is None:
             return
-        try:
-            await message.answer(await balance_text(message.from_user.id))
-        except (AuthorizationError, PermissionError, LookupError, ValueError):
-            await message.answer("Баланс сейчас недоступен.")
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            try:
+                await message.answer(await balance_text(message.from_user.id))
+            except (AuthorizationError, PermissionError, LookupError, ValueError):
+                await message.answer("Баланс сейчас недоступен.")
 
     async def balance_text(actor_telegram_user_id: int) -> str:
         profile = await registration.own_profile(actor_telegram_user_id)
@@ -261,24 +369,36 @@ def build_navigation_router(  # noqa: PLR0913
     async def show_insights(message: Message) -> None:
         if not await _require_private_message(message):
             return
-        await message.answer(INSIGHTS_TEXT, reply_markup=_insights_menu_markup())
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await message.answer(INSIGHTS_TEXT, reply_markup=_insights_menu_markup())
 
     async def show_help(message: Message) -> None:
-        await message.answer(_HELP_TEXT, reply_markup=main_menu_markup())
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await message.answer(_HELP_TEXT, reply_markup=main_menu_markup())
 
     async def show_owned(message: Message) -> None:
         if message.from_user is None:
             return
         if not await _require_private_message(message):
             return
-        await send_owned_tasks(message, message.from_user.id)
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await send_owned_tasks(
+                message,
+                message.from_user.id,
+                sent_message_ids=start_task_results(message, "created:all"),
+            )
 
-    async def send_owned_tasks(
+    async def send_owned_tasks(  # noqa: PLR0913
         message: Message,
         actor_telegram_user_id: int,
         *,
         status_group: str | None = None,
         cursor: tuple[datetime, UUID] | None = None,
+        sent_message_ids: list[int] | None = None,
+        result_generation: int | None = None,
     ) -> None:
         try:
             if status_group is None:
@@ -317,18 +437,24 @@ def build_navigation_router(  # noqa: PLR0913
                 has_more = status_group == "archive" and len(page) > page_limit
                 owned = page[:page_limit]
             for item in owned:
-                await message.answer(
+                sent = await message.answer(
                     owned_task_summary(item),
                     parse_mode=None,
                     reply_markup=owned_task_keyboard(item),
                 )
+                _capture_message_id(sent_message_ids, sent)
             review_sent = status_group in {
                 None,
                 "active",
-            } and await send_assignment_review_overview(message, assignments)
+            } and await send_assignment_review_overview(
+                message,
+                assignments,
+                sent_message_ids=sent_message_ids,
+            )
             if not owned and not review_sent:
                 label = "" if status_group is None else f" {_STATUS_LABELS[status_group].lower()}"
-                await message.answer(f"У вас пока нет{label} созданных заданий.")
+                sent = await message.answer(f"У вас пока нет{label} созданных заданий.")
+                _capture_message_id(sent_message_ids, sent)
             elif has_more:
                 last = owned[-1].task
                 await _send_archive_next(
@@ -336,23 +462,34 @@ def build_navigation_router(  # noqa: PLR0913
                     list_kind="created",
                     cursor_at=last.created_at,
                     cursor_id=last.id,
+                    sent_message_ids=sent_message_ids,
+                    result_generation=result_generation,
                 )
         except (AssignmentError, PermissionError, LookupError, TaskError):
-            await message.answer("Задания, созданные вами, сейчас недоступны.")
+            sent = await message.answer("Задания, созданные вами, сейчас недоступны.")
+            _capture_message_id(sent_message_ids, sent)
 
     async def show_assignments(message: Message) -> None:
         if message.from_user is None:
             return
         if not await _require_private_message(message):
             return
-        await send_assignments(message, message.from_user.id)
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await send_assignments(
+                message,
+                message.from_user.id,
+                sent_message_ids=start_task_results(message, "taken:all"),
+            )
 
-    async def send_assignments(
+    async def send_assignments(  # noqa: PLR0913
         message: Message,
         actor_telegram_user_id: int,
         *,
         status_group: str | None = None,
         cursor: tuple[datetime, UUID] | None = None,
+        sent_message_ids: list[int] | None = None,
+        result_generation: int | None = None,
     ) -> None:
         try:
             statuses = None if status_group is None else _ASSIGNMENT_STATUS_GROUPS[status_group]
@@ -367,6 +504,7 @@ def build_navigation_router(  # noqa: PLR0913
                 cursor=cursor,
                 order_by_reviewed_at=status_group == "completed",
                 empty_message=f"У вас пока нет{label} взятых заданий.",
+                sent_message_ids=sent_message_ids,
             )
             if status_group == "archive" and next_card is not None:
                 await _send_archive_next(
@@ -374,29 +512,36 @@ def build_navigation_router(  # noqa: PLR0913
                     list_kind="taken",
                     cursor_at=next_card.assignment.accepted_at,
                     cursor_id=next_card.assignment.id,
+                    sent_message_ids=sent_message_ids,
+                    result_generation=result_generation,
                 )
         except (AssignmentError, PermissionError, LookupError, TaskError):
-            await message.answer("Задания, взятые вами, сейчас недоступны.")
+            sent = await message.answer("Задания, взятые вами, сейчас недоступны.")
+            _capture_message_id(sent_message_ids, sent)
 
     async def show_profile(message: Message) -> None:
         if message.from_user is None:
             return
-        try:
-            profile = await registration.own_profile(message.from_user.id)
-            await message.answer(
-                own_profile_card(profile),
-                reply_markup=profile_edit_keyboard(),
-            )
-        except (PermissionError, LookupError, ValueError):
-            await message.answer("Карточка сейчас недоступна.")
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            try:
+                profile = await registration.own_profile(message.from_user.id)
+                await message.answer(
+                    own_profile_card(profile),
+                    reply_markup=profile_edit_keyboard(),
+                )
+            except (PermissionError, LookupError, ValueError):
+                await message.answer("Карточка сейчас недоступна.")
 
     async def show_statistics(message: Message) -> None:
         if message.from_user is None:
             return
-        try:
-            await message.answer(await statistics_text(message.from_user.id))
-        except (PermissionError, LookupError, ValueError):
-            await message.answer("Статистика сейчас недоступна.")
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            try:
+                await message.answer(await statistics_text(message.from_user.id))
+            except (PermissionError, LookupError, ValueError):
+                await message.answer("Статистика сейчас недоступна.")
 
     async def statistics_text(actor_telegram_user_id: int) -> str:
         value = await reputation.statistics(actor_telegram_user_id)
@@ -408,10 +553,12 @@ def build_navigation_router(  # noqa: PLR0913
     async def show_leaderboard(message: Message) -> None:
         if message.from_user is None:
             return
-        try:
-            await message.answer(await leaderboard_text(message.from_user.id))
-        except (PermissionError, LookupError, ValueError):
-            await message.answer("Лидерборд сейчас недоступен.")
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            try:
+                await message.answer(await leaderboard_text(message.from_user.id))
+            except (PermissionError, LookupError, ValueError):
+                await message.answer("Лидерборд сейчас недоступен.")
 
     async def leaderboard_text(actor_telegram_user_id: int) -> str:
         page = await reputation.leaderboard(telegram_user_id=actor_telegram_user_id)
@@ -424,7 +571,9 @@ def build_navigation_router(  # noqa: PLR0913
         )
 
     async def show_members(message: Message) -> None:
-        await send_member_catalog(message, reputation, moderation, foundation)
+        async with task_result_lock(message):
+            await clear_task_results(message)
+            await send_member_catalog(message, reputation, moderation, foundation)
 
     async def change_member_role(callback: CallbackQuery, event_update: Update) -> None:
         """Apply a superadministrator-only role change from a visible member card."""
@@ -450,17 +599,21 @@ def build_navigation_router(  # noqa: PLR0913
     async def show_admin(message: Message) -> None:
         if message.from_user is None:
             return
-        try:
-            await navigation.require_active_administrator(message.from_user.id)
-            await message.answer(
-                "Администрирование",
-                reply_markup=_admin_markup(include_task_creation=message.chat.type == "private"),
-            )
-        except PermissionError:
+        async with task_result_lock(message):
+            await clear_task_results(message)
             try:
-                await send_moderation_overview(message, moderation)
-            except (PermissionError, LookupError, ValueError):
-                await message.answer("Административное меню недоступно.")
+                await navigation.require_active_administrator(message.from_user.id)
+                await message.answer(
+                    "Администрирование",
+                    reply_markup=_admin_markup(
+                        include_task_creation=message.chat.type == "private"
+                    ),
+                )
+            except PermissionError:
+                try:
+                    await send_moderation_overview(message, moderation)
+                except (PermissionError, LookupError, ValueError):
+                    await message.answer("Административное меню недоступно.")
 
     async def community_approvals_action(callback: CallbackQuery) -> None:
         try:
@@ -567,10 +720,13 @@ def build_navigation_router(  # noqa: PLR0913
         if not isinstance(message, Message):
             return
         action = str(callback.data).removeprefix(_MENU_PREFIX)
+        lock = task_result_lock(message)
+        await lock.acquire()
         try:
             if action == "noop":
                 await callback.answer("Этот раздел уже открыт.")
                 return
+            await clear_task_results(message)
             if action == "root":
                 await message.edit_text("Главное меню открыто ниже.", reply_markup=None)
                 await callback.answer()
@@ -596,7 +752,12 @@ def build_navigation_router(  # noqa: PLR0913
                     reply_markup=_section_back_markup("tasks"),
                 )
                 await callback.answer()
-                await send_available_tasks(message, callback.from_user.id)
+                await send_available_tasks(
+                    message,
+                    callback.from_user.id,
+                    sent_message_ids=start_task_results(message, "find"),
+                    result_generation=current_task_generation(message),
+                )
                 return
             if action == "create":
                 await message.edit_text(
@@ -604,7 +765,11 @@ def build_navigation_router(  # noqa: PLR0913
                     reply_markup=_section_back_markup("tasks"),
                 )
                 await callback.answer()
-                await send_creation_catalog(message, callback.from_user.id)
+                await send_creation_catalog(
+                    message,
+                    callback.from_user.id,
+                    sent_message_ids=start_task_results(message, "create"),
+                )
                 return
             if action == "insights":
                 await message.edit_text(INSIGHTS_TEXT, reply_markup=_insights_menu_markup())
@@ -631,16 +796,22 @@ def build_navigation_router(  # noqa: PLR0913
                 )
                 await callback.answer()
                 if list_kind == "created":
+                    sent_message_ids = start_task_results(message, f"created:{status_group}")
                     await send_owned_tasks(
                         message,
                         callback.from_user.id,
                         status_group=status_group,
+                        sent_message_ids=sent_message_ids,
+                        result_generation=current_task_generation(message),
                     )
                 else:
+                    sent_message_ids = start_task_results(message, f"taken:{status_group}")
                     await send_assignments(
                         message,
                         callback.from_user.id,
                         status_group=status_group,
+                        sent_message_ids=sent_message_ids,
+                        result_generation=current_task_generation(message),
                     )
                 return
             await callback.answer("Раздел меню недоступен.", show_alert=True)
@@ -654,6 +825,8 @@ def build_navigation_router(  # noqa: PLR0913
             ValueError,
         ):
             await callback.answer("Не удалось открыть раздел меню.", show_alert=True)
+        finally:
+            lock.release()
 
     async def next_archive(callback: CallbackQuery) -> None:
         if not await _require_private_callback(callback):
@@ -661,9 +834,18 @@ def build_navigation_router(  # noqa: PLR0913
         message = callback.message
         if not isinstance(message, Message):
             return
+        lock = task_result_lock(message)
+        await lock.acquire()
         try:
-            list_kind, cursor = _parse_archive_cursor(str(callback.data))
-            await message.edit_reply_markup(reply_markup=None)
+            callback_data = str(callback.data)
+            list_kind, cursor, generation = _parse_archive_cursor(callback_data)
+            if task_result_views.get(message.chat.id) != (f"{list_kind}:archive", generation):
+                await callback.answer("Этот список уже обновлён.", show_alert=True)
+                return
+            consumed = consumed_pagination_callbacks.setdefault(message.chat.id, set())
+            if callback_data in consumed:
+                await callback.answer("Эта страница уже открыта.", show_alert=True)
+                return
             await callback.answer()
             if list_kind == "created":
                 await send_owned_tasks(
@@ -671,6 +853,8 @@ def build_navigation_router(  # noqa: PLR0913
                     callback.from_user.id,
                     status_group="archive",
                     cursor=cursor,
+                    sent_message_ids=current_task_results(message),
+                    result_generation=generation,
                 )
             else:
                 await send_assignments(
@@ -678,9 +862,24 @@ def build_navigation_router(  # noqa: PLR0913
                     callback.from_user.id,
                     status_group="archive",
                     cursor=cursor,
+                    sent_message_ids=current_task_results(message),
+                    result_generation=generation,
                 )
-        except (AssignmentError, PermissionError, LookupError, TaskError, ValueError):
+            consumed.add(callback_data)
+            with suppress(TelegramAPIError):
+                await message.edit_reply_markup(reply_markup=None)
+        except (
+            AssignmentError,
+            PermissionError,
+            LookupError,
+            TaskError,
+            TelegramAPIError,
+            ValueError,
+        ):
+            consumed_pagination_callbacks.get(message.chat.id, set()).discard(str(callback.data))
             await callback.answer("Не удалось открыть следующую страницу.", show_alert=True)
+        finally:
+            lock.release()
 
     router.message.register(show_tasks, Command("tasks"))
     router.message.register(show_task_menu, F.text == TASKS_TEXT)
@@ -783,19 +982,25 @@ def _task_list_title(list_kind: str) -> str:
     return "Созданные мной" if list_kind == "created" else "Взятые мной"
 
 
-async def _send_archive_next(
+async def _send_archive_next(  # noqa: PLR0913
     message: Message,
     *,
     list_kind: str,
     cursor_at: datetime,
     cursor_id: UUID,
+    sent_message_ids: list[int] | None = None,
+    result_generation: int | None = None,
 ) -> None:
+    if result_generation is None:
+        raise ValueError(_ARCHIVE_CALLBACK_INVALID)
     code = "ca" if list_kind == "created" else "ta"
     micros = int(cursor_at.timestamp() * 1_000_000)
-    callback_data = f"{_LIST_PAGE_PREFIX}{code}:{micros:x}:{cursor_id.hex}"
+    callback_data = (
+        f"{_LIST_PAGE_PREFIX}{code}:{micros:x}:{_encode_uuid(cursor_id)}:{result_generation:012x}"
+    )
     if len(callback_data.encode()) > _CALLBACK_LIMIT:
         raise ValueError(_ARCHIVE_CALLBACK_TOO_LONG)
-    await message.answer(
+    sent = await message.answer(
         "В архиве есть ещё задания.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -803,15 +1008,33 @@ async def _send_archive_next(
             ]
         ),
     )
+    _capture_message_id(sent_message_ids, sent)
 
 
-def _parse_archive_cursor(value: str) -> tuple[str, tuple[datetime, UUID]]:
-    code, raw_micros, raw_id = value.removeprefix(_LIST_PAGE_PREFIX).split(":", 2)
+def _parse_archive_cursor(value: str) -> tuple[str, tuple[datetime, UUID], int]:
+    code, raw_micros, raw_id, raw_generation = value.removeprefix(_LIST_PAGE_PREFIX).split(":", 3)
     if code not in {"ca", "ta"}:
         raise ValueError(_ARCHIVE_CALLBACK_INVALID)
     micros = int(raw_micros, 16)
     cursor_at = datetime.fromtimestamp(micros / 1_000_000, UTC)
-    return ("created" if code == "ca" else "taken"), (cursor_at, UUID(hex=raw_id))
+    return (
+        "created" if code == "ca" else "taken",
+        (cursor_at, _decode_uuid(raw_id)),
+        int(raw_generation, 16),
+    )
+
+
+def _parse_task_cursor(value: str) -> tuple[UUID, int]:
+    raw_id, raw_generation = value.removeprefix(_TASK_PAGE_PREFIX).split(":", 1)
+    return UUID(raw_id), int(raw_generation, 16)
+
+
+def _encode_uuid(value: UUID) -> str:
+    return urlsafe_b64encode(value.bytes).rstrip(b"=").decode("ascii")
+
+
+def _decode_uuid(value: str) -> UUID:
+    return UUID(bytes=urlsafe_b64decode(f"{value}=="))
 
 
 async def _require_private_message(
@@ -832,12 +1055,19 @@ async def _require_private_callback(callback: CallbackQuery) -> bool:
     return False
 
 
-async def _send_task_page(message: Message, page: AvailableTaskPage) -> None:
+async def _send_task_page(
+    message: Message,
+    page: AvailableTaskPage,
+    *,
+    sent_message_ids: list[int] | None = None,
+    result_generation: int | None = None,
+) -> None:
     if not page.items:
-        await message.answer("Доступных заданий пока нет.")
+        sent = await message.answer("Доступных заданий пока нет.")
+        _capture_message_id(sent_message_ids, sent)
         return
     for task in page.items:
-        await message.answer(
+        sent = await message.answer(
             published_task_card(task),
             parse_mode=None,
             reply_markup=InlineKeyboardMarkup(
@@ -846,20 +1076,27 @@ async def _send_task_page(message: Message, page: AvailableTaskPage) -> None:
                 ]
             ),
         )
+        _capture_message_id(sent_message_ids, sent)
     if page.next_cursor_task_id is not None:
-        await message.answer(
+        if result_generation is None:
+            raise ValueError(_ARCHIVE_CALLBACK_INVALID)
+        sent = await message.answer(
             "Есть ещё задания.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
                             text="Следующая страница",
-                            callback_data=f"{_TASK_PAGE_PREFIX}{page.next_cursor_task_id}",
+                            callback_data=(
+                                f"{_TASK_PAGE_PREFIX}{page.next_cursor_task_id}:"
+                                f"{result_generation:012x}"
+                            ),
                         )
                     ]
                 ]
             ),
         )
+        _capture_message_id(sent_message_ids, sent)
 
 
 async def _send_creation_catalog(
@@ -867,12 +1104,14 @@ async def _send_creation_catalog(
     page: CatalogPage,
     *,
     prefix: str,
+    sent_message_ids: list[int] | None = None,
 ) -> None:
     if not page.items:
-        await message.answer("Доступных шаблонов пока нет.")
+        sent = await message.answer("Доступных шаблонов пока нет.")
+        _capture_message_id(sent_message_ids, sent)
         return
     for template in page.items:
-        await message.answer(
+        sent = await message.answer(
             f"{template.category_name} · {template.name}\n{template.description}\n"
             f"Награда: {template.credit_reward} кредита",
             reply_markup=InlineKeyboardMarkup(
@@ -886,6 +1125,12 @@ async def _send_creation_catalog(
                 ]
             ),
         )
+        _capture_message_id(sent_message_ids, sent)
+
+
+def _capture_message_id(message_ids: list[int] | None, message: Message) -> None:
+    if message_ids is not None:
+        message_ids.append(message.message_id)
 
 
 def _admin_markup(*, include_task_creation: bool = True) -> InlineKeyboardMarkup:
