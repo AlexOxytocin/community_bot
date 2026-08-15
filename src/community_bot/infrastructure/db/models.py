@@ -30,6 +30,55 @@ class Base(DeclarativeBase):
     """Declarative metadata root."""
 
 
+class TestRunModel(Base):
+    """One isolated live smoke-test execution."""
+
+    __tablename__ = "test_runs"
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'completed', 'failed')", name="ck_test_runs_status"),
+        CheckConstraint("marker LIKE 'TEST-%'", name="ck_test_runs_marker"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    marker: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    started_by_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    started_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TestRunParticipantModel(Base):
+    """Member whose live Telegram actions belong to one test run."""
+
+    __tablename__ = "test_run_participants"
+    __table_args__ = (
+        Index(
+            "uq_test_run_participants_active_member",
+            "member_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
+    )
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("test_runs.id"), primary_key=True
+    )
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), primary_key=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    joined_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    left_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class MemberModel(Base):
     """Persistent member profile and security state."""
 
@@ -301,6 +350,9 @@ class TaskCreationDraftModel(Base):
     creator_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
+    test_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("test_runs.id")
+    )
     origin: Mapped[str] = mapped_column(Text, nullable=False, default="member")
     reviewer_admin_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id")
@@ -377,6 +429,9 @@ class TaskModel(Base):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     origin: Mapped[str] = mapped_column(Text, nullable=False)
+    test_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("test_runs.id"), index=True
+    )
     template_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
     )

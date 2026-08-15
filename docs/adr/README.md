@@ -27,3 +27,4 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0010 — Быстрый путь малых багфиксов](0010-small-bugfix-fast-lane.md)
 - [ADR-0011 — Защищенный release после одного полного CI](0011-protected-single-ci-release.md)
 - [ADR-0012 — Python-скрипты эксплуатации и деплой из GitHub ref](0012-python-ops-and-git-deploy.md)
+- [ADR-0013 — Изолированные live test runs в рабочем экземпляре](0013-isolated-live-test-runs.md)

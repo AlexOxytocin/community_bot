@@ -144,6 +144,47 @@ evidence или медиа. Чтение чата с ботом, нажатие 
 сообщений выполняются только по явному запросу пользователя на конкретный
 release acceptance сценарий.
 
+До начала реальной эксплуатации владелец разрешил полный live smoke через
+профили `default` и `tg-test`. Перед действиями открыть изолированный scope:
+
+```powershell
+uv run python ops/smoke_production.py `
+  --server USER@HOST `
+  begin TEST-RELEASE-UNIQUE01
+```
+
+После сценариев отменить пользовательские тестовые сущности через интерфейс, затем
+автоматически закрыть свободные community-карточки и проверить блокеры:
+
+```powershell
+uv run python ops/smoke_production.py --server USER@HOST cleanup TEST-RELEASE-UNIQUE01
+uv run python ops/smoke_production.py --server USER@HOST status TEST-RELEASE-UNIQUE01
+uv run python ops/smoke_production.py --server USER@HOST finish TEST-RELEASE-UNIQUE01
+```
+
+`cleanup` отменяет только опубликованные community-карточки без активных назначений.
+Черновики и активные назначения остаются блокерами: их нужно завершить или отменить
+через проверяемый пользовательский сценарий.
+
+После этого участники scope видят только карточки текущего запуска, а остальные
+пользователи не видят их и не получают уведомления. Все создаваемые карточки
+имеют видимый маркер `ТЕСТ`. Smoke вправе создавать, принимать, подтверждать,
+отменять и закрывать карточки, если это требуется критериями release.
+
+Незавершённые черновики удалить через `/cancel` или `/task_cancel`. Опубликованные
+tasks и assignments привести в терминальные состояния штатными callback и
+командами. Затем закрыть scope:
+
+```powershell
+uv run python ops/smoke_production.py `
+  --server USER@HOST `
+  finish TEST-RELEASE-UNIQUE01
+```
+
+`finish` обязан завершиться ошибкой, если остались nonterminal drafts, tasks или
+assignments. В таком случае smoke считается непройденным до штатной очистки.
+Telegram ID, session string, сообщения и callback payload в отчёт не включать.
+
 ## Частичный rollback
 
 1. Прочитать предыдущую identity из
@@ -194,7 +235,7 @@ restore, Alembic revision и результат проверок. Цели ло�
 ## Preflight допуска когорты
 
 1. Зафиксировать reviewed commit и immutable image digest текущего release.
-2. Подтвердить `0018`, healthy `postgres`, `community-worker` и `community-bot`,
+2. Подтвердить `0019`, healthy `postgres`, `community-worker` и `community-bot`,
    отсутствие terminal `failed` outbox и свежие heartbeat.
 3. Создать свежий backup, выполнить isolated restore drill и получить
    `ledger_mismatch_count = 0`; возраст backup должен быть не более 24 часов, а

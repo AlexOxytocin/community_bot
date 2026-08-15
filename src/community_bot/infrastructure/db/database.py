@@ -23,6 +23,7 @@ from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db import reputation as reputation_store
 from community_bot.infrastructure.db import task_cancellations as cancellation_store
 from community_bot.infrastructure.db import tasks as task_store
+from community_bot.infrastructure.db import test_runs as test_run_store
 from community_bot.infrastructure.db.economy import (
     SqlAlchemyEconomyMutation,
     acquire_product_config_mutation_gate,
@@ -40,6 +41,7 @@ from community_bot.infrastructure.db.models import (
     AuditEventModel,
     MemberModel,
     ProcessedTelegramUpdateModel,
+    TestRunParticipantModel,
 )
 from community_bot.infrastructure.db.moderation import SqlAlchemyModerationMutation
 
@@ -85,6 +87,7 @@ if TYPE_CHECKING:
         TaskCancellationResponse,
         TaskDraft,
     )
+    from community_bot.application.test_runs import TestRunSnapshot
     from community_bot.domain.assignments import (
         Assignment,
         AssignmentStatus,
@@ -575,28 +578,36 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await task_store.save_task_draft(self._require_session(), draft)
 
     async def list_active_administrators(
-        self, *, exclude_id: UUID
+        self, *, exclude_id: UUID, test_run_id: UUID | None
     ) -> tuple[AdministratorOption, ...]:
         """Return active administrators except one creator."""
+        statement = select(MemberModel).where(
+            MemberModel.role == MemberRole.ADMINISTRATOR.value,
+            MemberModel.status == MemberStatus.ACTIVE.value,
+            MemberModel.id != exclude_id,
+        )
+        if test_run_id is not None:
+            statement = statement.join(
+                TestRunParticipantModel,
+                TestRunParticipantModel.member_id == MemberModel.id,
+            ).where(
+                TestRunParticipantModel.run_id == test_run_id,
+                TestRunParticipantModel.is_active.is_(True),
+            )
         models = (
             await self._require_session().scalars(
-                select(MemberModel)
-                .where(
-                    MemberModel.role == MemberRole.ADMINISTRATOR.value,
-                    MemberModel.status == MemberStatus.ACTIVE.value,
-                    MemberModel.id != exclude_id,
-                )
-                .order_by(MemberModel.display_name, MemberModel.id)
+                statement.order_by(MemberModel.display_name, MemberModel.id)
             )
         ).all()
         return tuple(AdministratorOption(model.id, model.display_name) for model in models)
 
     async def list_pending_community_publications(
-        self, *, limit: int
+        self, *, actor_id: UUID, limit: int
     ) -> tuple[CommunityPublicationRequest, ...]:
         """Return community drafts awaiting superadministrator confirmation."""
         return await task_store.list_pending_community_publications(
             self._require_session(),
+            actor_id=actor_id,
             limit=limit,
         )
 
@@ -799,6 +810,12 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             limit=limit,
             cursor_task_id=cursor_task_id,
             now=now,
+        )
+
+    async def ensure_task_test_access(self, *, task_id: UUID, member_id: UUID) -> None:
+        """Enforce the test-scope boundary for direct task commands."""
+        await task_store.ensure_test_access(
+            self._require_session(), task_id=task_id, member_id=member_id
         )
 
     async def add_task_outbox(
@@ -1231,6 +1248,44 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             )
         )
         await self._require_session().flush()
+
+    async def members_by_telegram_ids(self, telegram_user_ids: Sequence[int]) -> tuple[Member, ...]:
+        """Resolve active test participants without exposing profile data."""
+        models = (
+            await self._require_session().scalars(
+                test_run_store.active_member_models_statement(telegram_user_ids)
+            )
+        ).all()
+        return tuple(_to_domain(model) for model in models)
+
+    async def create_test_run(
+        self,
+        *,
+        marker: str,
+        started_by_member_id: UUID,
+        participant_ids: Sequence[UUID],
+    ) -> TestRunSnapshot:
+        """Create one isolated live test scope."""
+        return await test_run_store.create_run(
+            self._require_session(),
+            marker=marker,
+            started_by_member_id=started_by_member_id,
+            participant_ids=participant_ids,
+        )
+
+    async def test_run_snapshot(
+        self, marker: str, *, for_update: bool = False
+    ) -> TestRunSnapshot | None:
+        """Load privacy-safe test-run state."""
+        return await test_run_store.snapshot(self._require_session(), marker, for_update=for_update)
+
+    async def finish_test_run(self, marker: str, *, failed: bool) -> TestRunSnapshot:
+        """Finish one checked test run and release its participants."""
+        return await test_run_store.finish(self._require_session(), marker, failed=failed)
+
+    async def cleanup_test_run(self, marker: str) -> int:
+        """Cancel disposable test-only community cards."""
+        return await test_run_store.cleanup(self._require_session(), marker)
 
     async def save_member(self, member: Member) -> None:
         """Persist the member security state in the locked row."""

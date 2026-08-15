@@ -29,7 +29,7 @@ DRILL_DATABASE = "community_bot_restore_drill"
 RESTORE_CHECK_SQL = """
 DO $$
 BEGIN
-  IF (SELECT version_num FROM alembic_version) <> '0018' THEN
+  IF (SELECT version_num FROM alembic_version) <> '0019' THEN
     RAISE EXCEPTION 'Unexpected Alembic revision in restored database.';
   END IF;
   IF EXISTS (

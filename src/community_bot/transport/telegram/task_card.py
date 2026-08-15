@@ -22,8 +22,9 @@ class TaskCardError(ValueError):
 
 def published_task_card(task: PublishedTask) -> str:
     """Render the performer-facing immutable task snapshot."""
+    title = f"ТЕСТ · {task.title}" if getattr(task, "test_run_id", None) is not None else task.title
     return _task_card(
-        title=task.title,
+        title=title,
         author=task.author_display_name,
         description=task.description,
         performer_instructions=task.performer_instructions,
@@ -49,7 +50,11 @@ def preview_task_card(preview: TaskPreview) -> str:
     ):
         raise TaskCardError
     card = _task_card(
-        title=preview.template_name,
+        title=(
+            f"ТЕСТ · {preview.template_name}"
+            if draft.test_run_id is not None
+            else preview.template_name
+        ),
         author=preview.author_display_name,
         description=preview.template_description,
         performer_instructions=preview.performer_instructions,
