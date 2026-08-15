@@ -74,7 +74,9 @@ success. Конфликт — защитная остановка, а не по�
 2. После merge workflow `Release image` доказывает совпадение PR/base/head/tree и
    собирает linux/arm64 image actual merge commit. Привилегированный deploy job ожидает
    подтверждения владельца в Environment `production`, затем передает immutable digest
-   forced-command entrypoint. Ручной SSH для штатного выпуска не требуется.
+   forced-command entrypoint. Источником release может быть только актуальный merge commit
+   `main`; ветки задач и commit вне `main` отклоняются. Ручной SSH для штатного выпуска не
+   требуется.
 3. Убедиться, что `docker compose ps` показывает healthy `postgres`, `worker` и
    `bot`, а `migrate` завершился с code 0.
 4. Проверить, что worker и bot были принудительно пересозданы, а `community-health`
