@@ -38,6 +38,7 @@ PRODUCTION_PATHS = (
     "migrations",
 )
 RELEASE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+MAIN_REFS = frozenset({"main", "refs/heads/main"})
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -119,11 +120,14 @@ def deploy_from_git(
 
 
 def fetch_source(*, repository: str, ref: str, source: Path) -> None:
-    """Fetch exactly one Git ref into a temporary checkout."""
+    """Fetch the current main commit and reject every other deployment ref."""
     source.mkdir(parents=True)
     run_checked(["git", "-C", str(source), "init"])
     run_checked(["git", "-C", str(source), "remote", "add", "origin", repository])
-    run_checked(["git", "-C", str(source), "fetch", "--depth", "1", "origin", ref])
+    run_checked(["git", "-C", str(source), "fetch", "--depth", "1", "origin", "refs/heads/main"])
+    main_commit = capture_text(["git", "-C", str(source), "rev-parse", "FETCH_HEAD"])
+    if ref not in MAIN_REFS and ref != main_commit:
+        raise OpsError("Deploy ref must match the current origin/main commit.")
     run_checked(["git", "-C", str(source), "checkout", "--detach", "FETCH_HEAD"])
 
 

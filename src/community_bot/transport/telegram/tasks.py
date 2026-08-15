@@ -798,7 +798,7 @@ def _cancel_error(error: Exception) -> str:
     for marker, message in messages:
         if marker in detail:
             return message
-    return "Не удалось отменить задание. Откройте «Мои задания» и попробуйте снова."
+    return "Не удалось отменить задание. Откройте «Созданные задания» и попробуйте снова."
 
 
 def _cancellation_response_error(error: Exception) -> str:

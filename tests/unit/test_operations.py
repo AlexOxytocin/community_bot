@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from ops import deploy_from_git
+from ops._runtime import OpsError
 
 _WINDOWS_GIT_BASH = Path("C:/Program Files/Git/bin/bash.exe")
 _BASH = str(_WINDOWS_GIT_BASH) if _WINDOWS_GIT_BASH.exists() else shutil.which("bash")
@@ -305,3 +307,34 @@ def test_host_maintenance_entrypoints_are_python() -> None:
         "deploy_self_hosted.sh",
         "github_deploy_entrypoint.sh",
     }
+
+
+def test_git_deploy_accepts_only_current_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A branch, tag, or stale commit cannot become a server release."""
+    calls: list[list[str]] = []
+    main_commit = "a" * 40
+
+    def record(command: list[str]) -> None:
+        calls.append(command)
+
+    def current_main(_command: list[str]) -> str:
+        return main_commit
+
+    monkeypatch.setattr(deploy_from_git, "run_checked", record)
+    monkeypatch.setattr(deploy_from_git, "capture_text", current_main)
+
+    source = tmp_path / "accepted"
+    deploy_from_git.fetch_source(repository="repository", ref=main_commit, source=source)
+
+    assert calls[-2][-1] == "refs/heads/main"
+    assert calls[-1][-2:] == ["--detach", "FETCH_HEAD"]
+
+    with pytest.raises(OpsError, match="current origin/main"):
+        deploy_from_git.fetch_source(
+            repository="repository",
+            ref="refs/heads/feature",
+            source=tmp_path / "rejected",
+        )

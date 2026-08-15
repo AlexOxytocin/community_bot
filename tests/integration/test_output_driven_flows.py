@@ -76,6 +76,7 @@ from community_bot.infrastructure.db.models import (
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
 from community_bot.transport.telegram.navigation import (
+    ACCEPTED_TASKS_TEXT,
     ADMIN_TEXT,
     CREATE_TASK_TEXT,
     FIND_TASK_TEXT,
@@ -136,7 +137,7 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
     dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
     send_message, send_callback = _transport(dispatcher, bot, actors)
     capture.callbacks.clear()
-    await send_message(81_102, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_102, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
     resumed_submit = _visible(capture, lambda value: value.startswith("as:a:s:"))
     assert resumed_submit == submit
     capture.callbacks.clear()
@@ -310,9 +311,21 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     _assert_task_card(capture, accepted_text, details, materials)
     assert "Задание принято." in accepted_text
     capture.texts.clear()
-    await send_message(81_221, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(81_221, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    recovered_summary = next(text for text in capture.texts if task_title in text)
+    assert "Статус: в работе" in recovered_summary
+    assert details not in recovered_summary
+    assignment_expand = _visible_on_text(
+        capture,
+        lambda text: text == recovered_summary,
+        lambda value: value.startswith("as:view:open:"),
+    )
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_callback(81_221_1, performer.telegram_user_id, assignment_expand)
     recovered_text = next(text for text in capture.texts if details in text)
     _assert_task_card(capture, recovered_text, details, materials)
+    assert "Статус: в работе" in recovered_text
     capture.texts.clear()
     capture.callbacks.clear()
     capture.button_payloads.clear()
@@ -352,6 +365,25 @@ async def test_task_details_are_visible_in_preview_catalog_and_acceptance(  # no
     await send_callback(81_225, performer.telegram_user_id, performer_confirmation)
     await send_callback(81_226, performer.telegram_user_id, performer_confirmation)
     assert capture.callback_answers[-1] == "Запрос отмены больше не актуален."
+    capture.texts.clear()
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_message(81_227, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
+    cancelled_summary = next(text for text in capture.texts if "Статус: cancelled" in text)
+    assert "Статус: отменено" not in cancelled_summary
+    assert details not in cancelled_summary
+    cancelled_expand = _visible_on_text(
+        capture,
+        lambda text: text == cancelled_summary,
+        lambda value: value.startswith("as:view:open:"),
+    )
+    capture.callbacks.clear()
+    capture.button_payloads.clear()
+    await send_callback(81_228, performer.telegram_user_id, cancelled_expand)
+    cancelled_details = next(
+        text for text in capture.texts if details in text and "Статус: cancelled" in text
+    )
+    assert "Статус: отменено" not in cancelled_details
     async with sessions() as session:
         cancelled_task = await session.scalar(select(TaskModel))
         creator_cancellations = await session.scalar(
@@ -1603,7 +1635,7 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
         _visible(capture, lambda value: value.startswith("task:accept:")),
     )
     capture.callbacks.clear()
-    await send_message(82_118, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(82_118, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
     await send_callback(
         82_119,
         performer.telegram_user_id,
@@ -1656,7 +1688,7 @@ async def test_community_journey_and_admin_surfaces_are_reachable(database_url: 
     await send_callback(82_132, resolver.telegram_user_id, confirm_refund)
 
     capture.callbacks.clear()
-    await send_message(82_133, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(82_133, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
     appeal = _visible(capture, lambda value: value.startswith("mod:appeal:"))
     capture.callbacks.clear()
     await send_callback(82_134, performer.telegram_user_id, appeal)
@@ -2027,7 +2059,7 @@ async def test_no_show_is_visible_after_deadline_worker(database_url: str) -> No
     assert finalized == 1
     capture.callbacks.clear()
     capture.texts.clear()
-    await send_message(86_102, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(86_102, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
     assert any("неявка" in text for text in capture.texts)
     async with sessions() as session:
         assignment = await session.scalar(
@@ -2264,7 +2296,7 @@ async def test_reject_dispute_and_moderator_resolution_use_visible_outputs(  # n
     await send_message(85_100, performer.telegram_user_id, FIND_TASK_TEXT)
     await _click(capture, send_callback, 85_101, performer.telegram_user_id, "task:accept:")
     capture.callbacks.clear()
-    await send_message(85_102, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(85_102, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
     await _click(capture, send_callback, 85_103, performer.telegram_user_id, "as:a:s:")
     await send_message(
         85_104,
@@ -2280,7 +2312,7 @@ async def test_reject_dispute_and_moderator_resolution_use_visible_outputs(  # n
     await send_callback(85_107, reviewer.telegram_user_id, reject)
 
     capture.callbacks.clear()
-    await send_message(85_108, performer.telegram_user_id, MY_TASKS_TEXT)
+    await send_message(85_108, performer.telegram_user_id, ACCEPTED_TASKS_TEXT)
     begin_dispute = _visible(capture, lambda value: value.startswith("as:a:d:"))
     capture.callbacks.clear()
     await send_callback(85_109, performer.telegram_user_id, begin_dispute)

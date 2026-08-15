@@ -23,10 +23,14 @@ from aiogram.utils.deep_linking import create_start_link
 from community_bot.application.catalog import CatalogQuery
 from community_bot.application.member_foundation import AdministrativeChange
 from community_bot.application.registration import InvitationCreateCommand
+from community_bot.domain.assignments import AssignmentError
 from community_bot.domain.catalog import CatalogError
 from community_bot.domain.members import AuthorizationError, ChangeKind
 from community_bot.domain.tasks import TaskError
-from community_bot.transport.telegram.assignments import send_assignment_overview
+from community_bot.transport.telegram.assignments import (
+    send_assignment_overview,
+    send_assignment_review_overview,
+)
 from community_bot.transport.telegram.moderation import send_moderation_overview
 from community_bot.transport.telegram.profile import (
     PROFILE_TEXT,
@@ -54,7 +58,8 @@ if TYPE_CHECKING:
 
 FIND_TASK_TEXT = "Найти задание"
 CREATE_TASK_TEXT = "Создать задание"
-MY_TASKS_TEXT = "Мои задания"
+MY_TASKS_TEXT = "Созданные задания"
+ACCEPTED_TASKS_TEXT = "Принятые задания"
 BALANCE_TEXT = "Баланс"
 STATISTICS_TEXT = "Статистика"
 LEADERBOARD_TEXT = "Лидерборд"
@@ -72,10 +77,11 @@ def main_menu_markup() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=FIND_TASK_TEXT), KeyboardButton(text=CREATE_TASK_TEXT)],
-            [KeyboardButton(text=MY_TASKS_TEXT), KeyboardButton(text=PROFILE_TEXT)],
-            [KeyboardButton(text=BALANCE_TEXT), KeyboardButton(text=STATISTICS_TEXT)],
-            [KeyboardButton(text=LEADERBOARD_TEXT), KeyboardButton(text=MEMBERS_TEXT)],
-            [KeyboardButton(text=HELP_TEXT), KeyboardButton(text=ADMIN_TEXT)],
+            [KeyboardButton(text=MY_TASKS_TEXT), KeyboardButton(text=ACCEPTED_TASKS_TEXT)],
+            [KeyboardButton(text=PROFILE_TEXT), KeyboardButton(text=BALANCE_TEXT)],
+            [KeyboardButton(text=STATISTICS_TEXT), KeyboardButton(text=LEADERBOARD_TEXT)],
+            [KeyboardButton(text=MEMBERS_TEXT), KeyboardButton(text=HELP_TEXT)],
+            [KeyboardButton(text=ADMIN_TEXT)],
         ],
         resize_keyboard=True,
     )
@@ -214,17 +220,28 @@ def build_navigation_router(  # noqa: PLR0913
             return
         try:
             owned = await tasks.list_owned_cards(actor_telegram_user_id=message.from_user.id)
-            if not owned:
-                await message.answer("У вас пока нет опубликованных заданий.")
             for item in owned:
                 await message.answer(
                     owned_task_summary(item),
                     parse_mode=None,
                     reply_markup=owned_task_keyboard(item),
                 )
+            review_sent = await send_assignment_review_overview(message, assignments)
+            if not owned and not review_sent:
+                await message.answer("У вас пока нет созданных заданий.")
+        except (AssignmentError, PermissionError, LookupError, TaskError):
+            await message.answer("Созданные задания сейчас недоступны.")
+
+    async def show_assignments(message: Message) -> None:
+        if message.from_user is None:
+            return
+        if message.chat.type != "private":
+            await message.answer("Задания доступны только в личном чате с ботом.")
+            return
+        try:
             await send_assignment_overview(message, assignments)
-        except (PermissionError, LookupError, TaskError):
-            await message.answer("Ваши задания сейчас недоступны.")
+        except (AssignmentError, PermissionError, LookupError, TaskError):
+            await message.answer("Принятые задания сейчас недоступны.")
 
     async def show_profile(message: Message) -> None:
         if message.from_user is None:
@@ -418,6 +435,7 @@ def build_navigation_router(  # noqa: PLR0913
     router.message.register(show_help, Command("help"))
     router.message.register(show_help, F.text == HELP_TEXT)
     router.message.register(show_owned, F.text == MY_TASKS_TEXT)
+    router.message.register(show_assignments, F.text == ACCEPTED_TASKS_TEXT)
     router.message.register(show_profile, F.text == PROFILE_TEXT)
     router.message.register(show_statistics, F.text == STATISTICS_TEXT)
     router.message.register(show_leaderboard, F.text == LEADERBOARD_TEXT)
@@ -536,7 +554,8 @@ def _ledger_line(item: LedgerHistoryItem) -> str:
 _HELP_TEXT = """Как пользоваться ботом:
 • /tasks — найти доступное задание и нажать «Взять»;
 • /create — выбрать шаблон и заполнить карточку;
-• /my_tasks — мои опубликованные задания;
+• /my_tasks — созданные мной задания;
+• /my_assignments — принятые мной задания;
 • /profile — моя карточка;
 • /balance — кредиты и последние операции;
 • /stats и /leaderboard — вклад и рейтинг;
