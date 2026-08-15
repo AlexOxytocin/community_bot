@@ -109,6 +109,8 @@ name NOT NULL
 description NULL
 icon NULL
 sort_order NOT NULL
+visibility TEXT NOT NULL DEFAULT 'public'
+creation_mode TEXT NOT NULL DEFAULT 'template'
 is_active NOT NULL
 ```
 
@@ -141,8 +143,11 @@ UNIQUE(code, version)
 переключение `is_active`. Частичный уникальный индекс разрешает не более одной
 активной версии одного `code`. Изменение награды или другого содержимого
 деактивирует прежнюю строку и вставляет следующую версию одной транзакцией.
-Категория также не удаляется и сохраняет идентичность; меняется только
-`is_active`.
+Категория также не удаляется и сохраняет идентичность; для рабочего справочника
+создания дополнительно задаются видимость `public|admin_only` и режим
+`template|freeform|both`. В меню свободного создания попадают только active
+категории с `creation_mode=freeform|both`, а `admin_only` доступна только
+администратору.
 
 `input_schema_json` и `result_schema_json` используют закрытые object-схемы
 JSON Schema Draft 2020-12 без удалённых `$ref`. Input проверяется до создания
@@ -160,7 +165,15 @@ reviewer_admin_id FK NULL
 community_approval_requested_at TIMESTAMP WITH TIME ZONE NULL
 community_approved_by_admin_id FK NULL
 community_approved_at TIMESTAMP WITH TIME ZONE NULL
-template_id FK NOT NULL
+template_id FK NULL
+category_id FK NULL
+task_kind TEXT NULL
+time_size TEXT NULL
+title TEXT NULL
+description TEXT NULL
+completion_criteria TEXT NULL
+credit_reward_per_performer INTEGER NULL
+estimated_minutes INTEGER NULL
 input_payload_json JSON NULL
 deadline_at TIMESTAMP WITH TIME ZONE NULL
 format TEXT NULL
@@ -176,10 +189,13 @@ updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 ```
 
 У участника может быть несколько незавершённых черновиков, но только один
-текущий. Каждый ответ сверяет ожидаемые шаг и revision. Community-черновик
-создаёт active administrator; до публикации в нём сохраняется другой active
-administrator как независимый `reviewer_admin_id`. Если создатель не является
-суперадминистратором, публикация сначала сохраняет
+текущий. Каждый ответ сверяет ожидаемые шаг и revision. Для свободного задания
+`template_id IS NULL`, а карточка собирается из полей `category_id`,
+`task_kind`, `time_size`, `title`, `description`, `completion_criteria`,
+`credit_reward_per_performer`, `materials_json`, срока и формата. Community-
+черновик создаёт active administrator; до публикации в нём сохраняется другой
+active administrator как независимый `reviewer_admin_id`. Если создатель не
+является суперадминистратором, публикация сначала сохраняет
 `community_approval_requested_at`; после подтверждения суперадминистратором
 заполняются `community_approved_by_admin_id` и `community_approved_at`. После
 публикации черновик остаётся исторической связью с заданием, получает
@@ -207,6 +223,7 @@ credit_reward_per_performer INTEGER NOT NULL
 performer_slots INTEGER NOT NULL
 reserved_credit_total INTEGER NOT NULL
 estimated_minutes INTEGER NOT NULL
+time_size TEXT NULL
 minimum_level INTEGER NOT NULL
 format TEXT NOT NULL
 city NULL
@@ -218,12 +235,18 @@ high_reward_confirmed_by_admin_id FK NULL
 publish_command_id UUID UNIQUE NOT NULL
 published_at TIMESTAMP NULL
 cancelled_at TIMESTAMP NULL
+closed_for_new_performers_at TIMESTAMP NULL
 created_at TIMESTAMP NOT NULL
 updated_at TIMESTAMP NOT NULL
 ```
 
 Для задания участника `creator_id` обязателен, а
 `reserved_credit_total = credit_reward_per_performer * performer_slots`.
+Свободное задание участника имеет `template_id IS NULL`, `template_version IS NULL`;
+его заголовок, описание, критерии, размер и категория сохраняются снимком
+карточки. Статус `closed_for_new_performers` означает, что групповое задание уже
+не доступно для новых исполнителей, но текущие активные assignments могут быть
+отменены по согласию или доведены до результата.
 Для нового задания сообщества `creator_id IS NULL`, `reserved_credit_total = 0`,
 `created_by_admin_id`, `reviewer_admin_id` и `community_approved_by_admin_id`
 заполнены; legacy community-строки без provenance остаются читаемыми.

@@ -14,17 +14,26 @@ from community_bot.domain.economy import ResolvedLevel, refund_reward, reserve_r
 from community_bot.domain.members import Member, MemberRole, MemberStatus, is_superadministrator
 from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import (
+    TASK_TIME_SIZE_SPECS,
     AcceptanceTaskSnapshot,
     StaleTaskDraftError,
     TaskDraftStep,
     TaskError,
+    TaskKind,
     TaskStatus,
+    TaskTimeSize,
     validate_acceptance_actor,
     validate_deadline,
+    validate_freeform_materials,
+    validate_freeform_reward,
+    validate_freeform_slots,
+    validate_freeform_text,
     validate_materials,
     validate_public_text_uris,
     validate_slots,
     validate_task_format,
+    validate_task_kind,
+    validate_time_size,
 )
 
 if TYPE_CHECKING:
@@ -52,7 +61,15 @@ class TaskDraft:
     community_approval_requested_at: datetime.datetime | None
     community_approved_by_admin_id: UUID | None
     community_approved_at: datetime.datetime | None
-    template_id: UUID
+    template_id: UUID | None
+    category_id: UUID | None
+    task_kind: TaskKind | None
+    time_size: TaskTimeSize | None
+    title: str | None
+    description: str | None
+    completion_criteria: str | None
+    credit_reward_per_performer: int | None
+    estimated_minutes: int | None
     input_payload: dict[str, object] | None
     deadline_at: datetime.datetime | None
     format: TaskFormat | None
@@ -72,6 +89,10 @@ class TaskPreview:
 
     draft: TaskDraft
     author_display_name: str
+    category_name: str | None
+    category_icon: str | None
+    task_kind: TaskKind | None
+    time_size: TaskTimeSize | None
     template_name: str
     template_description: str
     performer_instructions: str
@@ -91,8 +112,12 @@ class PublishedTask:
     reviewer_admin_id: UUID | None
     origin: str
     author_display_name: str
-    template_id: UUID
-    template_version: int
+    template_id: UUID | None
+    template_version: int | None
+    category_name: str | None
+    category_icon: str | None
+    task_kind: TaskKind | None
+    time_size: TaskTimeSize | None
     title: str
     description: str
     performer_instructions: str
@@ -111,6 +136,7 @@ class PublishedTask:
     publish_command_id: UUID
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    closed_for_new_performers_at: datetime.datetime | None = None
     test_run_id: UUID | None = None
 
     def acceptance_snapshot(self) -> AcceptanceTaskSnapshot:
@@ -177,6 +203,18 @@ class AdministratorOption:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskCategoryOption:
+    """Creator-facing task category available in the current role."""
+
+    id: UUID
+    code: str
+    name: str
+    description: str
+    icon: str
+    visibility: str
+
+
+@dataclass(frozen=True, slots=True)
 class CommunityPublicationRequest:
     """Pending community task release visible only to a superadministrator."""
 
@@ -233,9 +271,15 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         self, *, template_id: UUID, level: int
     ) -> CatalogTemplate | None: ...
     async def catalog_template(self, template_id: UUID) -> CatalogTemplate | None: ...
+    async def list_task_categories(
+        self, *, actor_role: MemberRole
+    ) -> tuple[TaskCategoryOption, ...]: ...
+    async def task_category_for_creation(
+        self, *, category_id: UUID, actor_role: MemberRole
+    ) -> TaskCategoryOption | None: ...
     async def member_display_name(self, member_id: UUID) -> str: ...
     async def create_task_draft(
-        self, *, creator_id: UUID, template_id: UUID, origin: str = "member"
+        self, *, creator_id: UUID, template_id: UUID | None, origin: str = "member"
     ) -> TaskDraft: ...
     async def get_current_task_draft(self, creator_id: UUID) -> TaskDraft | None: ...
     async def get_task_draft(self, draft_id: UUID) -> TaskDraft | None: ...
@@ -264,7 +308,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
     async def delete_task_draft(self, draft_id: UUID) -> None: ...
     async def task_by_publish_command(self, command_id: UUID) -> PublishedTask | None: ...
     async def insert_published_task(
-        self, *, draft: TaskDraft, template: CatalogTemplate
+        self, *, draft: TaskDraft, template: CatalogTemplate | None
     ) -> PublishedTask: ...
     async def get_task(self, task_id: UUID) -> PublishedTask | None: ...
     async def lock_task(self, task_id: UUID) -> PublishedTask | None: ...
@@ -272,6 +316,9 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         self, task_id: UUID, *, for_update: bool = False
     ) -> tuple[Assignment, ...]: ...
     async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask: ...
+    async def close_task_for_new_performers(
+        self, *, task_id: UUID, now: datetime.datetime
+    ) -> PublishedTask: ...
     async def save_community_reviewer(
         self, *, task_id: UUID, reviewer_id: UUID, now: datetime.datetime
     ) -> PublishedTask: ...
@@ -310,6 +357,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         self, *, response_id: UUID, accepted: bool, now: datetime.datetime
     ) -> TaskCancellationResponse: ...
     async def task_cancellation_all_accepted(self, request_id: UUID) -> bool: ...
+    async def task_cancellation_all_answered(self, request_id: UUID) -> bool: ...
     async def resolve_task_cancellation(
         self, *, request_id: UUID, status: str, reason: str, now: datetime.datetime
     ) -> None: ...
@@ -389,7 +437,15 @@ class TaskService:
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.CREATE_TASK)
             if template_id is None:
                 draft = await uow.get_current_task_draft(actor.id)
-                outcome = "task_draft:none" if draft is None else f"task_draft:{draft.id}"
+                if draft is None:
+                    if origin != "member":
+                        raise TaskError("Free-form community task creation is unavailable.")
+                    draft = await uow.create_task_draft(
+                        creator_id=actor.id,
+                        template_id=None,
+                        origin=origin,
+                    )
+                outcome = f"task_draft:{draft.id}"
             else:
                 await uow.acquire_catalog_mutation_gate()
                 actor = (await uow.lock_members((actor.id,)))[actor.id]
@@ -434,6 +490,12 @@ class TaskService:
                 exclude_id=actor.id,
                 test_run_id=None if draft is None else draft.test_run_id,
             )
+
+    async def task_categories(self, actor_telegram_user_id: int) -> tuple[TaskCategoryOption, ...]:
+        """List free-form categories visible to the active creator."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            return await uow.list_task_categories(actor_role=actor.role)
 
     async def pending_community_publications(
         self, *, actor_telegram_user_id: int, limit: int = 10
@@ -555,6 +617,74 @@ class TaskService:
                 "task_draft",
             )
 
+    async def edit_draft_step(
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int,
+        draft_id: UUID,
+        expected_revision: int,
+        step: TaskDraftStep,
+    ) -> TaskDraft:
+        """Move a preview draft back to one editable step."""
+        editable = {
+            TaskDraftStep.TASK_KIND,
+            TaskDraftStep.CATEGORY,
+            TaskDraftStep.TIME_SIZE,
+            TaskDraftStep.SLOTS,
+            TaskDraftStep.REWARD,
+            TaskDraftStep.TITLE,
+            TaskDraftStep.DESCRIPTION,
+            TaskDraftStep.COMPLETION_CRITERIA,
+            TaskDraftStep.INPUT,
+            TaskDraftStep.MATERIALS,
+            TaskDraftStep.DEADLINE,
+            TaskDraftStep.FORMAT,
+        }
+        if step not in editable:
+            raise TaskError("Task draft step is not editable.")
+        async with self._unit_of_work_factory() as uow:
+            replay = await _begin_update(uow, update_id)
+            if replay is not None:
+                draft = await _draft_from_outcome(uow, replay)
+                if draft is None:
+                    raise TaskError("Stored task draft does not exist.")
+                return draft
+            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            draft = await uow.lock_task_draft(draft_id)
+            if draft is None or draft.creator_id != actor.id:
+                raise PermissionError("Task draft is not owned by this member.")
+            _expect(draft, TaskDraftStep.PREVIEW, expected_revision)
+            if draft.template_id is None and step is TaskDraftStep.INPUT:
+                raise TaskError("Free-form task input is not editable.")
+            if draft.template_id is not None and step not in {
+                TaskDraftStep.INPUT,
+                TaskDraftStep.MATERIALS,
+                TaskDraftStep.DEADLINE,
+                TaskDraftStep.FORMAT,
+                TaskDraftStep.SLOTS,
+            }:
+                raise TaskError("Legacy task step is not editable.")
+            if (
+                draft.template_id is None
+                and step is TaskDraftStep.SLOTS
+                and draft.task_kind is TaskKind.SOLO
+            ):
+                raise TaskError("Solo task performer count is fixed.")
+            updated = await uow.save_task_draft(
+                _replace_draft(draft, current_step=step, revision=draft.revision + 1)
+            )
+            await uow.claim_text_flow(
+                member_id=actor.id,
+                flow_type="task",
+                step=updated.current_step.value,
+                reference_id=updated.id,
+                revision=updated.revision,
+            )
+            await _finish(uow, update_id, actor, f"task_draft:{updated.id}", "task_draft")
+            return updated
+
     async def advance(self, command: AdvanceDraftCommand) -> TaskDraft:
         """Validate and persist one expected draft step."""
         async with self._unit_of_work_factory() as uow:
@@ -572,10 +702,22 @@ class TaskService:
             if draft is None or draft.creator_id != actor.id:
                 raise PermissionError("Task draft is not owned by this member.")
             _expect(draft, command.expected_step, command.expected_revision)
-            template = await uow.catalog_template(draft.template_id)
-            if template is None:
-                raise TaskError("Task template version does not exist.")
-            updated = _advance_draft(draft, template, command.value)
+            if draft.template_id is None:
+                if draft.current_step is TaskDraftStep.CATEGORY:
+                    if not isinstance(command.value, UUID):
+                        raise TaskError("Task category is invalid.")
+                    category = await uow.task_category_for_creation(
+                        category_id=command.value,
+                        actor_role=actor.role,
+                    )
+                    if category is None:
+                        raise PermissionError("Task category is unavailable.")
+                updated = _advance_freeform_draft(draft, command.value)
+            else:
+                template = await uow.catalog_template(draft.template_id)
+                if template is None:
+                    raise TaskError("Task template version does not exist.")
+                updated = _advance_draft(draft, template, command.value)
             updated = await uow.save_task_draft(updated)
             await uow.claim_text_flow(
                 member_id=actor.id,
@@ -596,17 +738,61 @@ class TaskService:
         expected_revision: int,
     ) -> TaskPreview:
         """Move a complete draft to preview without an economy effect."""
-        draft = await self.advance(
-            AdvanceDraftCommand(
-                update_id,
-                actor_telegram_user_id,
-                draft_id,
-                TaskDraftStep.SLOTS,
-                expected_revision,
-                None,
-            )
-        )
         async with self._unit_of_work_factory() as uow:
+            actor = await _active_actor(uow, actor_telegram_user_id)
+            draft = await uow.get_task_draft(draft_id)
+            if draft is None or draft.creator_id != actor.id:
+                raise PermissionError("Task draft is not owned by this member.")
+        if draft.template_id is not None and draft.current_step is TaskDraftStep.SLOTS:
+            draft = await self.advance(
+                AdvanceDraftCommand(
+                    update_id,
+                    actor_telegram_user_id,
+                    draft_id,
+                    TaskDraftStep.SLOTS,
+                    expected_revision,
+                    None,
+                )
+            )
+        elif draft.current_step is not TaskDraftStep.PREVIEW or draft.revision != expected_revision:
+            raise StaleTaskDraftError("Task draft step or revision is stale.")
+        async with self._unit_of_work_factory() as uow:
+            category = (
+                None
+                if draft.category_id is None
+                else await uow.task_category_for_creation(
+                    category_id=draft.category_id,
+                    actor_role=(await _active_actor(uow, actor_telegram_user_id)).role,
+                )
+            )
+            if draft.template_id is None:
+                _validate_freeform_publishable(draft, category)
+                if (
+                    draft.performer_slots is None
+                    or draft.credit_reward_per_performer is None
+                    or draft.title is None
+                    or draft.description is None
+                    or draft.completion_criteria is None
+                ):
+                    message = "Task preview is incomplete."
+                    raise TaskError(message)
+                return TaskPreview(
+                    draft,
+                    await uow.member_display_name(draft.creator_id),
+                    None if category is None else category.name,
+                    None if category is None else category.icon,
+                    draft.task_kind,
+                    draft.time_size,
+                    draft.title,
+                    draft.description,
+                    "Следуйте описанию задания и критериям результата.",
+                    ("description",),
+                    draft.completion_criteria,
+                    draft.credit_reward_per_performer,
+                    draft.credit_reward_per_performer * draft.performer_slots,
+                )
+            if draft.template_id is None:
+                raise TaskError("Task preview is incomplete.")
             template = await uow.catalog_template(draft.template_id)
             if template is None or draft.performer_slots is None:
                 raise TaskError("Task preview is incomplete.")
@@ -617,6 +803,10 @@ class TaskService:
                     if draft.origin == "community"
                     else await uow.member_display_name(draft.creator_id)
                 ),
+                None,
+                None,
+                None,
+                None,
                 template.name,
                 template.description,
                 template.performer_instructions,
@@ -640,8 +830,23 @@ class TaskService:
                 raise TaskError("Task draft does not exist.")
             await uow.acquire_task_command_gate(preliminary.publish_command_id)
             await uow.acquire_catalog_mutation_gate()
-            template_before = await uow.catalog_template(preliminary.template_id)
-            if template_before is None or preliminary.performer_slots is None:
+            template_before = (
+                None
+                if preliminary.template_id is None
+                else await uow.catalog_template(preliminary.template_id)
+            )
+            actor_snapshot = await _active_actor(uow, command.actor_telegram_user_id)
+            category_before = (
+                None
+                if preliminary.category_id is None
+                else await uow.task_category_for_creation(
+                    category_id=preliminary.category_id,
+                    actor_role=actor_snapshot.role,
+                )
+            )
+            if preliminary.template_id is None:
+                _validate_freeform_publishable(preliminary, category_before)
+            elif template_before is None or preliminary.performer_slots is None:
                 raise TaskError("Task draft is incomplete.")
             await uow.ensure_moderation_action_allowed(
                 preliminary.creator_id, RestrictedAction.CREATE_TASK
@@ -664,7 +869,19 @@ class TaskService:
                     raise PermissionError("Community reviewer is no longer independent.")
                 reserve_total = 0
             else:
-                reserve_total = template_before.credit_reward * preliminary.performer_slots
+                if preliminary.template_id is None:
+                    if (
+                        preliminary.credit_reward_per_performer is None
+                        or preliminary.performer_slots is None
+                    ):
+                        raise TaskError("Task draft is incomplete.")
+                    reserve_total = (
+                        preliminary.credit_reward_per_performer * preliminary.performer_slots
+                    )
+                else:
+                    if template_before is None or preliminary.performer_slots is None:
+                        raise TaskError("Task draft is incomplete.")
+                    reserve_total = template_before.credit_reward * preliminary.performer_slots
                 prepared = await uow.economy.prepare_batch(
                     (
                         reserve_reward(
@@ -717,17 +934,34 @@ class TaskService:
                 return draft
             _expect(draft, TaskDraftStep.PREVIEW, command.expected_revision)
             level = await uow.resolve_member_level(actor.id)
-            template = await uow.template_for_creation(
-                template_id=draft.template_id, level=level.level_number
-            )
-            if template is None:
-                raise PermissionError("Task template is no longer publishable.")
-            _validate_publishable(draft, template)
-            expected_reserve = (
-                0
-                if draft.origin == "community"
-                else template.credit_reward * (draft.performer_slots or 0)
-            )
+            if draft.template_id is None:
+                category = (
+                    None
+                    if draft.category_id is None
+                    else await uow.task_category_for_creation(
+                        category_id=draft.category_id,
+                        actor_role=actor.role,
+                    )
+                )
+                _validate_freeform_publishable(draft, category)
+                template = None
+            else:
+                template = await uow.template_for_creation(
+                    template_id=draft.template_id, level=level.level_number
+                )
+                if template is None:
+                    raise PermissionError("Task template is no longer publishable.")
+                _validate_publishable(draft, template)
+            if draft.origin == "community":
+                expected_reserve = 0
+            elif draft.template_id is None:
+                if draft.credit_reward_per_performer is None or draft.performer_slots is None:
+                    raise TaskError("Task draft is incomplete.")
+                expected_reserve = draft.credit_reward_per_performer * draft.performer_slots
+            else:
+                if template is None or draft.performer_slots is None:
+                    raise TaskError("Task draft is incomplete.")
+                expected_reserve = template.credit_reward * draft.performer_slots
             if expected_reserve != reserve_total:
                 raise TaskError("Task reserve changed after preview.")
             if draft.origin == "community" and not is_superadministrator(actor):
@@ -811,6 +1045,8 @@ class TaskService:
             ):
                 raise PermissionError("Community reviewer is no longer independent.")
             level = await uow.resolve_member_level(creator.id)
+            if draft.template_id is None:
+                raise TaskError("Community task template is required.")
             template = await uow.template_for_creation(
                 template_id=draft.template_id, level=level.level_number
             )
@@ -975,7 +1211,7 @@ class TaskService:
     async def request_cancellation(
         self, *, update_id: int, actor_telegram_user_id: int, task_id: UUID
     ) -> TaskCancellationOutcome:
-        """Cancel a free task or ask every accepted performer for consent."""
+        """Close performer intake and ask accepted performers for cancellation consent."""
         async with self._unit_of_work_factory() as uow:
             replay = await _begin_update(uow, update_id)
             if replay is not None:
@@ -992,13 +1228,18 @@ class TaskService:
             actor = await _active_actor(uow, actor_telegram_user_id)
             if actor.id != task.creator_id:
                 raise PermissionError("Only the task creator can cancel this task.")
+            if task.status is TaskStatus.CANCELLED:
+                await _finish_receipt(uow, update_id, actor, f"task_cancelled:{task.id}")
+                return TaskCancellationOutcome(task, None, "cancelled")
             if task.status is not TaskStatus.PUBLISHED:
                 raise TaskError("Task cannot be cancelled from its current state.")
             if _utc_now() >= task.deadline_at:
                 raise TaskError("Task cancellation deadline has passed.")
             assignments = await uow.list_task_assignments(task.id, for_update=True)
-            active = [item for item in assignments if item.status is not AssignmentStatus.CANCELLED]
-            if not active:
+            latest = _latest_slot_assignments(assignments)
+            occupied = [item for item in latest if item.status is not AssignmentStatus.CANCELLED]
+            active = _active_slot_assignments(latest)
+            if not occupied:
                 prepared = await uow.economy.prepare_batch(
                     (
                         refund_reward(
@@ -1024,29 +1265,51 @@ class TaskService:
                 )
                 await _finish_receipt(uow, update_id, actor, f"task_cancelled:{task.id}")
                 return TaskCancellationOutcome(task, None, "cancelled")
-            if any(item.status is not AssignmentStatus.ACCEPTED for item in active):
-                raise TaskError("Cancellation is unavailable because work has already started.")
             pending = await uow.get_pending_task_cancellation(task.id)
             if pending is not None:
                 raise TaskError("A cancellation request is already awaiting performer responses.")
-            if await uow.has_declined_task_cancellation(task.id):
-                raise TaskError("A performer has already declined cancellation for this task.")
-            request_id = await uow.create_task_cancellation(
-                task_id=task.id, creator_id=actor.id, assignments=active
+            free_slots = max(0, task.performer_slots - len(occupied))
+            if free_slots:
+                prepared = await uow.economy.prepare_batch(
+                    (
+                        refund_reward(
+                            member_id=actor.id,
+                            amount=free_slots * task.credit_reward_per_performer,
+                            idempotency_key=f"task_close:{task.id}:free_slots:refund",
+                        ),
+                    )
+                )
+                await prepared.apply()
+            task = await uow.close_task_for_new_performers(task_id=task.id, now=_utc_now())
+            accepted = [item for item in active if item.status is AssignmentStatus.ACCEPTED]
+            request_id = (
+                await uow.create_task_cancellation(
+                    task_id=task.id,
+                    creator_id=actor.id,
+                    assignments=accepted,
+                )
+                if accepted
+                else None
             )
             await uow.append_audit_event(
                 actor_member_id=actor.id,
-                action="task_cancellation_requested",
+                action="task_intake_closed",
                 entity_type="task",
                 entity_id=str(task.id),
-                reason=None,
+                reason="creator_closed_group_intake",
             )
+            if request_id is None:
+                await _finish_receipt(uow, update_id, actor, f"task_closed:{task.id}")
+                return TaskCancellationOutcome(task, None, "closed")
             await _finish_receipt(
-                uow, update_id, actor, f"task_cancel_request:{task.id}:{request_id}"
+                uow,
+                update_id,
+                actor,
+                f"task_cancel_request:{task.id}:{request_id}",
             )
             return TaskCancellationOutcome(task, request_id, "pending")
 
-    async def respond_cancellation(  # noqa: PLR0911 - explicit cancellation state machine.
+    async def respond_cancellation(
         self,
         *,
         update_id: int,
@@ -1075,7 +1338,7 @@ class TaskService:
                 raise PermissionError("This cancellation request belongs to another performer.")
             now = _utc_now()
             if (
-                task.status is TaskStatus.PUBLISHED
+                task.status in {TaskStatus.PUBLISHED, TaskStatus.CLOSED_FOR_NEW_PERFORMERS}
                 and response.request_status == "pending"
                 and response.response_status == "pending"
                 and now >= task.deadline_at
@@ -1104,22 +1367,21 @@ class TaskService:
                     f"task_cancel_obsolete:{task.id}:{response.request_id}:{reason}",
                 )
                 return TaskCancellationOutcome(task, response.request_id, "obsolete", reason)
-            if (
-                task.status is not TaskStatus.PUBLISHED
-                or response.request_status != "pending"
-                or response.response_status != "pending"
-            ):
+            if response.request_status != "pending" or response.response_status != "pending":
+                raise TaskError("Cancellation request is no longer active.")
+            if task.status not in {TaskStatus.PUBLISHED, TaskStatus.CLOSED_FOR_NEW_PERFORMERS}:
                 raise TaskError("Cancellation request is no longer active.")
             response = await uow.answer_task_cancellation(
                 response_id=response.id, accepted=accepted, now=now
             )
             if not accepted:
-                await uow.resolve_task_cancellation(
-                    request_id=response.request_id,
-                    status="declined",
-                    reason="performer_started",
-                    now=now,
-                )
+                if await uow.task_cancellation_all_answered(response.request_id):
+                    await uow.resolve_task_cancellation(
+                        request_id=response.request_id,
+                        status="completed",
+                        reason="performer_continues",
+                        now=now,
+                    )
                 await uow.add_task_cancellation_outbox(
                     event_type="task.cancellation_declined",
                     aggregate_type="task_cancellation_request",
@@ -1141,38 +1403,12 @@ class TaskService:
                     f"task_cancel_declined:{task.id}:{response.request_id}",
                 )
                 return TaskCancellationOutcome(task, response.request_id, "declined")
-            if not await uow.task_cancellation_all_accepted(response.request_id):
-                await _finish_receipt(
-                    uow,
-                    update_id,
-                    actor,
-                    f"task_cancel_pending:{task.id}:{response.request_id}",
-                )
-                return TaskCancellationOutcome(task, response.request_id, "pending")
             assignments = await uow.list_task_assignments(task.id, for_update=True)
-            started = any(
-                item.status is not AssignmentStatus.ACCEPTED
-                for item in assignments
-                if item.status is not AssignmentStatus.CANCELLED
-            )
-            if started:
-                await uow.resolve_task_cancellation(
-                    request_id=response.request_id,
-                    status="obsolete",
-                    reason="work_started",
-                    now=now,
-                )
-                await _finish_receipt(
-                    uow,
-                    update_id,
-                    actor,
-                    f"task_cancel_obsolete:{task.id}:{response.request_id}:work_started",
-                )
-                return TaskCancellationOutcome(
-                    task, response.request_id, "obsolete", "work_started"
-                )
             for assignment in assignments:
-                if assignment.status is AssignmentStatus.ACCEPTED:
+                if (
+                    assignment.id == response.assignment_id
+                    and assignment.status is AssignmentStatus.ACCEPTED
+                ):
                     await uow.cancel_assignment_by_creator(
                         assignment.id,
                         task.creator_id,
@@ -1182,35 +1418,56 @@ class TaskService:
                 (
                     refund_reward(
                         member_id=task.creator_id,
-                        amount=task.reserved_credit_total,
-                        idempotency_key=f"task_cancel:{task.id}:refund",
+                        amount=task.credit_reward_per_performer,
+                        idempotency_key=f"task_cancel:{task.id}:{response.assignment_id}:refund",
                     ),
                 )
             )
             await prepared.apply()
-            task = await uow.save_task_status(task_id=task.id, status=TaskStatus.CANCELLED)
-            await uow.resolve_task_cancellation(
-                request_id=response.request_id, status="completed", reason="unanimous", now=now
-            )
-            await uow.add_task_outbox(
-                event_type="task.cancelled",
-                task=task,
-                business_key=f"task.cancelled:{task.id}",
-            )
+            if await uow.task_cancellation_all_answered(response.request_id):
+                await uow.resolve_task_cancellation(
+                    request_id=response.request_id,
+                    status="completed",
+                    reason="performers_answered",
+                    now=now,
+                )
+            assignments = await uow.list_task_assignments(task.id, for_update=True)
+            if not _active_slot_assignments(_latest_slot_assignments(assignments)):
+                task = await uow.save_task_status(task_id=task.id, status=TaskStatus.CANCELLED)
+                await uow.add_task_outbox(
+                    event_type="task.cancelled",
+                    task=task,
+                    business_key=f"task.cancelled:{task.id}",
+                )
+                await uow.append_audit_event(
+                    actor_member_id=actor.id,
+                    action="task_cancelled_by_consent",
+                    entity_type="task",
+                    entity_id=str(task.id),
+                    reason="performer_consent",
+                )
             await uow.append_audit_event(
                 actor_member_id=actor.id,
-                action="task_cancelled_by_consent",
+                action="task_assignment_cancelled_by_consent",
                 entity_type="task",
                 entity_id=str(task.id),
-                reason="unanimous_performer_consent",
+                reason="performer_consent",
             )
             await _finish_receipt(
                 uow,
                 update_id,
                 actor,
-                f"task_cancelled:{task.id}:{response.request_id}",
+                (
+                    f"task_cancelled:{task.id}:{response.request_id}"
+                    if task.status is TaskStatus.CANCELLED
+                    else f"task_cancel_pending:{task.id}:{response.request_id}"
+                ),
             )
-            return TaskCancellationOutcome(task, response.request_id, "cancelled")
+            return TaskCancellationOutcome(
+                task,
+                response.request_id,
+                "cancelled" if task.status is TaskStatus.CANCELLED else "pending",
+            )
 
     async def replace_community_reviewer(
         self,
@@ -1275,6 +1532,7 @@ async def _cancellation_outcome_from_receipt(
 ) -> TaskCancellationOutcome:
     statuses = {
         "task_cancelled:": "cancelled",
+        "task_closed:": "closed",
         "task_cancel_pending:": "pending",
         "task_cancel_declined:": "declined",
         "task_cancel_obsolete:": "obsolete",
@@ -1318,6 +1576,99 @@ def _require_superadministrator(actor: Member) -> None:
 def _expect(draft: TaskDraft, step: TaskDraftStep, revision: int) -> None:
     if draft.current_step is not step or draft.revision != revision:
         raise StaleTaskDraftError("Task draft step or revision is stale.")
+
+
+def _advance_freeform_draft(draft: TaskDraft, value: object) -> TaskDraft:
+    changes: dict[str, object]
+    if draft.current_step is TaskDraftStep.TASK_KIND:
+        kind = validate_task_kind(value)
+        changes = {
+            "task_kind": kind,
+            "performer_slots": 1 if kind is TaskKind.SOLO else None,
+            "current_step": TaskDraftStep.CATEGORY,
+        }
+    elif draft.current_step is TaskDraftStep.CATEGORY:
+        if not isinstance(value, UUID):
+            raise TaskError("Task category is invalid.")
+        changes = {"category_id": value, "current_step": TaskDraftStep.TIME_SIZE}
+    elif draft.current_step is TaskDraftStep.TIME_SIZE:
+        size = validate_time_size(value)
+        changes = {
+            "time_size": size,
+            "estimated_minutes": TASK_TIME_SIZE_SPECS[size].estimated_minutes,
+            "credit_reward_per_performer": None,
+            "current_step": (
+                TaskDraftStep.SLOTS if draft.task_kind is TaskKind.GROUP else TaskDraftStep.REWARD
+            ),
+        }
+    elif draft.current_step is TaskDraftStep.SLOTS:
+        if draft.task_kind is None:
+            raise TaskError("Task kind is missing.")
+        if not isinstance(value, int):
+            raise TaskError("Task performer slots must be an integer.")
+        changes = {
+            "performer_slots": validate_freeform_slots(value, kind=draft.task_kind),
+            "current_step": TaskDraftStep.REWARD,
+        }
+    elif draft.current_step is TaskDraftStep.REWARD:
+        if draft.time_size is None or not isinstance(value, int):
+            raise TaskError("Task reward cannot be selected before size.")
+        changes = {
+            "credit_reward_per_performer": validate_freeform_reward(draft.time_size, value),
+            "current_step": TaskDraftStep.TITLE,
+        }
+    elif draft.current_step is TaskDraftStep.TITLE:
+        changes = {
+            "title": validate_freeform_text(value, field="title"),
+            "current_step": TaskDraftStep.DESCRIPTION,
+        }
+    elif draft.current_step is TaskDraftStep.DESCRIPTION:
+        changes = {
+            "description": validate_freeform_text(value, field="description"),
+            "current_step": TaskDraftStep.COMPLETION_CRITERIA,
+        }
+    elif draft.current_step is TaskDraftStep.COMPLETION_CRITERIA:
+        changes = {
+            "completion_criteria": validate_freeform_text(
+                value,
+                field="completion_criteria",
+            ),
+            "current_step": TaskDraftStep.MATERIALS,
+        }
+    elif draft.current_step is TaskDraftStep.MATERIALS:
+        if not isinstance(value, Mapping):
+            raise TaskError("Task materials must be an object.")
+        changes = {
+            "materials": validate_freeform_materials(value),
+            "current_step": TaskDraftStep.DEADLINE,
+        }
+    elif draft.current_step is TaskDraftStep.DEADLINE:
+        if not isinstance(value, datetime.datetime):
+            raise TaskError("Task deadline must be a datetime.")
+        changes = {
+            "deadline_at": validate_deadline(value, now=_utc_now()),
+            "current_step": TaskDraftStep.FORMAT,
+        }
+    elif draft.current_step is TaskDraftStep.FORMAT:
+        if not isinstance(value, tuple) or len(value) != _FORMAT_VALUE_SIZE:
+            raise TaskError("Task format value must include format and city.")
+        task_format, city = value
+        if not isinstance(task_format, TaskFormat) or not (isinstance(city, str) or city is None):
+            raise TaskError("Task format value is invalid.")
+        selected, normalized_city = validate_task_format(
+            task_format,
+            template_format=TaskFormat.ANY,
+            city=city,
+        )
+        changes = {
+            "format": selected,
+            "city": normalized_city,
+            "current_step": TaskDraftStep.PREVIEW,
+        }
+    else:
+        raise TaskError("Task draft cannot advance from its current step.")
+    changes["revision"] = draft.revision + 1
+    return _replace_draft(draft, **changes)
 
 
 def _advance_draft(draft: TaskDraft, template: CatalogTemplate, value: object) -> TaskDraft:
@@ -1387,6 +1738,38 @@ def _validate_publishable(draft: TaskDraft, template: CatalogTemplate) -> None:
     validate_deadline(draft.deadline_at, now=_utc_now())
     validate_task_format(draft.format, template_format=template.format, city=draft.city)
     validate_slots(draft.performer_slots, maximum=template.maximum_performers)
+
+
+def _validate_freeform_publishable(
+    draft: TaskDraft,
+    category: TaskCategoryOption | None,
+) -> None:
+    if draft.template_id is not None:
+        raise TaskError("Free-form validation received a template draft.")
+    if category is None:
+        raise TaskError("Task category is unavailable.")
+    if draft.task_kind is None or draft.time_size is None:
+        raise TaskError("Task draft is incomplete.")
+    if (
+        draft.title is None
+        or draft.description is None
+        or draft.completion_criteria is None
+        or draft.credit_reward_per_performer is None
+        or draft.estimated_minutes is None
+        or draft.materials is None
+        or draft.performer_slots is None
+        or draft.deadline_at is None
+        or draft.format is None
+    ):
+        raise TaskError("Task draft is incomplete.")
+    validate_freeform_slots(draft.performer_slots, kind=draft.task_kind)
+    validate_freeform_reward(draft.time_size, draft.credit_reward_per_performer)
+    validate_freeform_text(draft.title, field="title")
+    validate_freeform_text(draft.description, field="description")
+    validate_freeform_text(draft.completion_criteria, field="completion_criteria")
+    validate_freeform_materials(draft.materials)
+    validate_deadline(draft.deadline_at, now=_utc_now())
+    validate_task_format(draft.format, template_format=TaskFormat.ANY, city=draft.city)
 
 
 def _plain_input_payload(schema: Mapping[str, object], text: str) -> dict[str, object]:
@@ -1472,7 +1855,7 @@ async def _publish_locked_draft(
     update_id: int,
     actor: Member,
     draft: TaskDraft,
-    template: CatalogTemplate,
+    template: CatalogTemplate | None,
 ) -> PublishedTask:
     task = await uow.insert_published_task(draft=draft, template=template)
     await uow.save_task_draft(
@@ -1555,3 +1938,21 @@ async def _task_from_outcome(uow: TaskUnitOfWork, outcome: str) -> PublishedTask
 
 def _utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def _latest_slot_assignments(assignments: Sequence[Assignment]) -> tuple[Assignment, ...]:
+    latest_by_slot: dict[int, Assignment] = {}
+    for assignment in assignments:
+        latest_by_slot[assignment.slot_number] = assignment
+    return tuple(latest_by_slot.values())
+
+
+def _active_slot_assignments(assignments: Sequence[Assignment]) -> tuple[Assignment, ...]:
+    active = {
+        AssignmentStatus.ACCEPTED,
+        AssignmentStatus.SUBMITTED,
+        AssignmentStatus.REJECTED_PENDING_DISPUTE,
+        AssignmentStatus.DISPUTED,
+        AssignmentStatus.REVIEWER_REQUIRED,
+    }
+    return tuple(item for item in assignments if item.status in active)

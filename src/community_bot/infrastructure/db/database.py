@@ -86,6 +86,7 @@ if TYPE_CHECKING:
         OwnedTaskCard,
         PublishedTask,
         TaskCancellationResponse,
+        TaskCategoryOption,
         TaskDraft,
     )
     from community_bot.application.test_runs import TestRunSnapshot
@@ -546,6 +547,22 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), template_id=template_id, level=level
         )
 
+    async def list_task_categories(
+        self, *, actor_role: MemberRole
+    ) -> tuple[TaskCategoryOption, ...]:
+        """Return active free-form categories visible to the actor."""
+        return await task_store.list_task_categories(self._require_session(), actor_role=actor_role)
+
+    async def task_category_for_creation(
+        self, *, category_id: UUID, actor_role: MemberRole
+    ) -> TaskCategoryOption | None:
+        """Read one free-form category only if the actor may use it."""
+        return await task_store.task_category_for_creation(
+            self._require_session(),
+            category_id=category_id,
+            actor_role=actor_role,
+        )
+
     async def lock_template_versions(self, code: str) -> tuple[CatalogTemplate, ...]:
         """Lock all versions of a logical template."""
         return await catalog_store.lock_template_versions(self._require_session(), code)
@@ -571,7 +588,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         )
 
     async def create_task_draft(
-        self, *, creator_id: UUID, template_id: UUID, origin: str = "member"
+        self, *, creator_id: UUID, template_id: UUID | None, origin: str = "member"
     ) -> TaskDraft:
         """Create a new current persistent task draft."""
         return await task_store.create_task_draft(
@@ -646,7 +663,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await task_store.task_by_publish_command(self._require_session(), command_id)
 
     async def insert_published_task(
-        self, *, draft: TaskDraft, template: CatalogTemplate
+        self, *, draft: TaskDraft, template: CatalogTemplate | None
     ) -> PublishedTask:
         """Insert one immutable member task snapshot."""
         task = await task_store.insert_published_task(
@@ -672,6 +689,16 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Persist a creation-owned task status transition."""
         return await task_store.save_task_status(
             self._require_session(), task_id=task_id, status=status
+        )
+
+    async def close_task_for_new_performers(
+        self, *, task_id: UUID, now: datetime.datetime
+    ) -> PublishedTask:
+        """Persist that creator closed intake for new performers."""
+        return await task_store.close_task_for_new_performers(
+            self._require_session(),
+            task_id=task_id,
+            now=now,
         )
 
     async def save_community_reviewer(
@@ -783,6 +810,10 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     async def task_cancellation_all_accepted(self, request_id: UUID) -> bool:
         """Return whether all response rows accepted cancellation."""
         return await cancellation_store.all_accepted(self._require_session(), request_id)
+
+    async def task_cancellation_all_answered(self, request_id: UUID) -> bool:
+        """Return whether no cancellation response is still pending."""
+        return await cancellation_store.all_answered(self._require_session(), request_id)
 
     async def resolve_task_cancellation(
         self, *, request_id: UUID, status: str, reason: str, now: datetime.datetime

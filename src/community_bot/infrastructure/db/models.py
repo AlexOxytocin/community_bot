@@ -249,7 +249,17 @@ class TaskCategoryModel(Base):
     """Immutable catalog category with an administrative visibility switch."""
 
     __tablename__ = "task_categories"
-    __table_args__ = (CheckConstraint("sort_order >= 0", name="ck_task_categories_sort_order"),)
+    __table_args__ = (
+        CheckConstraint("sort_order >= 0", name="ck_task_categories_sort_order"),
+        CheckConstraint(
+            "visibility IN ('public', 'admin_only')",
+            name="ck_task_categories_visibility",
+        ),
+        CheckConstraint(
+            "creation_mode IN ('template', 'freeform', 'both')",
+            name="ck_task_categories_creation_mode",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -259,6 +269,8 @@ class TaskCategoryModel(Base):
     description: Mapped[str | None] = mapped_column(Text)
     icon: Mapped[str | None] = mapped_column(Text)
     sort_order: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    visibility: Mapped[str] = mapped_column(Text, nullable=False, default="public")
+    creation_mode: Mapped[str] = mapped_column(Text, nullable=False, default="template")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
@@ -322,8 +334,9 @@ class TaskCreationDraftModel(Base):
     __tablename__ = "task_creation_drafts"
     __table_args__ = (
         CheckConstraint(
-            "current_step IN ('input', 'deadline', 'format', 'materials', "
-            "'slots', 'preview', 'published')",
+            "current_step IN ('task_kind', 'category', 'time_size', 'reward', 'title', "
+            "'description', 'completion_criteria', 'input', 'deadline', 'format', "
+            "'materials', 'slots', 'preview', 'published')",
             name="ck_task_creation_drafts_step",
         ),
         CheckConstraint("revision >= 0", name="ck_task_creation_drafts_revision"),
@@ -332,8 +345,16 @@ class TaskCreationDraftModel(Base):
             name="ck_task_creation_drafts_format",
         ),
         CheckConstraint(
-            "performer_slots IS NULL OR performer_slots BETWEEN 1 AND 10",
+            "performer_slots IS NULL OR performer_slots > 0",
             name="ck_task_creation_drafts_slots",
+        ),
+        CheckConstraint(
+            "task_kind IS NULL OR task_kind IN ('solo', 'group')",
+            name="ck_task_creation_drafts_kind",
+        ),
+        CheckConstraint(
+            "time_size IS NULL OR time_size IN ('xs', 's', 'm', 'l', 'xl')",
+            name="ck_task_creation_drafts_time_size",
         ),
         CheckConstraint("origin IN ('member', 'community')", name="ck_task_creation_drafts_origin"),
         Index(
@@ -364,9 +385,19 @@ class TaskCreationDraftModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
     community_approved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
-    template_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_templates.id")
     )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_categories.id")
+    )
+    task_kind: Mapped[str | None] = mapped_column(Text)
+    time_size: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    completion_criteria: Mapped[str | None] = mapped_column(Text)
+    credit_reward_per_performer: Mapped[int | None] = mapped_column(Integer)
+    estimated_minutes: Mapped[int | None] = mapped_column(Integer)
     input_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     deadline_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     format: Mapped[str | None] = mapped_column(Text)
@@ -395,14 +426,18 @@ class TaskModel(Base):
         CheckConstraint("origin IN ('member', 'community')", name="ck_tasks_origin"),
         CheckConstraint(
             "status IN ('published', 'settling', 'expired', 'partially_completed', "
-            "'completed', 'cancelled')",
+            "'completed', 'cancelled', 'closed_for_new_performers')",
             name="ck_tasks_status",
         ),
         CheckConstraint("credit_reward_per_performer > 0", name="ck_tasks_reward"),
-        CheckConstraint("performer_slots BETWEEN 1 AND 10", name="ck_tasks_slots"),
+        CheckConstraint("performer_slots > 0", name="ck_tasks_slots"),
         CheckConstraint("reserved_credit_total >= 0", name="ck_tasks_reserved_nonnegative"),
         CheckConstraint("minimum_level > 0", name="ck_tasks_minimum_level"),
         CheckConstraint("format IN ('online', 'offline')", name="ck_tasks_format"),
+        CheckConstraint(
+            "time_size IS NULL OR time_size IN ('xs', 's', 'm', 'l', 'xl')",
+            name="ck_tasks_time_size",
+        ),
         CheckConstraint("deadline_at > published_at", name="ck_tasks_future_deadline"),
         CheckConstraint(
             "(origin = 'member' AND creator_id IS NOT NULL "
@@ -432,10 +467,10 @@ class TaskModel(Base):
     test_run_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("test_runs.id"), index=True
     )
-    template_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("task_templates.id"), nullable=False
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("task_templates.id")
     )
-    template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    template_version: Mapped[int | None] = mapped_column(Integer)
     creator_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id")
     )
@@ -452,6 +487,7 @@ class TaskModel(Base):
     category_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("task_categories.id"), nullable=False
     )
+    time_size: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     completion_criteria: Mapped[str] = mapped_column(Text, nullable=False)
@@ -474,6 +510,9 @@ class TaskModel(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     cancelled_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_for_new_performers_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

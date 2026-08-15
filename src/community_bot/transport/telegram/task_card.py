@@ -6,7 +6,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
-from community_bot.domain.tasks import TaskError, validate_public_text_uris
+from community_bot.domain.tasks import (
+    TaskError,
+    TaskTimeSize,
+    task_time_size_label,
+    validate_public_text_uris,
+)
 
 if TYPE_CHECKING:
     import datetime
@@ -32,6 +37,12 @@ def published_task_card(task: PublishedTask) -> str:
         input_payload=task.input_payload,
         public_input_keys=task.public_input_keys,
         materials=task.materials,
+        metadata=_task_metadata(
+            category_icon=getattr(task, "category_icon", None),
+            category_name=getattr(task, "category_name", None),
+            time_size=getattr(task, "time_size", None),
+            performer_slots=getattr(task, "performer_slots", 1),
+        ),
         credit_reward=task.credit_reward_per_performer,
         deadline_at=task.deadline_at,
         task_format=task.format.value,
@@ -42,13 +53,9 @@ def published_task_card(task: PublishedTask) -> str:
 def preview_task_card(preview: TaskPreview) -> str:
     """Render the exact future card plus author-only reserve information."""
     draft = preview.draft
-    if (
-        draft.input_payload is None
-        or draft.materials is None
-        or draft.deadline_at is None
-        or draft.format is None
-    ):
+    if draft.materials is None or draft.deadline_at is None or draft.format is None:
         raise TaskCardError
+    input_payload = draft.input_payload or {"description": preview.template_description}
     card = _task_card(
         title=(
             f"ТЕСТ · {preview.template_name}"
@@ -59,9 +66,15 @@ def preview_task_card(preview: TaskPreview) -> str:
         description=preview.template_description,
         performer_instructions=preview.performer_instructions,
         completion_criteria=preview.completion_criteria,
-        input_payload=draft.input_payload,
+        input_payload=input_payload,
         public_input_keys=preview.public_input_keys,
         materials=draft.materials,
+        metadata=_task_metadata(
+            category_icon=preview.category_icon,
+            category_name=preview.category_name,
+            time_size=preview.time_size,
+            performer_slots=draft.performer_slots or 1,
+        ),
         credit_reward=preview.credit_reward_per_performer,
         deadline_at=draft.deadline_at,
         task_format=draft.format.value,
@@ -80,6 +93,7 @@ def _task_card(  # noqa: PLR0913
     input_payload: Mapping[str, object],
     public_input_keys: tuple[str, ...],
     materials: Mapping[str, object],
+    metadata: tuple[str, ...],
     credit_reward: int,
     deadline_at: datetime.datetime,
     task_format: str,
@@ -94,6 +108,7 @@ def _task_card(  # noqa: PLR0913
         f"Автор: {_clip(author, 160)}",
         f"Описание: {_clip(description, 300)}",
     ]
+    sections.extend(metadata)
     if details:
         sections.append(f"Детали от автора:\n{chr(10).join(details)}")
     sections.append(f"Как выполнить: {_clip(performer_instructions, 350)}")
@@ -109,6 +124,24 @@ def _task_card(  # noqa: PLR0913
     )
     body_limit = _MAX_CARD_TEXT - len(footer) - 1
     return f"{_clip(chr(10).join(sections), body_limit)}\n{footer}"
+
+
+def _task_metadata(
+    *,
+    category_icon: str | None,
+    category_name: str | None,
+    time_size: TaskTimeSize | None,
+    performer_slots: int,
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    if category_name:
+        prefix = "" if not category_icon else f"{category_icon} "
+        lines.append(f"Категория: {prefix}{category_name}")
+    if time_size is not None:
+        lines.append(f"Размер: {task_time_size_label(time_size)}")
+    if performer_slots > 1:
+        lines.append(f"Исполнителей: {performer_slots}")
+    return tuple(lines)
 
 
 def _public_input_values(

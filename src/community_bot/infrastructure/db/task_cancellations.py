@@ -262,6 +262,19 @@ async def all_accepted(session: AsyncSession, request_id: uuid.UUID) -> bool:
     )
 
 
+async def all_answered(session: AsyncSession, request_id: uuid.UUID) -> bool:
+    return not bool(
+        await session.scalar(
+            select(
+                exists().where(
+                    TaskCancellationResponseModel.request_id == request_id,
+                    TaskCancellationResponseModel.status == "pending",
+                )
+            )
+        )
+    )
+
+
 async def resolve_request(
     session: AsyncSession,
     *,

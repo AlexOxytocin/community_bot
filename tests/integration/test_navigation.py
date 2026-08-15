@@ -502,19 +502,11 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     await dispatcher.feed_update(bot, callback_update(70_004, 7_003, accept_callback))
 
     session.callbacks.clear()
+    session.texts.clear()
     await dispatcher.feed_update(bot, callback_update(70_005, 7_003, "nav:menu:create"))
     await dispatcher.feed_update(bot, callback_update(70_006, 7_003, "nav:create:not-a-uuid"))
-    create_callback = next(value for value in session.callbacks if value.startswith("nav:create:"))
-    await dispatcher.feed_update(bot, callback_update(70_007, 7_003, create_callback))
-    await dispatcher.feed_update(
-        bot,
-        message_update(
-            70_008,
-            7_003,
-            '{"context":"Useful review","materials":"https://example.com",'
-            '"constraints":"No private data"}',
-        ),
-    )
+    assert any("Выберите тип задания" in text for text in session.texts)
+    assert {"task:step:kind:solo", "task:step:kind:group"} <= set(session.callbacks)
     await dispatcher.feed_update(bot, message_update(70_009, 7_003, "/balance"))
     await dispatcher.feed_update(bot, message_update(70_010, 7_003, "/help"))
 
@@ -566,8 +558,8 @@ async def test_production_navigation_requires_no_user_supplied_uuid(database_url
     assert assignment_count == 1
     assert invite_count == 1
     assert performer_draft is not None
-    assert performer_draft.template_id == UUID(hex=create_callback.removeprefix("nav:create:"))
-    assert performer_draft.current_step == "deadline"
+    assert performer_draft.template_id is None
+    assert performer_draft.current_step == TaskDraftStep.TASK_KIND.value
     assert approved_member is not None
     assert approved_member.status == "active"
     assert approved_member.city == "Mendoza"

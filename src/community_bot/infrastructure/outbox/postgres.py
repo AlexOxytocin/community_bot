@@ -565,7 +565,7 @@ class PostgresNotificationQueue:
                 and response.status == "pending"
                 and request.status == "pending"
                 and assignment.status == "accepted"
-                and task.status == "published"
+                and task.status in {"published", "closed_for_new_performers"}
                 and task.deadline_at > now
             )
         if notification.notification_type not in {

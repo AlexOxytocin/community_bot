@@ -408,7 +408,7 @@ async def test_database_immutability_and_migration_cycle(database_url: str) -> N
         else:
             os.environ["DATABASE_URL"] = previous_url
     restarted = Database(database_url)
-    assert await count(restarted, TaskCategoryModel) == 8
+    assert await count(restarted, TaskCategoryModel) == 15
     assert await count(restarted, TaskTemplateModel) == 8
     await restarted.dispose()
 

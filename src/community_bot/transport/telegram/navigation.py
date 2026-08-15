@@ -1,4 +1,4 @@
-# ruff: noqa: C901, PLR0915, RUF001
+# ruff: noqa: C901, PLR0911, PLR0912, PLR0915, RUF001
 """User-facing Telegram commands and menus for the complete MVP."""
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ from community_bot.transport.telegram.tasks import (
     community_publication_approval_keyboard,
     owned_task_keyboard,
     owned_task_summary,
+    send_task_draft_prompt,
 )
 
 if TYPE_CHECKING:
@@ -85,7 +86,11 @@ _ARCHIVE_CALLBACK_INVALID = "Archive pagination callback is invalid."
 _UNBOUND_MESSAGE = "Telegram message is not bound to a bot."
 
 _CREATED_STATUS_GROUPS = {
-    "active": (TaskStatus.PUBLISHED, TaskStatus.SETTLING),
+    "active": (
+        TaskStatus.PUBLISHED,
+        TaskStatus.CLOSED_FOR_NEW_PERFORMERS,
+        TaskStatus.SETTLING,
+    ),
     "completed": (TaskStatus.COMPLETED, TaskStatus.PARTIALLY_COMPLETED),
     "archive": (
         TaskStatus.COMPLETED,
@@ -257,7 +262,7 @@ def build_navigation_router(  # noqa: PLR0913
         finally:
             lock.release()
 
-    async def show_create(message: Message) -> None:
+    async def show_create(message: Message, event_update: Update) -> None:
         if message.from_user is None:
             return
         if not await _require_private_message(
@@ -267,11 +272,26 @@ def build_navigation_router(  # noqa: PLR0913
             return
         async with task_result_lock(message):
             await clear_task_results(message)
-            await send_creation_catalog(
-                message,
-                message.from_user.id,
-                sent_message_ids=start_task_results(message, "create"),
-            )
+            sent_message_ids = start_task_results(message, "create")
+            try:
+                draft = await tasks.start(
+                    update_id=event_update.update_id,
+                    actor_telegram_user_id=message.from_user.id,
+                    template_id=None,
+                )
+                if draft is None:
+                    sent = await message.answer("Создание задания сейчас недоступно.")
+                    _capture_message_id(sent_message_ids, sent)
+                    return
+                await send_task_draft_prompt(
+                    message,
+                    draft,
+                    service=tasks,
+                    actor_telegram_user_id=message.from_user.id,
+                )
+            except (TaskError, PermissionError, LookupError, ValueError):
+                sent = await message.answer("Создание задания сейчас недоступно.")
+                _capture_message_id(sent_message_ids, sent)
 
     async def send_creation_catalog(
         message: Message,
@@ -713,7 +733,10 @@ def build_navigation_router(  # noqa: PLR0913
         except (TaskError, PermissionError, LookupError, ValueError):
             await callback.answer("Административное действие недоступно.", show_alert=True)
 
-    async def menu_action(callback: CallbackQuery) -> None:  # noqa: PLR0911, PLR0912
+    async def menu_action(
+        callback: CallbackQuery,
+        event_update: Update,
+    ) -> None:
         if not await _require_private_callback(callback):
             return
         message = callback.message
@@ -765,11 +788,26 @@ def build_navigation_router(  # noqa: PLR0913
                     reply_markup=_section_back_markup("tasks"),
                 )
                 await callback.answer()
-                await send_creation_catalog(
-                    message,
-                    callback.from_user.id,
-                    sent_message_ids=start_task_results(message, "create"),
-                )
+                sent_message_ids = start_task_results(message, "create")
+                try:
+                    draft = await tasks.start(
+                        update_id=event_update.update_id,
+                        actor_telegram_user_id=callback.from_user.id,
+                        template_id=None,
+                    )
+                    if draft is None:
+                        sent = await message.answer("Создание задания сейчас недоступно.")
+                        _capture_message_id(sent_message_ids, sent)
+                        return
+                    await send_task_draft_prompt(
+                        message,
+                        draft,
+                        service=tasks,
+                        actor_telegram_user_id=callback.from_user.id,
+                    )
+                except (TaskError, PermissionError, LookupError, ValueError):
+                    sent = await message.answer("Создание задания сейчас недоступно.")
+                    _capture_message_id(sent_message_ids, sent)
                 return
             if action == "insights":
                 await message.edit_text(INSIGHTS_TEXT, reply_markup=_insights_menu_markup())

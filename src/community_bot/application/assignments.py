@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from community_bot.domain.assignments import (
+    ACTIVE_ASSIGNMENT_STATUSES,
     Assignment,
     AssignmentDecision,
     AssignmentError,
@@ -28,7 +29,7 @@ from community_bot.domain.economy import (
 )
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.domain.moderation import RestrictedAction
-from community_bot.domain.tasks import TaskStatus
+from community_bot.domain.tasks import TaskStatus, validate_freeform_result_payload
 
 _MAX_ASSIGNMENT_CARDS = 50
 
@@ -119,6 +120,15 @@ class AssignmentCard:
     case_id: UUID | None
     case_status: str | None
     case_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskAggregateContext:
+    task_id: UUID
+    performer_slots: int
+    now: datetime.datetime
+    deadline: datetime.datetime
+    current_status: TaskStatus
 
 
 class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
@@ -215,6 +225,18 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def recompute_interaction_alert(self, assignment_id: UUID) -> None: ...
     async def add_assignment_outbox(
         self, *, assignment: Assignment, event_type: str, business_key: str
+    ) -> None: ...
+    async def add_task_outbox(
+        self, *, event_type: str, task: PublishedTask, business_key: str
+    ) -> None: ...
+    async def append_audit_event(
+        self,
+        *,
+        actor_member_id: UUID | None,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        reason: str | None,
     ) -> None: ...
     async def add_receipt(
         self, *, update_id: int, update_type: str, actor_id: UUID | None, outcome_code: str
@@ -521,10 +543,7 @@ class AssignmentService:
             require_submit_allowed(
                 assignment, task_deadline=task.deadline_at, now=datetime.datetime.now(datetime.UTC)
             )
-            template = await uow.catalog_template(task.template_id)
-            if template is None:
-                raise LookupError("Historical task template does not exist.")
-            payload = validate_payload(template.result_schema, command.payload)
+            payload = await _validate_result_payload(uow, task, command.payload)
             saved = await uow.save_submission_draft_payload(
                 draft_id=draft.id,
                 expected_revision=command.expected_revision,
@@ -625,15 +644,17 @@ class AssignmentService:
             if preliminary is None:
                 raise LookupError("Assignment does not exist.")
             await uow.acquire_assignment_task_gate(preliminary.task_id)
+            task = await uow.lock_task(preliminary.task_id)
             assignment = await uow.lock_assignment(assignment_id)
-            if assignment is None or assignment.performer_id != actor.id:
+            if task is None or assignment is None:
+                raise LookupError("Assignment task does not exist.")
+            if assignment.performer_id != actor.id:
                 raise PermissionError("Assignment is not owned by this member.")
             if assignment.status is not AssignmentStatus.ACCEPTED:
                 raise AssignmentError("Only an accepted assignment can be cancelled.")
+            now = datetime.datetime.now(datetime.UTC)
             await uow.obsolete_pending_task_cancellation(
-                assignment.task_id,
-                "assignment_cancelled",
-                datetime.datetime.now(datetime.UTC),
+                assignment.task_id, "assignment_cancelled", now
             )
             assignment = await uow.cancel_assignment(assignment.id, normalized)
             await uow.add_assignment_outbox(
@@ -641,6 +662,37 @@ class AssignmentService:
                 event_type="assignment_cancelled",
                 business_key=f"assignment:{assignment.id}:cancelled",
             )
+            if task.status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS and task.creator_id is not None:
+                history = await uow.list_task_assignments(task.id, for_update=True)
+                latest_by_slot = {item.slot_number: item for item in history}
+                if not any(
+                    item.status in ACTIVE_ASSIGNMENT_STATUSES for item in latest_by_slot.values()
+                ):
+                    prepared = await uow.economy.prepare_batch(
+                        (
+                            refund_reward(
+                                member_id=task.creator_id,
+                                amount=task.credit_reward_per_performer,
+                                idempotency_key=f"task_cancel:{task.id}:{assignment.id}:refund",
+                                task_id=task.id,
+                                assignment_id=assignment.id,
+                            ),
+                        )
+                    )
+                    await prepared.apply()
+                    task = await uow.save_task_status(task_id=task.id, status=TaskStatus.CANCELLED)
+                    await uow.add_task_outbox(
+                        event_type="task.cancelled",
+                        task=task,
+                        business_key=f"task.cancelled:{task.id}",
+                    )
+                    await uow.append_audit_event(
+                        actor_member_id=task.creator_id,
+                        action="task_cancelled",
+                        entity_type="task",
+                        entity_id=str(task.id),
+                        reason="assignment_cancelled",
+                    )
             await _finish(uow, update_id, actor.id, assignment)
             return assignment
 
@@ -674,10 +726,7 @@ class AssignmentService:
             now = datetime.datetime.now(datetime.UTC)
             require_submit_allowed(assignment, task_deadline=task.deadline_at, now=now)
             await uow.obsolete_pending_task_cancellation(task.id, "work_started", now)
-            template = await uow.catalog_template(task.template_id)
-            if template is None:
-                raise LookupError("Historical task template does not exist.")
-            payload = validate_payload(template.result_schema, command.payload)
+            payload = await _validate_result_payload(uow, task, command.payload)
             result = await uow.append_assignment_result(
                 assignment_id=assignment.id,
                 command_id=command.submit_command_id,
@@ -805,7 +854,14 @@ class AssignmentService:
             )
             if status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}:
                 await _update_task_aggregate(
-                    uow, task.id, task.performer_slots, now, task.deadline_at
+                    uow,
+                    _TaskAggregateContext(
+                        task_id=task.id,
+                        performer_slots=task.performer_slots,
+                        now=now,
+                        deadline=task.deadline_at,
+                        current_status=task.status,
+                    ),
                 )
             await _finish(uow, command.update_id, actor.id, updated)
             return updated
@@ -927,7 +983,16 @@ class AssignmentService:
                 event_type="assignment_autoconfirmed",
                 business_key=f"assignment:{assignment.id}:approved",
             )
-            await _update_task_aggregate(uow, task.id, task.performer_slots, now, task.deadline_at)
+            await _update_task_aggregate(
+                uow,
+                _TaskAggregateContext(
+                    task_id=task.id,
+                    performer_slots=task.performer_slots,
+                    now=now,
+                    deadline=task.deadline_at,
+                    current_status=task.status,
+                ),
+            )
             await uow.commit()
             return updated
 
@@ -981,7 +1046,16 @@ class AssignmentService:
                 event_type="assignment_rejected",
                 business_key=f"assignment:{assignment.id}:rejected",
             )
-            await _update_task_aggregate(uow, task.id, task.performer_slots, now, task.deadline_at)
+            await _update_task_aggregate(
+                uow,
+                _TaskAggregateContext(
+                    task_id=task.id,
+                    performer_slots=task.performer_slots,
+                    now=now,
+                    deadline=task.deadline_at,
+                    current_status=task.status,
+                ),
+            )
             await uow.commit()
             return updated
 
@@ -1021,7 +1095,7 @@ class AssignmentService:
                     for item in latest_by_slot.values()
                 )
                 unfilled_slots = task.performer_slots - occupied_slots
-                if unfilled_slots:
+                if unfilled_slots and task.status is TaskStatus.PUBLISHED:
                     refunds.append(
                         refund_reward(
                             member_id=task.creator_id,
@@ -1050,7 +1124,16 @@ class AssignmentService:
                 updated.append(terminal)
             if prepared is not None:
                 await prepared.apply()
-            await _update_task_aggregate(uow, task.id, task.performer_slots, now, task.deadline_at)
+            await _update_task_aggregate(
+                uow,
+                _TaskAggregateContext(
+                    task_id=task.id,
+                    performer_slots=task.performer_slots,
+                    now=now,
+                    deadline=task.deadline_at,
+                    current_status=task.status,
+                ),
+            )
             await uow.commit()
             return tuple(updated)
 
@@ -1109,15 +1192,30 @@ async def _result_replay(uow: AssignmentUnitOfWork, outcome: str) -> ResultVersi
     return result
 
 
+async def _validate_result_payload(
+    uow: AssignmentUnitOfWork,
+    task: PublishedTask,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    if task.template_id is None:
+        if set(payload) == {"summary", "findings", "evidence"} and isinstance(
+            payload.get("summary"),
+            str,
+        ):
+            return validate_freeform_result_payload({"result": payload["summary"]})
+        return validate_freeform_result_payload(payload)
+    template = await uow.catalog_template(task.template_id)
+    if template is None:
+        raise LookupError("Historical task template does not exist.")
+    return validate_payload(template.result_schema, payload)
+
+
 async def _update_task_aggregate(
     uow: AssignmentUnitOfWork,
-    task_id: UUID,
-    performer_slots: int,
-    now: datetime.datetime,
-    deadline: datetime.datetime,
+    context: _TaskAggregateContext,
 ) -> None:
     """Derive the task lifecycle only from locked latest slot states."""
-    history = await uow.list_task_assignments(task_id, for_update=True)
+    history = await uow.list_task_assignments(context.task_id, for_update=True)
     latest_by_slot: dict[int, Assignment] = {}
     for assignment in history:
         latest_by_slot[assignment.slot_number] = assignment
@@ -1129,19 +1227,32 @@ async def _update_task_aggregate(
         AssignmentStatus.DISPUTED,
         AssignmentStatus.REVIEWER_REQUIRED,
     }
-    if any(item.status in active for item in latest) or (
-        now < deadline and len(latest_by_slot) < performer_slots
-    ):
-        status = TaskStatus.PUBLISHED if now < deadline else TaskStatus.SETTLING
+    has_active = any(item.status in active for item in latest)
+    has_open_slots = (
+        context.current_status is TaskStatus.PUBLISHED
+        and context.now < context.deadline
+        and len(latest_by_slot) < context.performer_slots
+    )
+    if has_active or has_open_slots:
+        status = (
+            context.current_status
+            if (
+                context.current_status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
+                and context.now < context.deadline
+            )
+            else TaskStatus.PUBLISHED
+            if context.now < context.deadline
+            else TaskStatus.SETTLING
+        )
     else:
         paid = sum(
             item.status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}
             for item in latest
         )
-        if paid == performer_slots:
+        if paid == context.performer_slots:
             status = TaskStatus.COMPLETED
         elif paid:
             status = TaskStatus.PARTIALLY_COMPLETED
         else:
             status = TaskStatus.EXPIRED
-    await uow.save_task_status(task_id=task_id, status=status)
+    await uow.save_task_status(task_id=context.task_id, status=status)

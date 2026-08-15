@@ -21,16 +21,34 @@ from community_bot.application.tasks import (
     TaskDraft,
 )
 from community_bot.domain.catalog import TaskFormat
-from community_bot.domain.tasks import StaleTaskDraftError, TaskDraftStep, TaskError, TaskStatus
+from community_bot.domain.tasks import (
+    COMPLETION_CRITERIA_LIMIT,
+    DESCRIPTION_LIMIT,
+    TASK_TIME_SIZE_SPECS,
+    TITLE_LIMIT,
+    StaleTaskDraftError,
+    TaskDraftStep,
+    TaskError,
+    TaskKind,
+    TaskStatus,
+    TaskTimeSize,
+    task_time_size_label,
+)
 from community_bot.transport.telegram.task_card import preview_task_card, published_task_card
 
 if TYPE_CHECKING:
-    from community_bot.application.tasks import PublishedTask, TaskPreview, TaskService
+    from community_bot.application.tasks import (
+        PublishedTask,
+        TaskCategoryOption,
+        TaskPreview,
+        TaskService,
+    )
 
 _CALLBACK_PREFIX = "task:pub:"
 _APPROVE_PREFIX = "task:approve:"
 _REVIEWER_PREFIX = "task:reviewer:"
 _STEP_PREFIX = "task:step:"
+_EDIT_PREFIX = "task:edit:"
 _REPLACE_REVIEWER_PREFIX = "task:rr:"
 _SELECT_REVIEWER_PREFIX = "task:rs:"
 _CANCEL_REQUEST_PREFIX = "task:cancel:ask:"
@@ -42,6 +60,7 @@ _CANCEL_DISMISS = "task:cancel:no"
 _VIEW_OPEN_PREFIX = "task:view:open:"
 _VIEW_CLOSE_PREFIX = "task:view:close:"
 _CALLBACK_LIMIT = 64
+_PREVIEW_EDIT_ROW_SIZE = 2
 _SINGULAR_CREDIT_TEEN = 11
 
 
@@ -67,9 +86,14 @@ def build_task_router(
                 template_id=template_id,
             )
             if draft is None:
-                await message.answer("Активного черновика нет. Выберите шаблон в каталоге.")
+                await message.answer("Не удалось открыть черновик задания.")
             else:
-                await _send_draft_prompt(message, draft)
+                await _send_draft_prompt(
+                    message,
+                    draft,
+                    service=service,
+                    actor_telegram_user_id=message.from_user.id,
+                )
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
@@ -84,7 +108,12 @@ def build_task_router(
                 actor_telegram_user_id=message.from_user.id,
                 draft_id=UUID(_required_tail(message.text)),
             )
-            await _send_draft_prompt(message, draft)
+            await _send_draft_prompt(
+                message,
+                draft,
+                service=service,
+                actor_telegram_user_id=message.from_user.id,
+            )
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
@@ -174,7 +203,10 @@ def build_task_router(
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await callback.answer(_friendly_error(error), show_alert=True)
 
-    async def handle_step(callback: CallbackQuery, event_update: Update) -> None:
+    async def handle_step(  # noqa: PLR0912
+        callback: CallbackQuery,
+        event_update: Update,
+    ) -> None:
         if not await _require_private_callback(callback):
             return
         try:
@@ -182,7 +214,15 @@ def build_task_router(
             draft = await service.current(actor_telegram_user_id=callback.from_user.id)
             if draft is None:
                 raise TaskError("Task draft does not exist.")
-            if action.startswith("days:"):
+            if action.startswith("kind:"):
+                value = TaskKind(action.removeprefix("kind:"))
+            elif action.startswith("cat:"):
+                value = _decode_uuid(action.removeprefix("cat:"))
+            elif action.startswith("size:"):
+                value = TaskTimeSize(action.removeprefix("size:"))
+            elif action.startswith("reward:"):
+                value = int(action.removeprefix("reward:"))
+            elif action.startswith("days:"):
                 days = int(action.removeprefix("days:"))
                 value: object = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=days)
             elif action == "online":
@@ -216,7 +256,35 @@ def build_task_router(
             )
             await callback.answer()
             if isinstance(callback.message, Message):
-                await _send_draft_prompt(callback.message, updated)
+                await _send_draft_prompt(
+                    callback.message,
+                    updated,
+                    service=service,
+                    actor_telegram_user_id=callback.from_user.id,
+                )
+        except (TaskError, PermissionError, LookupError, ValueError) as error:
+            await callback.answer(_friendly_error(error), show_alert=True)
+
+    async def handle_edit(callback: CallbackQuery, event_update: Update) -> None:
+        if not await _require_private_callback(callback):
+            return
+        try:
+            draft_id, revision, step = _parse_edit_callback(str(callback.data))
+            updated = await service.edit_draft_step(
+                update_id=event_update.update_id,
+                actor_telegram_user_id=callback.from_user.id,
+                draft_id=draft_id,
+                expected_revision=revision,
+                step=step,
+            )
+            await callback.answer("Можно изменить пункт.")
+            if isinstance(callback.message, Message):
+                await _send_draft_prompt(
+                    callback.message,
+                    updated,
+                    service=service,
+                    actor_telegram_user_id=callback.from_user.id,
+                )
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await callback.answer(_friendly_error(error), show_alert=True)
 
@@ -326,11 +394,10 @@ def build_task_router(
             if task.status is not TaskStatus.PUBLISHED:
                 raise TaskError("Task cannot be cancelled from its current state.")
             if card.assignees:
-                if any(item.status != "accepted" for item in card.assignees):
-                    raise TaskError("Cancellation is unavailable because work has already started.")
                 text = (
-                    f"Запросить отмену «{task.title}» у исполнителя?\n"
-                    "Задание отменится только после согласия всех исполнителей."
+                    f"Завершить набор для «{task.title}»?\n"
+                    "Новые исполнители больше не смогут взять задание. Свободный резерв "
+                    "вернётся сразу, а тем, кто уже взял задание, уйдёт запрос на отмену."
                 )
                 markup = _cancel_confirmation_keyboard(task.id, negotiated=True)
             else:
@@ -381,11 +448,17 @@ def build_task_router(
                     f"Задание «{outcome.task.title}» отменено. "
                     f"{_credits(outcome.task.reserved_credit_total)} возвращены в доступный баланс."
                 )
-            else:
-                answer = "Запрос отправлен исполнителю."
+            elif outcome.status == "closed":
+                answer = "Набор завершён."
                 message = (
-                    f"Запрос на отмену «{outcome.task.title}» отправлен. "
-                    "Задание останется активным до ответа всех исполнителей."
+                    f"Набор для «{outcome.task.title}» завершён. "
+                    "Новые исполнители больше не смогут взять задание."
+                )
+            else:
+                answer = "Набор завершён."
+                message = (
+                    f"Набор для «{outcome.task.title}» завершён. "
+                    "Исполнителям отправлен запрос на отмену, но они могут сдать результат."
                 )
             await callback.answer(answer)
             if isinstance(callback.message, Message):
@@ -410,7 +483,7 @@ def build_task_router(
             if outcome.status == "cancelled":
                 message = "Отмена подтверждена. Задание отменено."
             elif outcome.status == "declined":
-                message = "Понятно. Задание остаётся активным."
+                message = "Понятно. Можно сдать результат автору обычным способом."
             elif outcome.status == "obsolete":
                 message = _obsolete_cancellation_message(outcome.reason)
             else:
@@ -470,6 +543,7 @@ def build_task_router(
     router.callback_query.register(handle_community_approval, F.data.startswith(_APPROVE_PREFIX))
     router.callback_query.register(handle_publish, F.data.startswith(_CALLBACK_PREFIX))
     router.callback_query.register(handle_reviewer, F.data.startswith(_REVIEWER_PREFIX))
+    router.callback_query.register(handle_edit, F.data.startswith(_EDIT_PREFIX))
     router.callback_query.register(handle_step, F.data.startswith(_STEP_PREFIX))
     router.callback_query.register(
         replace_reviewer,
@@ -508,19 +582,40 @@ async def handle_task_text(service: TaskService, message: Message, event_update:
                 value,
             )
         )
-        await _send_draft_prompt(message, updated)
+        await _send_draft_prompt(
+            message,
+            updated,
+            service=service,
+            actor_telegram_user_id=message.from_user.id,
+        )
     except (TaskError, PermissionError, LookupError, ValueError) as error:
         await message.answer(_friendly_error(error))
     return True
+
+
+async def send_task_draft_prompt(
+    message: Message,
+    draft: TaskDraft,
+    *,
+    service: TaskService,
+    actor_telegram_user_id: int,
+) -> None:
+    """Render the current task draft prompt for another router."""
+    await _send_draft_prompt(
+        message,
+        draft,
+        service=service,
+        actor_telegram_user_id=actor_telegram_user_id,
+    )
 
 
 async def _send_preview(message: Message, preview: TaskPreview) -> None:
     callback_data = f"{_CALLBACK_PREFIX}{preview.draft.id.hex}:{preview.draft.revision}"
     if len(callback_data.encode()) > _CALLBACK_LIMIT:
         raise TaskError("Task publish callback exceeds the Telegram limit.")
-    markup = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Опубликовать", callback_data=callback_data)]]
-    )
+    rows = _preview_edit_rows(preview.draft)
+    rows.append([InlineKeyboardButton(text="Опубликовать", callback_data=callback_data)])
+    markup = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(
         preview_task_card(preview),
         parse_mode=None,
@@ -528,8 +623,90 @@ async def _send_preview(message: Message, preview: TaskPreview) -> None:
     )
 
 
-def _parse_step_value(step: TaskDraftStep, text: str) -> object:  # noqa: PLR0911
+_EDIT_STEP_CODES = {
+    "tk": TaskDraftStep.TASK_KIND,
+    "cat": TaskDraftStep.CATEGORY,
+    "ts": TaskDraftStep.TIME_SIZE,
+    "sl": TaskDraftStep.SLOTS,
+    "rw": TaskDraftStep.REWARD,
+    "ti": TaskDraftStep.TITLE,
+    "ds": TaskDraftStep.DESCRIPTION,
+    "cc": TaskDraftStep.COMPLETION_CRITERIA,
+    "in": TaskDraftStep.INPUT,
+    "mt": TaskDraftStep.MATERIALS,
+    "dl": TaskDraftStep.DEADLINE,
+    "fm": TaskDraftStep.FORMAT,
+}
+_EDIT_CODES_BY_STEP = {step: code for code, step in _EDIT_STEP_CODES.items()}
+
+
+def _preview_edit_rows(draft: TaskDraft) -> list[list[InlineKeyboardButton]]:
+    steps = (
+        (
+            (TaskDraftStep.INPUT, "Данные"),
+            (TaskDraftStep.MATERIALS, "Материалы"),
+        )
+        if draft.template_id is not None
+        else (
+            (TaskDraftStep.TASK_KIND, "Тип"),
+            (TaskDraftStep.CATEGORY, "Категория"),
+            (TaskDraftStep.TIME_SIZE, "Время"),
+            (TaskDraftStep.SLOTS, "Исполнители"),
+            (TaskDraftStep.REWARD, "Награда"),
+            (TaskDraftStep.TITLE, "Название"),
+            (TaskDraftStep.DESCRIPTION, "Описание"),
+            (TaskDraftStep.COMPLETION_CRITERIA, "Критерии"),
+            (TaskDraftStep.MATERIALS, "Материалы"),
+        )
+    )
+    common = ((TaskDraftStep.DEADLINE, "Срок"), (TaskDraftStep.FORMAT, "Формат"))
+    rows: list[list[InlineKeyboardButton]] = []
+    current: list[InlineKeyboardButton] = []
+    for step, label in (*steps, *common):
+        if (
+            draft.template_id is None
+            and step is TaskDraftStep.SLOTS
+            and draft.task_kind is TaskKind.SOLO
+        ):
+            continue
+        current.append(
+            InlineKeyboardButton(
+                text=label,
+                callback_data=_edit_callback(draft.id, draft.revision, step),
+            )
+        )
+        if len(current) == _PREVIEW_EDIT_ROW_SIZE:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    return rows
+
+
+def _edit_callback(draft_id: UUID, revision: int, step: TaskDraftStep) -> str:
+    code = _EDIT_CODES_BY_STEP[step]
+    callback_data = f"{_EDIT_PREFIX}{_encode_uuid(draft_id)}:{revision}:{code}"
+    if len(callback_data.encode()) > _CALLBACK_LIMIT:
+        raise TaskError("Task edit callback exceeds the Telegram limit.")
+    return callback_data
+
+
+def _parse_step_value(step: TaskDraftStep, text: str) -> object:  # noqa: PLR0911, PLR0912
     clean = text.strip()
+    if step is TaskDraftStep.TASK_KIND:
+        return TaskKind(clean.lower())
+    if step is TaskDraftStep.CATEGORY:
+        return UUID(clean)
+    if step is TaskDraftStep.TIME_SIZE:
+        return TaskTimeSize(clean.lower())
+    if step is TaskDraftStep.REWARD:
+        return int(clean)
+    if step in {
+        TaskDraftStep.TITLE,
+        TaskDraftStep.DESCRIPTION,
+        TaskDraftStep.COMPLETION_CRITERIA,
+    }:
+        return clean
     if step is TaskDraftStep.INPUT:
         if clean.startswith("{"):
             value = json.loads(clean)
@@ -556,8 +733,42 @@ def _parse_step_value(step: TaskDraftStep, text: str) -> object:  # noqa: PLR091
     raise StaleTaskDraftError("Task draft is not waiting for a text answer.")
 
 
+def _category_prompt(categories: tuple[TaskCategoryOption, ...]) -> str:
+    lines = [
+        "Выберите категорию:",
+        *(f"{item.icon} {item.name} — {item.description}".strip() for item in categories),
+    ]
+    return "\n".join(lines)
+
+
+def _reward_prompt(draft: TaskDraft) -> str:
+    if draft.time_size is None:
+        return "Выберите награду за одного исполнителя."
+    spec = TASK_TIME_SIZE_SPECS[draft.time_size]
+    if spec.reward_options is None:
+        return "Укажите награду за одного исполнителя целым числом больше 10."
+    values = ", ".join(str(value) for value in spec.reward_options)
+    return f"Выберите награду за одного исполнителя: {values} кредитов."
+
+
 def _draft_prompt(draft: TaskDraft) -> str:
     prompts = {
+        TaskDraftStep.TASK_KIND: (
+            "Выберите тип задания.\n"
+            "Соло — один исполнитель. Групповое — несколько исполнителей, награда считается "
+            "за каждого."
+        ),
+        TaskDraftStep.CATEGORY: "Выберите категорию. Описание категорий ниже.",
+        TaskDraftStep.TIME_SIZE: "Выберите примерное время выполнения.",
+        TaskDraftStep.REWARD: _reward_prompt(draft),
+        TaskDraftStep.TITLE: f"Напишите короткое название задания. Лимит: {TITLE_LIMIT} символов.",
+        TaskDraftStep.DESCRIPTION: (
+            f"Опишите, что нужно сделать. Лимит: {DESCRIPTION_LIMIT} символов."
+        ),
+        TaskDraftStep.COMPLETION_CRITERIA: (
+            "Напишите критерии приемки: по чему автор поймёт, что работа сдана. "
+            f"Лимит: {COMPLETION_CRITERIA_LIMIT} символов."
+        ),
         TaskDraftStep.INPUT: "Опишите задание обычным сообщением.",
         TaskDraftStep.DEADLINE: "Выберите срок выполнения.",
         TaskDraftStep.FORMAT: "Выберите онлайн или отправьте город для очного задания.",
@@ -569,9 +780,62 @@ def _draft_prompt(draft: TaskDraft) -> str:
     return prompts[draft.current_step]
 
 
-async def _send_draft_prompt(message: Message, draft: TaskDraft) -> None:
+async def _send_draft_prompt(  # noqa: PLR0912
+    message: Message,
+    draft: TaskDraft,
+    *,
+    service: TaskService | None = None,
+    actor_telegram_user_id: int | None = None,
+) -> None:
     rows: list[list[InlineKeyboardButton]] = []
-    if draft.current_step is TaskDraftStep.DEADLINE:
+    prompt = _draft_prompt(draft)
+    if draft.current_step is TaskDraftStep.TASK_KIND:
+        rows = [
+            [
+                InlineKeyboardButton(text="Соло", callback_data=f"{_STEP_PREFIX}kind:solo"),
+                InlineKeyboardButton(text="Групповое", callback_data=f"{_STEP_PREFIX}kind:group"),
+            ]
+        ]
+    elif draft.current_step is TaskDraftStep.CATEGORY:
+        if service is None or actor_telegram_user_id is None:
+            raise TaskError("Task category prompt requires a service.")
+        categories = await service.task_categories(actor_telegram_user_id)
+        if not categories:
+            raise TaskError("No task categories are available.")
+        prompt = _category_prompt(categories)
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=f"{item.icon} {item.name}".strip(),
+                    callback_data=f"{_STEP_PREFIX}cat:{_encode_uuid(item.id)}",
+                )
+            ]
+            for item in categories
+        ]
+    elif draft.current_step is TaskDraftStep.TIME_SIZE:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=task_time_size_label(size),
+                    callback_data=f"{_STEP_PREFIX}size:{size.value}",
+                )
+            ]
+            for size in TaskTimeSize
+        ]
+    elif draft.current_step is TaskDraftStep.REWARD:
+        if draft.time_size is not None:
+            options = TASK_TIME_SIZE_SPECS[draft.time_size].reward_options
+            if options is not None:
+                rows = [
+                    [
+                        InlineKeyboardButton(
+                            text=str(value),
+                            callback_data=f"{_STEP_PREFIX}reward:{value}",
+                        )
+                        for value in options
+                    ]
+                ]
+    elif draft.current_step is TaskDraftStep.DEADLINE:
         rows = [
             [
                 InlineKeyboardButton(text="1 день", callback_data=f"{_STEP_PREFIX}days:1"),
@@ -591,7 +855,17 @@ async def _send_draft_prompt(message: Message, draft: TaskDraft) -> None:
             ]
         ]
     elif draft.current_step is TaskDraftStep.SLOTS:
-        if draft.performer_slots is None:
+        if draft.template_id is None and draft.performer_slots is None:
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        text=str(value),
+                        callback_data=f"{_STEP_PREFIX}slots:{value}",
+                    )
+                    for value in (2, 3, 5)
+                ]
+            ]
+        elif draft.performer_slots is None:
             rows = [
                 [
                     InlineKeyboardButton(
@@ -620,7 +894,7 @@ async def _send_draft_prompt(message: Message, draft: TaskDraft) -> None:
             ]
         ]
     await message.answer(
-        _draft_prompt(draft),
+        prompt,
         reply_markup=None if not rows else InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -633,6 +907,19 @@ def _parse_publish_callback(value: str) -> tuple[UUID, int]:
     if not separator:
         raise TaskError("Task publish callback is invalid.")
     return UUID(hex=draft_hex), int(revision)
+
+
+def _parse_edit_callback(value: str) -> tuple[UUID, int, TaskDraftStep]:
+    if not value.startswith(_EDIT_PREFIX):
+        raise TaskError("Task edit callback is invalid.")
+    payload = value.removeprefix(_EDIT_PREFIX)
+    raw_id, separator, tail = payload.partition(":")
+    if not separator:
+        raise TaskError("Task edit callback is invalid.")
+    raw_revision, separator, code = tail.partition(":")
+    if not separator or code not in _EDIT_STEP_CODES:
+        raise TaskError("Task edit callback is invalid.")
+    return _decode_uuid(raw_id), int(raw_revision), _EDIT_STEP_CODES[code]
 
 
 def _parse_approval_callback(value: str) -> tuple[UUID, int]:
@@ -677,8 +964,9 @@ def task_cancellation_keyboard(task: PublishedTask) -> InlineKeyboardMarkup | No
     callback_data = f"{_CANCEL_REQUEST_PREFIX}{_encode_uuid(task.id)}"
     if len(callback_data.encode()) > _CALLBACK_LIMIT:
         raise TaskError("Task cancellation callback exceeds the Telegram limit.")
+    text = "Завершить набор" if task.performer_slots > 1 else "Отменить"
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Отменить", callback_data=callback_data)]]
+        inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=callback_data)]]
     )
 
 
@@ -686,13 +974,14 @@ def _cancel_confirmation_keyboard(
     task_id: UUID, *, negotiated: bool = False
 ) -> InlineKeyboardMarkup:
     prefix = _CANCEL_NEGOTIATE_PREFIX if negotiated else _CANCEL_CONFIRM_PREFIX
+    confirm_text = "Завершить набор" if negotiated else "Да, отменить"
     callback_data = f"{prefix}{_encode_uuid(task_id)}"
     if len(callback_data.encode()) > _CALLBACK_LIMIT:
         raise TaskError("Task cancellation callback exceeds the Telegram limit.")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Да, отменить", callback_data=callback_data),
+                InlineKeyboardButton(text=confirm_text, callback_data=callback_data),
                 InlineKeyboardButton(text="Не отменять", callback_data=_CANCEL_DISMISS),
             ]
         ]
@@ -733,7 +1022,7 @@ def owned_task_keyboard(card: OwnedTaskCard, *, expanded: bool = False) -> Inlin
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="Отменить",
+                    text="Завершить набор" if card.task.performer_slots > 1 else "Отменить",
                     callback_data=f"{_CANCEL_REQUEST_PREFIX}{_encode_uuid(card.task.id)}",
                 )
             ]
