@@ -2255,11 +2255,10 @@ async def test_karma_sanction_and_alert_use_only_visible_outputs(  # noqa: PLR09
 
     capture.callbacks.clear()
     await send_message(84_100, admin.telegram_user_id, MEMBERS_TEXT)
-    begin_vote = _visible_on_text(
-        capture,
-        lambda text: target.display_name in text,
-        lambda value: value.startswith("karma:begin:"),
-    )
+    open_target = _member_catalog_open(capture, target.display_name)
+    capture.callbacks.clear()
+    await send_callback(84_100_1, admin.telegram_user_id, open_target)
+    begin_vote = _visible(capture, lambda value: value.startswith("karma:begin:"))
     capture.callbacks.clear()
     await send_callback(84_101, admin.telegram_user_id, begin_vote)
     positive = _visible(
@@ -2278,11 +2277,10 @@ async def test_karma_sanction_and_alert_use_only_visible_outputs(  # noqa: PLR09
 
     capture.callbacks.clear()
     await send_message(84_105, admin.telegram_user_id, MEMBERS_TEXT)
-    raw_karma = _visible_on_text(
-        capture,
-        lambda text: target.display_name in text,
-        lambda value: value.startswith("karma:raw:"),
-    )
+    open_target = _member_catalog_open(capture, target.display_name)
+    capture.callbacks.clear()
+    await send_callback(84_105_1, admin.telegram_user_id, open_target)
+    raw_karma = _visible(capture, lambda value: value.startswith("karma:raw:"))
     capture.callbacks.clear()
     await send_callback(84_106, admin.telegram_user_id, raw_karma)
     exclude_vote = _visible(
@@ -2294,11 +2292,10 @@ async def test_karma_sanction_and_alert_use_only_visible_outputs(  # noqa: PLR09
 
     capture.callbacks.clear()
     await send_message(84_108, admin.telegram_user_id, MEMBERS_TEXT)
-    restrict = _visible_on_text(
-        capture,
-        lambda text: target.display_name in text,
-        lambda value: value.startswith("mod:restrict:"),
-    )
+    open_target = _member_catalog_open(capture, target.display_name)
+    capture.callbacks.clear()
+    await send_callback(84_108_1, admin.telegram_user_id, open_target)
+    restrict = _visible(capture, lambda value: value.startswith("mod:restrict:"))
     capture.callbacks.clear()
     await send_callback(84_109, admin.telegram_user_id, restrict)
 
@@ -2849,6 +2846,27 @@ def _visible_on_text(
         for text, callback in capture.button_payloads
         if text_predicate(text) and callback_predicate(callback)
     )
+
+
+def _member_catalog_open(capture: CapturingSession, display_name: str) -> str:
+    for text, callback in capture.button_payloads:
+        if not callback.startswith("mc:o:"):
+            continue
+        row_index = _member_catalog_row_index(text, display_name)
+        if row_index is not None and callback.endswith(f":{row_index}"):
+            return callback
+    message = "Visible member catalog row was not found."
+    raise LookupError(message)
+
+
+def _member_catalog_row_index(text: str, display_name: str) -> int | None:
+    for line in text.splitlines():
+        if display_name not in line:
+            continue
+        raw_number = line.split(maxsplit=1)[0]
+        if raw_number.isdecimal():
+            return int(raw_number) - 1
+    return None
 
 
 async def _click(

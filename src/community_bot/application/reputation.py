@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from community_bot.domain.members import Member
 
 _PROFILE_UNAVAILABLE = "Profile unavailable."
+MEMBER_SEARCH_MIN_LENGTH = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,7 @@ class SafeProfile:
     """Profile projection that never contains raw karma authors or comments."""
 
     member_id: UUID
+    telegram_username: str | None
     display_name: str
     city: str | None
     short_bio: str | None
@@ -219,8 +221,11 @@ class ReputationUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def karma_vote_by_command(self, command_id: UUID) -> KarmaVoteResult | None: ...
     async def karma_aggregate(self, target_id: UUID) -> KarmaAggregate: ...
     async def safe_profile(self, member_id: UUID) -> SafeProfile | None: ...
+    async def member_catalog_cursor(
+        self, member_id: UUID, *, query: str | None
+    ) -> MemberCatalogCursor | None: ...
     async def safe_profiles(
-        self, *, limit: int, cursor: MemberCatalogCursor | None
+        self, *, limit: int, cursor: MemberCatalogCursor | None, query: str | None
     ) -> MemberCatalogPage: ...
     async def resolve_member_level(self, member_id: UUID) -> ResolvedLevel: ...
     async def personal_statistics(self, member_id: UUID) -> PersonalStatistics: ...
@@ -448,11 +453,20 @@ class ReputationService:
         telegram_user_id: int,
         limit: int = 50,
         cursor: MemberCatalogCursor | None = None,
+        cursor_member_id: UUID | None = None,
+        query: str | None = None,
     ) -> MemberCatalogPage:
         """Return the safe active-member catalog to an active actor."""
+        normalized_query = normalize_member_search_query(query)
         async with self._unit_of_work_factory() as uow:
             await self._active_actor(uow, telegram_user_id)
-            page = await uow.safe_profiles(limit=max(1, min(limit, 100)), cursor=cursor)
+            if cursor is None and cursor_member_id is not None:
+                cursor = await uow.member_catalog_cursor(cursor_member_id, query=normalized_query)
+            page = await uow.safe_profiles(
+                limit=max(1, min(limit, 100)),
+                cursor=cursor,
+                query=normalized_query,
+            )
             profiles = []
             for profile in page.items:
                 level = await uow.resolve_member_level(profile.member_id)
@@ -561,3 +575,15 @@ class ReputationService:
 
 class ReputationError(ValueError):
     """Application-level malformed or stale reputation command."""
+
+
+def normalize_member_search_query(query: str | None) -> str | None:
+    """Normalize an optional member search string for public catalog lookup."""
+    raw_query = (query or "").strip()
+    if not raw_query:
+        return None
+    normalized = " ".join(raw_query.lstrip("@").split()).casefold()
+    if len(normalized) < MEMBER_SEARCH_MIN_LENGTH:
+        message = "Member search query must contain at least 3 characters."
+        raise ValueError(message)
+    return normalized

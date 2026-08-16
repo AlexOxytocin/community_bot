@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 _PAIR_GATE_NAMESPACE = "reputation_pair"
 _TERMINAL_TYPES = {
@@ -439,6 +440,7 @@ async def safe_profile(session: AsyncSession, member_id: UUID) -> SafeProfile | 
     experience = await _experience_total(session, member_id)
     return SafeProfile(
         member_id=member.id,
+        telegram_username=member.telegram_username,
         display_name=member.display_name,
         city=member.city,
         short_bio=member.short_bio,
@@ -453,14 +455,37 @@ async def safe_profile(session: AsyncSession, member_id: UUID) -> SafeProfile | 
     )
 
 
+async def member_catalog_cursor(
+    session: AsyncSession, member_id: UUID, *, query: str | None
+) -> MemberCatalogCursor | None:
+    """Resolve an active catalog row into the stable keyset cursor."""
+    normalized_name = func.lower(MemberModel.display_name)
+    statement = select(normalized_name, MemberModel.id).where(
+        MemberModel.id == member_id,
+        _effectively_active_clause(),
+    )
+    if query is not None:
+        statement = statement.where(_member_catalog_search_clause(query))
+    row = (await session.execute(statement)).one_or_none()
+    if row is None:
+        return None
+    return MemberCatalogCursor(str(row[0]), row[1])
+
+
 async def safe_profiles(
-    session: AsyncSession, *, limit: int, cursor: MemberCatalogCursor | None
+    session: AsyncSession,
+    *,
+    limit: int,
+    cursor: MemberCatalogCursor | None,
+    query: str | None,
 ) -> MemberCatalogPage:
     """Return an active-profile keyset page in stable name/UUID order."""
     normalized_name = func.lower(MemberModel.display_name)
-    query = select(MemberModel.id).where(_effectively_active_clause())
+    statement = select(MemberModel.id).where(_effectively_active_clause())
+    if query is not None:
+        statement = statement.where(_member_catalog_search_clause(query))
     if cursor is not None:
-        query = query.where(
+        statement = statement.where(
             or_(
                 normalized_name > cursor.normalized_display_name,
                 and_(
@@ -470,7 +495,7 @@ async def safe_profiles(
             )
         )
     member_ids = (
-        await session.scalars(query.order_by(normalized_name, MemberModel.id).limit(limit + 1))
+        await session.scalars(statement.order_by(normalized_name, MemberModel.id).limit(limit + 1))
     ).all()
     has_more = len(member_ids) > limit
     member_ids = member_ids[:limit]
@@ -484,6 +509,19 @@ async def safe_profiles(
         last = profiles[-1]
         next_cursor = MemberCatalogCursor(last.display_name.casefold(), last.member_id)
     return MemberCatalogPage(tuple(profiles), next_cursor)
+
+
+def _member_catalog_search_clause(query: str) -> ColumnElement[bool]:
+    escaped = _escape_like(query)
+    pattern = f"%{escaped}%"
+    return or_(
+        func.lower(MemberModel.display_name).like(pattern, escape="\\"),
+        func.lower(func.coalesce(MemberModel.telegram_username, "")).like(pattern, escape="\\"),
+    )
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 async def personal_statistics(session: AsyncSession, member_id: UUID) -> PersonalStatistics:

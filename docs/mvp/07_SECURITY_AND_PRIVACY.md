@@ -83,11 +83,13 @@
 - административный аудит.
 
 Active member, moderator и administrator видят safe projection всех active
-профилей. Чужие `pending`, `paused`, `restricted`, `suspended`, `left` и
-`banned` карточки не выдаются ни списком, ни по UUID. Собственная карточка
-доступна при `active` и `paused`. Active administrator с `member_read` может
-читать карточки всех статусов, но перечисленные выше приватные поля остаются
-закрыты.
+профилей. В каталоге публичным поисковым ключом считается только видимый
+`telegram_username` и анкетный `display_name`; Telegram `first_name`/`last_name`
+не используются как скрытые поисковые поля. Чужие `pending`, `paused`,
+`restricted`, `suspended`, `left` и `banned` карточки не выдаются ни списком, ни
+поиском, ни по UUID. Собственная карточка доступна при `active` и `paused`.
+Active administrator с `member_read` может читать карточки всех статусов, но
+перечисленные выше приватные поля остаются закрыты.
 
 | Actor/status | Свой профиль | Чужой active | Чужой non-active | Raw-карма |
 |---|---:|---:|---:|---:|

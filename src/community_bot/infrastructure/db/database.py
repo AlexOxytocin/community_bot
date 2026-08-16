@@ -1190,12 +1190,20 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Return one privacy-safe profile projection."""
         return await reputation_store.safe_profile(self._require_session(), member_id)
 
+    async def member_catalog_cursor(
+        self, member_id: UUID, *, query: str | None
+    ) -> MemberCatalogCursor | None:
+        """Resolve one active member into the catalog keyset position."""
+        return await reputation_store.member_catalog_cursor(
+            self._require_session(), member_id, query=query
+        )
+
     async def safe_profiles(
-        self, *, limit: int, cursor: MemberCatalogCursor | None
+        self, *, limit: int, cursor: MemberCatalogCursor | None, query: str | None
     ) -> MemberCatalogPage:
         """Return the stable safe catalog of active profiles."""
         return await reputation_store.safe_profiles(
-            self._require_session(), limit=limit, cursor=cursor
+            self._require_session(), limit=limit, cursor=cursor, query=query
         )
 
     async def personal_statistics(self, member_id: UUID) -> PersonalStatistics:
