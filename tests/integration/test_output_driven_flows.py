@@ -2849,24 +2849,13 @@ def _visible_on_text(
 
 
 def _member_catalog_open(capture: CapturingSession, display_name: str) -> str:
-    for text, callback in capture.button_payloads:
+    for text, callback in reversed(capture.inline_buttons):
         if not callback.startswith("mc:o:"):
             continue
-        row_index = _member_catalog_row_index(text, display_name)
-        if row_index is not None and callback.endswith(f":{row_index}"):
+        if display_name in text:
             return callback
     message = "Visible member catalog row was not found."
     raise LookupError(message)
-
-
-def _member_catalog_row_index(text: str, display_name: str) -> int | None:
-    for line in text.splitlines():
-        if display_name not in line:
-            continue
-        raw_number = line.split(maxsplit=1)[0]
-        if raw_number.isdecimal():
-            return int(raw_number) - 1
-    return None
 
 
 async def _click(

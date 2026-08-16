@@ -51,12 +51,13 @@ _CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v2.json"
 
 
 class CapturingSession(BaseSession):
-    """Fake Bot API that captures only outgoing text."""
+    """Fake Bot API that captures outgoing text and inline button labels."""
 
     def __init__(self) -> None:
         """Initialize an empty response list."""
         super().__init__()
         self.texts: list[str] = []
+        self.inline_buttons: list[str] = []
 
     async def close(self) -> None:
         """Close no external resources."""
@@ -72,6 +73,11 @@ class CapturingSession(BaseSession):
         text_value = getattr(method, "text", None)
         if isinstance(text_value, str):
             self.texts.append(text_value)
+        markup = getattr(method, "reply_markup", None)
+        if markup is not None and hasattr(markup, "inline_keyboard"):
+            self.inline_buttons.extend(
+                button.text for row in markup.inline_keyboard for button in row
+            )
         return cast(
             "TelegramType",
             Message(
@@ -446,7 +452,8 @@ async def test_real_cli_then_production_dispatcher_creates_invitation_and_regist
     await dispatcher.feed_update(bot, update(49_001, administrator, "/profile"))
     await dispatcher.feed_update(bot, update(49_002, administrator, "/members"))
     await dispatcher.feed_update(bot, update(49_003, administrator, "/leaderboard"))
-    assert sum("Алексей Администратор" in text_value for text_value in session.texts) == 3
+    visible_outputs = [*session.texts, *session.inline_buttons]
+    assert sum("Алексей Администратор" in text_value for text_value in visible_outputs) == 3
 
     await dispatcher.feed_update(bot, update(50_001, administrator, "/invite_create 1 7 5002"))
     response = next(text_value for text_value in session.texts if "/start " in text_value)

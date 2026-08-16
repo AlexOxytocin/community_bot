@@ -27,6 +27,7 @@ _MEMBER_CATALOG_PAGE_PREFIX = "mc:p:"
 _MEMBER_CATALOG_SEARCH_CALLBACK = "mc:s"
 _MEMBER_CATALOG_RESET_CALLBACK = "mc:r"
 _MEMBER_CATALOG_SEARCH_LINE_PREFIX = "Поиск: "
+_MEMBER_CATALOG_BUTTON_TEXT_LIMIT = 64
 
 if TYPE_CHECKING:
     from decimal import Decimal
@@ -505,13 +506,14 @@ def present_member_catalog(
         )
         lines.append(empty_message)
         return "\n".join(lines)
-    lines.append("")
-    for index, item in enumerate(page.items, start=1):
-        expanded = item.member_id == expanded_member_id
-        marker = "-" if expanded else "+"
-        lines.append(f"{index:02d} {marker} {_member_catalog_row(item)}")
-        if expanded:
-            lines.extend(f"   {detail}" for detail in _member_catalog_details(item))
+    expanded_profile = next(
+        (item for item in page.items if item.member_id == expanded_member_id),
+        None,
+    )
+    if expanded_profile is not None:
+        lines.append("")
+        lines.append(_member_catalog_row(expanded_profile))
+        lines.extend(_member_catalog_details(expanded_profile))
     return "\n".join(lines)
 
 
@@ -526,22 +528,20 @@ def _member_catalog_keyboard(  # noqa: PLR0913 - Telegram markup is explicit by 
 ) -> InlineKeyboardMarkup:
     inline_keyboard: list[list[InlineKeyboardButton]] = []
     cursor_token = page_cursor_member_id.hex if page_cursor_member_id is not None else "0"
-    row_buttons: list[InlineKeyboardButton] = []
     expanded_profile = None
     for index, item in enumerate(page.items):
         expanded = item.member_id == expanded_member_id
         if expanded:
             expanded_profile = item
         prefix = _MEMBER_CATALOG_CLOSE_PREFIX if expanded else _MEMBER_CATALOG_OPEN_PREFIX
-        label = f"{'-' if expanded else '+'} {index + 1:02d}"
-        row_buttons.append(
-            InlineKeyboardButton(text=label, callback_data=f"{prefix}{cursor_token}:{index}")
+        inline_keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=_member_catalog_button_text(item, expanded=expanded),
+                    callback_data=f"{prefix}{cursor_token}:{index}",
+                )
+            ]
         )
-        if len(row_buttons) == 5:  # noqa: PLR2004 - compact Telegram grid width.
-            inline_keyboard.append(row_buttons)
-            row_buttons = []
-    if row_buttons:
-        inline_keyboard.append(row_buttons)
     if expanded_profile is not None:
         inline_keyboard.extend(
             _member_catalog_action_rows(
@@ -630,6 +630,18 @@ def _member_catalog_row(profile: SafeProfile) -> str:
     identity = _member_catalog_identity(profile)
     karma = _signed(profile.karma.score)
     return f"{identity} · ур.{profile.level_number} · карма {karma} ({profile.karma.count})"
+
+
+def _member_catalog_button_text(profile: SafeProfile, *, expanded: bool) -> str:
+    marker = "-" if expanded else "+"
+    karma = _signed(profile.karma.score)
+    suffix = f" · ур.{profile.level_number} · карма {karma} ({profile.karma.count})"
+    prefix = f"{marker} "
+    identity_limit = _MEMBER_CATALOG_BUTTON_TEXT_LIMIT - len(prefix) - len(suffix)
+    if identity_limit < 8:  # noqa: PLR2004 - keep a readable identity fragment.
+        return _clip(f"{prefix}{_member_catalog_row(profile)}", _MEMBER_CATALOG_BUTTON_TEXT_LIMIT)
+    identity = _clip(_member_catalog_identity(profile), identity_limit)
+    return f"{prefix}{identity}{suffix}"
 
 
 def _member_catalog_details(profile: SafeProfile) -> tuple[str, ...]:
