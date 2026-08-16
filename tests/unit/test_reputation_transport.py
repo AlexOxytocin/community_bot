@@ -30,7 +30,7 @@ from community_bot.transport.telegram.reputation import (
     present_member_catalog,
     present_profile,
 )
-from tests.integration.test_task_creation import CapturingSession
+from tests.integration.test_navigation import CapturingSession
 
 if TYPE_CHECKING:
     from community_bot.application.member_foundation import MemberFoundationService
@@ -64,7 +64,7 @@ def test_safe_profile_presentation_never_contains_raw_karma() -> None:
 
 
 def test_member_catalog_presentation_compacts_rows_and_expands_one_profile() -> None:
-    """Member catalog uses one row per member and details only for the expanded row."""
+    """Member catalog text shows only the selected profile details."""
     first = _safe_profile("Анна", "anna")
     second = _safe_profile("Иван", None)
     page = MemberCatalogPage((first, second), None)
@@ -72,8 +72,8 @@ def test_member_catalog_presentation_compacts_rows_and_expands_one_profile() -> 
     rendered = present_member_catalog(page, query="@Ann", expanded_member_id=first.member_id)
 
     assert "Поиск: ann" in rendered
-    assert "01 - @anna · Анна · ур.2 · карма +3 (4)" in rendered
-    assert "02 + Иван · ур.2 · карма +3 (4)" in rendered
+    assert "@anna · Анна · ур.2 · карма +3 (4)" in rendered
+    assert "Иван · ур.2" not in rendered
     assert "Город: Буэнос-Айрес" in rendered
     assert str(first.member_id) not in rendered
 
@@ -286,13 +286,15 @@ async def test_members_command_renders_searchable_compact_catalog_and_expands_ro
 
     await dispatcher.feed_update(bot, message_update(92_001, "/members @Anna"))
     assert service.calls[0]["query"] == "@Anna"
-    assert capture.texts[-1].startswith("Участники\nПоиск: anna")
-    assert "01 + @anna · Анна" in capture.texts[-1]
+    assert capture.texts[-1] == "Участники\nПоиск: anna"
+    assert ("+ @anna · Анна · ур.2 · карма +3 (4)", "mc:o:0:0") in capture.inline_buttons
     assert "mc:o:0:0" in capture.callbacks
     assert "mc:s" in capture.callbacks
 
     await dispatcher.feed_update(bot, callback_update(92_002, "mc:o:0:0", capture.texts[-1]))
-    assert "01 - @anna · Анна" in capture.texts[-1]
+    assert "@anna · Анна · ур.2 · карма +3 (4)" in capture.texts[-1]
+    assert "01 -" not in capture.texts[-1]
+    assert ("- @anna · Анна · ур.2 · карма +3 (4)", "mc:x:0:0") in capture.inline_buttons
     assert f"member:profile:{service.profile.member_id.hex}" in capture.callbacks
     assert f"karma:begin:{service.profile.member_id.hex}" in capture.callbacks
     assert f"karma:raw:{service.profile.member_id.hex}" in capture.callbacks
@@ -300,7 +302,7 @@ async def test_members_command_renders_searchable_compact_catalog_and_expands_ro
     assert f"member:role:administrator:{service.profile.member_id.hex}" in capture.callbacks
 
     await dispatcher.feed_update(bot, callback_update(92_002_1, "mc:x:0:0", capture.texts[-1]))
-    assert "01 + @anna · Анна" in capture.texts[-1]
+    assert capture.texts[-1] == "Участники\nПоиск: anna"
 
     capture.texts.clear()
     await dispatcher.feed_update(bot, message_update(92_003, "/members ab"))
@@ -359,11 +361,20 @@ async def test_members_catalog_paginates_resets_and_prompts_for_search() -> None
     await dispatcher.feed_update(bot, callback_update(92_012, next_page, first_text))
     assert service.calls[-1]["cursor_member_id"] == service.first.member_id
     assert service.calls[-1]["query"] == "ann"
-    assert "01 + @ivan · Иван" in capture.texts[-1]
+    assert capture.texts[-1] == "Участники\nПоиск: ann"
+    assert any(
+        text == "+ @ivan · Иван · ур.2 · карма +3 (4)"
+        and callback == f"mc:o:{service.first.member_id.hex}:0"
+        for text, callback in capture.inline_buttons
+    )
 
     await dispatcher.feed_update(bot, callback_update(92_013, "mc:r", capture.texts[-1]))
     assert service.calls[-1].get("query") is None
-    assert capture.texts[-1].startswith("Участники\n\n01 + @anna")
+    assert capture.texts[-1] == "Участники"
+    assert any(
+        text == "+ @anna · Анна · ур.2 · карма +3 (4)" and callback == "mc:o:0:0"
+        for text, callback in capture.inline_buttons
+    )
     await bot.session.close()
 
 
