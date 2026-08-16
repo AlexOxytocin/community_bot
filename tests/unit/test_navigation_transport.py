@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 import pytest
@@ -20,6 +20,8 @@ from community_bot.transport.telegram.navigation import (
 
 if TYPE_CHECKING:
     from aiogram.types import InlineKeyboardMarkup
+
+    from community_bot.application.tasks import OwnedTaskCard
 
 
 def _buttons(markup: InlineKeyboardMarkup) -> list[tuple[str, str | None]]:
@@ -48,8 +50,13 @@ def test_selected_nested_menu_controls_are_stable() -> None:
 
 def test_partially_completed_cards_are_split_by_free_slots() -> None:
     task = SimpleNamespace(status=TaskStatus.PARTIALLY_COMPLETED, performer_slots=2)
-    free_slot_card = SimpleNamespace(task=task, assignees=(SimpleNamespace(),))
-    full_card = SimpleNamespace(task=task, assignees=(SimpleNamespace(), SimpleNamespace()))
+    free_slot_card = cast(
+        "OwnedTaskCard", SimpleNamespace(task=task, assignees=(SimpleNamespace(),))
+    )
+    full_card = cast(
+        "OwnedTaskCard",
+        SimpleNamespace(task=task, assignees=(SimpleNamespace(), SimpleNamespace())),
+    )
 
     assert _created_status_group_matches(free_slot_card, "active")
     assert not _created_status_group_matches(free_slot_card, "completed")
