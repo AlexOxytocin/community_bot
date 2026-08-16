@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from community_bot.application.assignments import (
     AcceptAssignmentCommand,
     AssignmentService,
+    DecideAssignmentCommand,
     SubmitResultCommand,
 )
 from community_bot.application.economy import (
@@ -37,6 +38,7 @@ from community_bot.application.tasks import (
     TaskService,
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
+from community_bot.domain.assignments import AssignmentDecision
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.economy import (
     AdministrativeContext,
@@ -595,6 +597,151 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
         stored_assignment = await session.get(AssignmentModel, assignment.id)
     assert stored_assignment is not None
     assert stored_assignment.status == "submitted"
+    await database.dispose()
+
+
+async def test_partially_completed_group_can_release_its_free_slot_reserve(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    author = await prepare_member(database, telegram_user_id=19_750)
+    performer = await add_member(database, telegram_user_id=19_751)
+    task_service = TaskService(database.unit_of_work)
+    assignment_service = AssignmentService(database.unit_of_work)
+    selected_category = await category_id(database, "promotion")
+    draft_id, revision = await complete_freeform_preview(
+        task_service,
+        member=author,
+        selected_category_id=selected_category,
+        update_base=19_750,
+        kind=TaskKind.GROUP,
+        time_size=TaskTimeSize.S,
+        performer_slots=2,
+        reward=2,
+    )
+    task = await task_service.publish(
+        PublishTaskCommand(19_850, author.telegram_user_id, draft_id, revision)
+    )
+    assignment = await assignment_service.accept(
+        AcceptAssignmentCommand(19_851, performer.telegram_user_id, task.id)
+    )
+    await assignment_service.submit(
+        SubmitResultCommand(
+            19_852,
+            performer.telegram_user_id,
+            assignment.id,
+            uuid4(),
+            {"result": "Проверил сценарий и подробно описал наблюдения."},
+        )
+    )
+    approved = await assignment_service.decide(
+        DecideAssignmentCommand(
+            19_853,
+            author.telegram_user_id,
+            assignment.id,
+            uuid4(),
+            AssignmentDecision.FULL,
+        )
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        stored_task = await session.get(TaskModel, task.id)
+        assert stored_task is not None
+        # Preserve a legacy state produced by the old live-smoke workflow:
+        # one slot was paid while another stayed reserved and unoccupied.
+        stored_task.status = TaskStatus.PARTIALLY_COMPLETED.value
+
+    outcome = await task_service.request_cancellation(
+        update_id=19_854,
+        actor_telegram_user_id=author.telegram_user_id,
+        task_id=task.id,
+    )
+
+    assert outcome.status == "closed"
+    assert outcome.task.status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
+    async with sessions() as session:
+        persisted_author = await session.get(MemberModel, author.id)
+        persisted_performer = await session.get(MemberModel, performer.id)
+        persisted_assignment = await session.get(AssignmentModel, assignment.id)
+        refund = await session.scalar(
+            select(AccountTransactionModel).where(
+                AccountTransactionModel.idempotency_key == f"task_close:{task.id}:free_slots:refund"
+            )
+        )
+    assert persisted_author is not None
+    assert persisted_author.credit_balance_cached == 8
+    assert persisted_performer is not None
+    assert persisted_performer.credit_balance_cached == 2
+    assert persisted_assignment is not None
+    assert approved.id == persisted_assignment.id
+    assert persisted_assignment.status == "approved"
+    assert refund is not None
+    assert refund.credit_delta == 2
+    await database.dispose()
+
+
+async def test_partially_completed_task_without_free_slots_cannot_be_reopened(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    author = await prepare_member(database, telegram_user_id=19_760)
+    first_performer = await add_member(database, telegram_user_id=19_761)
+    second_performer = await add_member(database, telegram_user_id=19_762)
+    task_service = TaskService(database.unit_of_work)
+    assignment_service = AssignmentService(database.unit_of_work)
+    selected_category = await category_id(database, "promotion")
+    draft_id, revision = await complete_freeform_preview(
+        task_service,
+        member=author,
+        selected_category_id=selected_category,
+        update_base=19_760,
+        kind=TaskKind.GROUP,
+        time_size=TaskTimeSize.S,
+        performer_slots=2,
+        reward=2,
+    )
+    task = await task_service.publish(
+        PublishTaskCommand(19_860, author.telegram_user_id, draft_id, revision)
+    )
+    assignments = [
+        await assignment_service.accept(
+            AcceptAssignmentCommand(19_861, first_performer.telegram_user_id, task.id)
+        ),
+        await assignment_service.accept(
+            AcceptAssignmentCommand(19_862, second_performer.telegram_user_id, task.id)
+        ),
+    ]
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        stored_task = await session.get(TaskModel, task.id)
+        assert stored_task is not None
+        stored_task.status = TaskStatus.PARTIALLY_COMPLETED.value
+
+    with pytest.raises(TaskError, match="no free performer slots"):
+        await task_service.request_cancellation(
+            update_id=19_863,
+            actor_telegram_user_id=author.telegram_user_id,
+            task_id=task.id,
+        )
+
+    async with sessions() as session:
+        persisted_task = await session.get(TaskModel, task.id)
+        persisted_author = await session.get(MemberModel, author.id)
+        assignment_count = await session.scalar(
+            select(func.count(AssignmentModel.id)).where(AssignmentModel.task_id == task.id)
+        )
+        free_slot_refund = await session.scalar(
+            select(AccountTransactionModel).where(
+                AccountTransactionModel.idempotency_key == f"task_close:{task.id}:free_slots:refund"
+            )
+        )
+    assert len(assignments) == 2
+    assert persisted_task is not None
+    assert persisted_task.status == TaskStatus.PARTIALLY_COMPLETED.value
+    assert persisted_author is not None
+    assert persisted_author.credit_balance_cached == 6
+    assert assignment_count == 2
+    assert free_slot_refund is None
     await database.dispose()
 
 

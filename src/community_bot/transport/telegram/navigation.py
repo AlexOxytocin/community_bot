@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from community_bot.application.navigation import NavigationService
     from community_bot.application.registration import RegistrationService
     from community_bot.application.reputation import ReputationService
-    from community_bot.application.tasks import AvailableTaskPage, TaskService
+    from community_bot.application.tasks import AvailableTaskPage, OwnedTaskCard, TaskService
 
 TASKS_TEXT = "Задания"
 INSIGHTS_TEXT = "Баланс и статистика"
@@ -90,6 +90,7 @@ _CREATED_STATUS_GROUPS = {
         TaskStatus.PUBLISHED,
         TaskStatus.CLOSED_FOR_NEW_PERFORMERS,
         TaskStatus.SETTLING,
+        TaskStatus.PARTIALLY_COMPLETED,
     ),
     "completed": (TaskStatus.COMPLETED, TaskStatus.PARTIALLY_COMPLETED),
     "archive": (
@@ -433,13 +434,13 @@ def build_navigation_router(  # noqa: PLR0913
                 owned_items = []
                 for status in _CREATED_STATUS_GROUPS[status_group]:
                     owned_items.extend(
-                        await tasks.list_owned_cards(
+                        await _list_created_status_cards(
+                            tasks,
                             actor_telegram_user_id=actor_telegram_user_id,
-                            limit=fetch_limit,
+                            status_group=status_group,
                             status=status,
                             cursor=cursor,
-                            creator_only=True,
-                            order_by_updated_at=status_group == "completed",
+                            fetch_limit=fetch_limit,
                         )
                     )
                 page = tuple(
@@ -1014,6 +1015,46 @@ def _section_back_markup(section: str) -> InlineKeyboardMarkup:
 
 def _menu_button(text: str, action: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=f"{_MENU_PREFIX}{action}")
+
+
+def _created_status_group_matches(card: OwnedTaskCard, status_group: str) -> bool:
+    if card.task.status is not TaskStatus.PARTIALLY_COMPLETED:
+        return True
+    has_free_slots = len(card.assignees) < card.task.performer_slots
+    return has_free_slots if status_group == "active" else not has_free_slots
+
+
+async def _list_created_status_cards(  # noqa: PLR0913
+    tasks: TaskService,
+    *,
+    actor_telegram_user_id: int,
+    status_group: str,
+    status: TaskStatus,
+    cursor: tuple[datetime, UUID] | None,
+    fetch_limit: int,
+) -> tuple[OwnedTaskCard, ...]:
+    """Filter mixed partial states without losing cards behind the database limit."""
+    page_cursor = cursor
+    matches: list[OwnedTaskCard] = []
+    page_size = 20 if status is TaskStatus.PARTIALLY_COMPLETED else fetch_limit
+    while len(matches) < fetch_limit:
+        cards = await tasks.list_owned_cards(
+            actor_telegram_user_id=actor_telegram_user_id,
+            limit=page_size,
+            status=status,
+            cursor=page_cursor,
+            creator_only=True,
+            order_by_updated_at=status_group == "completed",
+        )
+        matches.extend(item for item in cards if _created_status_group_matches(item, status_group))
+        if status is not TaskStatus.PARTIALLY_COMPLETED or len(cards) < page_size:
+            break
+        last = cards[-1].task
+        page_cursor = (
+            last.updated_at if status_group == "completed" else last.created_at,
+            last.id,
+        )
+    return tuple(matches[:fetch_limit])
 
 
 def _task_list_title(list_kind: str) -> str:
