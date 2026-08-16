@@ -8,7 +8,10 @@
 
 - Reviewed commit:
 - Immutable image digest:
-- Alembic revision (`0019` ожидается):
+- `POSTGRES_DB` отличается от `community_bot_restore_drill`: `да|нет`
+- Expected image Alembic head:
+- Production Alembic revision (ровно одна, равна expected head):
+- Restored Alembic revision (ровно одна, равна expected head):
 - `postgres`: `healthy|unhealthy`
 - `community-worker`: `healthy|unhealthy`
 - `community-bot`: `healthy|unhealthy`
@@ -31,6 +34,7 @@
 - Время последнего успешного backup UTC:
 - Возраст backup (`<=24h` ожидается):
 - Последний restore drill UTC и длительность (`<=4h` ожидается):
+- Drill database отсутствует после cleanup: `да|нет`
 - Остаточный риск same-host backup принят и не изменился: `да|нет`
 
 ## Продуктовые агрегаты
