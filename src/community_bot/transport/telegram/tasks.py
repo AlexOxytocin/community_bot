@@ -433,24 +433,29 @@ def build_task_router(
                 )
                 await message.answer("Черновик удалён.")
             except (LookupError, TaskError):
-                card = await service.owned_card(
-                    actor_telegram_user_id=message.from_user.id,
-                    task_id=reference_id,
-                )
-                if card.task.status is TaskStatus.PARTIALLY_COMPLETED:
+                try:
+                    task = await service.cancel(
+                        update_id=event_update.update_id,
+                        actor_telegram_user_id=message.from_user.id,
+                        task_id=reference_id,
+                    )
+                    await message.answer(f"Задание отменено: {task.title}")
+                except TaskError:
                     outcome = await service.request_cancellation(
                         update_id=event_update.update_id,
                         actor_telegram_user_id=message.from_user.id,
                         task_id=reference_id,
                     )
-                    await message.answer(f"Набор для «{outcome.task.title}» завершён.")
-                    return
-                task = await service.cancel(
-                    update_id=event_update.update_id,
-                    actor_telegram_user_id=message.from_user.id,
-                    task_id=reference_id,
-                )
-                await message.answer(f"Задание отменено: {task.title}")
+                    if outcome.status == "cancelled":
+                        text = f"Задание отменено: {outcome.task.title}"
+                    elif outcome.status == "closed":
+                        text = f"Набор для «{outcome.task.title}» завершён."
+                    else:
+                        text = (
+                            f"Набор для «{outcome.task.title}» завершён. "
+                            "Исполнителям отправлен запрос на отмену."
+                        )
+                    await message.answer(text)
         except (TaskError, PermissionError, LookupError, ValueError) as error:
             await message.answer(_friendly_error(error))
 
