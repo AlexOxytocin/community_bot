@@ -7,24 +7,59 @@ applicability:
     - 1B
     - 2
     - 3
-  level_1: follow_adr_0004_without_jira_or_task_artifact_requirements
-  level_1b: follow_adr_0010_small_reproducible_bugfix_fast_lane
+  level_1: non_behavior_documentation_only_without_jira_or_task_artifact_requirements
+  level_1b: follow_adr_0010_small_reproducible_bugfix_fast_lane_with_jira_issue_and_task_branch
 
 source_of_truth:
   current_work: jira_CB
   durable_knowledge: git_docs
   retrieval_index: mempalace_community_bot
 
+jira_first:
+  required_for:
+    - bug
+    - feature
+    - user_story
+    - runtime_behavior_change
+    - workflow_change
+    - development_process_change
+  standing_owner_intent:
+    create_issue_for_requested_bug_feature_or_process_change: true
+  not_required_for:
+    - read_only_analysis
+    - non_behavior_level_1_documentation_cleanup
+  branch_required_for_git_changes: task/{issue_key}
+  task_branch_completion_route:
+    - local_verification
+    - commit
+    - push
+    - pull_request
+    - ci_and_review
+    - merge_to_main_when_gates_pass
+  standing_owner_intent_for_task_branch_push_pr_merge: true
+  blocked_gate_stops_merge_and_requires_jira_update: true
+  jira_records_material_events:
+    - issue_created_or_selected
+    - task_branch
+    - implementation_started
+    - blocker
+    - review_or_pr_ready
+    - verification_results
+    - release_or_deploy_gate
+    - final_result
+  do_not_comment_each_local_command: true
+
 phases:
   - id: intake
     owner: developer
     inputs:
+      - existing_jira_issue_or_clear_request_to_create_one
       - jira_issue
       - comments
       - links_and_blockers
       - parent_or_epic
       - acceptance_criteria
-    gate: issue_context_read
+    gate: jira_issue_exists_before_bug_feature_or_behavior_implementation
 
   - id: validation
     owner: developer
@@ -58,6 +93,8 @@ phases:
     owner: developer
     required_outputs:
       level_1b:
+        - jira_issue
+        - task_branch
         - compact_bugfix_note
       levels_2_3:
         - plan.md
@@ -90,7 +127,7 @@ phases:
   - id: plan_publication
     owner: developer
     checks:
-      - record_level_1b_note_without_blocking_checkpoint
+      - show_compact_bugfix_note_for_level_1b
       - show_plan_to_user_for_levels_2_3
       - show_plan_review_to_user_when_required
       - show_proposed_adr_to_owner_when_required
@@ -104,7 +141,7 @@ phases:
     checks:
       - preserve_user_changes
       - refresh_origin_main
-      - create_task_branch_before_edits
+      - create_or_rename_task_branch_before_edits
     branch: task/{issue_key}
 
   - id: implementation_start
@@ -158,6 +195,8 @@ phases:
       level_1:
         - exact_change_description
       level_1b:
+        - jira_issue
+        - task_branch
         - compact_bugfix_note
         - reproduction_or_targeted_test
       level_2:
@@ -208,7 +247,7 @@ phases:
     checks:
       - wait_for_ci_and_code_review
       - fixes_require_tests_report_update_and_new_final_review_or_compact_diff_verdict
-      - merge_uses_standing_intent_after_required_checks_or_explicit_request
+      - merge_to_main_after_successful_ci_and_review
 
   - id: memory
     owner: developer
@@ -218,29 +257,14 @@ phases:
 
 mutation_policy:
   jira_read: allowed_when_requested
-  standing_implementation_intent:
-    authorizes:
-      - jira_create_or_update_and_transitions_through_review
-      - task_branch_push_pull_request
-      - merge_after_required_checks
-      - release_and_deploy
-    stops_on:
-      - state_conflict
-      - risk_escalation
-      - failed_gate
-      - destructive_action
-      - explicit_owner_stop
-    never_authorizes:
-      - bypass_required_gate
-      - arbitrary_telegram_read_or_write
-      - final_done_without_production_acceptance
-  jira_write: clear_or_standing_implementation_intent_required
+  jira_issue_create_for_requested_bug_feature_or_process_change: standing_owner_intent
+  jira_write: clear_user_intent_required
   telegram_read: explicit_specific_request_required
   telegram_write: explicit_recipient_and_content_required
-  git_push: clear_or_standing_implementation_intent_required
-  pull_request: clear_or_standing_implementation_intent_required
-  merge: standing_intent_and_required_checks_or_explicit_request
-  release_deploy: standing_intent_and_required_checks_or_explicit_request
+  git_push_for_task_branch_after_verification: standing_owner_intent
+  pull_request_for_task_branch_after_verification: standing_owner_intent
+  merge_task_branch_after_ci_and_review: standing_owner_intent
+  merge_when_gate_blocked: forbidden
 
 telegram_testing:
   live_profile_labels:
@@ -261,7 +285,9 @@ telegram_testing:
 
 branching:
   task_flow: task/{issue_key} -> main
+  task_branch_must_reach_pr_and_merge_when_gates_pass: true
   direct_task_changes_to_main: forbidden
+  bug_feature_or_behavior_branch_without_issue_key: forbidden
   pull_request_base: main
   dev_branch_rule: introduce_only_by_accepted_adr_when_parallel_integration_is_needed
 
@@ -300,6 +326,8 @@ artifacts:
   root: tasks/{issue_key}
   required_before_code:
     level_1b:
+      - jira_issue
+      - task_branch
       - compact_bugfix_note
     levels_2_3:
       - plan.md

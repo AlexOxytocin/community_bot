@@ -8,7 +8,7 @@ output_schema: community_bot.developer.handoff.v1
 language: ru
 inputs:
   required:
-    - issue_key_or_explicit_work_request
+    - issue_key_or_explicit_work_request_to_create_jira_issue
   optional:
     - target_scope
     - manual_qa_required
@@ -36,4 +36,7 @@ artifacts:
   blocking_or_escalation:
     - needs-info.md
     - problem-escalation.md
-remote_mutations: clear_or_standing_implementation_intent_required
+remote_mutations:
+  jira_issue_create_for_requested_bug_feature_or_process_change: standing_owner_intent
+  task_branch_commit_push_pr_merge_after_successful_gates: standing_owner_intent
+  other_mutations: clear_user_intent_required
