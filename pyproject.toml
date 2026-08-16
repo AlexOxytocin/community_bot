@@ -1,6 +1,6 @@
 [project]
 name = "community-bot"
-version = "0.1.0"
+version = "1.0.0"
 description = "Modular monolith foundation for the Community Bot MVP"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -24,6 +24,7 @@ community-repair-bootstrap-admin-profile = "community_bot.bootstrap.initial_admi
 community-bootstrap-product-config = "community_bot.bootstrap.product_config_cli:main"
 community-health = "community_bot.bootstrap.health:main"
 community-migrate = "community_bot.bootstrap.migrate:main"
+community-migration-head = "community_bot.bootstrap.migration_head:main"
 community-pilot-report = "community_bot.bootstrap.pilot_report:main"
 community-test-run = "community_bot.bootstrap.test_run:main"
 community-worker = "community_bot.worker.entrypoint:main"

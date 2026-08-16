@@ -209,14 +209,49 @@ python3 /opt/community-bot/current/ops/restore_drill.py \
   /var/backups/community-bot/community_bot-YYYYMMDDTHHMMSSZ.dump
 ```
 
-Скрипт создаёт отдельную `community_bot_restore_drill`, восстанавливает backup,
-проверяет `alembic_version` и доступность ключевых таблиц, затем удаляет только
-временную БД. Рабочая БД и контейнеры не переключаются.
+До первого Docker/DB subprocess скрипт требует, чтобы configured `POSTGRES_DB`
+отличалась от фиксированной `community_bot_restore_drill`. Коллизия немедленно
+блокирует запуск до pre-cleanup: никакая БД в этом случае не удаляется и не
+проверяется. Затем скрипт идемпотентно удаляет оставшуюся drill DB и отдельным
+запросом доказывает её отсутствие.
+
+Expected Alembic head извлекается командой `community-migration-head` из exact
+immutable image, записанного в `shared/releases/current-image`. Image запускается
+с `--pull=never`, без сети, с read-only filesystem и не читает production env.
+Stdout захватывается как исходные bytes без text mode и universal-newline
+conversion. Допустимый протокол — ровно `REVISION` либо `REVISION\n`: revision
+должна соответствовать ASCII-грамматике `[A-Za-z0-9][A-Za-z0-9_.-]*`, которая
+является строгим подмножеством UTF-8, а один терминальный LF разрешён как
+разделитель и не считается дополнительной строкой. CR, CRLF, invalid UTF-8,
+padding, ведущая/дополнительная пустая строка, второй LF, несколько heads и
+любой другой вывод блокируют drill.
+
+Production и restored базы независимо должны содержать ровно одну исходную
+строку `alembic_version`, побайтно по текстовому значению равную expected image
+head. DB stdout остаётся bytes; parser удаляет только один терминальный LF
+протокола и сохраняет все остальные строки, CR и whitespace. Поэтому padded
+revision, blank/whitespace row рядом с valid revision, CR/CRLF, invalid bytes и
+multiple rows отклоняются. Cleanup count аналогично принимается только как одна
+raw row `0` или `1` с необязательным единственным терминальным LF. Production
+проверяется read-only запросом до `createdb`; restored база — после `pg_restore`
+и до ledger/cache reconciliation. Затем скрипт проверяет доступность ключевых
+таблиц и согласованность ledger/cache, после чего в `finally` удаляет только
+временную БД и снова доказывает её отсутствие. Рабочая БД и контейнеры не
+переключаются, не мигрируются и не удаляются.
+
+Любая ошибка получения image head, production/restored revision, restore,
+ledger, cleanup или проверки отсутствия даёт ненулевой результат. Если cleanup
+или его postcondition не прошли, повторный drill запрещён до ручной проверки и
+безопасного удаления только `community_bot_restore_drill`; старое успешное
+доказательство повторно не используется.
 
 В несекретном операционном отчёте фиксируются UTC-время backup, начало и конец
-restore, Alembic revision и результат проверок. Цели логического восстановления:
-`RPO <= 24h`, `RTO <= 4h`. Backup находится на том же сервере и не защищает от
-полной потери хоста; этот риск принят для MVP.
+restore, expected image head, отдельные production/restored revisions,
+агрегированные counts, `ledger_mismatch_count`, итоговый code и доказанный факт
+`drill_database_absent=true`. Env values, credentials, содержимое backup,
+строки ledger и пользовательские идентификаторы не фиксируются. Цели
+логического восстановления: `RPO <= 24h`, `RTO <= 4h`. Backup находится на том
+же сервере и не защищает от полной потери хоста; этот риск принят для MVP.
 
 ## Диагностика
 
@@ -235,8 +270,10 @@ restore, Alembic revision и результат проверок. Цели ло�
 ## Preflight допуска когорты
 
 1. Зафиксировать reviewed commit и immutable image digest текущего release.
-2. Подтвердить `0019`, healthy `postgres`, `community-worker` и `community-bot`,
-   отсутствие terminal `failed` outbox и свежие heartbeat.
+2. Подтвердить exact equality expected image head и единственных
+   production/restored Alembic revisions, healthy `postgres`,
+   `community-worker` и `community-bot`, отсутствие terminal `failed` outbox и
+   свежие heartbeat.
 3. Создать свежий backup, выполнить isolated restore drill и получить
    `ledger_mismatch_count = 0`; возраст backup должен быть не более 24 часов, а
    длительность восстановления — менее 4 часов.

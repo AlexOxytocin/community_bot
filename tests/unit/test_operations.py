@@ -104,7 +104,14 @@ def test_backup_restore_and_release_assets_keep_mvp_boundaries() -> None:
     assert "community_bot_restore_drill" in restore
     assert "pg_restore" in restore
     assert "alembic_version" in restore
-    assert "0019" in restore
+    assert "0019" not in restore
+    assert "community-migration-head" in restore
+    assert "--pull=never" in restore
+    assert '"--network",' in restore
+    assert '"none",' in restore
+    assert "--read-only" in restore
+    assert '"POSTGRES_DB"' in restore
+    assert "SELECT version_num FROM alembic_version ORDER BY version_num" in restore
     assert "account_transactions" in restore
     assert "credit_balance_cached" in restore
     assert "experience_total_cached" in restore
