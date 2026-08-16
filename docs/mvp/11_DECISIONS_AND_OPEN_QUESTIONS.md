@@ -608,6 +608,54 @@ XS — `1` или `2`, S — `2–4`, M — `4–7`, L — `6–10`, XL — лю
 пути, ставить верхний потолок на XL-награду и возвращать групповое задание в
 каталог после отказа исполнителя от отмены.
 
+### D-033. Multi-interface архитектура Release 2
+
+**Дата:** 2026-08-16.
+
+**Причина:** Release 1 уже работает как Telegram-бот, а следующий релиз должен
+дать участникам полноценный визуальный Telegram Mini App и не закрыть путь к
+будущему browser UI. Копирование правил в отдельный web backend сделало бы два
+расходящихся продукта вместо двух интерфейсов одного сообщества.
+
+**Выбрано:** Release 1 фиксируется immutable tag `v1.0.0`, а `main` остаётся
+выпускаемым без постоянной ветки `release/2`. Release 2 сохраняет один
+модульный Python-монолит, одну PostgreSQL, общий domain/application и добавляет
+FastAPI `/api/v1` вместе с React + TypeScript + Vite SPA. Telegram Mini App
+является первым визуальным клиентом; bot сохраняет регистрацию, вход,
+уведомления, deep links и fallback.
+
+Внешняя identity сначала разрешается auth adapter в краткоживущую внутреннюю
+session. Subject `ActorContext` — internal `member_id`; provider и время
+authentication являются audit metadata. Role, member status, permissions и
+ownership не доверяются клиенту или session claims и заново читаются из
+PostgreSQL каждым защищённым use case. Telegram proof проверяется по исходному
+`initData`; browser auth остаётся отдельным будущим решением и не создаёт
+публичную регистрацию.
+
+Изменяющие команды используют namespaced operation receipt с actor,
+external key, command, canonical payload fingerprint и сохранённым outcome.
+Exact replay возвращает прежний outcome; тот же scoped key с другим command или
+payload отклоняется без нового доменного эффекта. Receipt, state, ledger, audit
+и outbox коммитятся одной транзакцией.
+
+Frontend обращается к Telegram SDK только через `PlatformBridge` с capability
+detection, нормализованными событиями и явным `supported|unsupported`.
+`start_param`, query string и прямой URL — только недоверенные navigation
+hints. Обычный браузер до появления browser auth не получает пользовательские
+данные. Незавершённые R2 surfaces закрыты server-side fail-closed feature
+flags; отсутствие или ошибка конфигурации означает `disabled` и блокирует
+прямой API/URL.
+
+Parity-разработка может идти параллельно пилоту CB-24. Новая экономика,
+монетизация, публичная регистрация и новые направления платформы остаются
+зависимыми от данных пилота. Детали зафиксированы в
+[ADR-0014](../adr/0014-multi-interface-release-2.md),
+[capability-контракте](../release-2/README.md) и задачах CB-48 — CB-58.
+
+**Отклонено:** отдельный backend и копирование правил для Mini App или browser,
+доверие `initDataUnsafe`, URL и клиентским claims, длинная ветка `release/2`,
+микросервисы, Redis и брокер без измеримой необходимости.
+
 ## Открытые продуктовые вопросы
 
 Нет открытых продуктовых вопросов, блокирующих текущий MVP.
