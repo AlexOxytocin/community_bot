@@ -120,6 +120,39 @@ class _DeniedTaskService:
         return _deny_task
 
 
+class _PartialTaskService:
+    """Expose one legacy partially completed card to the Telegram callback."""
+
+    def __init__(self) -> None:
+        task = SimpleNamespace(
+            id=uuid4(),
+            creator_id=uuid4(),
+            status=TaskStatus.PARTIALLY_COMPLETED,
+            performer_slots=2,
+            title="Legacy partial task",
+        )
+        self.card = cast(
+            "OwnedTaskCard",
+            SimpleNamespace(
+                task=task,
+                assignees=(SimpleNamespace(status="approved"),),
+                cancellation_status=None,
+            ),
+        )
+
+    async def owned_card(self, **kwargs: object) -> OwnedTaskCard:
+        del kwargs
+        return self.card
+
+    async def cancel_draft(self, **kwargs: object) -> Never:
+        del kwargs
+        raise LookupError
+
+    async def request_cancellation(self, **kwargs: object) -> object:
+        del kwargs
+        return SimpleNamespace(task=self.card.task, status="closed")
+
+
 @pytest.mark.asyncio
 async def test_task_router_safely_denies_every_output_driven_route() -> None:
     """Commands, callbacks, and free text fail visibly without leaking internals."""
@@ -226,6 +259,68 @@ async def test_task_cancellation_callbacks_reject_group_chat_before_service() ->
 
     private_only = "Работа с заданиями доступна только в личном чате с ботом."  # noqa: RUF001
     assert capture.callback_answers == [private_only, private_only, private_only]
+    await bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_task_callback_opens_free_reserve_confirmation() -> None:
+    service = _PartialTaskService()
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_task_router(cast("TaskService", service)))
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'K' * 35}", session=capture)
+    actor = User(id=9303, is_bot=False, first_name="Author")
+
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=93_201,
+            callback_query=CallbackQuery(
+                id="partial-task-cancellation",
+                from_user=actor,
+                chat_instance="partial-task-cancellation",
+                data=f"task:cancel:ask:{_encode_uuid(service.card.task.id)}",
+                message=Message(
+                    message_id=93_201,
+                    date=datetime.datetime.now(datetime.UTC),
+                    chat=Chat(id=actor.id, type="private"),
+                    from_user=actor,
+                    text="Legacy partial task",
+                ),
+            ),
+        ),
+    )
+
+    assert capture.callback_answers == [""]
+    assert "резерв свободных мест вернётся" in capture.texts[-1]
+    assert any(value.startswith("task:cancel:req:") for value in capture.callbacks)
+    await bot.session.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_task_command_closes_legacy_free_reserve() -> None:
+    service = _PartialTaskService()
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_task_router(cast("TaskService", service)))
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'K' * 35}", session=capture)
+    actor = User(id=9304, is_bot=False, first_name="Author")
+
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=93_202,
+            message=Message(
+                message_id=93_202,
+                date=datetime.datetime.now(datetime.UTC),
+                chat=Chat(id=actor.id, type="private"),
+                from_user=actor,
+                text=f"/task_cancel {service.card.task.id}",
+            ),
+        ),
+    )
+
+    assert capture.texts[-1] == "Набор для «Legacy partial task» завершён."  # noqa: RUF001
     await bot.session.close()
 
 
