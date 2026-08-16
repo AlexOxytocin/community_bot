@@ -433,6 +433,18 @@ def build_task_router(
                 )
                 await message.answer("Черновик удалён.")
             except (LookupError, TaskError):
+                card = await service.owned_card(
+                    actor_telegram_user_id=message.from_user.id,
+                    task_id=reference_id,
+                )
+                if card.task.status is TaskStatus.PARTIALLY_COMPLETED:
+                    outcome = await service.request_cancellation(
+                        update_id=event_update.update_id,
+                        actor_telegram_user_id=message.from_user.id,
+                        task_id=reference_id,
+                    )
+                    await message.answer(f"Набор для «{outcome.task.title}» завершён.")
+                    return
                 task = await service.cancel(
                     update_id=event_update.update_id,
                     actor_telegram_user_id=message.from_user.id,
@@ -453,9 +465,19 @@ def build_task_router(
             task = card.task
             if task.creator_id is None:
                 raise PermissionError("Only the task creator can cancel this task.")
-            if task.status is not TaskStatus.PUBLISHED:
+            if task.status not in {TaskStatus.PUBLISHED, TaskStatus.PARTIALLY_COMPLETED}:
                 raise TaskError("Task cannot be cancelled from its current state.")
-            if card.assignees:
+            has_free_slots = len(card.assignees) < task.performer_slots
+            if task.status is TaskStatus.PARTIALLY_COMPLETED and not has_free_slots:
+                raise TaskError("Task has no free performer slots to release.")
+            if task.status is TaskStatus.PARTIALLY_COMPLETED:
+                text = (
+                    f"Завершить набор для «{task.title}»?\n"
+                    "Новые исполнители больше не смогут взять задание, а резерв "
+                    "свободных мест вернётся в доступный баланс."
+                )
+                markup = _cancel_confirmation_keyboard(task.id, negotiated=True)
+            elif card.assignees:
                 text = (
                     f"Завершить набор для «{task.title}»?\n"
                     "Новые исполнители больше не смогут взять задание. Свободный резерв "
