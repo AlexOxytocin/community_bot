@@ -22,6 +22,7 @@ from community_bot.application.tasks import (
     TaskDraft,
 )
 from community_bot.domain.catalog import TaskFormat
+from community_bot.domain.economy import InsufficientBalanceError
 from community_bot.domain.tasks import (
     COMPLETION_CRITERIA_LIMIT,
     DESCRIPTION_LIMIT,
@@ -1176,6 +1177,10 @@ def _friendly_error(error: Exception) -> str:
         return "Это действие вам недоступно."
     if isinstance(error, StaleTaskDraftError):
         return "Черновик уже изменился. Откройте его заново."
+    if isinstance(error, InsufficientBalanceError):
+        return (
+            "Недостаточно кредитов для публикации. Уменьшите награду или количество исполнителей."
+        )
     return "Не удалось обработать задание. Проверьте данные и попробуйте снова."
 
 

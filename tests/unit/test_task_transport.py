@@ -20,6 +20,7 @@ from community_bot.application.tasks import (
     TaskDraft,
 )
 from community_bot.domain.catalog import TaskFormat
+from community_bot.domain.economy import InsufficientBalanceError
 from community_bot.domain.tasks import (
     TaskDraftStep,
     TaskError,
@@ -264,6 +265,10 @@ def test_task_transport_formats_credit_forms_and_safe_errors() -> None:
     assert "недоступно" in _cancel_error(TaskError("current state")).lower()
     assert "исполнитель" in _cancel_error(TaskError("assignment history")).lower()
     assert "недоступно" in _friendly_error(PermissionError()).lower()
+    assert _friendly_error(InsufficientBalanceError()) == (
+        "Недостаточно кредитов для публикации. Уменьшите награду или количество исполнителей."
+    )
+    assert "проверьте данные" in _friendly_error(TaskError("internal detail")).lower()
     assert "срок" in _obsolete_cancellation_message("deadline_reached").lower()
     assert "работа уже началась" in _obsolete_cancellation_message("work_started").lower()
     assert "исполнение" in _obsolete_cancellation_message("assignment_cancelled").lower()
