@@ -44,10 +44,12 @@ PROJECT_ROOT = Path(__file__).parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "product-config.v1.json"
 
 
-async def add_member(
+async def add_member(  # noqa: PLR0913 - fixture exposes independent member axes.
     database: Database,
     telegram_user_id: int,
     *,
+    telegram_username: str | None = None,
+    display_name: str | None = None,
     role: MemberRole = MemberRole.MEMBER,
     status: MemberStatus = MemberStatus.ACTIVE,
     permissions: list[str] | None = None,
@@ -58,7 +60,8 @@ async def add_member(
         model = MemberModel(
             id=uuid4(),
             telegram_user_id=telegram_user_id,
-            display_name=f"Member {telegram_user_id}",
+            telegram_username=telegram_username,
+            display_name=display_name or f"Member {telegram_user_id}",
             timezone="UTC",
             role=role.value,
             status=status.value,
@@ -615,15 +618,23 @@ async def test_vote_fault_rolls_back_every_persistent_effect(database_url: str) 
     await database.dispose()
 
 
-async def test_safe_catalog_own_paused_profile_and_ledger_pagination(database_url: str) -> None:
+async def test_safe_catalog_own_paused_profile_and_ledger_pagination(  # noqa: PLR0915
+    database_url: str,
+) -> None:
     """Catalog hides non-active members and leaderboard keyset has no duplicates."""
     database = Database(database_url)
-    actor = await add_member(database, 8381)
+    actor = await add_member(database, 8381, telegram_username="same_actor")
     await prepare_config(database, actor.id)
     paused = await add_member(database, 8382, status=MemberStatus.PAUSED)
-    second = await add_member(database, 8383)
+    second = await add_member(database, 8383, telegram_username="beta_match")
     hidden_members = [
-        await add_member(database, 8384 + index, status=status)
+        await add_member(
+            database,
+            8384 + index,
+            telegram_username="beta_hidden" if index == 0 else None,
+            display_name="Hidden beta" if index == 0 else None,
+            status=status,
+        )
         for index, status in enumerate(
             (
                 MemberStatus.PENDING,
@@ -670,6 +681,29 @@ async def test_safe_catalog_own_paused_profile_and_ledger_pagination(database_ur
     assert actor.id in ids
     assert second.id in ids
     assert paused.id not in ids
+    username_search = await service.members(
+        telegram_user_id=actor.telegram_user_id,
+        query="@beta",
+    )
+    assert [item.member_id for item in username_search.items] == [second.id]
+    assert username_search.items[0].telegram_username == "beta_match"
+    display_name_search = await service.members(
+        telegram_user_id=actor.telegram_user_id,
+        limit=1,
+        query="same",
+    )
+    assert display_name_search.next_cursor is not None
+    display_name_next_page = await service.members(
+        telegram_user_id=actor.telegram_user_id,
+        limit=10,
+        cursor=display_name_search.next_cursor,
+        query="same",
+    )
+    assert display_name_search.items[0].member_id not in {
+        item.member_id for item in display_name_next_page.items
+    }
+    with pytest.raises(ValueError, match="at least 3"):
+        await service.members(telegram_user_id=actor.telegram_user_id, query="@be")
     assert (await service.profile(telegram_user_id=paused.telegram_user_id)).member_id == paused.id
     for hidden in hidden_members:
         with pytest.raises(ProfileUnavailableError):

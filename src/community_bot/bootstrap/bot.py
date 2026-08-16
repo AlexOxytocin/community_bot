@@ -131,7 +131,7 @@ def _dispatcher(database: Database, *, invite_token_secret: str) -> Dispatcher:
     dispatcher.include_router(build_catalog_router(catalog))
     dispatcher.include_router(build_assignment_router(assignments))
     dispatcher.include_router(build_moderation_router(moderation))
-    dispatcher.include_router(build_reputation_router(reputation, moderation))
+    dispatcher.include_router(build_reputation_router(reputation, moderation, foundation))
     dispatcher.include_router(build_task_router(tasks, include_text_fallback=False))
     dispatcher.include_router(build_registration_router(registration, include_text_fallback=False))
     return dispatcher
