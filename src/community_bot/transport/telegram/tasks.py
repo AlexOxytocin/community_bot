@@ -1127,7 +1127,11 @@ def owned_task_keyboard(card: OwnedTaskCard, *, expanded: bool = False) -> Inlin
     ]
     if (
         card.task.creator_id is not None
-        and card.task.status is TaskStatus.PUBLISHED
+        and card.task.status in {TaskStatus.PUBLISHED, TaskStatus.PARTIALLY_COMPLETED}
+        and (
+            card.task.status is TaskStatus.PUBLISHED
+            or len(card.assignees) < card.task.performer_slots
+        )
         and card.cancellation_status != "pending"
     ):
         rows.append(

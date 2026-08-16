@@ -251,6 +251,51 @@ def test_task_cancellation_button_is_hidden_for_community_and_terminal_tasks(
     assert task_cancellation_keyboard(task) is None
 
 
+def test_partially_completed_group_exposes_close_only_with_free_slots() -> None:
+    """A partially completed card can release only a genuinely free slot."""
+    task = SimpleNamespace(
+        id=uuid4(),
+        creator_id=uuid4(),
+        status=TaskStatus.PARTIALLY_COMPLETED,
+        performer_slots=2,
+    )
+    free_slot_card = cast(
+        "OwnedTaskCard",
+        SimpleNamespace(task=task, assignees=(SimpleNamespace(),), cancellation_status=None),
+    )
+    full_card = cast(
+        "OwnedTaskCard",
+        SimpleNamespace(
+            task=task,
+            assignees=(SimpleNamespace(), SimpleNamespace()),
+            cancellation_status=None,
+        ),
+    )
+
+    free_slot_keyboard = owned_task_keyboard(free_slot_card)
+    full_keyboard = owned_task_keyboard(full_card)
+
+    assert free_slot_keyboard.inline_keyboard[1][0].text == "Завершить набор"
+    assert len(full_keyboard.inline_keyboard) == 1
+
+
+def test_published_full_task_keeps_negotiated_cancellation_action() -> None:
+    task = SimpleNamespace(
+        id=uuid4(),
+        creator_id=uuid4(),
+        status=TaskStatus.PUBLISHED,
+        performer_slots=1,
+    )
+    card = cast(
+        "OwnedTaskCard",
+        SimpleNamespace(task=task, assignees=(SimpleNamespace(),), cancellation_status=None),
+    )
+
+    keyboard = owned_task_keyboard(card)
+
+    assert keyboard.inline_keyboard[1][0].text == "Отменить"
+
+
 def test_task_transport_formats_credit_forms_and_safe_errors() -> None:
     """Compact task controls keep Russian forms and do not expose exception details."""
     assert _credits(1).endswith("кредит")

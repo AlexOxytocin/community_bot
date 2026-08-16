@@ -32,7 +32,7 @@ from community_bot.domain.members import (
     ADMINISTRATOR_PERMISSIONS,
     MemberRole,
 )
-from community_bot.domain.tasks import TaskDraftStep
+from community_bot.domain.tasks import TaskDraftStep, TaskStatus
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -46,7 +46,7 @@ from community_bot.infrastructure.db.models import (
     TaskModel,
     TaskTemplateModel,
 )
-from community_bot.transport.telegram.navigation import ADMIN_TEXT
+from community_bot.transport.telegram.navigation import ADMIN_TEXT, _list_created_status_cards
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -673,6 +673,95 @@ async def test_task_discovery_paginates_and_stale_cursor_restarts(database_url: 
     at_limit = await service.list_available(actor_telegram_user_id=performer.telegram_user_id)
     assert at_limit.items == ()
     assert at_limit.next_cursor_task_id is None
+    await database.dispose()
+
+
+async def test_active_partial_card_is_loaded_beyond_terminal_partial_page(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    admin = await _member(database, 8_051, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 8_052)
+    performer = await _member(database, 8_053)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    await EconomyService(database.unit_of_work).apply_one(starting_grant(author.id))
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        template = await db_session.scalar(
+            select(TaskTemplateModel.id).where(
+                TaskTemplateModel.code == "repository_first_impression"
+            )
+        )
+    assert template is not None
+    published = await _published_task(database, author, template, update_id_base=60_500)
+    now = datetime.datetime.now(datetime.UTC)
+    active_title = "Partial with one free slot"
+    async with sessions.begin() as db_session:
+        source = await db_session.get(TaskModel, published.id)
+        assert source is not None
+        assignment_models = []
+        for index in range(21):
+            task_id = uuid4()
+            slots = 2 if index == 20 else 1
+            created_at = now - datetime.timedelta(minutes=index + 1)
+            db_session.add(
+                TaskModel(
+                    id=task_id,
+                    origin=source.origin,
+                    template_id=source.template_id,
+                    template_version=source.template_version,
+                    creator_id=source.creator_id,
+                    author_display_name=source.author_display_name,
+                    category_id=source.category_id,
+                    title=active_title if index == 20 else f"Terminal partial {index:02d}",
+                    description=source.description,
+                    completion_criteria=source.completion_criteria,
+                    materials_json=source.materials_json,
+                    input_payload_json=source.input_payload_json,
+                    credit_reward_per_performer=source.credit_reward_per_performer,
+                    performer_slots=slots,
+                    reserved_credit_total=source.credit_reward_per_performer * slots,
+                    estimated_minutes=source.estimated_minutes,
+                    minimum_level=source.minimum_level,
+                    format=source.format,
+                    city=source.city,
+                    deadline_at=source.deadline_at,
+                    status=TaskStatus.PARTIALLY_COMPLETED.value,
+                    safety_snapshot_json=source.safety_snapshot_json,
+                    publish_command_id=uuid4(),
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            assignment_models.append(
+                AssignmentModel(
+                    task_id=task_id,
+                    performer_id=performer.id,
+                    slot_number=1,
+                    status="approved",
+                    accepted_at=created_at,
+                    reviewed_at=created_at,
+                )
+            )
+        await db_session.flush()
+        db_session.add_all(assignment_models)
+
+    cards = await _list_created_status_cards(
+        TaskService(database.unit_of_work),
+        actor_telegram_user_id=author.telegram_user_id,
+        status_group="active",
+        status=TaskStatus.PARTIALLY_COMPLETED,
+        cursor=None,
+        fetch_limit=20,
+    )
+
+    assert [card.task.title for card in cards] == [active_title]
     await database.dispose()
 
 

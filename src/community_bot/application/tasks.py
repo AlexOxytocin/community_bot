@@ -1279,7 +1279,7 @@ class TaskService:
             if task.status is TaskStatus.CANCELLED:
                 await _finish_receipt(uow, update_id, actor, f"task_cancelled:{task.id}")
                 return TaskCancellationOutcome(task, None, "cancelled")
-            if task.status is not TaskStatus.PUBLISHED:
+            if task.status not in {TaskStatus.PUBLISHED, TaskStatus.PARTIALLY_COMPLETED}:
                 raise TaskError("Task cannot be cancelled from its current state.")
             if _utc_now() >= task.deadline_at:
                 raise TaskError("Task cancellation deadline has passed.")
@@ -1287,6 +1287,9 @@ class TaskService:
             latest = _latest_slot_assignments(assignments)
             occupied = [item for item in latest if item.status is not AssignmentStatus.CANCELLED]
             active = _active_slot_assignments(latest)
+            free_slots = max(0, task.performer_slots - len(occupied))
+            if task.status is TaskStatus.PARTIALLY_COMPLETED and free_slots == 0:
+                raise TaskError("Task has no free performer slots to release.")
             if not occupied:
                 prepared = await uow.economy.prepare_batch(
                     (
@@ -1316,7 +1319,6 @@ class TaskService:
             pending = await uow.get_pending_task_cancellation(task.id)
             if pending is not None:
                 raise TaskError("A cancellation request is already awaiting performer responses.")
-            free_slots = max(0, task.performer_slots - len(occupied))
             if free_slots:
                 prepared = await uow.economy.prepare_batch(
                     (
