@@ -148,9 +148,43 @@ class _PartialTaskService:
         del kwargs
         raise LookupError
 
+    async def cancel(self, **kwargs: object) -> Never:
+        del kwargs
+        raise TaskError
+
     async def request_cancellation(self, **kwargs: object) -> object:
         del kwargs
         return SimpleNamespace(task=self.card.task, status="closed")
+
+
+class _CommandCancellationService:
+    """Record the exact command fallback without exposing an owned-card lookup."""
+
+    def __init__(self, *, status: TaskStatus, direct_cancel: bool) -> None:
+        self.task = SimpleNamespace(id=uuid4(), title="Command task", status=status)
+        self.direct_cancel = direct_cancel
+        self.calls: list[tuple[str, int]] = []
+
+    async def cancel_draft(self, **kwargs: object) -> Never:
+        self.calls.append(("cancel_draft", cast("int", kwargs["update_id"])))
+        raise LookupError
+
+    async def owned_card(self, **kwargs: object) -> Never:
+        del kwargs
+        raise AssertionError
+
+    async def cancel(self, **kwargs: object) -> object:
+        self.calls.append(("cancel", cast("int", kwargs["update_id"])))
+        if self.direct_cancel:
+            return self.task
+        raise TaskError
+
+    async def request_cancellation(self, **kwargs: object) -> object:
+        self.calls.append(("request_cancellation", cast("int", kwargs["update_id"])))
+        outcome_status = (
+            "closed" if self.task.status is TaskStatus.PARTIALLY_COMPLETED else "pending"
+        )
+        return SimpleNamespace(task=self.task, status=outcome_status)
 
 
 @pytest.mark.asyncio
@@ -298,8 +332,36 @@ async def test_partial_task_callback_opens_free_reserve_confirmation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_partial_task_command_closes_legacy_free_reserve() -> None:
-    service = _PartialTaskService()
+@pytest.mark.parametrize(
+    ("status", "mode", "expected_calls", "expected_text"),
+    [
+        (
+            TaskStatus.PARTIALLY_COMPLETED,
+            "fallback",
+            ("cancel_draft", "cancel", "request_cancellation"),
+            "Набор для «Command task» завершён.",  # noqa: RUF001
+        ),
+        (
+            TaskStatus.PUBLISHED,
+            "direct",
+            ("cancel_draft", "cancel"),
+            "Задание отменено: Command task",
+        ),
+        (
+            TaskStatus.PUBLISHED,
+            "fallback",
+            ("cancel_draft", "cancel", "request_cancellation"),
+            "Набор для «Command task» завершён. Исполнителям отправлен запрос на отмену.",  # noqa: RUF001
+        ),
+    ],
+)
+async def test_task_cancel_command_uses_exact_fallback_chain(
+    status: TaskStatus,
+    mode: str,
+    expected_calls: tuple[str, ...],
+    expected_text: str,
+) -> None:
+    service = _CommandCancellationService(status=status, direct_cancel=mode == "direct")
     dispatcher = Dispatcher()
     dispatcher.include_router(build_task_router(cast("TaskService", service)))
     capture = CapturingSession()
@@ -315,12 +377,14 @@ async def test_partial_task_command_closes_legacy_free_reserve() -> None:
                 date=datetime.datetime.now(datetime.UTC),
                 chat=Chat(id=actor.id, type="private"),
                 from_user=actor,
-                text=f"/task_cancel {service.card.task.id}",
+                text=f"/task_cancel {service.task.id}",
             ),
         ),
     )
 
-    assert capture.texts[-1] == "Набор для «Legacy partial task» завершён."  # noqa: RUF001
+    assert capture.texts[-1] == expected_text
+    assert tuple(name for name, _update_id in service.calls) == expected_calls
+    assert {update_id for _name, update_id in service.calls} == {93_202}
     await bot.session.close()
 
 
