@@ -136,3 +136,26 @@ alembic upgrade head
 - отдельная веб-панель администратора.
 
 Это не вечный запрет. Это защита первой версии от инфраструктуры, которая пока не решает ни одной подтверждённой проблемы.
+
+## 9. Расширение стека для Release 2
+
+Появление подтверждённого Telegram Mini App является отдельной причиной снять
+запрет MVP на FastAPI и frontend строго внутри эпика CB-48. Принятый контракт
+зафиксирован в [ADR-0014](../adr/0014-multi-interface-release-2.md) и
+[capability Release 2](../release-2/README.md).
+
+| Область | Выбор для Release 2 | Граница |
+|---|---|---|
+| HTTPS transport | FastAPI внутри существующего модульного монолита | Только inbound/API adapter; domain и application от FastAPI не зависят |
+| HTTP contract | Versioned `/api/v1`, Pydantic и OpenAPI | Сервер остаётся источником state, прав и допустимых transitions |
+| Frontend | React + TypeScript + Vite SPA | Один frontend для Mini App и будущего browser mode |
+| Platform integration | `PlatformBridge` | Telegram SDK изолирован; business state и authorization не хранятся в bridge |
+| Authentication | Provider-specific proof adapter → краткоживущая внутренняя session | Subject — internal `member_id`; role/status/permissions/ownership читаются из PostgreSQL для защищённого use case |
+| Operation identity | Namespaced receipt с command, payload fingerprint и outcome | Exact replay возвращает outcome; несовпадение даёт conflict без доменного эффекта |
+| Rollout | Server-side fail-closed feature flags | Ошибка или отсутствие configuration означает `disabled`; прямой URL/API gate не обходит |
+
+Python 3.13, PostgreSQL 18, SQLAlchemy/Alembic, ledger, audit, outbox, worker и
+единый immutable release сохраняются. Runtime-часть этой схемы ещё не
+реализована: её создают CB-51 — CB-57, а дизайн-систему — CB-58. Browser auth,
+public registration, Redis, Celery, микросервисы и отдельный browser backend
+этим решением не добавляются.

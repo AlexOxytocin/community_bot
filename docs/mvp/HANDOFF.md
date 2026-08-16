@@ -16,6 +16,10 @@
 - технологический стек в [TECH_STACK.md](TECH_STACK.md) и [ADR-0005](../adr/0005-mvp-technology-stack.md);
 - рабочий каркас Python 3.13, PostgreSQL 18, миграции, CI, модульные границы,
   фундамент участников, авторизации, аудита и защиты от повторных Telegram updates.
+- принятый [capability-контракт Release 2](../release-2/README.md),
+  [матрица паритета](../release-2/PARITY_MATRIX.md) и
+  [ADR-0014](../adr/0014-multi-interface-release-2.md) для Telegram Mini App с
+  подготовленной, но не выпущенной browser-границей.
 
 Технический каркас и фундамент участников уже реализованы. Следующая работа
 выбирается только по готовой и разблокированной Jira-задаче, а не по старому
@@ -50,7 +54,10 @@
 - не связывать карму с автоматическими наказаниями;
 - не начислять опыт за стартовые кредиты и возвраты;
 - не помещать бизнес-правила в Telegram handlers;
-- не добавлять Redis, Celery, FastAPI, микросервисы или LLM без новой подтверждённой причины.
+- не добавлять Redis, Celery, микросервисы или LLM без новой подтверждённой причины;
+- FastAPI и frontend разрешены только в задачах эпика CB-48 по ADR-0014: не
+  помещать доменные правила в HTTP transport, не доверять клиентским правам и
+  не открывать browser auth или публичную регистрацию молча;
 - не добавлять external daily backup, application object storage или webhook в
   CB-15: владелец исключил их из текущей области.
 
@@ -63,3 +70,11 @@
 и эксплуатационный профиль пилота приняты 2026-08-11. Все решения перенесены в
 [журнал решений](11_DECISIONS_AND_OPEN_QUESTIONS.md); открытых продуктовых
 вопросов, блокирующих текущий MVP, нет.
+
+Направление Release 2 принято 2026-08-16: один модульный монолит и PostgreSQL,
+общие application services, FastAPI `/api/v1`, React/TypeScript/Vite,
+`ActorContext` с internal `member_id`, сменяемые auth adapters,
+`PlatformBridge`, namespaced operation receipts и server-side fail-closed
+feature flags. Bot остаётся входом, уведомлениями и fallback. Реализация идёт
+по CB-50 — CB-58; новые продуктовые правила до данных пилота в эту работу не
+входят.
