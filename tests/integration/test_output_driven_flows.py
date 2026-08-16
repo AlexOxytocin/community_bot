@@ -70,6 +70,7 @@ from community_bot.infrastructure.db.models import (
     ReliabilityEventModel,
     TaskCancellationRequestModel,
     TaskCancellationResponseModel,
+    TaskCreationDraftModel,
     TaskModel,
     TaskTemplateModel,
 )
@@ -197,6 +198,61 @@ async def test_member_journey_uses_only_visible_outputs(database_url: str) -> No
     assert reward_count == 1
     assert created_count == 1
     assert all(len(value.encode()) <= 64 for value in capture.callbacks)
+    await bot.session.close()
+    await database.dispose()
+
+
+async def test_task_publish_reports_insufficient_balance_without_losing_draft(
+    database_url: str,
+) -> None:
+    """A rejected publication explains the balance problem and keeps the preview editable."""
+    database = Database(database_url)
+    admin = await _member(database, 81_501, MemberRole.ADMINISTRATOR)
+    author = await _member(database, 81_502)
+    await ProductConfigBootstrapCoordinator(
+        database.unit_of_work, load_product_config_candidate
+    ).prepare(
+        candidate_path=CONFIG_PATH,
+        actor_member_id=admin.id,
+        activation_command_id=uuid4(),
+    )
+    capture = CapturingSession()
+    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
+    actors = _actors(author.telegram_user_id)
+    dispatcher = _dispatcher(database, invite_token_secret="x" * 32)
+    send_message, send_callback = _transport(dispatcher, bot, actors)
+
+    await send_message(81_510, author.telegram_user_id, CREATE_TASK_COMMAND)
+    await _complete_freeform_creation(
+        capture,
+        send_message,
+        send_callback,
+        update_base=81_511,
+        actor_id=author.telegram_user_id,
+        title="Проверить отказ при недостаточном балансе",
+        details="Нужно подтвердить безопасное сообщение об ошибке публикации.",  # noqa: RUF001
+        criteria="Карточка не опубликована, а черновик остаётся доступен.",  # noqa: RUF001
+        materials="Материалы не требуются.",
+        group_slots=3,
+    )
+    publish = _visible(capture, lambda value: value.startswith("task:pub:"))
+    await send_callback(81_530, author.telegram_user_id, publish)
+
+    assert capture.callback_answers[-1] == (
+        "Недостаточно кредитов для публикации. Уменьшите награду или количество исполнителей."
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count(TaskModel.id))) == 0
+        draft = await session.scalar(
+            select(TaskCreationDraftModel).where(
+                TaskCreationDraftModel.creator_id == author.id,
+                TaskCreationDraftModel.is_current.is_(True),
+            )
+        )
+    assert draft is not None
+    assert draft.current_step == TaskDraftStep.PREVIEW.value
+
     await bot.session.close()
     await database.dispose()
 
