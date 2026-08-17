@@ -201,6 +201,11 @@ authenticated_at
 - дизайн-направление и доступные light/dark tokens фиксируются в CB-58 до CB-53;
 - референс владельца задаёт dark neon язык, но не landing-page композицию.
 
+Канонический результат CB-58: [дизайн-система Release 2](design/DESIGN.md),
+versioned [semantic tokens](design/design-tokens.json) и автономный
+[интерактивный preview](design/design-preview.html). Они задают handoff для
+CB-53, но не добавляют production frontend runtime в эту задачу.
+
 ### States и transitions
 
 R2 не вводит новых доменных состояний. UI отображает и вызывает переходы из
