@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 project:
   id: community_bot
   documentation_language: ru
@@ -65,3 +65,211 @@ roles:
     path: final-review
     idempotency: idempotent
     output_schema: community_bot.final_review.verdict.v1
+
+orchestration_policy:
+  policy_id: community_bot.orchestration.v2
+  external_execution_policy:
+    policy_id: codex.agent-budget.v1
+    locator: windows_user_profile/.codex/policies/agent-budget.yaml
+    locator_resolution: "[Environment]::GetFolderPath('UserProfile')"
+    validation_command: 'powershell -NoProfile -Command "& ([IO.Path]::Combine([Environment]::GetFolderPath(''UserProfile''), ''.codex'', ''tools'', ''Get-CodexTokenAudit.ps1'')) -ValidatePolicy -Hours 1 -Json"'
+    required_profiles:
+      - luna_explorer
+      - luna_worker
+      - sol_developer
+      - sol_reviewer
+    repository_execution_budget_values: forbidden
+
+  document_routing:
+    token_estimator: words_times_1_3
+    startup_documents:
+      - AGENTS.md
+      - docs/PROJECT_RULES_AND_GUARDRAILS_RU.md
+    startup_estimated_tokens_limit:
+      value: 6000
+      unit: estimated_tokens
+      min: 1000
+      max: 6000
+    conditional_routes:
+      jira_work:
+        - docs/AGENT_WORKFLOW.md
+        - docs/JIRA_WORKFLOW.md
+      product_behavior:
+        - docs/mvp/README.md
+        - docs/mvp/01_PRODUCT_REQUIREMENTS.md
+      domain_rules:
+        - docs/mvp/02_DOMAIN_RULES.md
+      technology_or_architecture:
+        - docs/mvp/TECH_STACK.md
+        - docs/mvp/11_DECISIONS_AND_OPEN_QUESTIONS.md
+        - docs/adr/README.md
+      multi_agent_work:
+        - docs/AGENT_CONTEXT_AND_COST_POLICY.md
+        - agents/README.md
+        - agents/config.yaml
+        - agents/workflow.yaml
+      telegram_live:
+        - docs/operations/PILOT_RUNBOOK.md
+      release_or_deployment:
+        - docs/release-2/README.md
+        - docs/operations/PILOT_RUNBOOK.md
+
+  role_routing:
+    developer:
+      default_profile: sol_developer
+      bounded_profile: luna_worker
+      escalation_profile: sol_developer
+      bounded_when: mechanical_slice_with_clear_acceptance
+      escalate_when:
+        - multiple_modules_or_migration
+        - security_or_contract_conflict
+        - unresolved_blocker
+    analyst-architect:
+      default_profile: luna_explorer
+      escalation_profile: sol_reviewer
+      escalate_when:
+        - level_3_structural_decision
+        - source_conflict
+        - high_cost_of_error
+    plan-reviewer:
+      default_profile: sol_reviewer
+      mode: independent_read_only_review
+    final-review:
+      default_profile: sol_reviewer
+      mode: independent_read_only_review
+
+  process_limits:
+    failed_reviews_before_escalation:
+      value: 2
+      unit: reviews
+      min: 1
+      max: 2
+    post_escalation_reviews:
+      value: 1
+      unit: reviews
+      min: 1
+      max: 1
+    technical_attempts_per_problem:
+      value: 3
+      unit: attempts
+      min: 1
+      max: 3
+    normal_overhead_target:
+      value: 25
+      unit: percent
+      min: 1
+      max: 25
+    level_1b_overhead_target:
+      value: 15
+      unit: percent
+      min: 1
+      max: 15
+    level_1b_max_overhead:
+      value: 10
+      unit: minutes
+      min: 1
+      max: 10
+
+  continuation:
+    external_policy_refs:
+      max_auto_extensions: codex.agent-budget.v1#/continuation/max_auto_extensions
+      max_fresh_context_handoffs: codex.agent-budget.v1#/continuation/max_fresh_context_handoffs
+      progress_evidence: codex.agent-budget.v1#/continuation/progress_evidence_any_of
+      initial_state: codex.agent-budget.v1#/continuation/initial_state
+      terminal_states: codex.agent-budget.v1#/continuation/terminal_states
+      states: codex.agent-budget.v1#/continuation/states
+      decision_owner: codex.agent-budget.v1#/continuation/decision_owner
+    handoff_packet: agents/config.yaml#/orchestration_policy/packets/task
+
+  packets:
+    task:
+      max_estimated_tokens:
+        value: 4000
+        unit: estimated_tokens
+        min: 500
+        max: 4000
+      required_fields:
+        - issue_key
+        - objective
+        - scope
+        - acceptance
+        - relevant_paths
+        - known_state
+        - progress_evidence
+        - next_action
+    review:
+      max_estimated_tokens:
+        value: 6000
+        unit: estimated_tokens
+        min: 1000
+        max: 6000
+      required_fields:
+        - issue_snapshot
+        - acceptance
+        - diff_summary
+        - verification
+        - risks
+        - source_links
+    jira_snapshot:
+      max_estimated_tokens:
+        value: 2500
+        unit: estimated_tokens
+        min: 500
+        max: 2500
+      required_fields:
+        - issue_key
+        - status
+        - acceptance
+        - dependencies
+        - updated_at
+
+  tool_output:
+    default_text:
+      value: 8000
+      unit: characters
+      min: 1000
+      max: 8000
+    search:
+      value: 4000
+      unit: characters
+      min: 500
+      max: 4000
+    test_failure:
+      value: 8000
+      unit: characters
+      min: 1000
+      max: 8000
+    web:
+      value: 8000
+      unit: characters
+      min: 1000
+      max: 8000
+    jira:
+      value: 6000
+      unit: characters
+      min: 1000
+      max: 6000
+    visual_artifacts_per_decision:
+      value: 1
+      unit: artifacts
+      min: 0
+      max: 1
+    visual_analysis_owners:
+      value: 1
+      unit: agents
+      min: 1
+      max: 1
+    full_output_storage: file
+    oversized_output_action: summarize_with_path_and_relevant_excerpt
+
+  consumers:
+    - AGENTS.md
+    - agents/workflow.yaml
+    - agents/README.md
+    - agents/developer/instruction.md
+    - agents/analyst-architect/instruction.md
+    - agents/plan-reviewer/instruction.md
+    - agents/final-review/instruction.md
+    - docs/AGENT_CONTEXT_AND_COST_POLICY.md
+    - docs/AGENT_WORKFLOW.md
+    - docs/PROJECT_RULES_AND_GUARDRAILS_RU.md
