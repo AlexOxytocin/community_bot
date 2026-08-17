@@ -193,7 +193,7 @@ repository root с ACL только для deployment owner:
 ```powershell
 $secureRoot = (Resolve-Path -LiteralPath $env:COMMUNITY_BOT_SECURE_ARTIFACT_DIR).Path
 uv run python ops/backup_postgres.py --encrypted-output "$secureRoot/source.dump.gpg" --sha256-manifest "$secureRoot/source.dump.gpg.sha256" --gpg-passphrase-file $env:COMMUNITY_BOT_BACKUP_PASSPHRASE_FILE
-uv run python ops/restore_drill.py "$secureRoot/source.dump.gpg" --sha256-manifest "$secureRoot/source.dump.gpg.sha256"
+uv run python ops/restore_drill.py "$secureRoot/source.dump.gpg" --sha256-manifest "$secureRoot/source.dump.gpg.sha256" --gpg-passphrase-file $env:COMMUNITY_BOT_BACKUP_PASSPHRASE_FILE
 uv run python -m community_bot.compact_import inventory --output "$secureRoot/cb51-inventory.json" --quarantine "$secureRoot/cb51-quarantine.json"
 uv run alembic upgrade head
 uv run alembic downgrade base

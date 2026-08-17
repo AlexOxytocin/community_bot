@@ -730,15 +730,39 @@ def test_main_returns_success_and_converts_safe_error_to_exit(
 ) -> None:
     """The CLI exposes deterministic success and safe precondition failure."""
     backup = tmp_path / "backup.dump"
-    monkeypatch.setattr(restore_drill, "restore_drill", lambda _path: 0)
-    assert restore_drill.main([str(backup)]) == 0
+    manifest = tmp_path / "backup.sha256"
+    passphrase = tmp_path / "passphrase"
+    monkeypatch.setattr(
+        restore_drill,
+        "prepare_encrypted_restore",
+        lambda *_args: ["gpg", "--decrypt"],
+    )
 
-    def fail(_path: Path) -> int:
+    def succeed(_path: Path, *, decrypt_command: list[str]) -> int:
+        assert decrypt_command == ["gpg", "--decrypt"]
+        return 0
+
+    monkeypatch.setattr(
+        restore_drill,
+        "restore_drill",
+        succeed,
+    )
+    arguments = [
+        str(backup),
+        "--sha256-manifest",
+        str(manifest),
+        "--gpg-passphrase-file",
+        str(passphrase),
+    ]
+    assert restore_drill.main(arguments) == 0
+
+    def fail(_path: Path, *, decrypt_command: list[str]) -> int:
+        assert decrypt_command == ["gpg", "--decrypt"]
         message = "Safe restore failure."
         raise OpsError(message)
 
     monkeypatch.setattr(restore_drill, "restore_drill", fail)
     with pytest.raises(SystemExit) as exc_info:
-        restore_drill.main([str(backup)])
+        restore_drill.main(arguments)
     assert exc_info.value.code == 1
     assert capsys.readouterr().err == "Safe restore failure.\n"
