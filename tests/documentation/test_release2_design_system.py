@@ -6,8 +6,9 @@ import json
 import math
 import re
 from pathlib import Path
+from typing import Any
 
-type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
+type JsonValue = Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DESIGN_DIR = ROOT / "docs" / "release-2" / "design"
@@ -344,7 +345,11 @@ def _expected_state_ids() -> set[str]:
 
 def _hex_rgb(value: str) -> tuple[float, float, float]:
     assert re.fullmatch(r"#[0-9A-Fa-f]{6}", value), value
-    return tuple(int(value[index : index + 2], 16) / 255 for index in (1, 3, 5))
+    return (
+        int(value[1:3], 16) / 255,
+        int(value[3:5], 16) / 255,
+        int(value[5:7], 16) / 255,
+    )
 
 
 def _luminance(value: str) -> float:
