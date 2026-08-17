@@ -31,6 +31,8 @@ from community_bot.domain.registration import (
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
+    from community_bot.application.identity import ActorContext
+
 _MIN_TOKEN_SECRET_BYTES = 32
 _MAX_INVITATION_USES = 100
 
@@ -271,7 +273,7 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         """Return oldest submitted applications first."""
         ...
 
-    async def get_own_profile(self, telegram_user_id: int) -> ProfileData | None:
+    async def get_own_profile(self, member_id: UUID) -> ProfileData | None:
         """Return the active member profile before level resolution."""
         ...
 
@@ -330,7 +332,7 @@ class RegistrationService:
     def __init__(
         self,
         unit_of_work_factory: RegistrationUnitOfWorkFactory,
-        token_codec: InviteTokenCodec,
+        token_codec: InviteTokenCodec | None = None,
     ) -> None:
         """Configure persistence and token derivation."""
         self._unit_of_work_factory = unit_of_work_factory
@@ -348,8 +350,9 @@ class RegistrationService:
         if expires_at is not None and expires_at <= datetime.now(UTC):
             message = "Invitation expiry must be in the future."
             raise InvitationError(message)
-        token = self._token_codec.token_for_update(command.update_id)
-        code_hash = self._token_codec.hash_token(token)
+        token_codec = self._require_token_codec()
+        token = token_codec.token_for_update(command.update_id)
+        code_hash = token_codec.hash_token(token)
         async with self._unit_of_work_factory() as unit_of_work:
             await unit_of_work.acquire_update_gate(command.update_id)
             stored = await unit_of_work.get_receipt_outcome(command.update_id)
@@ -456,7 +459,7 @@ class RegistrationService:
                     await unit_of_work.commit()
                     return RegistrationView(outcome, None)
                 invitation = await unit_of_work.lock_invitation_by_hash(
-                    self._token_codec.hash_token(command.invitation_token)
+                    self._require_token_codec().hash_token(command.invitation_token)
                 )
                 invitation = _validated_invitation(invitation, command.telegram_user_id)
                 context = await unit_of_work.create_pending_registration(
@@ -772,10 +775,10 @@ class RegistrationService:
             await unit_of_work.commit()
         return RegistrationView(outcome, context)
 
-    async def own_profile(self, telegram_user_id: int) -> ProfileSnapshot:
+    async def own_profile(self, actor: ActorContext) -> ProfileSnapshot:
         """Return an active or paused member's own profile with the resolved level."""
         async with self._unit_of_work_factory() as unit_of_work:
-            profile = await unit_of_work.get_own_profile(telegram_user_id)
+            profile = await unit_of_work.get_own_profile(actor.member_id)
             if profile is None:
                 message = "An available own profile does not exist."
                 raise PermissionError(message)
@@ -794,6 +797,12 @@ class RegistrationService:
                 experience_total=profile.experience_total,
                 level=level,
             )
+
+    def _require_token_codec(self) -> InviteTokenCodec:
+        if self._token_codec is None:
+            message = "Invitation token codec is unavailable in this process."
+            raise RuntimeError(message)
+        return self._token_codec
 
     async def expected_input(self, telegram_user_id: int) -> tuple[str, str] | None:
         """Return the persisted input expectation for the Telegram adapter."""

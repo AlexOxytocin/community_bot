@@ -22,8 +22,11 @@ Telegram остаётся только для запуска Mini App, auth proo
 ## Очередность
 
 1. `CB-62` — очистка старого UI/runtime и фиксация границы.
-2. `CB-51` — transport-neutral `ActorContext` и HTTP operation identity.
-3. `CB-52` — versioned API для сохранённых use cases.
+2. `CB-51` — завершённая Pareto-cleanup backend без schema consolidation.
+3. `CB-52` — минимальная web foundation: Telegram proof, короткая server
+   session, internal `ActorContext` и пять read projections. Первый domain
+   write и его operation identity добавляются в `CB-53` вместе с реальным UI
+   consumer.
 4. `CB-53` — frontend shell, routing и platform bridge.
 5. `CB-54`—`CB-55` — продуктовые экраны и административные сценарии.
 6. `CB-56` — новый HTTPS/deployment/observability контур.

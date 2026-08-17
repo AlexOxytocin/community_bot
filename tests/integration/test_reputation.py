@@ -18,6 +18,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
+from community_bot.application.identity import ActorContext
 from community_bot.application.reputation import ReputationService
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.members import MemberRole, MemberStatus
@@ -42,6 +43,10 @@ from community_bot.infrastructure.db.models import (
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 PROJECT_ROOT = Path(__file__).parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "product-config.v1.json"
+
+
+def actor_context(member: MemberModel) -> ActorContext:
+    return ActorContext(member.id, "telegram", datetime.datetime.now(datetime.UTC))
 
 
 async def add_member(  # noqa: PLR0913 - fixture exposes independent member axes.
@@ -249,9 +254,7 @@ async def test_vote_flow_updates_one_row_history_and_anonymous_aggregate(
     async with sessions() as session:
         assert await session.scalar(select(func.count(KarmaVoteModel.id))) == 1
         assert await session.scalar(select(func.count(KarmaVoteHistoryModel.id))) == 2
-    profile = await service.profile(
-        telegram_user_id=creator.telegram_user_id, target_id=performer.id
-    )
+    profile = await service.profile(actor=actor_context(creator), target_id=performer.id)
     assert profile.karma.score == -1
     assert not hasattr(profile, "rater_id")
     await database.dispose()
@@ -273,9 +276,9 @@ async def test_ineligible_self_and_hidden_profiles_have_no_effects(database_url:
                 target_id=target,
             )
     with pytest.raises(ProfileUnavailableError, match="Profile unavailable"):
-        await service.profile(telegram_user_id=actor.telegram_user_id, target_id=paused.id)
+        await service.profile(actor=actor_context(actor), target_id=paused.id)
     with pytest.raises(ProfileUnavailableError, match="Profile unavailable"):
-        await service.profile(telegram_user_id=actor.telegram_user_id, target_id=uuid4())
+        await service.profile(actor=actor_context(actor), target_id=uuid4())
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
         assert await session.scalar(select(func.count(KarmaVoteModel.id))) == 0
@@ -676,25 +679,25 @@ async def test_safe_catalog_own_paused_profile_and_ledger_pagination(  # noqa: P
             )
         )
     service = ReputationService(database.unit_of_work)
-    catalog = await service.members(telegram_user_id=actor.telegram_user_id)
+    catalog = await service.members(actor=actor_context(actor))
     ids = {item.member_id for item in catalog.items}
     assert actor.id in ids
     assert second.id in ids
     assert paused.id not in ids
     username_search = await service.members(
-        telegram_user_id=actor.telegram_user_id,
+        actor=actor_context(actor),
         query="@beta",
     )
     assert [item.member_id for item in username_search.items] == [second.id]
     assert username_search.items[0].telegram_username == "beta_match"
     display_name_search = await service.members(
-        telegram_user_id=actor.telegram_user_id,
+        actor=actor_context(actor),
         limit=1,
         query="same",
     )
     assert display_name_search.next_cursor is not None
     display_name_next_page = await service.members(
-        telegram_user_id=actor.telegram_user_id,
+        actor=actor_context(actor),
         limit=10,
         cursor=display_name_search.next_cursor,
         query="same",
@@ -703,19 +706,19 @@ async def test_safe_catalog_own_paused_profile_and_ledger_pagination(  # noqa: P
         item.member_id for item in display_name_next_page.items
     }
     with pytest.raises(ValueError, match="at least 3"):
-        await service.members(telegram_user_id=actor.telegram_user_id, query="@be")
-    assert (await service.profile(telegram_user_id=paused.telegram_user_id)).member_id == paused.id
+        await service.members(actor=actor_context(actor), query="@be")
+    assert (await service.profile(actor=actor_context(paused))).member_id == paused.id
     for hidden in hidden_members:
         with pytest.raises(ProfileUnavailableError):
-            await service.profile(telegram_user_id=hidden.telegram_user_id)
-    first_catalog_page = await service.members(telegram_user_id=actor.telegram_user_id, limit=1)
+            await service.profile(actor=actor_context(hidden))
+    first_catalog_page = await service.members(actor=actor_context(actor), limit=1)
     assert first_catalog_page.next_cursor is not None
     async with sessions.begin() as session:
         stored_second = await session.get(MemberModel, second.id)
         assert stored_second is not None
         stored_second.status = "paused"
     second_catalog_page = await service.members(
-        telegram_user_id=actor.telegram_user_id,
+        actor=actor_context(actor),
         limit=10,
         cursor=first_catalog_page.next_cursor,
     )
@@ -724,11 +727,11 @@ async def test_safe_catalog_own_paused_profile_and_ledger_pagination(  # noqa: P
         stored_second = await session.get(MemberModel, second.id)
         assert stored_second is not None
         stored_second.status = "active"
-    first_page = await service.leaderboard(telegram_user_id=actor.telegram_user_id, limit=1)
+    first_page = await service.leaderboard(actor=actor_context(actor), limit=1)
     assert first_page.items[0].member_id == second.id
     assert first_page.next_cursor is not None
     second_page = await service.leaderboard(
-        telegram_user_id=actor.telegram_user_id,
+        actor=actor_context(actor),
         limit=10,
         cursor=first_page.next_cursor,
     )
@@ -847,7 +850,7 @@ async def test_reliability_chain_and_leaderboard_are_ledger_authoritative(
     restored = await service.statistics(performer.telegram_user_id)
     assert restored.reliability.accepted == 1
     assert restored.reliability.approved_weight == pytest.approx(0.5)
-    page = await service.leaderboard(telegram_user_id=creator.telegram_user_id)
+    page = await service.leaderboard(actor=actor_context(creator))
     experience = {item.member_id: item.experience for item in page.items}
     assert experience[performer.id] == 1
     assert experience[other.id] == 1

@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
     func,
@@ -1307,6 +1308,34 @@ class ProcessedTelegramUpdateModel(Base):
     processed_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class WebSessionModel(Base):
+    """Short-lived revocable Mini App session stored by token digest."""
+
+    __tablename__ = "web_sessions"
+    __table_args__ = (
+        CheckConstraint("octet_length(token_digest) = 32", name="ck_web_sessions_digest"),
+        CheckConstraint("expires_at > created_at", name="ck_web_sessions_expiry"),
+        CheckConstraint("authenticated_at <= expires_at", name="ck_web_sessions_authenticated_at"),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= created_at",
+            name="ck_web_sessions_revoked_at",
+        ),
+    )
+
+    token_digest: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    authenticated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AccountTransactionModel(Base):
