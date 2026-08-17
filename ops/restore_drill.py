@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -27,7 +25,6 @@ from ops._runtime import (
     run_checked,
     validate_environment_file,
 )
-from ops.backup_postgres import require_root_owned, sha256_file
 
 DRILL_DATABASE = "community_bot_restore_drill"
 REVISION_QUERY_SQL = "SELECT version_num FROM alembic_version ORDER BY version_num;"
@@ -67,22 +64,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run one restore drill for a provided backup file."""
     parser = argparse.ArgumentParser(prog="restore_drill.py")
     parser.add_argument("backup_file", type=Path)
-    parser.add_argument("--sha256-manifest", required=True, type=Path)
-    parser.add_argument("--gpg-passphrase-file", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        decrypt_command = prepare_encrypted_restore(
-            args.backup_file,
-            args.sha256_manifest,
-            args.gpg_passphrase_file,
-        )
-        return restore_drill(args.backup_file, decrypt_command=decrypt_command)
+        return restore_drill(args.backup_file)
     except OpsError as exc:
         fail(str(exc))
     return 1
 
 
-def restore_drill(backup_file: Path, *, decrypt_command: list[str] | None = None) -> int:
+def restore_drill(backup_file: Path) -> int:
     """Restore a dump, validate revision and ledger caches, then remove the drill DB."""
     root_dir = default_root_dir()
     env_file = root_dir / "shared" / ".env"
@@ -134,24 +124,24 @@ def restore_drill(backup_file: Path, *, decrypt_command: list[str] | None = None
             ],
             env=environment,
         )
-        run_pg_restore(
-            [
-                *compose,
-                "exec",
-                "-T",
-                "postgres",
-                "pg_restore",
-                "--username",
-                postgres_user,
-                "--dbname",
-                DRILL_DATABASE,
-                "--no-owner",
-                "--no-privileges",
-            ],
-            backup_file,
-            environment,
-            decrypt_command=decrypt_command,
-        )
+        with backup_file.open("rb") as backup:
+            run_checked(
+                [
+                    *compose,
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_restore",
+                    "--username",
+                    postgres_user,
+                    "--dbname",
+                    DRILL_DATABASE,
+                    "--no-owner",
+                    "--no-privileges",
+                ],
+                env=environment,
+                stdin=backup,
+            )
         restored_revisions = read_database_revisions(
             compose,
             environment,
@@ -198,72 +188,6 @@ def restore_drill(backup_file: Path, *, decrypt_command: list[str] | None = None
             print("cleanup_failed", file=sys.stderr)
 
     return restore_return_code or cleanup_return_code
-
-
-def prepare_encrypted_restore(backup: Path, manifest: Path, passphrase_file: Path) -> list[str]:
-    """Verify encrypted bytes before returning the GPG decrypt command."""
-    require_non_empty_file(backup, "Encrypted backup is missing.")
-    require_root_owned(backup, expected_mode=0o600, regular=True)
-    require_root_owned(manifest, expected_mode=0o600, regular=True)
-    require_root_owned(passphrase_file, expected_mode=0o600, regular=True)
-    try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise OpsError("Encrypted backup manifest is invalid.") from exc
-    expected = {
-        "schema": "community_bot.encrypted_backup.v1",
-        "file": backup.name,
-        "sha256": sha256_file(backup),
-        "size": backup.stat().st_size,
-    }
-    if payload != expected:
-        raise OpsError("Encrypted backup manifest does not match the backup.")
-    gpg = shutil.which("gpg")
-    if gpg is None:
-        raise OpsError("GPG is required for encrypted PostgreSQL restore.")
-    return [
-        gpg,
-        "--batch",
-        "--yes",
-        "--pinentry-mode",
-        "loopback",
-        "--decrypt",
-        "--passphrase-file",
-        str(passphrase_file),
-        str(backup),
-    ]
-
-
-def run_pg_restore(
-    command: list[str],
-    backup_file: Path,
-    environment: dict[str, str],
-    *,
-    decrypt_command: list[str] | None,
-) -> None:
-    """Feed plaintext only through a pipe into pg_restore."""
-    if decrypt_command is None:
-        with backup_file.open("rb") as backup:
-            run_checked(command, env=environment, stdin=backup)
-        return
-    decrypt = subprocess.Popen(
-        decrypt_command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    if decrypt.stdout is None:
-        decrypt.kill()
-        raise OpsError("Encrypted restore pipe could not be created.")
-    try:
-        run_checked(command, env=environment, stdin=decrypt.stdout)
-    except (OpsError, subprocess.CalledProcessError):
-        decrypt.kill()
-        decrypt.wait()
-        raise
-    finally:
-        decrypt.stdout.close()
-    if decrypt.wait() != 0:
-        raise OpsError("Encrypted PostgreSQL restore failed.")
 
 
 def require_distinct_database_names(production_database: str) -> None:

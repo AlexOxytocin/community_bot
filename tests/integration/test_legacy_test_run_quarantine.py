@@ -1,11 +1,11 @@
 """Post-removal regression gate for retained synthetic-data quarantine."""
 
-# ruff: noqa: PT018
+# ruff: noqa: PLR0915, PT018
 
 from __future__ import annotations
 
 import datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -19,6 +19,7 @@ from community_bot.infrastructure.db.models import (
     MemberModel,
     NotificationModel,
     OutboxEventModel,
+    TaskModel,
     TaskTemplateModel,
 )
 from community_bot.infrastructure.db.models import (
@@ -28,7 +29,6 @@ from community_bot.infrastructure.db.models import (
     TestRunParticipantModel as RunParticipantModel,
 )
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
-from tests.integration.test_test_runs import _task
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -127,15 +127,23 @@ async def test_legacy_test_rows_remain_quarantined_without_the_old_cli(
             status="accepted",
         )
         session.add(completed_assignment)
-        session.add(
-            OutboxEventModel(
-                event_type="task.published",
-                aggregate_type="task",
-                aggregate_id=completed_task.id,
-                payload_json={},
-                business_key=f"completed-run:{completed_run.id}:published",
-            )
+        active_event = OutboxEventModel(
+            event_type="task.published",
+            aggregate_type="task",
+            aggregate_id=active_task.id,
+            payload_json={},
+            business_key=f"active-run:{active_run.id}:published",
         )
+        completed_event = OutboxEventModel(
+            event_type="task.published",
+            aggregate_type="task",
+            aggregate_id=completed_task.id,
+            payload_json={},
+            business_key=f"completed-run:{completed_run.id}:published",
+        )
+        session.add_all((active_event, completed_event))
+        await session.flush()
+        completed_event_id = completed_event.id
 
     async with database.session_factory.begin() as session:
         active_view = await task_store.list_available_tasks(
@@ -182,12 +190,15 @@ async def test_legacy_test_rows_remain_quarantined_without_the_old_cli(
         limit=10,
         lease_duration=datetime.timedelta(minutes=1),
     )
-    assert len(claims) == 1
-    await queue.materialize(claims[0], now=now, window=DeliveryWindow())
+    assert len(claims) == 2
+    for claim in claims:
+        await queue.materialize(claim, now=now, window=DeliveryWindow())
     async with database.session_factory.begin() as session:
         notification_count = await session.scalar(select(func.count(NotificationModel.id)))
-        stored_event = await session.get(OutboxEventModel, claims[0].id)
-    assert notification_count == 0
+        recipients = set(await session.scalars(select(NotificationModel.member_id)))
+        stored_event = await session.get(OutboxEventModel, completed_event_id)
+    assert notification_count == 1
+    assert recipients == {active_participant.id}
     assert stored_event is not None and stored_event.status == "materialized"
     await database.dispose()
 
@@ -200,4 +211,39 @@ def _member(telegram_user_id: int, display_name: str, *, role: str = "member") -
         timezone="UTC",
         role=role,
         status="active",
+    )
+
+
+def _task(
+    *,
+    template: TaskTemplateModel,
+    creator: MemberModel,
+    title: str,
+    test_run_id: UUID | None,
+    now: datetime.datetime,
+) -> TaskModel:
+    return TaskModel(
+        origin="member",
+        test_run_id=test_run_id,
+        template_id=template.id,
+        template_version=template.version,
+        creator_id=creator.id,
+        author_display_name=creator.display_name,
+        category_id=template.category_id,
+        title=title,
+        description="Test description",
+        completion_criteria="Test completion criteria",
+        materials_json={"text": "No materials"},
+        input_payload_json={"context": "Test input"},
+        credit_reward_per_performer=template.credit_reward,
+        performer_slots=1,
+        reserved_credit_total=template.credit_reward,
+        estimated_minutes=template.estimated_minutes,
+        minimum_level=template.minimum_level,
+        format="online",
+        city=None,
+        deadline_at=now + datetime.timedelta(days=1),
+        status="published",
+        safety_snapshot_json={"public_input_keys": ["context"]},
+        publish_command_id=uuid4(),
     )
