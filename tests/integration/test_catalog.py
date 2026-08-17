@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast, override
+from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
 import pytest
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import func, select, text
@@ -36,12 +31,10 @@ from community_bot.infrastructure.db.models import (
     TaskCategoryModel,
     TaskTemplateModel,
 )
-from community_bot.transport.telegram.catalog import build_catalog_router
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping
+    from collections.abc import Mapping
 
-    from aiogram.methods import TelegramMethod
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v1.json"
@@ -411,167 +404,3 @@ async def test_database_immutability_and_migration_cycle(database_url: str) -> N
     assert await count(restarted, TaskCategoryModel) == 15
     assert await count(restarted, TaskTemplateModel) == 8
     await restarted.dispose()
-
-
-class CapturingSession(BaseSession):
-    """Fake Bot API session for the catalog Telegram smoke."""
-
-    def __init__(self) -> None:
-        """Collect outgoing text and callback data."""
-        super().__init__()
-        self.texts: list[str] = []
-        self.callbacks: list[str] = []
-
-    async def close(self) -> None:
-        """Close no external resources."""
-
-    @override
-    async def make_request(
-        self,
-        bot: Bot,
-        method: TelegramMethod[TelegramType],
-        timeout: int | None = None,
-    ) -> TelegramType:
-        del bot, timeout
-        text_value = getattr(method, "text", None)
-        if isinstance(text_value, str):
-            self.texts.append(text_value)
-        markup = getattr(method, "reply_markup", None)
-        if markup is not None:
-            for row in markup.inline_keyboard:
-                self.callbacks.extend(
-                    button.callback_data for button in row if button.callback_data is not None
-                )
-        if isinstance(method, AnswerCallbackQuery):
-            return cast("TelegramType", True)  # noqa: FBT003 - Bot API success payload.
-        return cast(
-            "TelegramType",
-            Message(
-                message_id=999,
-                date=datetime.now(UTC),
-                chat=Chat(id=1, type="private"),
-                text="ok",
-            ),
-        )
-
-    @override
-    async def stream_content(
-        self,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int = 30,
-        chunk_size: int = 65536,
-        raise_for_status: bool = True,
-    ) -> AsyncGenerator[bytes]:
-        del url, headers, timeout, chunk_size, raise_for_status
-        if False:
-            yield b""
-
-
-async def test_catalog_synthetic_telegram_browse_page_and_admin(database_url: str) -> None:
-    database = Database(database_url)
-    admin = await add_member(
-        database,
-        telegram_user_id=940,
-        role=MemberRole.ADMINISTRATOR,
-    )
-    member = await add_member(database, telegram_user_id=941, experience=10)
-    await prepare_config(database, admin)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_catalog_router(CatalogService(database.unit_of_work)))
-    receipts_before = await count(database, ProcessedTelegramUpdateModel)
-    audit_before = await count(database, AuditEventModel)
-    session = CapturingSession()
-    bot = Bot(token=f"{123456}:{'C' * 35}", session=session)
-    member_user = User(id=member.telegram_user_id, is_bot=False, first_name="Member")
-    admin_user = User(id=admin.telegram_user_id, is_bot=False, first_name="Admin")
-
-    def message_update(update_id: int, actor: User, value: str) -> Update:
-        return Update(
-            update_id=update_id,
-            message=Message(
-                message_id=update_id,
-                date=datetime.now(UTC),
-                chat=Chat(id=actor.id, type="private"),
-                from_user=actor,
-                text=value,
-            ),
-        )
-
-    await dispatcher.feed_update(bot, message_update(9_400, member_user, "/catalog"))
-    assert session.callbacks
-    assert max(len(value.encode()) for value in session.callbacks) <= 64
-    callback_data = session.callbacks[-1]
-    await dispatcher.feed_update(
-        bot,
-        Update(
-            update_id=9_401,
-            callback_query=CallbackQuery(
-                id="catalog-page",
-                from_user=member_user,
-                chat_instance="catalog",
-                data=callback_data,
-                message=Message(
-                    message_id=9_401,
-                    date=datetime.now(UTC),
-                    chat=Chat(id=member_user.id, type="private"),
-                    text="catalog",
-                ),
-            ),
-        ),
-    )
-    await dispatcher.feed_update(
-        bot,
-        message_update(
-            9_402,
-            member_user,
-            "/catalog_template_reward resume_review 4",
-        ),
-    )
-    await dispatcher.feed_update(
-        bot,
-        message_update(
-            9_403,
-            admin_user,
-            "/catalog_template_reward resume_review not-a-number",
-        ),
-    )
-    await dispatcher.feed_update(
-        bot,
-        message_update(
-            9_404,
-            admin_user,
-            "/catalog_template_reward resume_review 4",
-        ),
-    )
-    await dispatcher.feed_update(
-        bot,
-        message_update(
-            9_404,
-            admin_user,
-            "/catalog_template_reward resume_review 4",
-        ),
-    )
-    await dispatcher.feed_update(
-        bot,
-        message_update(9_405, member_user, "/catalog career online"),
-    )
-    assert any(
-        "Следующая" not in value and "Первое впечатление" in value for value in session.texts
-    )
-    assert any("Опубликована версия 2" in value for value in session.texts)
-    assert any("Проверка резюме" in value and "4 кредита" in value for value in session.texts)
-    assert any("недоступно" in value for value in session.texts)
-    assert any("Проверьте параметры" in value for value in session.texts)
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as sql_session:
-        resume_versions = (
-            await sql_session.scalars(
-                select(TaskTemplateModel).where(TaskTemplateModel.code == "resume_review")
-            )
-        ).all()
-    assert sorted(item.version for item in resume_versions) == [1, 2]
-    assert await count(database, ProcessedTelegramUpdateModel) == receipts_before + 1
-    assert await count(database, AuditEventModel) == audit_before + 1
-    await bot.session.close()
-    await database.dispose()

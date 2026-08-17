@@ -27,7 +27,7 @@ jobs:
       - name: Lint
         run: uv run ruff check --output-format=github .
       - name: Type check
-        run: uv run ty check src tests ops/verify_release_provenance.py
+        run: uv run ty check src tests ops
       - name: Test without PostgreSQL
         run: uv run pytest -m "not integration" --no-cov
 

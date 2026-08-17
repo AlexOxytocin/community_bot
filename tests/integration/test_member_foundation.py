@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeVar, cast, override
+from typing import Any, TypeVar
 from uuid import uuid4
 
 import pytest
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.base import BaseSession
-from aiogram.types import Chat, Message, Update, User
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import event, func, select, text
@@ -36,19 +32,10 @@ from community_bot.infrastructure.db.models import (
     MemberModel,
     ProcessedTelegramUpdateModel,
 )
-from community_bot.transport.telegram.member_foundation import (
-    REFRESH_MENU_TEXT,
-    build_member_foundation_router,
-)
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 TelegramType = TypeVar("TelegramType")
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
-    from aiogram.methods import TelegramMethod
 
 
 def fake_bot_token() -> str:
@@ -615,126 +602,6 @@ async def test_member_constraints_uniqueness_and_utc_timestamps(database_url: st
     assert persisted_member.created_at.tzinfo is not None
     assert receipt.received_at.tzinfo is not None
     assert receipt.processed_at.tzinfo is not None
-    await database.dispose()
-
-
-class RecordingSession(BaseSession):
-    """Fake Bot API session that verifies the receipt is already committed."""
-
-    def __init__(self, database: Database, expected_update_id: int) -> None:
-        """Record the database used to prove post-commit visibility."""
-        super().__init__()
-        self.database = database
-        self.expected_update_id = expected_update_id
-        self.calls = 0
-
-    async def close(self) -> None:
-        """Close no external resources."""
-
-    @override
-    async def make_request(
-        self,
-        bot: Bot,
-        method: TelegramMethod[TelegramType],
-        timeout: int | None = None,
-    ) -> TelegramType:
-        """Record a fake call only after a committed receipt is visible."""
-        del bot, method, timeout
-        async with self.database.engine.connect() as connection:
-            receipt = await connection.scalar(
-                select(ProcessedTelegramUpdateModel.update_id).where(
-                    ProcessedTelegramUpdateModel.update_id == self.expected_update_id
-                )
-            )
-        assert receipt == self.expected_update_id
-        self.calls += 1
-        return cast(
-            "TelegramType",
-            Message(
-                message_id=999,
-                date=datetime.now(UTC),
-                chat=Chat(id=1, type="private"),
-                text="ok",
-            ),
-        )
-
-    @override
-    async def stream_content(
-        self,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int = 30,
-        chunk_size: int = 65536,
-        raise_for_status: bool = True,
-    ) -> AsyncGenerator[bytes]:
-        """Yield no content because tests perform no downloads."""
-        del url, headers, timeout, chunk_size, raise_for_status
-        if False:
-            yield b""
-
-
-async def test_synthetic_update_calls_fake_bot_only_after_commit(database_url: str) -> None:
-    database = Database(database_url)
-    await add_member(database, telegram_user_id=60)
-    service = MemberFoundationService(database.unit_of_work)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_member_foundation_router(service))
-    session = RecordingSession(database, expected_update_id=600)
-    bot = Bot(token=fake_bot_token(), session=session)
-    update = Update(
-        update_id=600,
-        message=Message(
-            message_id=1,
-            date=datetime.now(UTC),
-            chat=Chat(id=60, type="private"),
-            from_user=User(id=60, is_bot=False, first_name="Test"),
-            text="/start",
-        ),
-    )
-
-    await dispatcher.feed_update(bot, update)
-    await dispatcher.feed_update(bot, update)
-
-    session.expected_update_id = 602
-    assert update.message is not None
-    refresh_update = update.model_copy(
-        update={
-            "update_id": 602,
-            "message": update.message.model_copy(
-                update={"message_id": 3, "text": REFRESH_MENU_TEXT}
-            ),
-        }
-    )
-    await dispatcher.feed_update(bot, refresh_update)
-
-    assert session.calls == 3
-    assert await scalar_count(database, ProcessedTelegramUpdateModel) == 2
-    await bot.session.close()
-    await database.dispose()
-
-
-async def test_update_without_from_user_has_no_receipt_or_reply(database_url: str) -> None:
-    database = Database(database_url)
-    service = MemberFoundationService(database.unit_of_work)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_member_foundation_router(service))
-    session = RecordingSession(database, expected_update_id=601)
-    bot = Bot(token=fake_bot_token(), session=session)
-    update = Update(
-        update_id=601,
-        message=Message(
-            message_id=2,
-            date=datetime.now(UTC),
-            chat=Chat(id=60, type="private"),
-            text="/start",
-        ),
-    )
-
-    await dispatcher.feed_update(bot, update)
-
-    assert session.calls == 0
-    assert await scalar_count(database, ProcessedTelegramUpdateModel) == 0
-    await bot.session.close()
     await database.dispose()
 
 

@@ -5,14 +5,10 @@ import datetime
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast, override
+from typing import TypeVar
 from uuid import UUID, uuid4
 
 import pytest
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import func, select, text
@@ -69,12 +65,6 @@ from community_bot.infrastructure.db.models import (
     TaskModel,
     TaskTemplateModel,
 )
-from community_bot.transport.telegram.tasks import build_task_router
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
-    from aiogram.methods import TelegramMethod
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v1.json"
@@ -269,64 +259,6 @@ async def scalar_count(database: Database, model: type[object]) -> int:
     return int(value or 0)
 
 
-class CapturingSession(BaseSession):
-    """Fake Bot API session for task creation smoke tests."""
-
-    def __init__(self) -> None:
-        """Initialize captured Bot API calls."""
-        super().__init__()
-        self.texts: list[str] = []
-        self.callbacks: list[str] = []
-        self.callback_answers: list[str] = []
-
-    async def close(self) -> None:
-        """Close no external resources."""
-
-    @override
-    async def make_request(
-        self,
-        bot: Bot,
-        method: TelegramMethod[TelegramType],
-        timeout: int | None = None,
-    ) -> TelegramType:
-        del bot, timeout
-        text_value = getattr(method, "text", None)
-        if isinstance(text_value, str):
-            self.texts.append(text_value)
-        markup = getattr(method, "reply_markup", None)
-        if markup is not None:
-            for row in getattr(markup, "inline_keyboard", ()):
-                self.callbacks.extend(
-                    button.callback_data for button in row if button.callback_data is not None
-                )
-        if isinstance(method, AnswerCallbackQuery):
-            self.callback_answers.append(method.text or "")
-            callback_result = True
-            return cast("TelegramType", callback_result)
-        return cast(
-            "TelegramType",
-            Message(
-                message_id=999,
-                date=datetime.datetime.now(datetime.UTC),
-                chat=Chat(id=1, type="private"),
-                text="ok",
-            ),
-        )
-
-    @override
-    async def stream_content(
-        self,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int = 30,
-        chunk_size: int = 65536,
-        raise_for_status: bool = True,
-    ) -> AsyncGenerator[bytes]:
-        del url, headers, timeout, chunk_size, raise_for_status
-        if False:
-            yield b""
-
-
 async def test_freeform_task_publishes_without_template_and_reserves_full_budget(
     database_url: str,
 ) -> None:
@@ -424,108 +356,6 @@ async def test_template_draft_edits_return_directly_to_preview(database_url: str
         )
         next_update += 1
         assert updated.current_step is TaskDraftStep.PREVIEW
-    await database.dispose()
-
-
-async def test_template_draft_edit_buttons_work_through_telegram(database_url: str) -> None:
-    database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=19_680)
-    selected_template = await template_id(database, "repository_first_impression")
-    service = TaskService(database.unit_of_work)
-    await complete_preview(
-        service,
-        member=member,
-        selected_template_id=selected_template,
-        update_base=19_680,
-    )
-    capture = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_task_router(service))
-    actor = User(id=member.telegram_user_id, is_bot=False, first_name="Member")
-    next_update = 19_700
-
-    async def send_text(text_value: str) -> None:
-        nonlocal next_update
-        capture.callbacks.clear()
-        await dispatcher.feed_update(
-            bot,
-            Update(
-                update_id=next_update,
-                message=Message(
-                    message_id=next_update,
-                    date=datetime.datetime.now(datetime.UTC),
-                    chat=Chat(id=actor.id, type="private"),
-                    from_user=actor,
-                    text=text_value,
-                ),
-            ),
-        )
-        next_update += 1
-
-    async def press(callback_data: str) -> None:
-        nonlocal next_update
-        capture.callbacks.clear()
-        await dispatcher.feed_update(
-            bot,
-            Update(
-                update_id=next_update,
-                callback_query=CallbackQuery(
-                    id=f"template-edit-{next_update}",
-                    from_user=actor,
-                    chat_instance="template-edit",
-                    data=callback_data,
-                    message=Message(
-                        message_id=next_update,
-                        date=datetime.datetime.now(datetime.UTC),
-                        chat=Chat(id=actor.id, type="private"),
-                        text="draft",
-                    ),
-                ),
-            ),
-        )
-        next_update += 1
-
-    async def press_visible(prefix: str) -> None:
-        await press(next(value for value in capture.callbacks if value.startswith(prefix)))
-
-    async def open_preview() -> None:
-        await press_visible("task:step:preview")
-
-    await send_text("/task_preview")
-    original_edit_callbacks = {
-        callback.rsplit(":", 1)[-1]: callback
-        for callback in capture.callbacks
-        if callback.startswith("task:edit:")
-    }
-    assert set(original_edit_callbacks) == {"in", "mt", "dl", "fm", "sl"}
-
-    await press(original_edit_callbacks["in"])
-    await send_text("Обновлённые данные для проверки репозитория.")
-    await open_preview()
-
-    await press(original_edit_callbacks["mt"])
-    await send_text("https://example.com/template-updated")
-    await open_preview()
-
-    await press(original_edit_callbacks["dl"])
-    await press_visible("task:step:days:")
-    await open_preview()
-
-    await press(original_edit_callbacks["fm"])
-    await press_visible("task:step:online")
-    await open_preview()
-
-    await press(original_edit_callbacks["sl"])
-    assert any(value == "task:step:slots:1" for value in capture.callbacks)
-    await press_visible("task:step:slots:1")
-    await open_preview()
-
-    assert (
-        "Черновик уже изменился. Откройте его заново."  # noqa: RUF001
-        not in capture.callback_answers
-    )
-    await bot.session.close()
     await database.dispose()
 
 
@@ -1445,92 +1275,3 @@ async def test_task_snapshot_db_guard_and_migration_cycle(database_url: str) -> 
     restarted = Database(database_url)
     assert await scalar_count(restarted, TaskCreationDraftModel) == 0
     await restarted.dispose()
-
-
-async def test_task_synthetic_telegram_restart_publish_list_cancel(database_url: str) -> None:
-    database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=2400)
-    selected = await template_id(database, "repository_first_impression")
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_task_router(TaskService(database.unit_of_work)))
-    capture = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
-    actor = User(id=member.telegram_user_id, is_bot=False, first_name="Member")
-
-    def message_update(update_id: int, text_value: str) -> Update:
-        return Update(
-            update_id=update_id,
-            message=Message(
-                message_id=update_id,
-                date=datetime.datetime.now(datetime.UTC),
-                chat=Chat(id=actor.id, type="private"),
-                from_user=actor,
-                text=text_value,
-            ),
-        )
-
-    messages = [
-        f"/task_create {selected}",
-        (
-            '{"context":"Need a detailed and practical review.",'
-            '"materials":"https://example.com/item",'
-            '"constraints":"Do not publish private information."}'
-        ),
-        (datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)).isoformat(),
-        "online",
-        '{"url":"https://example.com/item"}',
-        "1",
-        "/task_preview",
-    ]
-    for offset, value in enumerate(messages):
-        await dispatcher.feed_update(bot, message_update(24_000 + offset, value))
-    assert capture.callbacks
-    callback_data = capture.callbacks[-1]
-    assert len(callback_data.encode()) <= 64
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_task_router(TaskService(database.unit_of_work)))
-
-    def callback_update(update_id: int, data: str = callback_data) -> Update:
-        return Update(
-            update_id=update_id,
-            callback_query=CallbackQuery(
-                id=f"publish-{update_id}",
-                from_user=actor,
-                chat_instance="tasks",
-                data=data,
-                message=Message(
-                    message_id=update_id,
-                    date=datetime.datetime.now(datetime.UTC),
-                    chat=Chat(id=actor.id, type="private"),
-                    text="preview",
-                ),
-            ),
-        )
-
-    await dispatcher.feed_update(bot, callback_update(24_007))
-    await dispatcher.feed_update(bot, callback_update(24_007))
-    callback_prefix, _, callback_revision = callback_data.rpartition(":")
-    await dispatcher.feed_update(
-        bot,
-        callback_update(24_010, f"{callback_prefix}:{int(callback_revision) + 1}"),
-    )
-    await dispatcher.feed_update(bot, message_update(24_008, "/my_tasks"))
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as session:
-        task_id = await session.scalar(select(TaskModel.id))
-    assert task_id is not None
-    await dispatcher.feed_update(bot, message_update(24_009, f"/task_cancel {task_id}"))
-    await dispatcher.feed_update(bot, message_update(24_009, f"/task_cancel {task_id}"))
-    assert any("Задание опубликовано" in value for value in capture.texts)
-    assert any("Первое впечатление" in value for value in capture.texts)
-    assert any("Задание отменено" in value for value in capture.texts)
-    assert sum("Задание отменено" in value for value in capture.texts) == 2
-    assert any("Черновик уже изменился" in value for value in capture.texts)
-    assert await scalar_count(database, TaskModel) == 1
-    assert await scalar_count(database, OutboxEventModel) == 2
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as session:
-        payloads = (await session.scalars(select(OutboxEventModel.payload_json))).all()
-    assert all(set(payload) == {"task_id", "creator_id", "status"} for payload in payloads)
-    await bot.session.close()
-    await database.dispose()

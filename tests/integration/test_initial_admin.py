@@ -1,21 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import re
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast, override
+from typing import TypeVar
 from uuid import uuid4
 
 import pytest
-from aiogram import Bot
-from aiogram.client.session.base import BaseSession
-from aiogram.types import Chat, Message, Update, User
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.initial_admin import (
     InitialAdministratorCommand,
     InitialAdministratorConflictError,
@@ -23,83 +16,17 @@ from community_bot.application.initial_admin import (
     InitialAdministratorReason,
     InitialAdministratorService,
 )
-from community_bot.bootstrap.bot import _dispatcher
-from community_bot.bootstrap.initial_admin import main as bootstrap_main
-from community_bot.bootstrap.initial_admin import repair_main
-from community_bot.bootstrap.product_config import load_product_config_candidate
-from community_bot.bootstrap.settings import get_settings
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.models import (
-    AccountTransactionModel,
     AuditEventModel,
-    InvitationModel,
     MemberModel,
-    ProcessedTelegramUpdateModel,
-    RegistrationApplicationModel,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
-    from aiogram.methods import TelegramMethod
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 TelegramType = TypeVar("TelegramType")
 _TOKEN_SECRET = "x" * 32
 _CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v2.json"
-
-
-class CapturingSession(BaseSession):
-    """Fake Bot API that captures outgoing text and inline button labels."""
-
-    def __init__(self) -> None:
-        """Initialize an empty response list."""
-        super().__init__()
-        self.texts: list[str] = []
-        self.inline_buttons: list[str] = []
-
-    async def close(self) -> None:
-        """Close no external resources."""
-
-    @override
-    async def make_request(
-        self,
-        bot: Bot,
-        method: TelegramMethod[TelegramType],
-        timeout: int | None = None,
-    ) -> TelegramType:
-        del bot, timeout
-        text_value = getattr(method, "text", None)
-        if isinstance(text_value, str):
-            self.texts.append(text_value)
-        markup = getattr(method, "reply_markup", None)
-        if markup is not None and hasattr(markup, "inline_keyboard"):
-            self.inline_buttons.extend(
-                button.text for row in markup.inline_keyboard for button in row
-            )
-        return cast(
-            "TelegramType",
-            Message(
-                message_id=999,
-                date=datetime.now(UTC),
-                chat=Chat(id=1, type="private"),
-                text="ok",
-            ),
-        )
-
-    @override
-    async def stream_content(
-        self,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int = 30,
-        chunk_size: int = 65536,
-        raise_for_status: bool = True,
-    ) -> AsyncGenerator[bytes]:
-        del url, headers, timeout, chunk_size, raise_for_status
-        if False:
-            yield b""
 
 
 def _command(telegram_user_id: int) -> InitialAdministratorCommand:
@@ -382,165 +309,4 @@ async def test_concurrent_bootstrap_has_one_persisted_winner(
     else:
         assert sum(not isinstance(result, BaseException) for result in results) == 1
         assert sum(isinstance(result, InitialAdministratorConflictError) for result in results) == 1
-    await database.dispose()
-
-
-async def test_real_cli_then_production_dispatcher_creates_invitation_and_registration(  # noqa: PLR0915
-    database_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", database_url)
-    get_settings.cache_clear()
-    try:
-        exit_code = await asyncio.to_thread(
-            bootstrap_main,
-            ["--telegram-user-id", "5001", "--reason", "initial_install"],
-        )
-    finally:
-        get_settings.cache_clear()
-    assert exit_code == 0
-    repair_exit_code = await asyncio.to_thread(
-        repair_main,
-        [],
-        io.StringIO("5001\nАлексей Администратор\n"),  # noqa: RUF001 - UTF-8 input.
-    )
-    replay_exit_code = await asyncio.to_thread(
-        repair_main,
-        [],
-        io.StringIO("5001\nАлексей Администратор\n"),  # noqa: RUF001 - UTF-8 input.
-    )
-    assert repair_exit_code == 0
-    assert replay_exit_code == 0
-    safe_cli_output = capsys.readouterr()
-    assert "Алексей Администратор" not in safe_cli_output.out + safe_cli_output.err
-    assert "5001" not in safe_cli_output.out + safe_cli_output.err
-
-    database = Database(database_url)
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as db_session:
-        administrator_model = await db_session.scalar(
-            select(MemberModel).where(MemberModel.telegram_user_id == 5_001)
-        )
-    assert administrator_model is not None
-    await ProductConfigBootstrapCoordinator(
-        database.unit_of_work,
-        load_product_config_candidate,
-    ).prepare(
-        candidate_path=_CONFIG_PATH,
-        actor_member_id=administrator_model.id,
-        activation_command_id=uuid4(),
-    )
-    dispatcher = _dispatcher(database, invite_token_secret=_TOKEN_SECRET)
-    session = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=session)
-    administrator = User(id=5_001, is_bot=False, first_name="Admin")
-    newcomer = User(id=5_002, is_bot=False, first_name="Newcomer")
-
-    def update(update_id: int, actor: User, text_value: str) -> Update:
-        return Update(
-            update_id=update_id,
-            message=Message(
-                message_id=update_id,
-                date=datetime.now(UTC),
-                chat=Chat(id=actor.id, type="private"),
-                from_user=actor,
-                text=text_value,
-            ),
-        )
-
-    await dispatcher.feed_update(bot, update(49_001, administrator, "/profile"))
-    await dispatcher.feed_update(bot, update(49_002, administrator, "/members"))
-    await dispatcher.feed_update(bot, update(49_003, administrator, "/leaderboard"))
-    visible_outputs = [*session.texts, *session.inline_buttons]
-    assert sum("Алексей Администратор" in text_value for text_value in visible_outputs) == 3
-
-    await dispatcher.feed_update(bot, update(50_001, administrator, "/invite_create 1 7 5002"))
-    response = next(text_value for text_value in session.texts if "/start " in text_value)
-    match = re.search(r"/start ([A-Za-z0-9_-]+)", response)
-    assert match is not None
-    token = match.group(1)
-    await dispatcher.feed_update(bot, update(50_002, newcomer, f"/start {token}"))
-
-    async with sessions() as db_session:
-        members = (
-            await db_session.scalars(select(MemberModel).order_by(MemberModel.telegram_user_id))
-        ).all()
-        invitation = await db_session.scalar(select(InvitationModel))
-        application = await db_session.scalar(select(RegistrationApplicationModel))
-        receipts = (
-            await db_session.scalars(
-                select(ProcessedTelegramUpdateModel).order_by(
-                    ProcessedTelegramUpdateModel.update_id
-                )
-            )
-        ).all()
-        bootstrap_audit = await db_session.scalar(
-            select(AuditEventModel).where(
-                AuditEventModel.action == "initial_administrator_bootstrapped"
-            )
-        )
-        repair_audits = (
-            await db_session.scalars(
-                select(AuditEventModel).where(
-                    AuditEventModel.action == "initial_administrator_profile_repaired"
-                )
-            )
-        ).all()
-        ledger_count = await db_session.scalar(
-            select(func.count()).select_from(AccountTransactionModel)
-        )
-
-    assert [(member.telegram_user_id, member.role, member.status) for member in members] == [
-        (5_001, "administrator", "active"),
-        (5_002, "member", "pending"),
-    ]
-    admin = members[0]
-    assert admin.display_name == "Алексей Администратор"
-    assert admin.timezone == "UTC"
-    assert admin.approved_at is not None
-    assert admin.permissions_json == [
-        "interaction_review",
-        "karma_review",
-        "member_read",
-        "superadministrator",
-    ]
-    assert admin.credit_balance_cached == 0
-    assert admin.experience_total_cached == 0
-    assert invitation is not None
-    assert invitation.code_hash != token
-    assert token not in invitation.code_hash
-    assert invitation.max_uses == 1
-    assert invitation.uses_count == 1
-    assert application is not None
-    assert application.status == "draft"
-    assert [receipt.update_id for receipt in receipts] == [50_001, 50_002]
-    assert bootstrap_audit is not None
-    assert bootstrap_audit.actor_member_id is None
-    assert bootstrap_audit.reason == "initial_install"
-    assert bootstrap_audit.before_json is None
-    assert bootstrap_audit.after_json == {
-        "permissions": [
-            "interaction_review",
-            "karma_review",
-            "member_read",
-            "superadministrator",
-        ],
-        "role": "administrator",
-        "status": "active",
-    }
-    assert len(repair_audits) == 1
-    assert repair_audits[0].after_json == {"display_name_repaired": True}
-    assert repair_audits[0].reason == "operator_request"
-    serialized_audit = str(
-        {
-            "entity_id": bootstrap_audit.entity_id,
-            "after": bootstrap_audit.after_json,
-            "reason": bootstrap_audit.reason,
-        }
-    )
-    assert "5001" not in serialized_audit
-    assert token not in serialized_audit
-    assert ledger_count == 0
-    await bot.session.close()
     await database.dispose()

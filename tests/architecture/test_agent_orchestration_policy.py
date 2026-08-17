@@ -48,11 +48,7 @@ EXPECTED_ROUTES = {
         "agents/config.yaml",
         "agents/workflow.yaml",
     ),
-    "telegram_live": ("docs/operations/PILOT_RUNBOOK.md",),
-    "release_or_deployment": (
-        "docs/release-2/README.md",
-        "docs/operations/PILOT_RUNBOOK.md",
-    ),
+    "release_or_deployment": ("docs/release-2/README.md",),
 }
 EXPECTED_CONTINUATION_REFS = {
     "max_auto_extensions": "codex.agent-budget.v1#/continuation/max_auto_extensions",

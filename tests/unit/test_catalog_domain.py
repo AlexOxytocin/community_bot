@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -13,9 +14,12 @@ from community_bot.domain.catalog import (
     PayloadValidationError,
     TaskFormat,
     TemplateDraft,
+    require_catalog_admin,
+    require_catalog_member,
     validate_payload,
     validate_template_draft,
 )
+from community_bot.domain.members import Member, MemberRole, MemberStatus
 
 SCHEMA: dict[str, object] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -101,3 +105,62 @@ def test_invalid_or_remote_schema_and_limits_are_rejected() -> None:
                 },
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"name": "x"}, "name length"),
+        ({"estimated_minutes": 0}, "duration"),
+        ({"minimum_level": 0}, "minimum level"),
+        ({"maximum_performers": 11}, "performer count"),
+        ({"code": "Bad-Code"}, "code is invalid"),
+    ],
+)
+def test_every_template_scalar_boundary_fails_closed(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(CatalogError, match=message):
+        validate_template_draft(replace(draft(), **changes))
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": True,
+        },
+        {
+            "type": "object",
+            "properties": {"x": {"type": "not-a-json-schema-type"}},
+            "required": ["x"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {"x": {"const": "x" * 70_000}},
+            "required": ["x"],
+            "additionalProperties": False,
+        },
+    ],
+)
+def test_schema_shape_meta_schema_and_size_fail_closed(schema: dict[str, object]) -> None:
+    with pytest.raises(CatalogError):
+        validate_template_draft(replace(draft(), input_schema=schema))
+
+
+def test_catalog_access_requires_active_member_and_active_admin() -> None:
+    active_member = Member(uuid4(), 1, MemberRole.MEMBER, MemberStatus.ACTIVE)
+    paused_member = Member(uuid4(), 2, MemberRole.MEMBER, MemberStatus.PAUSED)
+    active_admin = Member(uuid4(), 3, MemberRole.ADMINISTRATOR, MemberStatus.ACTIVE)
+
+    require_catalog_member(active_member)
+    require_catalog_admin(active_admin)
+    with pytest.raises(PermissionError):
+        require_catalog_member(paused_member)
+    with pytest.raises(PermissionError):
+        require_catalog_admin(active_member)

@@ -30,3 +30,4 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0013 — Изолированные live test runs в рабочем экземпляре](0013-isolated-live-test-runs.md)
 - [ADR-0014 — Multi-interface архитектура Release 2](0014-multi-interface-release-2.md)
 - [ADR-0015 — Бюджетная многопоточная оркестрация агентов](0015-cost-aware-multi-agent-orchestration.md)
+- [ADR-0016 — Mini App как единственный пользовательский интерфейс](0016-mini-app-only-runtime.md)

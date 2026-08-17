@@ -71,5 +71,5 @@
 - [Требования к MVP](../mvp/01_PRODUCT_REQUIREMENTS.md)
 - [Доменная модель](../mvp/02_DOMAIN_RULES.md)
 - [Модель данных](../mvp/06_DATA_MODEL.md)
-- [План разработки](../mvp/09_IMPLEMENTATION_PLAN.md)
+- [Текущий продуктовый контракт](../mvp/README.md)
 - [Архитектура](../ARCHITECTURE.md)

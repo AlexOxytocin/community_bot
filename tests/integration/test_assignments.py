@@ -1,6 +1,6 @@
 """PostgreSQL tests for the complete task assignment exchange."""
 
-# ruff: noqa: PLR0915, RUF001
+# ruff: noqa: PLR0915
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +8,6 @@ import datetime
 from uuid import uuid4
 
 import pytest
-from aiogram import Bot, Dispatcher
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -29,15 +27,12 @@ from community_bot.infrastructure.db.models import (
     AssignmentDisputeModel,
     AssignmentModel,
     AssignmentResultVersionModel,
-    AssignmentSubmissionDraftModel,
     MemberModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
     TaskModel,
 )
-from community_bot.transport.telegram.assignments import build_assignment_router
 from tests.integration.test_task_creation import (
-    CapturingSession,
     add_member,
     complete_preview,
     prepare_member,
@@ -745,132 +740,4 @@ async def test_assignment_fault_checkpoints_roll_back_and_retry(
     assert receipt is not None
     assert assignment_count == 1
     assert assignment.id is not None
-    await database.dispose()
-
-
-async def test_persistent_telegram_submission_survives_router_restart(database_url: str) -> None:
-    """Synthetic accept, result v1/v2, restart, stale callback, and author full."""
-    database = Database(database_url)
-    author, task = await _published_task(database, update_base=5600)
-    performer = await prepare_member(database, telegram_user_id=5700)
-    service = AssignmentService(database.unit_of_work)
-    capture = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
-    actor = User(id=performer.telegram_user_id, is_bot=False, first_name="Performer")
-    author_actor = User(id=author.telegram_user_id, is_bot=False, first_name="Author")
-
-    def message_update(update_id: int, value: str, user: User = actor) -> Update:
-        return Update(
-            update_id=update_id,
-            message=Message(
-                message_id=update_id,
-                date=datetime.datetime.now(datetime.UTC),
-                chat=Chat(id=user.id, type="private"),
-                from_user=user,
-                text=value,
-            ),
-        )
-
-    def callback_update(update_id: int, data: str, user: User = actor) -> Update:
-        return Update(
-            update_id=update_id,
-            callback_query=CallbackQuery(
-                id=f"assignment-{update_id}",
-                from_user=user,
-                chat_instance="assignments",
-                data=data,
-                message=Message(
-                    message_id=update_id,
-                    date=datetime.datetime.now(datetime.UTC),
-                    chat=Chat(id=user.id, type="private"),
-                    text="preview",
-                ),
-            ),
-        )
-
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_assignment_router(service))
-    await dispatcher.feed_update(bot, callback_update(57_100, f"task:accept:{task.id}"))
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as session:
-        assignment = await session.scalar(
-            select(AssignmentModel).where(AssignmentModel.task_id == task.id)
-        )
-    assert assignment is not None
-    await dispatcher.feed_update(bot, message_update(57_101, f"/assignment_submit {assignment.id}"))
-    async with sessions() as session:
-        draft = await session.scalar(
-            select(AssignmentSubmissionDraftModel).where(
-                AssignmentSubmissionDraftModel.assignment_id == assignment.id,
-                AssignmentSubmissionDraftModel.submitted_result_id.is_(None),
-            )
-        )
-    assert draft is not None
-    payload = (
-        '{"summary":"A sufficiently detailed result summary.",'
-        '"findings":["One concrete finding"],"evidence":[]}'
-    )
-    await dispatcher.feed_update(
-        bot,
-        message_update(57_102, f"/assignment_result {draft.id} {draft.revision} {payload}"),
-    )
-    callback_data = capture.callbacks[-1]
-    assert len(callback_data.encode()) <= 64
-
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_assignment_router(AssignmentService(database.unit_of_work)))
-    await dispatcher.feed_update(bot, callback_update(57_103, callback_data))
-    await dispatcher.feed_update(bot, callback_update(57_103, callback_data))
-
-    await dispatcher.feed_update(bot, message_update(57_104, f"/assignment_submit {assignment.id}"))
-    async with sessions() as session:
-        second_draft = await session.scalar(
-            select(AssignmentSubmissionDraftModel).where(
-                AssignmentSubmissionDraftModel.assignment_id == assignment.id,
-                AssignmentSubmissionDraftModel.submitted_result_id.is_(None),
-            )
-        )
-    assert second_draft is not None
-    assert second_draft.id != draft.id
-    payload_v2 = payload.replace("One concrete finding", "A corrected concrete finding")
-    await dispatcher.feed_update(
-        bot,
-        message_update(
-            57_105,
-            f"/assignment_result {second_draft.id} {second_draft.revision} {payload_v2}",
-        ),
-    )
-    callback_v2 = capture.callbacks[-1]
-    prefix, _, revision = callback_v2.rpartition(":")
-    await dispatcher.feed_update(bot, callback_update(57_106, f"{prefix}:{int(revision) + 1}"))
-    await dispatcher.feed_update(bot, callback_update(57_107, callback_v2))
-    await dispatcher.feed_update(
-        bot,
-        callback_update(
-            57_108,
-            f"assign:review:{assignment.id.hex}:full",
-            author_actor,
-        ),
-    )
-    async with sessions() as session:
-        result_count = await session.scalar(
-            select(func.count(AssignmentResultVersionModel.id)).where(
-                AssignmentResultVersionModel.assignment_id == assignment.id
-            )
-        )
-        receipt_count = await session.scalar(
-            select(func.count(ProcessedTelegramUpdateModel.update_id)).where(
-                ProcessedTelegramUpdateModel.update_id.in_(
-                    (57_100, 57_101, 57_102, 57_103, 57_104, 57_105, 57_106, 57_107, 57_108)
-                )
-            )
-        )
-        stored = await session.get(AssignmentModel, assignment.id)
-    assert result_count == 2
-    assert receipt_count == 8
-    assert stored is not None
-    assert stored.status == AssignmentStatus.APPROVED.value
-    assert sum("Результат отправлен" in value for value in capture.texts) == 3
-    assert any("Не удалось отправить результат" in value for value in capture.texts)
-    await bot.session.close()
     await database.dispose()

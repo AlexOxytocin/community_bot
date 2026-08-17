@@ -1,6 +1,6 @@
 # ADR-0011 - Защищенный release после одного полного CI
 
-**Статус:** Принято
+**Статус:** Заменено ADR-0016; новая release topology определяется в CB-56
 
 **Дата:** 2026-08-14
 
@@ -88,5 +88,4 @@ release, а synthetic merge PR может отличаться от фактич
 
 - [ADR-0009 - Самостоятельное размещение пилота](0009-self-hosted-pilot-runtime.md)
 - [ADR-0010 - Быстрый путь малых багфиксов](0010-small-bugfix-fast-lane.md)
-- [Runbook пилота](../operations/PILOT_RUNBOOK.md)
-- [CB-38](../../tasks/CB-38/plan.md)
+- [Заменяющее решение ADR-0016](0016-mini-app-only-runtime.md)
