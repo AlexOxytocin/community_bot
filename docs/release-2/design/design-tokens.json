@@ -1,0 +1,211 @@
+{
+  "schemaVersion": "1.0.0",
+  "name": "Community Bot",
+  "direction": "Технологичная взаимопомощь",
+  "primitives": {
+    "color": {
+      "neutral": {
+        "0": "#FFFFFF",
+        "50": "#F6F8FC",
+        "100": "#E7EAF2",
+        "300": "#A9B1C4",
+        "500": "#687187",
+        "700": "#252A38",
+        "800": "#171B26",
+        "900": "#0C0F17",
+        "950": "#05060A"
+      },
+      "cyan": {
+        "400": "#2EE6D6",
+        "500": "#12BFB3",
+        "700": "#08766F"
+      },
+      "violet": {
+        "300": "#C4B5FD",
+        "400": "#A78BFA",
+        "500": "#8B5CF6",
+        "700": "#6D28D9"
+      },
+      "green": {
+        "400": "#4ADE80",
+        "700": "#15803D"
+      },
+      "amber": {
+        "400": "#FBBF24",
+        "700": "#B45309"
+      },
+      "red": {
+        "400": "#FB7185",
+        "700": "#BE123C"
+      },
+      "blue": {
+        "400": "#60A5FA",
+        "700": "#1D4ED8"
+      }
+    },
+    "space": {
+      "0": "0",
+      "1": "4px",
+      "2": "8px",
+      "3": "12px",
+      "4": "16px",
+      "5": "20px",
+      "6": "24px",
+      "8": "32px",
+      "10": "40px"
+    },
+    "radius": {
+      "sm": "8px",
+      "md": "12px",
+      "lg": "16px",
+      "pill": "999px"
+    },
+    "font": {
+      "family": {
+        "body": "\"Manrope\", \"Segoe UI\", sans-serif",
+        "display": "\"Unbounded\", \"Manrope\", sans-serif"
+      },
+      "size": {
+        "caption": "12px",
+        "body": "15px",
+        "bodyLarge": "17px",
+        "title": "22px",
+        "display": "30px"
+      },
+      "lineHeight": {
+        "tight": 1.2,
+        "normal": 1.5
+      },
+      "weight": {
+        "regular": 400,
+        "medium": 500,
+        "semibold": 600,
+        "bold": 700
+      }
+    },
+    "motion": {
+      "fast": "120ms",
+      "normal": "180ms",
+      "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)"
+    }
+  },
+  "themes": {
+    "dark": {
+      "background": "#05060A",
+      "surface": "#0C0F17",
+      "surfaceRaised": "#171B26",
+      "text": "#F6F8FC",
+      "textMuted": "#A9B1C4",
+      "border": "#252A38",
+      "accent": "#2EE6D6",
+      "accentStrong": "#12BFB3",
+      "accentHover": "#20D4C7",
+      "accentPressed": "#12BFB3",
+      "accentText": "#05060A",
+      "brandSecondary": "#A78BFA",
+      "focus": "#C4B5FD",
+      "success": "#4ADE80",
+      "warning": "#FBBF24",
+      "danger": "#FB7185",
+      "dangerHover": "#FB7185",
+      "dangerPressed": "#FDA4AF",
+      "dangerText": "#05060A",
+      "info": "#60A5FA",
+      "surfaceHover": "#252A38",
+      "surfacePressed": "#32394A",
+      "overlay": "rgba(5, 6, 10, 0.78)",
+      "shadow": "0 12px 32px rgba(0, 0, 0, 0.32)"
+    },
+    "light": {
+      "background": "#F6F8FC",
+      "surface": "#FFFFFF",
+      "surfaceRaised": "#FFFFFF",
+      "text": "#171B26",
+      "textMuted": "#687187",
+      "border": "#E7EAF2",
+      "accent": "#08766F",
+      "accentStrong": "#12BFB3",
+      "accentHover": "#075E59",
+      "accentPressed": "#064E49",
+      "accentText": "#FFFFFF",
+      "brandSecondary": "#6D28D9",
+      "focus": "#6D28D9",
+      "success": "#15803D",
+      "warning": "#B45309",
+      "danger": "#BE123C",
+      "dangerHover": "#BE123C",
+      "dangerPressed": "#9F1239",
+      "dangerText": "#FFFFFF",
+      "info": "#1D4ED8",
+      "surfaceHover": "#E7EAF2",
+      "surfacePressed": "#D7DCE7",
+      "overlay": "rgba(23, 27, 38, 0.56)",
+      "shadow": "0 12px 30px rgba(37, 42, 56, 0.12)"
+    }
+  },
+  "components": {
+    "control": {
+      "minHeight": "44px",
+      "paddingInline": "16px",
+      "gap": "8px",
+      "radius": "{primitives.radius.md}"
+    },
+    "card": {
+      "padding": "16px",
+      "gap": "12px",
+      "radius": "{primitives.radius.lg}"
+    },
+    "chip": {
+      "minHeight": "28px",
+      "paddingInline": "10px",
+      "radius": "{primitives.radius.pill}"
+    },
+    "navigation": {
+      "minHeight": "56px",
+      "itemMinSize": "44px"
+    }
+  },
+  "platform": {
+    "telegramThemeMapping": {
+      "--app-background": "--tg-theme-bg-color",
+      "--app-surface": "--tg-theme-secondary-bg-color",
+      "--app-text": "--tg-theme-text-color",
+      "--app-text-muted": "--tg-theme-hint-color",
+      "--app-accent": "--tg-theme-button-color",
+      "--app-accent-text": "--tg-theme-button-text-color"
+    },
+    "contrastPolicy": {
+      "normalTextMinimum": 4.5,
+      "focusAndGraphicsMinimum": 3.0,
+      "fallbackMode": "atomic-base-theme",
+      "fallbackThemeSource": "telegram-color-scheme",
+      "validatedPairs": [
+        {"foreground": "text", "background": "background", "minimum": 4.5},
+        {"foreground": "textMuted", "background": "background", "minimum": 4.5},
+        {"foreground": "text", "background": "surface", "minimum": 4.5},
+        {"foreground": "textMuted", "background": "surface", "minimum": 4.5},
+        {"foreground": "text", "background": "surfaceRaised", "minimum": 4.5},
+        {"foreground": "accentText", "background": "accent", "minimum": 4.5},
+        {"foreground": "accentText", "background": "accentHover", "minimum": 4.5},
+        {"foreground": "accentText", "background": "accentPressed", "minimum": 4.5},
+        {"foreground": "text", "background": "surfaceHover", "minimum": 4.5},
+        {"foreground": "text", "background": "surfacePressed", "minimum": 4.5},
+        {"foreground": "dangerText", "background": "dangerHover", "minimum": 4.5},
+        {"foreground": "dangerText", "background": "dangerPressed", "minimum": 4.5},
+        {"foreground": "success", "background": "surface", "minimum": 4.5},
+        {"foreground": "warning", "background": "surface", "minimum": 4.5},
+        {"foreground": "danger", "background": "surface", "minimum": 4.5},
+        {"foreground": "info", "background": "surface", "minimum": 4.5},
+        {"foreground": "accent", "background": "surface", "minimum": 4.5},
+        {"foreground": "focus", "background": "background", "minimum": 3.0},
+        {"foreground": "focus", "background": "surface", "minimum": 3.0}
+      ]
+    },
+    "safeAreaVariables": [
+      "--tg-safe-area-inset-top",
+      "--tg-safe-area-inset-right",
+      "--tg-safe-area-inset-bottom",
+      "--tg-safe-area-inset-left"
+    ]
+  }
+}
