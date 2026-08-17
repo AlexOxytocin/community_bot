@@ -2,17 +2,23 @@
 
 ## Канонические документы
 
-Перед работой с проектом прочитать и соблюдать:
+Перед любой работой прочитать только
+`docs/PROJECT_RULES_AND_GUARDRAILS_RU.md`. Остальные документы подключать по
+условию задачи, не загружать все маршруты по умолчанию:
 
-- `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md` — обязательные правила и ограничения;
-- `docs/AGENT_WORKFLOW.md` — жизненный цикл Jira-задачи;
-- `docs/JIRA_WORKFLOW.md` — настройки Jira проекта `CB`;
-- `docs/mvp/README.md` — карта продуктовой документации MVP;
-- `docs/mvp/01_PRODUCT_REQUIREMENTS.md` — функциональные границы MVP;
-- `docs/mvp/02_DOMAIN_RULES.md` — кредиты, опыт, карма, уровни и состояния;
-- `docs/mvp/TECH_STACK.md` — утверждённый технологический стек;
-- `docs/mvp/11_DECISIONS_AND_OPEN_QUESTIONS.md` — продуктовые решения и вопросы `TBD`;
-- `agents/README.md` — роли агентов и правила их активации.
+- Jira-задача или изменение процесса: `docs/AGENT_WORKFLOW.md` и
+  `docs/JIRA_WORKFLOW.md`;
+- продуктовое поведение: `docs/mvp/README.md` и
+  `docs/mvp/01_PRODUCT_REQUIREMENTS.md`;
+- доменные правила: `docs/mvp/02_DOMAIN_RULES.md`;
+- технология или архитектура: `docs/mvp/TECH_STACK.md`,
+  `docs/mvp/11_DECISIONS_AND_OPEN_QUESTIONS.md` и `docs/adr/README.md`;
+- многопоточная агентская работа: `docs/AGENT_CONTEXT_AND_COST_POLICY.md`,
+  `agents/README.md`, проектная политика `community_bot.orchestration.v2` в
+  `agents/config.yaml`, `agents/workflow.yaml` и инструкция активируемой роли;
+- Telegram/live-проверка: релевантные разделы
+  `docs/operations/PILOT_RUNBOOK.md`;
+- release или deployment: релевантные release-документы и runbook.
 
 Если документы расходятся, приоритет имеет `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md`, затем актуальная Jira-задача, затем остальные документы проекта.
 

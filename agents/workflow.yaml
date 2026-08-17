@@ -2,6 +2,14 @@ schema_version: 1
 workflow_id: community_bot.jira_development.v1
 language: ru
 
+policy_references:
+  project_orchestration: agents/config.yaml#/orchestration_policy
+  execution_budget: codex.agent-budget.v1
+  document_routing: agents/config.yaml#/orchestration_policy/document_routing
+  role_routing: agents/config.yaml#/orchestration_policy/role_routing
+  continuation: agents/config.yaml#/orchestration_policy/continuation
+  tool_output: agents/config.yaml#/orchestration_policy/tool_output
+
 applicability:
   default_process_levels:
     - 1B
@@ -108,6 +116,7 @@ phases:
   - id: plan_review
     owner: plan-reviewer
     activation: required_for_process_level_3_plan
+    input_packet: agents/config.yaml#/orchestration_policy/packets/review
     checks:
       - complete_plan_package_only
       - no_partial_slice_reviews
@@ -185,6 +194,7 @@ phases:
 
   - id: final_review
     owner: final-review
+    input_packet: agents/config.yaml#/orchestration_policy/packets/review
     required_inputs:
       - work_request_or_jira_issue
       - repository_diff
@@ -237,6 +247,7 @@ phases:
 
   - id: handoff
     owner: developer
+    output_packet: agents/config.yaml#/orchestration_policy/packets/task
     checks:
       - clear_user_intent_before_remote_mutation
       - jira_comment_states_exact_external_state
@@ -244,6 +255,7 @@ phases:
 
   - id: pull_request_validation
     owner: developer
+    waiting_policy: codex.agent-budget.v1#/coordination
     checks:
       - wait_for_ci_and_code_review
       - fixes_require_tests_report_update_and_new_final_review_or_compact_diff_verdict
@@ -308,8 +320,9 @@ review_retry_policy:
   first_failed_review: fix_all_findings_in_one_cycle_then_one_recheck
   second_failed_review: preserve_both_attempts_create_problem_escalation_and_make_one_consolidated_fix
   failed_review_after_escalation: stop_for_owner_decision
-  technical_attempts_threshold: 3
-  failed_reviews_threshold_per_phase: 2
+  technical_attempts_threshold_ref: agents/config.yaml#/orchestration_policy/process_limits/technical_attempts_per_problem
+  failed_reviews_threshold_per_phase_ref: agents/config.yaml#/orchestration_policy/process_limits/failed_reviews_before_escalation
+  post_escalation_reviews_ref: agents/config.yaml#/orchestration_policy/process_limits/post_escalation_reviews
 
 regression_policy:
   per_task: targeted_required_integration_and_smoke_only
@@ -317,9 +330,9 @@ regression_policy:
   bugs_first_found_in_full_regression: separate_jira_bug_and_branch
 
 process_budget:
-  normal_task_planning_verification_and_review_target_percent: 25
-  level_1b_planning_verification_and_review_target_percent: 15
-  level_1b_max_overhead_minutes: 10
+  normal_task_target_ref: agents/config.yaml#/orchestration_policy/process_limits/normal_overhead_target
+  level_1b_target_ref: agents/config.yaml#/orchestration_policy/process_limits/level_1b_overhead_target
+  level_1b_max_overhead_ref: agents/config.yaml#/orchestration_policy/process_limits/level_1b_max_overhead
   action_when_exceeded: consolidate_checks_or_escalate
 
 artifacts:
