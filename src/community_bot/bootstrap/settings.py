@@ -25,6 +25,7 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://community_bot:community_bot@localhost:5432/community_bot"
     )
     bot_token: SecretStr | None = None
+    mini_app_origin: str | None = None
     invite_token_secret: SecretStr | None = None
     sentry_dsn: SecretStr | None = None
     release: str = "local"

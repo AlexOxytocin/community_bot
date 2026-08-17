@@ -22,6 +22,7 @@ from community_bot.application.assignments import (
     SubmitResultCommand,
 )
 from community_bot.application.economy import EconomyService
+from community_bot.application.identity import ActorContext
 from community_bot.application.moderation import ModerationService, ResolveCaseCommand
 from community_bot.application.reputation import ReputationError, ReputationService
 from community_bot.application.tasks import PublishTaskCommand, TaskService
@@ -62,6 +63,11 @@ from tests.integration.test_task_creation import (
     complete_preview,
     prepare_config,
 )
+
+
+def actor_context(member: MemberModel) -> ActorContext:
+    return ActorContext(member.id, "telegram", datetime.datetime.now(datetime.UTC))
+
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -414,7 +420,7 @@ async def test_full_exchange_reconciles_ledger_exactly_once(database_url: str) -
     assert transaction_count == 1
     assert int(outbox_count or 0) >= 1
     reputation = ReputationService(database.unit_of_work)
-    leaderboard = await reputation.leaderboard(telegram_user_id=author.telegram_user_id)
+    leaderboard = await reputation.leaderboard(actor=actor_context(author))
     assert leaderboard.items[0].member_id == performer.id
     async with database.unit_of_work() as unit_of_work:
         assert await unit_of_work.karma_eligible(author.id, performer.id)
@@ -600,7 +606,7 @@ async def test_raw_karma_access_remains_administrative_and_audited(
         expected_revision=draft.revision,
     )
     profile = await reputation.profile(
-        telegram_user_id=outsider.telegram_user_id,
+        actor=actor_context(outsider),
         target_id=target.id,
     )
     raw = await reputation.raw_karma(

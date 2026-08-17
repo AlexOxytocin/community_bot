@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from community_bot.application.economy import EconomyService, ProductConfigBootstrapCoordinator
+from community_bot.application.identity import ActorContext
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
@@ -83,6 +84,10 @@ async def count(database: Database, model: type[object]) -> int:
 
 def service(database: Database) -> RegistrationService:
     return RegistrationService(database.unit_of_work, InviteTokenCodec(TEST_TOKEN_KEY))
+
+
+def actor(member_id: UUID) -> ActorContext:
+    return ActorContext(member_id, "telegram", datetime.now(UTC))
 
 
 async def create_invite(
@@ -243,7 +248,7 @@ async def test_invitation_replay_revoke_and_pending_access_rules(database_url: s
     )
     assert pending.context is not None
     with pytest.raises(PermissionError):
-        await registration.own_profile(152)
+        await registration.own_profile(actor(pending.context.member_id))
     await registration.revoke_invitation(
         update_id=1_504,
         actor_telegram_user_id=admin.telegram_user_id,
@@ -618,7 +623,7 @@ async def test_reject_resubmit_approve_and_edit_own_profile(database_url: str) -
             expected_field=field,
             raw_value=raw_value,
         )
-    profile = await registration.own_profile(601)
+    profile = await registration.own_profile(actor(target_id))
 
     assert profile.member_id == target_id
     assert profile.display_name == "Анна Петрова"
@@ -650,7 +655,7 @@ async def test_reject_resubmit_approve_and_edit_own_profile(database_url: str) -
         expected_field=ProfileField.DISPLAY_NAME,
         raw_value="Другой участник",
     )
-    assert (await registration.own_profile(601)).display_name == "Анна Петрова"
+    assert (await registration.own_profile(actor(target_id))).display_name == "Анна Петрова"
 
     inactive = await add_member(
         database,

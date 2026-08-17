@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
     from community_bot.application.catalog import CatalogTemplate
     from community_bot.application.economy import ActiveProductConfig, EconomyMutationPort
+    from community_bot.application.identity import ActorContext
     from community_bot.domain.assignments import Assignment
 
 _MAX_OWNED_TASKS = 20
@@ -260,6 +261,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
     async def acquire_assignment_task_gate(self, task_id: UUID) -> None: ...
     async def acquire_catalog_mutation_gate(self) -> None: ...
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
+    async def get_member(self, member_id: UUID) -> Member | None: ...
     async def ensure_moderation_action_allowed(
         self, member_id: UUID, action: RestrictedAction
     ) -> None: ...
@@ -1172,29 +1174,31 @@ class TaskService:
     async def list_available(
         self,
         *,
-        actor_telegram_user_id: int,
+        actor: ActorContext,
         cursor_task_id: UUID | None = None,
+        limit: int = _MAX_AVAILABLE_TASKS,
     ) -> AvailableTaskPage:
         """Return tasks the actor may attempt to accept right now."""
         async with self._unit_of_work_factory() as uow:
-            actor = await _active_actor(uow, actor_telegram_user_id)
-            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.ACCEPT_TASK)
+            member = await _active_context_actor(uow, actor)
+            await uow.ensure_moderation_action_allowed(member.id, RestrictedAction.ACCEPT_TASK)
             active = await uow.get_active_product_config()
-            limit = 3 if active is None else active.maximum_active_assignments
-            if await uow.count_active_assignments(actor.id) >= limit:
+            assignment_limit = 3 if active is None else active.maximum_active_assignments
+            if await uow.count_active_assignments(member.id) >= assignment_limit:
                 return AvailableTaskPage(items=(), next_cursor_task_id=None)
-            level = await uow.resolve_member_level(actor.id)
+            level = await uow.resolve_member_level(member.id)
+            page_limit = max(1, min(limit, 50))
             tasks = await uow.list_available_tasks(
-                performer_id=actor.id,
+                performer_id=member.id,
                 level=level.level_number,
-                limit=_MAX_AVAILABLE_TASKS + 1,
+                limit=page_limit + 1,
                 cursor_task_id=cursor_task_id,
                 now=datetime.datetime.now(datetime.UTC),
             )
-        items = tasks[:_MAX_AVAILABLE_TASKS]
+        items = tasks[:page_limit]
         return AvailableTaskPage(
             items=items,
-            next_cursor_task_id=items[-1].id if len(tasks) > _MAX_AVAILABLE_TASKS else None,
+            next_cursor_task_id=items[-1].id if len(tasks) > page_limit else None,
         )
 
     async def cancel(
@@ -1607,6 +1611,14 @@ async def _cancellation_outcome_from_receipt(
 
 async def _active_actor(uow: TaskUnitOfWork, telegram_user_id: int) -> Member:
     actor = await uow.get_member_by_telegram_user_id(telegram_user_id)
+    if actor is None:
+        raise PermissionError("Task actor is not a registered member.")
+    _require_active(actor)
+    return actor
+
+
+async def _active_context_actor(uow: TaskUnitOfWork, context: ActorContext) -> Member:
+    actor = await uow.get_member(context.member_id)
     if actor is None:
         raise PermissionError("Task actor is not a registered member.")
     _require_active(actor)

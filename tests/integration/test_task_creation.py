@@ -27,6 +27,7 @@ from community_bot.application.economy import (
     ProductConfigBootstrapCoordinator,
     ProductConfigService,
 )
+from community_bot.application.identity import ActorContext
 from community_bot.application.tasks import (
     AdvanceDraftCommand,
     PublishedTask,
@@ -68,6 +69,12 @@ from community_bot.infrastructure.db.models import (
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v1.json"
+
+
+def actor_context(member: MemberModel) -> ActorContext:
+    return ActorContext(member.id, "telegram", datetime.datetime.now(datetime.UTC))
+
+
 TelegramType = TypeVar("TelegramType")
 
 
@@ -394,9 +401,7 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
 
     assert outcome.status == "pending"
     assert outcome.task.status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
-    available_to_stranger = await task_service.list_available(
-        actor_telegram_user_id=stranger.telegram_user_id
-    )
+    available_to_stranger = await task_service.list_available(actor=actor_context(stranger))
     assert not available_to_stranger.items
     async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
         response_id = await session.scalar(select(TaskCancellationResponseModel.id))

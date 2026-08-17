@@ -332,12 +332,10 @@ async def list_submitted_registrations(
 
 async def get_own_profile(
     session: AsyncSession,
-    telegram_user_id: int,
+    member_id: UUID,
 ) -> ProfileData | None:
     """Return an active member's own persisted profile."""
-    member = await session.scalar(
-        select(MemberModel).where(MemberModel.telegram_user_id == telegram_user_id)
-    )
+    member = await session.get(MemberModel, member_id)
     if member is None or member.status not in {
         MemberStatus.ACTIVE.value,
         MemberStatus.PAUSED.value,

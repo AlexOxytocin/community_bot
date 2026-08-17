@@ -18,7 +18,9 @@ RULES = (
         directory="domain",
         forbidden_prefixes=(
             "aiogram",
+            "fastapi",
             "sqlalchemy",
+            "starlette",
             "community_bot.application",
             "community_bot.bootstrap",
             "community_bot.infrastructure",
@@ -30,7 +32,9 @@ RULES = (
         directory="application",
         forbidden_prefixes=(
             "aiogram",
+            "fastapi",
             "sqlalchemy",
+            "starlette",
             "community_bot.bootstrap",
             "community_bot.infrastructure",
             "community_bot.transport",

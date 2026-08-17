@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from decimal import Decimal
 
+    from community_bot.application.identity import ActorContext
     from community_bot.application.member_foundation import UpdateReceipt
     from community_bot.domain.economy import ResolvedLevel
     from community_bot.domain.members import Member
@@ -427,13 +428,13 @@ class ReputationService:
             await uow.commit()
             return True
 
-    async def profile(self, *, telegram_user_id: int, target_id: UUID | None = None) -> SafeProfile:
+    async def profile(self, *, actor: ActorContext, target_id: UUID | None = None) -> SafeProfile:
         """Return one server-authorized safe profile projection."""
         async with self._unit_of_work_factory() as uow:
-            actor = await self._actor(uow, telegram_user_id)
-            target_id = actor.id if target_id is None else target_id
+            member = await self._context_actor(uow, actor)
+            target_id = member.id if target_id is None else target_id
             target = await uow.get_member(target_id)
-            require_profile_visible(actor, target)
+            require_profile_visible(member, target)
             profile = await uow.safe_profile(target_id)
             if profile is None:
                 raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
@@ -450,7 +451,7 @@ class ReputationService:
     async def members(
         self,
         *,
-        telegram_user_id: int,
+        actor: ActorContext,
         limit: int = 50,
         cursor: MemberCatalogCursor | None = None,
         cursor_member_id: UUID | None = None,
@@ -459,7 +460,7 @@ class ReputationService:
         """Return the safe active-member catalog to an active actor."""
         normalized_query = normalize_member_search_query(query)
         async with self._unit_of_work_factory() as uow:
-            await self._active_actor(uow, telegram_user_id)
+            await self._active_context_actor(uow, actor)
             if cursor is None and cursor_member_id is not None:
                 cursor = await uow.member_catalog_cursor(cursor_member_id, query=normalized_query)
             page = await uow.safe_profiles(
@@ -511,13 +512,13 @@ class ReputationService:
     async def leaderboard(
         self,
         *,
-        telegram_user_id: int,
+        actor: ActorContext,
         limit: int = 20,
         cursor: LeaderboardCursor | None = None,
     ) -> LeaderboardPage:
         """Return the main contribution leaderboard to an active member."""
         async with self._unit_of_work_factory() as uow:
-            await self._active_actor(uow, telegram_user_id)
+            await self._active_context_actor(uow, actor)
             return await uow.leaderboard(limit=max(1, min(limit, 100)), cursor=cursor)
 
     async def _save_draft(  # noqa: PLR0913 - explicit state fields form the revision gate.
@@ -568,6 +569,20 @@ class ReputationService:
 
     async def _active_actor(self, uow: ReputationUnitOfWork, telegram_user_id: int) -> Member:
         actor = await self._actor(uow, telegram_user_id)
+        if actor.status is not MemberStatus.ACTIVE:
+            raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
+        return actor
+
+    async def _context_actor(self, uow: ReputationUnitOfWork, context: ActorContext) -> Member:
+        actor = await uow.get_member(context.member_id)
+        if actor is None:
+            raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
+        return actor
+
+    async def _active_context_actor(
+        self, uow: ReputationUnitOfWork, context: ActorContext
+    ) -> Member:
+        actor = await self._context_actor(uow, context)
         if actor.status is not MemberStatus.ACTIVE:
             raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
         return actor

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -41,6 +41,7 @@ from community_bot.infrastructure.db.models import (
     MemberModel,
     ProcessedTelegramUpdateModel,
     TestRunParticipantModel,
+    WebSessionModel,
 )
 from community_bot.infrastructure.db.moderation import SqlAlchemyModerationMutation
 
@@ -164,6 +165,62 @@ class Database:
     async def dispose(self) -> None:
         """Release all engine resources."""
         await self.engine.dispose()
+
+    async def create_web_session(
+        self,
+        *,
+        telegram_user_id: int,
+        token_digest: bytes,
+        authenticated_at: datetime.datetime,
+        expires_at: datetime.datetime,
+    ) -> UUID | None:
+        """Persist one session for an existing Telegram identity."""
+        async with self._sessions.begin() as session:
+            member_id = await session.scalar(
+                select(MemberModel.id).where(MemberModel.telegram_user_id == telegram_user_id)
+            )
+            if member_id is None:
+                return None
+            session.add(
+                WebSessionModel(
+                    token_digest=token_digest,
+                    member_id=member_id,
+                    authenticated_at=authenticated_at,
+                    expires_at=expires_at,
+                )
+            )
+        return member_id
+
+    async def web_session_member_id(
+        self, *, token_digest: bytes, now: datetime.datetime
+    ) -> tuple[UUID, datetime.datetime] | None:
+        """Resolve one live, unrevoked session to internal identity."""
+        async with self._sessions() as session:
+            row = (
+                await session.execute(
+                    select(WebSessionModel.member_id, WebSessionModel.authenticated_at).where(
+                        WebSessionModel.token_digest == token_digest,
+                        WebSessionModel.revoked_at.is_(None),
+                        WebSessionModel.expires_at > now,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            return row.member_id, row.authenticated_at
+
+    async def revoke_web_session(self, *, token_digest: bytes, now: datetime.datetime) -> None:
+        """Atomically revoke a currently live session, if any."""
+        async with self._sessions.begin() as session:
+            await session.execute(
+                update(WebSessionModel)
+                .where(
+                    WebSessionModel.token_digest == token_digest,
+                    WebSessionModel.revoked_at.is_(None),
+                    WebSessionModel.expires_at > now,
+                )
+                .values(revoked_at=now)
+            )
 
 
 class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
@@ -1059,9 +1116,9 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Return submitted registrations for the moderation queue."""
         return await registration_store.list_submitted_registrations(self._require_session(), limit)
 
-    async def get_own_profile(self, telegram_user_id: int) -> ProfileData | None:
+    async def get_own_profile(self, member_id: UUID) -> ProfileData | None:
         """Return one active member's own profile."""
-        return await registration_store.get_own_profile(self._require_session(), telegram_user_id)
+        return await registration_store.get_own_profile(self._require_session(), member_id)
 
     async def get_conversation_expectation(self, telegram_user_id: int) -> tuple[str, str] | None:
         """Return the flow and step expected from the next text update."""
