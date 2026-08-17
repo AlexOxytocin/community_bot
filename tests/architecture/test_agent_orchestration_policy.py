@@ -146,9 +146,7 @@ def _validate_budget_node(node: YamlMap, path: tuple[str, ...]) -> None:
     minimum = node["min"]
     maximum = node["max"]
     numeric_values = (value, minimum, maximum)
-    if not all(
-        isinstance(item, int) and not isinstance(item, bool) for item in numeric_values
-    ):
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in numeric_values):
         _fail(f"non-integer budget at {'/'.join(path)}")
     value_int = cast("int", value)
     minimum_int = cast("int", minimum)

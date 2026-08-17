@@ -56,6 +56,7 @@
 | Global policy validation | valid; policy `codex.agent-budget.v1`; проверено 21 budget node, 7 consumers, canonical continuation и 3 negative mutations |
 | Profile TOML parse | valid |
 | Target project policy tests | 10 passed |
+| `uv run ruff format --check .` | passed |
 | `uv run ruff check .` | passed |
 | `uv run ty check` | passed |
 | `uv run pytest` | 605 passed, 1 skipped; coverage 80.32% |
@@ -68,6 +69,10 @@
 избыточная копия: теперь они тоже каноничны только в глобальной policy. Публичный
 CI проверяет точные symbolic refs, а фактический graph и runtime consumers —
 локальный global validator.
+
+Первый PR run выявил пропущенный локально formatting gate в одном тесте.
+`ruff format` изменил только перенос строки без изменения поведения; после этого
+format, lint, type check и target policy tests повторно прошли.
 
 ## Остаточные риски
 
