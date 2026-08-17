@@ -1,6 +1,6 @@
 # ADR-0012 — Python-скрипты эксплуатации и деплой из GitHub ref
 
-**Статус:** Частично заменено ADR-0011
+**Статус:** Частично заменено ADR-0016; Python backup/restore contract сохранён
 
 **Дата:** 2026-08-14
 
@@ -51,5 +51,5 @@ ADR-0009 закрепил self-hosted runtime через Docker Compose и image
 
 - [ADR-0009](0009-self-hosted-pilot-runtime.md)
 - [ADR-0011](0011-protected-single-ci-release.md)
-- [Runbook пилота](../operations/PILOT_RUNBOOK.md)
+- [Заменяющее решение ADR-0016](0016-mini-app-only-runtime.md)
 - [Технологический стек](../mvp/TECH_STACK.md)

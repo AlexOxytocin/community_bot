@@ -108,11 +108,8 @@ orchestration_policy:
         - agents/README.md
         - agents/config.yaml
         - agents/workflow.yaml
-      telegram_live:
-        - docs/operations/PILOT_RUNBOOK.md
       release_or_deployment:
         - docs/release-2/README.md
-        - docs/operations/PILOT_RUNBOOK.md
 
   role_routing:
     developer:

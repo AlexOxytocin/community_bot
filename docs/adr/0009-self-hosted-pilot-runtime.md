@@ -1,6 +1,6 @@
 # ADR-0009 — Самостоятельное размещение пилота
 
-**Статус:** Принято
+**Статус:** Частично заменено ADR-0016; PostgreSQL data-safety решения сохранены
 
 **Дата:** 2026-08-11
 
@@ -71,4 +71,4 @@ backup и документированную эксплуатацию, поэт�
 - [ADR-0008](0008-pilot-runtime-and-operations.md)
 - [Технологический стек](../mvp/TECH_STACK.md)
 - [Решения и открытые вопросы](../mvp/11_DECISIONS_AND_OPEN_QUESTIONS.md)
-- [Runbook пилота](../operations/PILOT_RUNBOOK.md)
+- [Заменяющее решение ADR-0016](0016-mini-app-only-runtime.md)

@@ -22,6 +22,7 @@ COPY alembic.ini ./
 RUN uv sync --locked --no-default-groups
 
 LABEL org.opencontainers.image.source="https://github.com/alexgoodman53/community_bot"
+LABEL org.opencontainers.image.description="Community Mini App backend worker"
 
 USER 65532:65532
 

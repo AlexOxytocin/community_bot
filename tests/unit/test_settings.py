@@ -37,3 +37,12 @@ def test_settings_normalize_render_postgresql_urls() -> None:
     )
 
     assert settings.database_url.startswith("postgresql+asyncpg://")
+
+
+def test_settings_normalize_standard_postgresql_url() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql://user:password@private-host/database",
+    )
+
+    assert settings.database_url.startswith("postgresql+asyncpg://")

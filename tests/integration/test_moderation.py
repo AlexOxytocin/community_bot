@@ -9,8 +9,6 @@ import datetime
 from uuid import uuid4
 
 import pytest
-from aiogram import Bot, Dispatcher
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -54,9 +52,7 @@ from community_bot.infrastructure.db.models import (
     TaskModel,
     TaskTemplateModel,
 )
-from community_bot.transport.telegram.moderation import build_moderation_router
 from tests.integration.test_reputation import add_member, add_paid_interaction, prepare_config
-from tests.integration.test_task_creation import CapturingSession
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -672,86 +668,6 @@ async def test_concurrent_resolution_has_one_winner_and_no_second_receipt(
             )
             == 1
         )
-    await database.dispose()
-
-
-async def test_telegram_preview_survives_restart_and_rejects_foreign_callback(
-    database_url: str,
-) -> None:
-    """The Telegram callback is compact, durable, actor-bound, and restart-safe."""
-    database = Database(database_url)
-    moderator = await add_member(database, 13_651, role=MemberRole.MODERATOR)
-    await prepare_config(database, moderator.id)
-    foreign = await add_member(database, 13_652, role=MemberRole.MODERATOR)
-    creator = await add_member(database, 13_653)
-    performer = await add_member(database, 13_654)
-    case = await _open_dispute_fixture(database, creator, performer)
-    capture = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=capture)
-
-    def message_update(update_id: int) -> Update:
-        return Update(
-            update_id=update_id,
-            message=Message(
-                message_id=update_id,
-                date=datetime.datetime.now(datetime.UTC),
-                chat=Chat(id=moderator.telegram_user_id, type="private"),
-                from_user=User(
-                    id=moderator.telegram_user_id,
-                    is_bot=False,
-                    first_name="Moderator",
-                ),
-                text=f"/mod_resolve {case.id} 0 full_payment Evidence reviewed.",
-            ),
-        )
-
-    def callback_update(update_id: int, user_id: int, data: str) -> Update:
-        return Update(
-            update_id=update_id,
-            callback_query=CallbackQuery(
-                id=f"moderation-{update_id}",
-                from_user=User(id=user_id, is_bot=False, first_name="Moderator"),
-                chat_instance="moderation",
-                data=data,
-                message=Message(
-                    message_id=update_id,
-                    date=datetime.datetime.now(datetime.UTC),
-                    chat=Chat(id=user_id, type="private"),
-                    text="preview",
-                ),
-            ),
-        )
-
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_moderation_router(ModerationService(database.unit_of_work)))
-    await dispatcher.feed_update(bot, message_update(136_100))
-    callback_data = capture.callbacks[-1]
-    assert len(callback_data.encode()) <= 64
-
-    await dispatcher.feed_update(
-        bot, callback_update(136_101, foreign.telegram_user_id, callback_data)
-    )
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_moderation_router(ModerationService(database.unit_of_work)))
-    await dispatcher.feed_update(
-        bot, callback_update(136_102, moderator.telegram_user_id, callback_data)
-    )
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as session:
-        assert (
-            int(
-                await session.scalar(
-                    select(func.count(DisputeResolutionModel.id)).where(
-                        DisputeResolutionModel.case_id == case.id
-                    )
-                )
-                or 0
-            )
-            == 1
-        )
-        assert await session.get(ProcessedTelegramUpdateModel, 136_101) is None
-        assert await session.get(ProcessedTelegramUpdateModel, 136_102) is not None
-    await bot.session.close()
     await database.dispose()
 
 

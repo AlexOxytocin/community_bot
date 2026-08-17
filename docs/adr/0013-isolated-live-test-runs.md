@@ -1,6 +1,6 @@
 # ADR-0013 — Изолированные live test runs в рабочем экземпляре
 
-**Статус:** Принято
+**Статус:** Частично заменено ADR-0016; historical data quarantine сохранён
 
 **Дата:** 2026-08-14
 
@@ -53,4 +53,4 @@
 
 - [ADR-0009](0009-self-hosted-pilot-runtime.md)
 - [ADR-0012](0012-python-ops-and-git-deploy.md)
-- [Runbook пилота](../operations/PILOT_RUNBOOK.md)
+- [Сохранённая quarantine-граница](../ARCHITECTURE.md)

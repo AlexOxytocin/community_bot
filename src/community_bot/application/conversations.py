@@ -1,4 +1,4 @@
-"""Single durable owner for free-form Telegram text."""
+"""Single durable owner for free-form user input."""
 
 # ruff: noqa: D102, D107, TC003
 
@@ -41,7 +41,7 @@ class ConversationUnitOfWorkFactory(Protocol):  # pragma: no cover - structural 
 
 
 class ConversationService:
-    """Resolve exactly one text owner before transport dispatch."""
+    """Resolve exactly one input owner before transport dispatch."""
 
     def __init__(self, unit_of_work_factory: ConversationUnitOfWorkFactory) -> None:
         self._unit_of_work_factory = unit_of_work_factory

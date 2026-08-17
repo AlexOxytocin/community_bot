@@ -1,146 +1,58 @@
-# Community Bot
+# Community Mini App
 
-Telegram-бот закрытого сообщества взаимной помощи с заданиями, внутренней экономикой, прогрессом и репутацией. В репозитории реализуются функции MVP отдельными Jira-задачами поверх небольшого модульного монолита.
-
-## Язык проекта
-
-Русский язык является каноническим для документации, Jira, планов, отчётов и проверок. Код, технические идентификаторы, ключи конфигурации, логи и сообщения об ошибках во время выполнения пишутся на английском.
+Продукт закрытого сообщества взаимной помощи: участники создают и выполняют задания, рассчитываются внутренними кредитами, получают опыт и формируют репутацию. Единственный пользовательский интерфейс нового направления — Telegram Mini App.
 
 ## Текущее состояние
 
-- Подключена Jira `CB` через Atlassian Rovo MCP с доступом на чтение и запись.
-- Создан отдельный MemPalace проекта.
-- Зафиксированы инженерные принципы, агентские роли и процесс разработки.
-- Сформирован пакет требований и план разработки MVP в `docs/mvp/`.
-- Утверждён стек Python 3.13, aiogram 3.x, PostgreSQL 18 и SQLAlchemy 2 async.
-- Создан этап 0: Python-пакет, границы слоёв, PostgreSQL 18, Alembic, тесты и CI.
-- Реализован фундамент участников: роли и статусы, серверная авторизация, append-only аудит, PostgreSQL-дедупликация Telegram updates и минимальный маршрут `/start`.
-- Реализовано ядро экономики: append-only журнал кредитов и опыта, атомарные
-  кэши, идемпотентные batch-операции, точные развороты, сверка и история.
-- Уровни и их пороги загружаются из строгой версионной конфигурации,
-  активируются в PostgreSQL и пересчитываются без изменения кода.
+Сохранён и покрыт тестами backend модульного монолита:
 
-## Требования к окружению
+- роли, статусы, регистрация и серверная авторизация;
+- каталог и жизненный цикл заданий;
+- назначения, результаты, споры и модерация;
+- append-only ledger кредитов и опыта;
+- карма, надёжность и административный аудит;
+- PostgreSQL-дедупликация, transactional outbox и worker;
+- Alembic-миграции, backup и restore drill.
 
-- [uv](https://docs.astral.sh/uv/) 0.12.3 или совместимая версия;
-- управляемый uv Python 3.13;
-- Docker с Compose — только для PostgreSQL и миграционных проверок.
+Старый Telegram chat UI, long-polling runtime и pilot/release-контур удалены. Telegram остаётся внешней платформой для запуска Mini App, проверки auth proof и коротких исходящих уведомлений без callback-навигации. HTTP API и frontend создаются задачами эпика `CB-48`.
 
-Установка окружения из зафиксированного lock-файла:
+## Окружение
+
+Требуются uv 0.12.3, Python 3.13 и Docker Compose с PostgreSQL 18.
 
 ```powershell
 uv python install 3.13
 uv sync --locked --all-groups
-uv run python --version
-```
-
-## Безопасные точки запуска
-
-Режим проверки загружает конфигурацию, настраивает структурированное логирование и завершается без обращения к Telegram:
-
-```powershell
-uv run community-bot --check
-uv run community-worker --check
-uv run community-health --process community-worker
-```
-
-Запуск без `--check` поднимает long polling bot либо долговечный notification
-worker. Для него нужны `BOT_TOKEN`, `INVITE_TOKEN_SECRET` и доступный PostgreSQL с
-актуальной миграцией. Одноразовый безопасный проход выполняется командой
-`uv run community-worker --once`.
-
-## Конфигурация
-
-Скопируйте `.env.example` в локальный `.env` и при необходимости измените только development-значения. `.env` игнорируется Git. Для миграций обязательна переменная `DATABASE_URL`; bootstrap-проверки используют безопасные значения по умолчанию. Секреты не должны попадать в Git, Jira или логи.
-
-## PostgreSQL и миграции
-
-```powershell
-docker compose config
 docker compose up -d --wait postgres
 uv run alembic upgrade head
-uv run alembic downgrade base
-uv run alembic upgrade head
 uv run pytest
-docker compose down -v
 ```
 
-Миграция `0002` создаёт `members`, `audit_events` и
-`processed_telegram_updates`, ограничения ролей и статусов, а также PostgreSQL
-trigger, запрещающий изменение и удаление audit events. Миграция `0003`
-добавляет неизменяемый журнал экономики, версии продуктовой конфигурации,
-уровни, историю активаций и активный указатель. Downgrade `0003` намеренно
-отказывается удалять непустую экономическую историю. Миграция `0004` добавляет
-хешированные приглашения, заявки регистрации, возобновляемые состояния диалога
-и редактируемые поля собственного профиля. Миграция `0005` создаёт
-неизменяемые версии каталога и воспроизводимый seed из восьми категорий и
-восьми шаблонов. Миграция `0006` добавляет долговечные черновики создания,
-неизменяемые снимки опубликованных заданий и transactional outbox. Публикация
-одной транзакцией резервирует полную награду, фиксирует задание, аудит,
-уведомление и receipt Telegram; повтор команды не создаёт второй эффект.
+Безопасная проверка worker не обращается к Telegram:
 
-Миграция `0010` добавляет fenced lease и bounded retry для transactional outbox,
-адресные `notifications` и heartbeat процессов. Worker фиксирует claim до Bot API,
-не держит транзакцию во время сети и после рестарта забирает только истёкшие
-lease. Порядок self-hosted релиза и backup-восстановления описан в
-[`docs/operations/PILOT_RUNBOOK.md`](docs/operations/PILOT_RUNBOOK.md).
+```powershell
+uv run community-worker --check
+```
 
-Редактируемый снимок уровней и порогов находится в
-`config/product-config.v1.json`. После проверки и активации runtime-источником
-истины служит PostgreSQL; смена названий или порогов выполняется новой версией
-конфигурации, а не правкой кода.
+Для реальной отправки уведомлений worker требует `BOT_TOKEN`, актуальную PostgreSQL-схему и остальные значения из `.env.example`. Секреты не хранятся в Git, Jira или логах.
 
-## Проверки качества
+## Проверки
 
 ```powershell
 uv run ruff format --check .
 uv run ruff check .
-uv run ty check src tests
+uv run ty check src tests ops
 uv run pytest
 ```
 
-Если `DATABASE_URL` задан, integration-тесты создают отдельные временные базы на указанном PostgreSQL. Если переменная отсутствует, Testcontainers автоматически поднимает `postgres:18`. Недоступный Docker завершает прогон ошибкой, а не пропуском тестов. В GitHub Actions полный набор выполняется в отдельном job с PostgreSQL 18.
+Integration-тесты используют реальный PostgreSQL: заданный `DATABASE_URL` либо Testcontainers.
 
-## Архитектурные границы
+## Архитектура
 
-Исходный код расположен в `src/community_bot/`:
+- `domain` — бизнес-инварианты без framework-зависимостей;
+- `application` — use cases, права, идемпотентность и транзакционные границы;
+- `infrastructure` — PostgreSQL, outbox, observability и Telegram sender;
+- `worker` — дедлайны и доставка уведомлений;
+- будущий HTTP transport вызывает те же application use cases.
 
-- `domain` не зависит от фреймворков и внешних слоёв;
-- `application` может зависеть от `domain`, но не от адаптеров;
-- `transport` и `infrastructure` содержат внешние адаптеры;
-- `bootstrap` собирает процесс bot;
-- `worker` предоставляет отдельную точку запуска из той же кодовой базы.
-
-Направления импортов проверяются AST-тестом в `tests/architecture/`.
-
-## Навигация
-
-- `docs/PROJECT_CONTEXT.md` — цели, границы и открытые продуктовые вопросы.
-- `docs/PROJECT_RULES_AND_GUARDRAILS_RU.md` — обязательные правила проекта.
-- `docs/DEVELOPMENT_PRINCIPLES.md` — канонические инженерные принципы.
-- `docs/AGENT_WORKFLOW.md` — процесс от Jira-задачи до передачи результата.
-- `docs/JIRA_WORKFLOW.md` — настройки и правила Jira `CB`.
-- `docs/ARCHITECTURE.md` — исходные архитектурные границы.
-- `docs/mvp/README.md` — требования, доменные правила, сценарии и план MVP.
-- `docs/mvp/TECH_STACK.md` — утверждённый технологический стек.
-- `docs/adr/` — архитектурные решения (ADR).
-- `agents/` — инструкции и конфигурация ролей агентов.
-- `tasks/` — рабочие артефакты Jira-задач.
-- `src/` — исходный код приложения.
-- `tests/` — автоматизированные тесты.
-
-## Telegram
-
-Для разрешённых операций с пользовательским Telegram-аккаунтом используется общий инструмент:
-
-```powershell
-& 'C:\Users\User\.codex\tools\telegram.ps1' probe
-```
-
-Сессии и ключи находятся вне репозитория.
-
-## MemPalace
-
-Выделенное хранилище: `C:\Users\User\.mempalace\palaces\community_bot`.
-
-Документация репозитория остаётся источником истины, а MemPalace используется как поисковый индекс.
+Каноническое направление зафиксировано в [ADR-0016](docs/adr/0016-mini-app-only-runtime.md). Требования находятся в [docs/mvp](docs/mvp/README.md), границы Release 2 — в [docs/release-2](docs/release-2/README.md).

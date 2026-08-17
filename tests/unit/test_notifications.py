@@ -9,7 +9,6 @@ from uuid import uuid4
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.methods import SendMessage
-from aiogram.types import InlineKeyboardMarkup
 
 from community_bot.application.notifications import (
     DeliveryClaim,
@@ -74,8 +73,34 @@ def test_delivery_window_handles_dst_and_never_passes_deadline() -> None:
 
     assert scheduled.tzinfo is datetime.UTC
     assert scheduled <= deadline
+
+
+def test_delivery_window_rejects_aware_clock_and_naive_candidate() -> None:
     with pytest.raises(NotificationError):
-        window.schedule(candidate=candidate, timezone_name="Invalid/Timezone")
+        DeliveryWindow(start=datetime.time(9, tzinfo=datetime.UTC))
+    with pytest.raises(NotificationError):
+        DeliveryWindow().schedule(
+            candidate=datetime.datetime(2026, 8, 17, 12),  # noqa: DTZ001
+            timezone_name="UTC",
+        )
+    with pytest.raises(NotificationError):
+        DeliveryWindow().schedule(
+            candidate=datetime.datetime(2026, 8, 17, 12, tzinfo=datetime.UTC),
+            timezone_name="Invalid/Timezone",
+        )
+
+
+def test_delivery_window_uses_previous_start_when_deadline_precedes_next_window() -> None:
+    candidate = datetime.datetime(2026, 8, 17, 22, tzinfo=datetime.UTC)
+    deadline = datetime.datetime(2026, 8, 18, 8, tzinfo=datetime.UTC)
+
+    scheduled = DeliveryWindow().schedule(
+        candidate=candidate,
+        timezone_name="UTC",
+        deadline=deadline,
+    )
+
+    assert scheduled == datetime.datetime(2026, 8, 17, 9, tzinfo=datetime.UTC)
 
 
 class _Queue:
@@ -165,19 +190,16 @@ class _TelegramBotStub:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.sent: list[tuple[int, str]] = []
-        self.reply_markups: list[object | None] = []
 
     async def send_message(
         self,
         *,
         chat_id: int,
         text: str,
-        reply_markup: object | None = None,
     ) -> None:
         if self.error is not None:
             raise self.error
         self.sent.append((chat_id, text))
-        self.reply_markups.append(reply_markup)
 
 
 def _telegram_method() -> SendMessage:
@@ -202,7 +224,6 @@ async def test_telegram_sender_uses_allowlisted_message() -> None:
     await sender.send(claim)
 
     assert bot.sent == [(42, "Опубликовано новое задание в сообществе.")]
-    assert bot.reply_markups == [None]
 
 
 @pytest.mark.asyncio
@@ -228,19 +249,30 @@ async def test_telegram_sender_rejects_unknown_notification_type() -> None:
     assert bot.sent == []
 
 
+@pytest.mark.parametrize(
+    ("notification_type", "expected"),
+    [
+        ("registration.approved", "Регистрация подтверждена."),
+        (
+            "task.cancellation_requested",
+            "Автор запросил отмену задания. Запрос ожидает ответа.",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_cancellation_notification_has_stable_performer_actions() -> None:
-    """A retry renders the same response identity and no arbitrary persisted text."""
+async def test_transitional_notifications_do_not_promise_an_unavailable_ui(
+    notification_type: str,
+    expected: str,
+) -> None:
+    """Core-only delivery is plain and never advertises a menu or unavailable Mini App."""
     bot = _TelegramBotStub()
     sender = TelegramNotificationSender(cast("Bot", bot))
-    response_id = uuid4()
     claim = DeliveryClaim(
         id=uuid4(),
         member_id=uuid4(),
         telegram_user_id=42,
-        notification_type="task.cancellation_requested",
+        notification_type=notification_type,
         payload={
-            "aggregate_id": str(response_id),
             "title": "Проверка лендинга",
             "private": "не отправлять",
         },
@@ -251,19 +283,9 @@ async def test_cancellation_notification_has_stable_performer_actions() -> None:
     await sender.send(claim)
     await sender.send(claim)
 
-    assert len(bot.sent) == 2
-    assert "Проверка лендинга" in bot.sent[0][1]
-    assert "не отправлять" not in bot.sent[0][1]
-    assert bot.reply_markups[0] == bot.reply_markups[1]
-    markup = bot.reply_markups[0]
-    assert isinstance(markup, InlineKeyboardMarkup)
-    callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
-    first, second = callbacks
-    assert isinstance(first, str)
-    assert isinstance(second, str)
-    assert first.startswith("task:cancel:yes:")
-    assert second.startswith("task:cancel:nope:")
-    assert all(len(value.encode()) <= 64 for value in (first, second))
+    assert bot.sent == [(42, expected), (42, expected)]
+    assert "меню" not in expected
+    assert "Mini App" not in expected
 
 
 @pytest.mark.parametrize(

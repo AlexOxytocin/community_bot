@@ -1,7 +1,7 @@
 [project]
 name = "community-bot"
 version = "1.0.0"
-description = "Modular monolith foundation for the Community Bot MVP"
+description = "Backend core and notification worker for the Community Mini App"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -18,15 +18,12 @@ dependencies = [
 ]
 
 [project.scripts]
-community-bot = "community_bot.bootstrap.bot:main"
 community-bootstrap-admin = "community_bot.bootstrap.initial_admin:main"
 community-repair-bootstrap-admin-profile = "community_bot.bootstrap.initial_admin:repair_main"
 community-bootstrap-product-config = "community_bot.bootstrap.product_config_cli:main"
 community-health = "community_bot.bootstrap.health:main"
 community-migrate = "community_bot.bootstrap.migrate:main"
 community-migration-head = "community_bot.bootstrap.migration_head:main"
-community-pilot-report = "community_bot.bootstrap.pilot_report:main"
-community-test-run = "community_bot.bootstrap.test_run:main"
 community-worker = "community_bot.worker.entrypoint:main"
 
 [build-system]
@@ -92,21 +89,6 @@ ignore = [
     "TRY003",
 ]
 "src/community_bot/bootstrap/settings.py" = ["TC002"]
-"src/community_bot/transport/telegram/registration.py" = [
-    "C901",
-    "PLR0911",
-    "PLR0915",
-    "RUF001",
-]
-"src/community_bot/transport/telegram/catalog.py" = ["C901", "RUF001"]
-"src/community_bot/transport/telegram/tasks.py" = [
-    "C901",
-    "EM101",
-    "PLR0915",
-    "RUF001",
-    "TRY003",
-    "TRY301",
-]
 "src/community_bot/application/tasks.py" = [
     "C901",
     "D102",
@@ -144,7 +126,6 @@ asyncio_mode = "strict"
 filterwarnings = ["error"]
 markers = [
     "integration: exercises an actual PostgreSQL instance",
-    "e2e: exercises a complete user story through the production Telegram dispatcher",
 ]
 testpaths = ["tests"]
 

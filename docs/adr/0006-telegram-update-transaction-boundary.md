@@ -75,5 +75,4 @@ PostgreSQL позволяет атомарно связать уникальны
 - [ADR-0005 — Технологический стек MVP](0005-mvp-technology-stack.md)
 - [Архитектура](../ARCHITECTURE.md)
 - [Безопасность и приватность](../mvp/07_SECURITY_AND_PRIVACY.md)
-- [План тестирования](../mvp/10_TEST_PLAN.md)
-- [План CB-6](../../tasks/CB-6/plan.md)
+- [Текущие проверки и архитектура](../../README.md)

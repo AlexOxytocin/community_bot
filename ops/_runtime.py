@@ -7,7 +7,6 @@ import re
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -133,27 +132,3 @@ def capture_text(command: list[str], **kwargs: Any) -> str:
     """Run a command and return stripped stdout."""
     result = subprocess.run(command, check=True, capture_output=True, text=True, **kwargs)
     return result.stdout.strip()
-
-
-def wait_for_health(
-    compose: list[str],
-    environment: dict[str, str],
-    *,
-    service: str,
-    process: str,
-    attempts: int = 30,
-    interval_seconds: int = 2,
-) -> None:
-    """Wait until one Compose service reports application readiness."""
-    for _ in range(attempts):
-        result = subprocess.run(
-            [*compose, "exec", "-T", service, "community-health", "--process", process],
-            env=environment,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        time.sleep(interval_seconds)
-    raise OpsError(f"Service did not become healthy: {service}")

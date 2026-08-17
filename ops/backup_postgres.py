@@ -1,4 +1,4 @@
-"""Create a root-only PostgreSQL logical backup for the self-hosted pilot."""
+"""Create a root-only PostgreSQL logical backup for the Mini App backend."""
 
 from __future__ import annotations
 

@@ -2,23 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast, override
+from typing import TypeVar
 from uuid import UUID, uuid4
 
 import pytest
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery, SendMessage
-from aiogram.types import CallbackQuery, Chat, Message, ReplyKeyboardMarkup, Update, User
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from community_bot.application.economy import EconomyService, ProductConfigBootstrapCoordinator
-from community_bot.application.notifications import NotificationWorker
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
@@ -30,7 +25,6 @@ from community_bot.application.registration import (
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.economy import economy_payload_hash, starting_grant
 from community_bot.domain.members import MemberRole, MemberStatus
-from community_bot.domain.notifications import DeliveryWindow
 from community_bot.domain.registration import (
     InvitationError,
     ModerationDecision,
@@ -46,19 +40,9 @@ from community_bot.infrastructure.db.models import (
     InvitationModel,
     InvitationRedemptionModel,
     MemberModel,
-    OutboxEventModel,
     ProcessedTelegramUpdateModel,
     RegistrationApplicationModel,
 )
-from community_bot.infrastructure.outbox import PostgresNotificationQueue
-from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
-from community_bot.transport.telegram.registration import build_registration_router
-from community_bot.worker.entrypoint import _notification_reply_markup
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
-    from aiogram.methods import TelegramMethod
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -204,103 +188,6 @@ async def test_invitation_is_hashed_and_concurrent_last_use_is_atomic(
     assert token not in invitation.code_hash
     assert invitation.uses_count == 1
     assert await count(database, InvitationRedemptionModel) == 1
-    await database.dispose()
-
-
-async def test_existing_timezone_step_accepts_human_city_name(database_url: str) -> None:
-    database = Database(database_url)
-    admin = await add_member(
-        database,
-        telegram_user_id=150,
-        role=MemberRole.ADMINISTRATOR,
-    )
-    registration = service(database)
-    token = await create_invite(registration, admin, update_id=1_500)
-    await registration.start(
-        RegistrationStartCommand(
-            update_id=1_501,
-            telegram_user_id=151,
-            telegram_username="existing_draft",
-            telegram_display_name="Existing Draft",
-            invitation_token=token,
-        )
-    )
-    await registration.answer(
-        RegistrationAnswerCommand(
-            update_id=1_502,
-            telegram_user_id=151,
-            expected_step=RegistrationStep.CONSENT,
-            raw_value="да",
-        )
-    )
-    await registration.answer(
-        RegistrationAnswerCommand(
-            update_id=1_503,
-            telegram_user_id=151,
-            expected_step=RegistrationStep.DISPLAY_NAME,
-            raw_value="Андрей",
-        )
-    )
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_registration_router(registration))
-    session = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=session)
-    user = User(id=151, is_bot=False, first_name="Andrey", username="existing_draft")
-    await dispatcher.feed_update(
-        bot,
-        Update(
-            update_id=1_504,
-            message=Message(
-                message_id=1_504,
-                date=datetime.now(UTC),
-                chat=Chat(id=user.id, type="private"),
-                from_user=user,
-                text="Неизвестный небольшой город",
-            ),
-        ),
-    )
-    city_view = await registration.answer(
-        RegistrationAnswerCommand(
-            update_id=1_504,
-            telegram_user_id=151,
-            expected_step=RegistrationStep.CITY,
-            raw_value="Неизвестный небольшой город",
-        )
-    )
-    assert city_view.context is not None
-    assert city_view.context.current_step is RegistrationStep.TIMEZONE
-    assert any("ближайший крупный город" in text_value for text_value in session.texts)
-    await dispatcher.feed_update(
-        bot,
-        Update(
-            update_id=1_505,
-            message=Message(
-                message_id=1_505,
-                date=datetime.now(UTC),
-                chat=Chat(id=user.id, type="private"),
-                from_user=user,
-                text="Buenos Aires",
-            ),
-        ),
-    )
-    timezone_view = await registration.answer(
-        RegistrationAnswerCommand(
-            update_id=1_505,
-            telegram_user_id=151,
-            expected_step=RegistrationStep.TIMEZONE,
-            raw_value="Buenos Aires",
-        )
-    )
-
-    assert timezone_view.context is not None
-    assert timezone_view.context.current_step is RegistrationStep.SHORT_BIO
-    assert timezone_view.context.payload["timezone"] == "America/Argentina/Buenos_Aires"
-    assert any("Коротко расскажите" in text_value for text_value in session.texts)
-    assert not any(
-        "Не удалось сохранить" in text_value  # noqa: RUF001 - exact Russian error text.
-        for text_value in session.texts
-    )
-    await bot.session.close()
     await database.dispose()
 
 
@@ -827,212 +714,6 @@ async def test_fault_after_grant_flush_rolls_back_full_approval(database_url: st
 
     await normal_service.moderate(command)
     assert await count(database, AccountTransactionModel) == 1
-    await database.dispose()
-
-
-class CapturingSession(BaseSession):
-    """Fake Bot API session used by the complete synthetic Telegram scenario."""
-
-    def __init__(self) -> None:
-        """Initialize an empty collection of outgoing user-facing texts."""
-        super().__init__()
-        self.texts: list[str] = []
-        self.sent_messages: list[tuple[int | str, str, object | None]] = []
-
-    async def close(self) -> None:
-        """Close no external resources."""
-
-    @override
-    async def make_request(
-        self,
-        bot: Bot,
-        method: TelegramMethod[TelegramType],
-        timeout: int | None = None,
-    ) -> TelegramType:
-        del bot, timeout
-        text_value = getattr(method, "text", None)
-        if isinstance(text_value, str):
-            self.texts.append(text_value)
-        if isinstance(method, SendMessage):
-            self.sent_messages.append((method.chat_id, method.text, method.reply_markup))
-        if isinstance(method, AnswerCallbackQuery):
-            return cast("TelegramType", True)  # noqa: FBT003 - Bot API success payload.
-        return cast(
-            "TelegramType",
-            Message(
-                message_id=999,
-                date=datetime.now(UTC),
-                chat=Chat(id=1, type="private"),
-                text="ok",
-            ),
-        )
-
-    @override
-    async def stream_content(
-        self,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int = 30,
-        chunk_size: int = 65536,
-        raise_for_status: bool = True,
-    ) -> AsyncGenerator[bytes]:
-        del url, headers, timeout, chunk_size, raise_for_status
-        if False:
-            yield b""
-
-
-def _registration_notification_worker(database: Database, bot: Bot) -> NotificationWorker:
-    return NotificationWorker(
-        PostgresNotificationQueue(database.session_factory),
-        TelegramNotificationSender(bot, _notification_reply_markup),
-        delivery_window=DeliveryWindow(start=time.min, end=time.max),
-    )
-
-
-def _assert_single_approval_menu(session: CapturingSession, telegram_user_id: int) -> None:
-    approval_messages = [
-        item
-        for item in session.sent_messages
-        if item[0] == telegram_user_id
-        and item[1] == "Регистрация подтверждена. Главное меню уже доступно."
-    ]
-    assert len(approval_messages) == 1
-    approval_markup = approval_messages[0][2]
-    assert isinstance(approval_markup, ReplyKeyboardMarkup)
-    assert [button.text for row in approval_markup.keyboard for button in row] == [
-        "Задания",
-        "Участники",
-        "Моя карточка",
-        "Баланс и статистика",
-        "Помощь",
-        "Администрирование",
-    ]
-
-
-async def test_complete_synthetic_telegram_registration_and_profile_smoke(
-    database_url: str,
-) -> None:
-    database = Database(database_url)
-    admin = await add_member(
-        database,
-        telegram_user_id=800,
-        role=MemberRole.ADMINISTRATOR,
-    )
-    registration = service(database)
-    token = await create_invite(registration, admin, update_id=8_000)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_registration_router(registration))
-    session = CapturingSession()
-    bot = Bot(token=f"{123456}:{'T' * 35}", session=session)
-    user = User(id=801, is_bot=False, first_name="Anna", username="anna")
-    admin_user = User(id=admin.telegram_user_id, is_bot=False, first_name="Admin")
-
-    def message_update(update_id: int, actor: User, text_value: str) -> Update:
-        return Update(
-            update_id=update_id,
-            message=Message(
-                message_id=update_id,
-                date=datetime.now(UTC),
-                chat=Chat(id=actor.id, type="private"),
-                from_user=actor,
-                text=text_value,
-            ),
-        )
-
-    def callback_update(
-        update_id: int,
-        actor: User,
-        data: str,
-    ) -> Update:
-        return Update(
-            update_id=update_id,
-            callback_query=CallbackQuery(
-                id=str(update_id),
-                from_user=actor,
-                chat_instance="test",
-                data=data,
-                message=Message(
-                    message_id=update_id,
-                    date=datetime.now(UTC),
-                    chat=Chat(id=actor.id, type="private"),
-                    from_user=actor,
-                    text="button",
-                ),
-            ),
-        )
-
-    await dispatcher.feed_update(bot, message_update(8_001, user, f"/start {token}"))
-    await dispatcher.feed_update(
-        bot,
-        callback_update(8_002, user, "registration:consent"),
-    )
-    await dispatcher.feed_update(bot, message_update(8_003, user, "/cancel"))
-    assert await registration.expected_input(user.id) is None
-    await dispatcher.feed_update(bot, message_update(8_004, user, "ignored value"))
-    await dispatcher.feed_update(bot, message_update(8_005, user, "/start"))
-    assert await registration.expected_input(user.id) == ("registration", "display_name")
-    answers = [
-        "Анна",
-        "Buenos Aires",
-        "Помогаю тестировать цифровые продукты",
-        "Найти полезные задачи",
-        "Тестирование, Продукт",
-        "Python, Исследования",
-        "Два часа в неделю",
-    ]
-    for offset, answer in enumerate(answers, start=10):
-        await dispatcher.feed_update(bot, message_update(8_000 + offset, user, answer))
-    await dispatcher.feed_update(
-        bot,
-        callback_update(8_020, user, "registration:submit"),
-    )
-    queue = await registration.submitted_registrations(
-        actor_telegram_user_id=admin.telegram_user_id
-    )
-    assert len(queue) == 1
-    assert queue[0].payload["city"] == "Buenos Aires"
-    assert queue[0].payload["timezone"] == "America/Argentina/Buenos_Aires"
-    target_id = queue[0].member_id
-    await dispatcher.feed_update(
-        bot,
-        callback_update(8_021, admin_user, f"registration:approve:{target_id}"),
-    )
-    assert await count(database, OutboxEventModel) == 1
-    assert not any(
-        item[0] == user.id and item[1] == "Регистрация подтверждена. Главное меню уже доступно."
-        for item in session.sent_messages
-    )
-    worker = _registration_notification_worker(database, bot)
-    first_tick = await worker.tick(now=datetime.now(UTC) + timedelta(seconds=1))
-    assert first_tick.notifications_sent == 1
-    _assert_single_approval_menu(session, user.id)
-    await dispatcher.feed_update(
-        bot,
-        callback_update(8_021, admin_user, f"registration:approve:{target_id}"),
-    )
-    second_tick = await worker.tick(now=datetime.now(UTC) + timedelta(seconds=2))
-    assert second_tick.notifications_sent == 0
-    assert await count(database, OutboxEventModel) == 1
-    _assert_single_approval_menu(session, user.id)
-    await ProductConfigBootstrapCoordinator(
-        database.unit_of_work,
-        load_product_config_candidate,
-    ).prepare(
-        candidate_path=CONFIG_PATH,
-        actor_member_id=admin.id,
-        activation_command_id=uuid4(),
-    )
-    await dispatcher.feed_update(bot, message_update(8_022, user, "/profile"))
-
-    assert any("Проверьте анкету" in text_value for text_value in session.texts)
-    assert any(
-        "Коротко расскажите о себе" in text_value  # noqa: RUF001 - exact Russian prompt.
-        for text_value in session.texts
-    )
-    assert not any("Europe/Moscow" in text_value for text_value in session.texts)
-    assert any("Баланс: 10 кредитов" in text_value for text_value in session.texts)
-    assert await count(database, AccountTransactionModel) == 1
-    await bot.session.close()
     await database.dispose()
 
 

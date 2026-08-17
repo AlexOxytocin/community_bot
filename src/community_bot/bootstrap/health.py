@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 def main(argv: Sequence[str] | None = None) -> int:
     """Check one process heartbeat and critical PostgreSQL state."""
     parser = argparse.ArgumentParser(prog="community-health")
-    parser.add_argument("--process", required=True, choices=("community-bot", "community-worker"))
+    parser.add_argument("--process", required=True, choices=("community-worker",))
     parser.add_argument("--not-before", type=_parse_timestamp)
     arguments = parser.parse_args(argv)
     settings = get_settings()

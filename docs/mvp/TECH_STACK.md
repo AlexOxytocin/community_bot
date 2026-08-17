@@ -1,161 +1,38 @@
-# Технологический стек MVP
+# Технологический стек
 
-## 1. Цель выбора
+Канонические решения: [ADR-0005](../adr/0005-mvp-technology-stack.md) и [ADR-0016](../adr/0016-mini-app-only-runtime.md).
 
-Стек рассчитан на Telegram-бота закрытого сообщества с транзакционной экономикой, конечными автоматами диалогов, модерацией и фоновыми уведомлениями. Приоритеты: корректность данных, простая эксплуатация, быстрый выпуск пилота и возможность расти без преждевременного перехода к микросервисам.
+## Сохранённый backend
 
-Каноническое архитектурное решение: [ADR-0005](../adr/0005-mvp-technology-stack.md).
+| Область | Выбор |
+|---|---|
+| Язык | Python 3.13, asyncio |
+| Данные | PostgreSQL 18, SQLAlchemy 2 async, asyncpg |
+| Миграции | Alembic |
+| Конфигурация | Pydantic 2, pydantic-settings |
+| Outbox notifications | aiogram 3.x только как outbound Bot API client |
+| Проверки | Ruff, ty, pytest, Hypothesis, Testcontainers |
+| Наблюдаемость | structlog, Sentry без PII |
+| Зависимости | uv и `uv.lock` |
 
-## 2. Основной стек
+Backend остаётся модульным монолитом. Domain/application не зависят от web или Telegram SDK. PostgreSQL UoW объединяет state, ledger, audit, idempotency receipt и outbox.
 
-| Область | Выбор | Назначение |
-|---|---|---|
-| Язык | Python 3.13 | прикладной и доменный код |
-| Асинхронная модель | `asyncio` | обработка Telegram updates, БД и фоновых задач |
-| Telegram | aiogram 3.x | роутеры, middleware, FSM, long polling |
-| СУБД | PostgreSQL 18 | транзакции, ограничения, блокировки, JSONB и очередь outbox |
-| ORM | SQLAlchemy 2.x async | модели хранения и транзакционные unit of work |
-| Драйвер БД | asyncpg | асинхронный доступ к PostgreSQL |
-| Миграции | Alembic | версионирование схемы и seed-миграции |
-| Конфигурация | Pydantic 2 + pydantic-settings | проверяемые настройки из окружения |
-| Контракты шаблонов | JSON Schema Draft 2020-12 + jsonschema | локальная проверка input/result без сетевых ссылок |
-| Часовые пояса | zoneinfo + tzdata | проверка IANA timezone одинаково на Linux и Windows |
-| Зависимости | uv | виртуальное окружение, зависимости и lock-файл |
-| Формат проекта | `pyproject.toml` + `uv.lock` | единая воспроизводимая конфигурация |
-| Стиль и линтинг | Ruff | форматирование и статические проверки |
-| Типы | ty | статическая проверка типов |
-| Тесты | pytest + pytest-asyncio | модульные и асинхронные тесты |
-| Генеративные тесты | Hypothesis | инварианты экономики и переходов состояний |
-| Интеграционные тесты | Testcontainers | проверки на настоящем PostgreSQL |
-| Логи | стандартный `logging` + structlog | структурированные JSON-логи |
-| Эксплуатационные скрипты | Python 3.13 host-side scripts | deployment, backup, restore drill и локальные проверки; два узких shell wrapper-а защищают release boundary |
-| Локальная среда | Docker Compose | PostgreSQL и запуск сервисов разработки |
-| CI | GitHub Actions | линтинг, типы, тесты и проверка миграций |
+## Целевой web-слой
 
-Версии библиотек фиксируются в `uv.lock`. Переход на новый major требует отдельного решения, если меняет публичные интерфейсы или архитектурные границы.
+| Область | Выбор |
+|---|---|
+| HTTPS API | FastAPI внутри существующего монолита |
+| Контракт | versioned `/api/v1`, Pydantic, OpenAPI |
+| Frontend | React, TypeScript, Vite |
+| Telegram integration | тонкий `PlatformBridge` и server-side validation auth proof |
+| Actor identity | internal `member_id`; права читаются из PostgreSQL |
+| Mutation identity | namespaced operation ID + payload fingerprint + stored outcome |
+| Rollout | server-side fail-closed gates |
 
-## 3. Форма приложения
+FastAPI/frontend ещё не реализуются в CB-62; они входят в CB-51—CB-57.
 
-MVP реализуется как модульный монолит в одном репозитории и одном Python-пакете. Из одной кодовой базы запускаются два процесса:
+## Runtime после очистки
 
-1. `bot` — принимает Telegram updates через long polling и выполняет пользовательские сценарии.
-2. `worker` — обрабатывает outbox, уведомления, дедлайны и повторные попытки.
+Текущий transitional Compose содержит PostgreSQL, одноразовый `migrate` и `worker`. Публичного HTTP-порта пока нет. Старый `bot` process и release workflow удалены. Backup и restore drill сохранены как защита данных до появления нового deployment-контура.
 
-Оба процесса используют одну PostgreSQL, общую доменную модель и одинаковый слой конфигурации. Это не два микросервиса: раздельные точки запуска нужны только для независимого цикла выполнения.
-
-## 4. Границы модулей
-
-Рекомендуемая исходная структура:
-
-```text
-src/community_bot/
-  bootstrap/
-  transport/telegram/
-  application/
-  domain/
-  infrastructure/db/
-  infrastructure/outbox/
-  infrastructure/observability/
-  worker/
-```
-
-- `transport` преобразует Telegram update в вызов прикладного сценария и не содержит бизнес-правил.
-- `application` управляет транзакцией, правами и последовательностью доменных операций.
-- `domain` содержит сущности, значения, переходы и инварианты без зависимости от aiogram и SQLAlchemy.
-- `infrastructure` реализует хранение, outbox, логирование и внешние адаптеры.
-- `bootstrap` собирает зависимости и точки запуска.
-
-Запрещены импорты aiogram в `domain` и прямое использование ORM-моделей как доменного API.
-
-## 5. Транзакции и фоновые задания
-
-- Начисление кредитов, опыта, резервирование награды и смена состояния задания выполняются одной транзакцией PostgreSQL.
-- Каждая изменяющая команда имеет ключ идемпотентности.
-- События для уведомлений записываются в outbox в той же транзакции, что и доменное изменение.
-- Worker выбирает готовые записи через `FOR UPDATE SKIP LOCKED`, ограничивает число попыток и фиксирует последнюю ошибку.
-- Доставленное уведомление не удаляется сразу: его статус остаётся частью аудита.
-- Плановые операции используют таблицу заданий и цикл worker; отдельный брокер очередей в MVP не нужен.
-
-## 6. Запуск и размещение
-
-На локальной машине все зависимости поднимаются через Docker Compose. Сам бот может запускаться через `uv run` либо внутри контейнера.
-
-Пилот размещается на одном собственном сервере под Ubuntu 24.04 через Docker
-Compose:
-
-- `bot`, `worker`, одноразовый `migrate` и PostgreSQL 18 работают в отдельном
-  Compose project и внутренней сети;
-- PostgreSQL не публикует порт, а long polling не требует входящего HTTP-порта;
-- GitHub Actions публикует один reviewed `linux/arm64` image в GHCR под архитектуру
-  пилотного сервера, штатный release использует его SHA-256 digest без mutable tags;
-- deployment запускает PostgreSQL, migration gate, `worker` + readiness и лишь
-  затем `bot` + readiness;
-- release-миграции expand-only и совместимы с предыдущим image; частичный сбой
-  откатывает процессы без автоматического schema downgrade;
-- Docker ограничивает размер локальных JSON-логов, Sentry хранит очищенные error
-  events не более 30 дней;
-- ежедневный root-only logical backup хранится локально семь суток, restore
-  drill выполняется до пилота и каждые четыре недели.
-
-External backup, application object storage и webhook не входят в MVP. Полный
-эксплуатационный контракт зафиксирован в
-[ADR-0009](../adr/0009-self-hosted-pilot-runtime.md); он заменяет hosting,
-release и backup-положения ADR-0008.
-
-## 7. Контроль качества
-
-Минимальный CI для каждого изменения:
-
-```text
-ruff format --check
-ruff check
-ty check
-pytest
-alembic upgrade head
-```
-
-Отдельные обязательные проверки:
-
-- доменные тесты не требуют Telegram и PostgreSQL;
-- интеграционные тесты проверяют ограничения и конкуренцию на PostgreSQL;
-- миграции проверяются на пустой базе и на последней поддерживаемой схеме;
-- экономические инварианты покрываются property-based тестами;
-- повторная доставка update и повторный callback не создают двойных начислений.
-
-## 8. Что не входит в MVP
-
-Без отдельного обоснования не добавляются:
-
-- FastAPI и публичный HTTP API;
-- Redis;
-- Celery и внешний брокер сообщений;
-- MongoDB;
-- Kubernetes;
-- микросервисы;
-- LLM в критических доменных решениях;
-- отдельная веб-панель администратора.
-
-Это не вечный запрет. Это защита первой версии от инфраструктуры, которая пока не решает ни одной подтверждённой проблемы.
-
-## 9. Расширение стека для Release 2
-
-Появление подтверждённого Telegram Mini App является отдельной причиной снять
-запрет MVP на FastAPI и frontend строго внутри эпика CB-48. Принятый контракт
-зафиксирован в [ADR-0014](../adr/0014-multi-interface-release-2.md) и
-[capability Release 2](../release-2/README.md).
-
-| Область | Выбор для Release 2 | Граница |
-|---|---|---|
-| HTTPS transport | FastAPI внутри существующего модульного монолита | Только inbound/API adapter; domain и application от FastAPI не зависят |
-| HTTP contract | Versioned `/api/v1`, Pydantic и OpenAPI | Сервер остаётся источником state, прав и допустимых transitions |
-| Frontend | React + TypeScript + Vite SPA | Один frontend для Mini App и будущего browser mode |
-| Platform integration | `PlatformBridge` | Telegram SDK изолирован; business state и authorization не хранятся в bridge |
-| Authentication | Provider-specific proof adapter → краткоживущая внутренняя session | Subject — internal `member_id`; role/status/permissions/ownership читаются из PostgreSQL для защищённого use case |
-| Operation identity | Namespaced receipt с command, payload fingerprint и outcome | Exact replay возвращает outcome; несовпадение даёт conflict без доменного эффекта |
-| Rollout | Server-side fail-closed feature flags | Ошибка или отсутствие configuration означает `disabled`; прямой URL/API gate не обходит |
-
-Python 3.13, PostgreSQL 18, SQLAlchemy/Alembic, ledger, audit, outbox, worker и
-единый immutable release сохраняются. Runtime-часть этой схемы ещё не
-реализована: её создают CB-51 — CB-57, а дизайн-систему — CB-58. Browser auth,
-public registration, Redis, Celery, микросервисы и отдельный browser backend
-этим решением не добавляются.
+Не добавляются без отдельного решения: Redis, Celery, внешний брокер, Kubernetes, микросервисы, browser auth и LLM в критических доменных решениях.

@@ -1,4 +1,4 @@
-name: community-bot
+name: community-mini-app-core
 
 services:
   postgres:
@@ -49,27 +49,6 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "community-health", "--process", "community-worker"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    networks: [internal, egress]
-    logging: *logging
-
-  bot:
-    image: ${COMMUNITY_BOT_IMAGE}
-    command: community-bot
-    init: true
-    restart: unless-stopped
-    stop_grace_period: 30s
-    env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
-    environment:
-      RELEASE: ${COMMUNITY_BOT_RELEASE:-manual}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "community-health", "--process", "community-bot"]
       interval: 30s
       timeout: 10s
       retries: 5

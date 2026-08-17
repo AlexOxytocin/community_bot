@@ -1,6 +1,6 @@
 # ADR-0014 — Multi-interface архитектура Release 2
 
-**Статус:** Принято
+**Статус:** Частично заменено ADR-0016 в части bot fallback и parity
 
 **Дата:** 2026-08-16
 
@@ -199,5 +199,5 @@ Mini App SPA добавляет runtime и deployment сложность без 
 - [ADR-0006 — Транзакционная граница Telegram updates](0006-telegram-update-transaction-boundary.md)
 - [ADR-0009 — Самостоятельное размещение пилота](0009-self-hosted-pilot-runtime.md)
 - [ADR-0011 — Защищённый release](0011-protected-single-ci-release.md)
-- [CB-49 — план](../../tasks/CB-49/plan.md)
+- [Заменяющее решение ADR-0016](0016-mini-app-only-runtime.md)
 - [Telegram Mini Apps](https://core.telegram.org/bots/webapps)

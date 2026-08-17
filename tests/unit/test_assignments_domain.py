@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -13,6 +14,7 @@ from community_bot.domain.assignments import (
     AssignmentStatus,
     partial_reward,
     require_dispute_allowed,
+    require_submit_allowed,
 )
 
 
@@ -39,3 +41,24 @@ def test_dispute_window_is_half_open() -> None:
     require_dispute_allowed(assignment, now=now + datetime.timedelta(hours=23))
     with pytest.raises(AssignmentError):
         require_dispute_allowed(assignment, now=now + datetime.timedelta(hours=24))
+
+
+def test_submit_requires_active_assignment_and_open_deadline() -> None:
+    now = datetime.datetime.now(datetime.UTC)
+    accepted = Assignment(
+        id=uuid4(),
+        task_id=uuid4(),
+        performer_id=uuid4(),
+        slot_number=1,
+        status=AssignmentStatus.ACCEPTED,
+        accepted_at=now,
+    )
+    require_submit_allowed(accepted, task_deadline=now + datetime.timedelta(hours=1), now=now)
+    with pytest.raises(AssignmentError, match="deadline"):
+        require_submit_allowed(accepted, task_deadline=now, now=now)
+    with pytest.raises(AssignmentError, match="current state"):
+        require_submit_allowed(
+            replace(accepted, status=AssignmentStatus.CANCELLED),
+            task_deadline=now + datetime.timedelta(hours=1),
+            now=now,
+        )
