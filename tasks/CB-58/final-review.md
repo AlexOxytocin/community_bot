@@ -1,38 +1,30 @@
-# CB-58 — финальное ревью
+# CB-58 — финальный recheck компактной редакции
+
+Schema: `community_bot.final_review.verdict.v1`
 
 Status: approved
 
 ## Проверенная область
 
-Повторно проверена полная локальная реализация CB-58 в worktree
-`C:\Users\User\community_bot-worktrees\CB-58` на ветке `task/CB-58`
-относительно зафиксированной базы
-`cbb1807fe281f022cb46caef75e3adaeb9cbce9e`.
+Проверен текущий полностью staged итоговый diff ветки `task/CB-58`
+относительно `origin/main` после первого final review со
+`Status: changes_requested`. Прочитаны:
 
-Перечитаны предыдущее финальное ревью со `Status: changes_requested`,
-обновлённые `test-plan.md`, `implementation-report.md`, product outputs,
-контрактные тесты и локальные privacy-safe browser evidence. Фактический diff
-сверен с утверждёнными plan/source context и правилами уровня 3. Отдельно
-перепроверены три исходных существенных замечания: live state bindings,
-однозначность mode projection и соответствие синтетических примеров
-D-018/D-032.
+- `owner-decision-after-final-review.md` с явным разрешением владельца
+  «ок продолжай»;
+- сохранённый первый verdict
+  `final-review-simplification-attempt-1.md`;
+- исправленные contract test и `Manrope-OFL.txt`;
+- обновлённый `implementation-report.md` и текущий test evidence.
 
-Изменения по-прежнему ограничены документацией, автономным preview,
-task-артефактами и `tests/documentation/`. Runtime бота, API, БД, migrations,
-React/Vite, Telegram SDK, auth и deployment не затронуты. SHA-256 трёх product
-outputs совпадают с `implementation-report.md`.
+Разрешённый remediation ограничен двумя прежними findings: Ruff formatter
+применён к contract test, trailing whitespace удалён из OFL. Unstaged и
+untracked файлов перед созданием этого verdict не было. Product design,
+runtime, Telegram transport, API, БД, migrations и deployment не менялись.
 
-## Уровень процесса и условные барьеры
-
-| Барьер | Требуется | Результат | Доказательство |
-|---|---|---|---|
-| Уровень 3 | Да | Пройден | Сохранены source context, утверждённый plan/test plan, R-008 escalation history, implementation report и независимые reviews |
-| Ветка и task base | Да | Пройден | `task/CB-58`; `HEAD` и merge-base равны `cbb1807fe281f022cb46caef75e3adaeb9cbce9e` |
-| Независимые AT/Ruff gates | Да | Пройден | `6 passed in 0.55s`; Ruff format — `484 files already formatted`; Ruff check — `All checks passed`; whitespace check успешен |
-| Browser/manual gate | Да | Пройден | Независимо проверены 114 records во всех 6 palettes, 11 control tuples, negative preset cases и прежние interactive regressions |
-| Доменная проверка | Да | Пройден | Примеры и form limit соответствуют D-018/D-032 и `02_DOMAIN_RULES.md` |
-| Секреты и автономность | Да | Пройден | Evidence синтетический; console/page/external errors — 0; preview не требует сети или внешнего runtime |
-| Release freeze | Да | Активен | `origin/main` уже продвинут до `049fb8997b803f0c150f5bdc0fde645dc888fab2`; rebase/merge, commit/push/PR запрещены до CB-50/v1.0.0 |
+Уровень процесса — 3. Текущий `plan-review.md` сохраняет точный
+`Status: approved`; owner decision легитимно открыл один узкий recheck после
+первого final verdict.
 
 ## Критические замечания
 
@@ -40,132 +32,106 @@ outputs совпадают с `implementation-report.md`.
 
 ## Существенные замечания
 
-Нет. Все три обязательных замечания первого финального ревью закрыты:
+Нет.
 
-1. **Live state contract.** Preview содержит ровно 114 уникальных живых
-   `componentStateTokens` specimens и по одному style target на record.
-   Независимая browser-проверка прошла все ненулевые
-   background/foreground/border/focus/icon/indicator/placeholder/message/
-   progress/action paths во всех шести effective palettes без расхождений на
-   фактических target/field nodes. Число evidence воспроизводится:
-   `475 token paths × 6 palettes + 3 interactive regressions × 6 = 2868`.
-   Дополнительно реальным hover/press в browser dark подтверждены
-   primary `#2DD4BF → #5EEAD4 → #14B8A6` и destructive
-   `#B42335 → #9F1239 → #881337`.
-2. **Control projection.** Все 11 разрешённых
-   platform/theme/preset combinations возвращают mode tuple из точного
-   `contracts.paletteModes` record. В browser preset control отключён; explicit
-   Telegram dark/light показывают только два совместимых preset; Telegram
-   system — четыре. Несовместимые light↔dark варианты отсутствуют в options,
-   обе negative проверки пройдены. Console/page errors и внешние requests — 0.
-3. **Product examples.** Member task теперь показывает
-   `S · 15–40 минут · 3 кредита`, community task — автора `Сообщество` и
-   `M · 40–75 минут · 4 кредита`; категория — `Практическая помощь`,
-   `maxlength` и counter используют `1200`. Прежние ошибочные значения
-   отсутствуют; это дополнительно закреплено `AT-06`.
+Оба существенных finding первого final review закрыты:
+
+1. `ruff format --check --no-cache .` теперь завершается успешно:
+   `519 files already formatted`.
+2. Строка 21 `Manrope-OFL.txt` больше не содержит trailing whitespace;
+   `git diff --cached --check` завершается с exit code `0` и охватывает уже
+   staged font/license bundle.
 
 ## Незначительные замечания
 
-Нет обязательных замечаний. `tests/documentation/__init__.py` обоснован как
-package marker для репозиторного Ruff `INP001`, содержит только module docstring,
-отражён в обновлённом отчёте и не добавляет runtime logic.
+Необязательная редакционная правка: `implementation-report.md:60` фиксирует
+`518 files passed`, тогда как независимый текущий запуск Ruff сообщает `519
+files already formatted`. Команда, exit code и результат `passed` верны;
+расхождение счётчика не влияет на CI или критерии приёмки.
 
-## Критерии приёмки
+## Результат матрицы приёмки
 
 | Критерий CB-58 | Результат | Доказательство |
-|---|---|---|
-| Semantic dark/light palette и независимые status roles | Пройден | Exact leaf sets, 114 state records, 158 contrast pairs; `AT-01`—`AT-03` |
-| WCAG 2.2 AA для текста, controls и focus | Пройден в области CB-58 | Declared ratios, computed live-state bindings, focus/keyboard/reflow evidence |
-| Targets не меньше `44×44` | Пройден | 18 scene/frame measurements, undersized targets — 0 |
-| Один semantic/component contract для Telegram и browser | Пройден | 6 palette modes и 11 разрешённых control tuples без неоднозначных combinations |
-| Telegram SDK изолирован | Пройден | SDK/globals/initData отсутствуют; provider mapping остаётся data contract |
-| Manrope и ограниченный display font | Пройден | Embedded fonts, pinned provenance, hashes, OFL и notices подтверждены `AT-04` |
-| Функциональные glow и motion | Пройден | Gradient ограничен brand/route; reduced override и media query отключают несущественное движение |
-| Mobile и desktop preview | Пройден | `320×568`, `390×844`, `1440×900`; compact/wide navigation и table/list работают без overflow |
-| Handoff доступен CB-53 | Пройден локально | `DESIGN.md`, versioned JSON и self-contained preview согласованы и связаны из capability README |
+| --- | --- | --- |
+| Semantic dark/light roles | Пройден | Targeted token/parity contract |
+| Cyan/violet отделены от success/error | Пройден | Раздельные brand и status roles |
+| WCAG AA и targets от 44px | Пройден в области preview | 19 contrast pairs, unsafe provider counterexamples и size contract |
+| Один token contract для Telegram/browser | Пройден | Mapping и atomic base-theme fallback |
+| Telegram SDK изолирован | Пройден | Только `PlatformBridge` guidance; runtime diff отсутствует |
+| Manrope для рабочего UI | Пройден | Font `165420` bytes, pinned SHA-256 и OFL bundle |
+| Purposeful glow/motion | Пройден | Gradient ограничен brand/route, reduced-motion rule сохранён |
+| Mobile и desktop preview | Пройден | Предыдущее независимое Chrome evidence остаётся применимым; HTML/CSS remediation не затрагивал |
 
-## Тесты и проверка ключевого сценария
+## Результат матрицы тестов
 
-Независимо повторены целевые проверки:
+Независимо выполнены:
 
 ```text
-C:\Users\User\community_bot\.venv\Scripts\python.exe -B -m pytest -q --no-cov -p no:cacheprovider tests/documentation/test_release2_design_system.py
-6 passed in 0.55s
+ruff format --check --no-cache .
+519 files already formatted
 
-C:\Users\User\community_bot\.venv\Scripts\ruff.exe format --check --no-cache .
-484 files already formatted
-
-C:\Users\User\community_bot\.venv\Scripts\ruff.exe check --no-cache .
+ruff check --no-cache .
 All checks passed!
 
-git diff --check cbb1807
-tracked и отдельный untracked no-index whitespace check — успешно
+ty check src tests ops/verify_release_provenance.py
+All checks passed!
+
+python -B -m pytest -q --no-cov -p no:cacheprovider tests/documentation/test_release2_design_system.py
+5 passed in 0.21s
+
+git diff --cached --check
+passed, exit code 0
 ```
 
-Независимый read-only Playwright audit в Chrome `151.0.7922.138` через
-`file://` подтвердил:
+Formatter изменил только представление Python test: пять provider cases,
+equality inventory и остальные assertions сохраняют прежнюю семантику.
+Targeted suite повторно доказывает обе themes, 19 live contrast pairs, три
+terminal unsafe candidates, atomic fallback, JSON ↔ CSS parity, font hash и
+preview markers.
 
-- 114 live records и 475 ненулевых visual fields в каждой из шести palettes;
-- отсутствие расхождений computed styles на заявленных target/field nodes;
-- прежние primary pressed и destructive hover/pressed ошибки исправлены и на
-  реальных интерактивных buttons;
-- все 11 canonical projection tuples дают ожидаемый `modeId`, а incompatible
-  preset отсутствует в доступных options;
-- console errors, page errors и HTTP(S) requests — 0;
-- исправленные D-018/D-032 значения и limit `1200` присутствуют, прежние
-  ошибочные факты отсутствуют.
+Полный product suite в первом review дал `605 passed, 1 skipped` и пять
+environment-only entrypoint failures; контрольный повтор этих пяти cases с
+`.venv\Scripts` в `PATH` дал `5 passed`. В текущем remediation runtime и
+смысл тестов не менялись, поэтому повтор полного семиминутного suite не нужен.
 
-Обновлённые `Actual/Evidence/Deviation/Result` в TP-06, TP-07, TP-10, TP-11,
-TP-14 и TP-15 соответствуют проверенному поведению. Полный developer run
-`501 passed, 1 skipped` повторно не запускался: runtime diff отсутствует, а
-затронутая область независимо закрыта целевым suite и browser contract audit.
+Browser/contrast evidence первого review также остаётся применимым: remediation
+не затрагивал tokens, HTML или CSS. Тогда независимо были подтверждены loaded
+Manrope, desktop/mobile без overflow, dark/light overlay, computed
+hover/pressed states, dialog focus/Escape/focus return и отсутствие
+console/page errors.
 
-## Документация и язык
+## Безопасность и секреты
 
-`DESIGN.md`, внешний JSON и embedded JSON согласованы; capability README ведёт
-на все три outputs. Смысловая документация написана по-русски, технические
-идентификаторы сохранены. Обновлённые test plan и implementation report больше
-не переносят неподтверждённый `passed`: они описывают повторный evidence после
-remediation и честно фиксируют ограничения.
+Повторный secret-like scan всех staged textual paths не нашёл credentials,
+Bot API tokens, session strings, private keys или cookies. Binary Manrope
+повторно имеет SHA-256
+`d0639be45d0af36e798172419d7bd173c4bd4f29e2b76cbb69db1d11bf8b0a40`.
+Staged path audit не выявил изменений в `src/`, `alembic/`, `ops/` или
+`config/`. Telegram/live действия не выполнялись.
 
-## Секреты и безопасность
+## Процесс и ветка
 
-Preview остаётся автономным: нет `fetch`, XHR, WebSocket, storage, cookies,
-service worker, analytics, Telegram globals или внешних runtime resources.
-Browser audit не увидел внешних запросов. Evidence содержит только synthetic
-data и `REQ-0001`, без raw DOM, Telegram identifiers, credentials или PII.
+- ветка: `task/CB-58`;
+- относительно `origin/main`: два task commits впереди, отставание отсутствует;
+- итоговый diff полностью staged до создания этого verdict;
+- первый непройденный verdict сохранён отдельно;
+- новый recheck явно разрешён владельцем и не расширяет remediation.
 
-## Процесс Git/Jira
-
-Ветка остаётся `task/CB-58` на исходной базе `cbb1807`. Продвижение
-`origin/main` до `049fb8997b803f0c150f5bdc0fde645dc888fab2` связано с CB-59 и
-не является дефектом CB-58: по явному release freeze rebase/merge сейчас не
-выполняются. Jira, commit, push, PR и иное внешнее состояние в ходе повторного
-review не изменялись.
-
-`Status: approved` подтверждает локальную готовность design handoff, но не
-снимает freeze и не разрешает начинать внешний Git route до закрытия CB-50 и
-фиксации `v1.0.0`.
+Workflow gate финального ревью пройден. После добавления этого артефакта можно
+продолжить стандартный маршрут commit/push/PR/CI/merge; внешний CI остаётся
+обязательным и не подменяется локальным recheck.
 
 ## Обязательные действия
 
-Исправлений по результату ревью не требуется. Сохранить ветку без
-rebase/merge/commit/push/PR до снятия release freeze; после CB-50/v1.0.0 пройти
-предусмотренный проектом Git/Jira route без подмены production-проверок
-статическим preview.
+Нет.
 
-## Остаточные риски
+## Остаточные риски и неопределённость
 
-- Axe-core и полноценный screen-reader pass в доступном runtime отсутствуют;
-  выполнены contrast contract, native semantics, CDP accessibility tree,
-  keyboard и focus checks, но совместимость с конкретным screen reader не
-  заявляется.
-- 400% reflow проверен эквивалентом CDP device metrics, а не UI zoom видимого
-  Chrome; это ограничение явно отражено в test plan.
-- Visual baseline до CB-58 отсутствует, поэтому pixel regression остаётся
-  неприменимым; выполнен ручной visual/anti-AI-slop audit.
-- Form placeholder role в contract gallery доказан отдельным живым visual field;
-  production-применение к native `::placeholder`, как и остальные React
-  components, должно быть реализовано и проверено в CB-53.
-- Live Telegram/WebView parity, browser auth, server integration и deployment
-  не входят в CB-58 и остаются последующим release-2 work.
+- Static preview не доказывает parity будущих React components и реального
+  Telegram WebView; это gate CB-53/release acceptance.
+- Pixel baseline и полноценный screen-reader pass отсутствуют; visual
+  regression остаётся `inconclusive`.
+- Contrast inventory декларативен: для текущего CSS его полнота проверена, но
+  будущие visual pairs требуют синхронного обновления inventory и policy.
+- GitHub CI ещё не выполнялся для этого staged результата; локально
+  воспроизведены его применимые static и targeted команды.
