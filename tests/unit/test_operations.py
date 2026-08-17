@@ -70,6 +70,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "__init__.py",
         "_runtime.py",
         "backup_postgres.py",
+        "check_refactor_contract.py",
         "restore_drill.py",
     }
     assert list((root / "ops").glob("*.sh")) == []
