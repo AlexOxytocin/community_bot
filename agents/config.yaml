@@ -14,7 +14,7 @@ tracker:
   transition_rule: discover_exact_transitions_per_issue
 
 repository:
-  remote: https://github.com/alexgoodman53/community_bot
+  remote: https://github.com/AlexOxytocin/community_bot
   stable_branch: main
   pull_request_base: main
   task_branch_pattern: task/{issue_key}
