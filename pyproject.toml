@@ -42,6 +42,7 @@ test = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
+    "playwright>=1.62,<2",
     "pyyaml>=6,<7",
     "testcontainers[postgres]>=4,<5",
 ]
@@ -154,6 +155,7 @@ addopts = [
 asyncio_mode = "strict"
 filterwarnings = ["error"]
 markers = [
+    "browser: exercises the native Mini App in a real browser",
     "integration: exercises an actual PostgreSQL instance",
 ]
 testpaths = ["tests"]

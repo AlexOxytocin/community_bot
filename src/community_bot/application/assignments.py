@@ -49,8 +49,9 @@ class AcceptAssignmentCommand:
     """Accept one free task slot."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     task_id: UUID
+    actor_member_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +143,7 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def acquire_assignment_task_gate(self, task_id: UUID) -> None: ...
     async def acquire_assignment_limit_gate(self, member_id: UUID) -> None: ...
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
+    async def get_member(self, member_id: UUID) -> Member | None: ...
     async def ensure_moderation_action_allowed(
         self, member_id: UUID, action: RestrictedAction
     ) -> None: ...
@@ -318,12 +320,17 @@ class AssignmentService:
             replay = await _begin(uow, command.update_id)
             if replay is not None:
                 assignment = await _assignment_replay(uow, replay)
+                if assignment.task_id != command.task_id or (
+                    command.actor_member_id is not None
+                    and assignment.performer_id != command.actor_member_id
+                ):
+                    raise AssignmentError("Stored assignment belongs to another operation.")
                 task = await uow.lock_task(assignment.task_id)
                 if task is None:
                     raise LookupError("Assignment task does not exist.")
                 return assignment, task
-            await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
-            actor = await _actor(uow, command.actor_telegram_user_id)
+            actor = await _accept_actor(uow, command)
+            await uow.acquire_task_identity_gate(actor.telegram_user_id)
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.ACCEPT_TASK)
             await uow.acquire_assignment_limit_gate(actor.id)
             await uow.acquire_assignment_task_gate(command.task_id)
@@ -334,6 +341,19 @@ class AssignmentService:
                 raise AssignmentError("Task is awaiting cancellation responses.")
             actor = (await uow.lock_members((actor.id,)))[actor.id]
             await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
+            if command.actor_member_id is not None:
+                existing = next(
+                    (
+                        item
+                        for item in await uow.list_task_assignments(task.id, for_update=True)
+                        if item.performer_id == actor.id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.status in ACTIVE_ASSIGNMENT_STATUSES:
+                        return existing, task
+                    raise AssignmentError("Existing assignment cannot be accepted again.")
             if task.origin == "community" and task.reviewer_admin_id == actor.id:
                 raise PermissionError("Community reviewer cannot perform the task.")
             level = await uow.resolve_member_level(actor.id)
@@ -349,6 +369,13 @@ class AssignmentService:
                 raise AssignmentError("Member has reached the active assignment limit.")
             assignment = await uow.create_assignment(
                 task_id=task.id, performer_id=actor.id, slots=task.performer_slots
+            )
+            await uow.append_audit_event(
+                actor_member_id=actor.id,
+                action="assignment_accepted",
+                entity_type="assignment",
+                entity_id=str(assignment.id),
+                reason=None,
             )
             await uow.add_assignment_outbox(
                 assignment=assignment,
@@ -1145,6 +1172,18 @@ async def _begin(uow: AssignmentUnitOfWork, update_id: int) -> str | None:
 
 async def _actor(uow: AssignmentUnitOfWork, telegram_user_id: int) -> Member:
     actor = await uow.get_member_by_telegram_user_id(telegram_user_id)
+    if actor is None or actor.status is not MemberStatus.ACTIVE:
+        raise PermissionError("Only an active member can use assignment workflows.")
+    return actor
+
+
+async def _accept_actor(uow: AssignmentUnitOfWork, command: AcceptAssignmentCommand) -> Member:
+    if command.actor_member_id is not None:
+        actor = await uow.get_member(command.actor_member_id)
+    elif command.actor_telegram_user_id is not None:
+        actor = await uow.get_member_by_telegram_user_id(command.actor_telegram_user_id)
+    else:
+        actor = None
     if actor is None or actor.status is not MemberStatus.ACTIVE:
         raise PermissionError("Only an active member can use assignment workflows.")
     return actor

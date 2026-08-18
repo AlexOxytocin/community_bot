@@ -22,6 +22,8 @@ jobs:
         run: uv python install 3.13
       - name: Synchronize locked environment
         run: uv sync --locked --all-groups
+      - name: Install browser
+        run: uv run playwright install --with-deps chromium
       - name: Check formatting
         run: uv run ruff format --check .
       - name: Lint
@@ -29,7 +31,9 @@ jobs:
       - name: Type check
         run: uv run ty check src tests ops
       - name: Test without PostgreSQL
-        run: uv run pytest -m "not integration" --no-cov
+        run: uv run pytest -m "not integration and not browser" --no-cov
+      - name: Test Mini App browser path
+        run: uv run pytest tests/browser --no-cov
 
   postgresql:
     name: PostgreSQL and Alembic
@@ -58,7 +62,7 @@ jobs:
           uv run alembic downgrade base
           uv run alembic upgrade head
       - name: Run full test suite with PostgreSQL
-        run: uv run pytest
+        run: uv run pytest -m "not browser"
       - name: Stop PostgreSQL
         if: always()
         run: docker compose down -v

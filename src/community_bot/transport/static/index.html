@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark light">
+    <title>Community Bot — каталог</title>
+    <link rel="stylesheet" href="/mini-assets/styles.css">
+  </head>
+  <body>
+    <main class="shell" id="app">
+      <header class="hero">
+        <p class="eyebrow">Community Bot</p>
+        <h1>Задания рядом</h1>
+        <p class="lead" id="welcome">Загружаем ваш каталог…</p>
+      </header>
+      <section aria-labelledby="screen-title">
+        <div class="screen-heading">
+          <button class="back hidden" id="back" type="button">← Назад</button>
+          <h2 id="screen-title">Каталог</h2>
+        </div>
+        <div id="content" aria-live="polite"></div>
+      </section>
+    </main>
+    <script type="module" src="/mini-assets/app.js"></script>
+  </body>
+</html>

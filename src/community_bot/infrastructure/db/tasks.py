@@ -629,9 +629,10 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
 def _task(model: TaskModel) -> PublishedTask:
     stored_public_keys = model.safety_snapshot_json.get("public_input_keys")
     public_input_keys = (
-        tuple(str(key) for key in stored_public_keys)
-        if isinstance(stored_public_keys, list)
-        else tuple(str(key) for key in model.input_payload_json)
+        tuple(stored_public_keys)
+        if isinstance(stored_public_keys, (list, tuple))
+        and all(isinstance(key, str) for key in stored_public_keys)
+        else ()
     )
     task_kind_value = model.safety_snapshot_json.get("task_kind")
     time_size_value = getattr(model, "time_size", None) or model.safety_snapshot_json.get(
