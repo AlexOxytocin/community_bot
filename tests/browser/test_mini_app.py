@@ -792,7 +792,7 @@ def _freeform_submission_rows() -> tuple[str, str, dict[str, object], dict[str, 
     return assignment_id, draft_id, assignment, submitted
 
 
-def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: PLR0915
+def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:
     assignment_id, draft_id, assignment, submitted = _freeform_submission_rows()
@@ -800,7 +800,22 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: P
     current_detail: dict[str, Any] = {"value": detail}
     begin_keys: list[str] = []
     confirm_keys: list[str] = []
+    review_keys: list[str] = []
+    review_pending = {"value": True}
     pending_confirm: list[Route] = []
+    review = {
+        "id": assignment_id,
+        "task_title": "Проверить форму",
+        "performer_display_name": "Участник",
+        "review_deadline_at": "2026-08-20T20:30:00Z",
+        "result": "<script>globalThis.pwned=true</script>",
+        "available_decisions": ["full", "partial", "reject"],
+    }
+
+    def confirm_rejection(dialog) -> None:  # noqa: ANN001
+        expected = "Отклонить результат? Выплата и резерв останутся заморожены на 24 часа для возможного спора. Повторная отправка результата не откроется."  # noqa: E501
+        assert dialog.message == expected
+        dialog.accept()
 
     def save(route: Route) -> None:
         request = route.request
@@ -827,6 +842,15 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: P
         current_detail["value"] = submitted
         pending_confirm.append(route)
 
+    def decide(route: Route) -> None:
+        review_keys.append(route.request.headers["idempotency-key"])
+        assert route.request.post_data_json == {"decision": "reject"}
+        if len(review_keys) == 1:
+            route.abort()
+        else:
+            review_pending["value"] = False
+            route.fulfill(status=204)
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
@@ -848,6 +872,17 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: P
         )
         page.route(f"**/api/v1/submission-drafts/{draft_id}", save)
         page.route(f"**/api/v1/submission-drafts/{draft_id}/confirm", confirm)
+        page.route(
+            "**/api/v1/assignment-reviews",
+            lambda route: route.fulfill(
+                json={"items": [review] if review_pending["value"] else []}
+            ),
+        )
+        page.route(
+            f"**/api/v1/assignment-reviews/{assignment_id}",
+            lambda route: route.fulfill(json=review),
+        )
+        page.route(f"**/api/v1/assignment-reviews/{assignment_id}/decision", decide)
         page.goto(mini_app_url)
         page.get_by_role("button", name="Мои задания").click()
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
@@ -875,6 +910,21 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: P
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.get_by_text("Результат отправлен").first.wait_for()
         assert page.get_by_role("button", name="Начать отправку").count() == 0
+        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Созданные мной").click()
+        review_button = page.get_by_role("button", name=re.compile("Проверить форму"))
+        review_button.click()
+        assert page.evaluate("globalThis.pwned") is None
+        page.get_by_role("button", name="Назад").click()
+        assert review_button.evaluate("node => node === document.activeElement")
+        review_button.click()
+        for _attempt in range(2):
+            page.once("dialog", confirm_rejection)
+            page.get_by_role("button", name="Отклонить").click()
+            if len(review_keys) == 1:
+                page.get_by_text("ключ останется тем же").wait_for()
+        assert review_keys[0] == review_keys[1]
+        page.get_by_text("Результатов, ожидающих решения, пока нет.").wait_for()
         browser.close()
 
 

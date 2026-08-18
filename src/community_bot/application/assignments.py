@@ -71,10 +71,11 @@ class DecideAssignmentCommand:
     """Apply an author's exact assignment decision."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     assignment_id: UUID
     decision_command_id: UUID
     decision: AssignmentDecision
+    actor_member_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +134,14 @@ class AssignmentCard:
     def submission_contract(self) -> str | None:
         """Expose only the one result contract this Mini App can render."""
         return "freeform_result_v1" if self.task.template_id is None else None
+
+    @property
+    def available_decisions(self) -> tuple[AssignmentDecision, ...]:
+        try:
+            partial_reward(self.task.credit_reward_per_performer)
+        except AssignmentError:
+            return (AssignmentDecision.FULL, AssignmentDecision.REJECT)
+        return tuple(AssignmentDecision)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +206,13 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
         before_id: UUID | None = None,
         order_by_reviewed_at: bool = False,
     ) -> tuple[AssignmentCard, ...]: ...
-    async def list_review_cards(self, actor_id: UUID) -> tuple[AssignmentCard, ...]: ...
+    async def list_review_cards(
+        self,
+        actor_id: UUID,
+        *,
+        member_owned: bool = False,
+        assignment_id: UUID | None = None,
+    ) -> tuple[AssignmentCard, ...]: ...
     async def list_task_assignments(
         self, task_id: UUID, *, for_update: bool = False
     ) -> tuple[Assignment, ...]: ...
@@ -561,6 +576,17 @@ class AssignmentService:
             actor = await _actor(uow, actor_telegram_user_id)
             return await uow.list_review_cards(actor.id)
 
+    async def creator_review_cards(
+        self, *, actor: ActorContext, assignment_id: UUID | None = None
+    ) -> tuple[AssignmentCard, ...]:
+        async with self._unit_of_work_factory() as uow:
+            member = await _context_actor(uow, actor)
+            return await uow.list_review_cards(
+                member.id,
+                member_owned=True,
+                assignment_id=assignment_id,
+            )
+
     async def begin_submission(self, command: BeginSubmissionCommand) -> SubmissionDraft:
         """Start or resume result input with all state persisted in PostgreSQL."""
         async with self._unit_of_work_factory() as uow:
@@ -865,26 +891,41 @@ class AssignmentService:
         async with self._unit_of_work_factory() as uow:
             replay = await _begin(uow, command.update_id)
             if replay is not None:
-                return await _assignment_replay(uow, replay)
-            await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
-            actor = await _actor(uow, command.actor_telegram_user_id)
+                if command.actor_member_id is None:
+                    return await _assignment_replay(uow, replay)
+                actor = await _command_actor(uow, command)
+                expected = f"web_assignment:{actor.id}:{command.assignment_id}:{command.decision}"
+                if replay != expected:
+                    raise AssignmentError("Stored assignment decision does not match command.")
+                assignment = await uow.get_assignment(command.assignment_id)
+                if assignment is None:
+                    raise LookupError("Stored assignment outcome does not exist.")
+                await _ensure_web_decision_access(uow, actor.id, assignment)
+                return assignment
+            actor = await _command_actor(uow, command)
+            await uow.acquire_task_identity_gate(actor.telegram_user_id)
             assignment = await uow.get_assignment(command.assignment_id)
             if assignment is None:
                 raise LookupError("Assignment does not exist.")
             await uow.acquire_assignment_task_gate(assignment.task_id)
             task = await uow.lock_task(assignment.task_id)
             assignment = await uow.lock_assignment(assignment.id)
+            if task is not None and command.actor_member_id is not None:
+                await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
             authorized = task is not None and (
                 task.creator_id == actor.id
                 or (
-                    task.origin == "community"
-                    and actor.role is MemberRole.ADMINISTRATOR
+                    command.actor_member_id is None
                     and (
-                        (
-                            task.reviewer_admin_id == actor.id
-                            and task.created_by_admin_id != actor.id
+                        task.origin == "community"
+                        and actor.role is MemberRole.ADMINISTRATOR
+                        and (
+                            (
+                                task.reviewer_admin_id == actor.id
+                                and task.created_by_admin_id != actor.id
+                            )
+                            or (task.reviewer_admin_id is None and task.created_by_admin_id is None)
                         )
-                        or (task.reviewer_admin_id is None and task.created_by_admin_id is None)
                     )
                 )
             )
@@ -900,7 +941,7 @@ class AssignmentService:
                     or assignment.terminal_command_id != command.decision_command_id
                 ):
                     raise AssignmentError("Assignment already has another review outcome.")
-                await _finish(uow, command.update_id, actor.id, assignment)
+                await _finish(uow, command.update_id, actor.id, assignment, command)
                 return assignment
             if assignment.status is not AssignmentStatus.SUBMITTED:
                 raise AssignmentError("Only a submitted assignment can be reviewed.")
@@ -973,7 +1014,7 @@ class AssignmentService:
                         current_status=task.status,
                     ),
                 )
-            await _finish(uow, command.update_id, actor.id, updated)
+            await _finish(uow, command.update_id, actor.id, updated, command)
             return updated
 
     async def dispute(
@@ -1271,6 +1312,7 @@ async def _command_actor(
     uow: AssignmentUnitOfWork,
     command: (
         AcceptAssignmentCommand
+        | DecideAssignmentCommand
         | BeginSubmissionCommand
         | SaveSubmissionDraftCommand
         | ConfirmSubmissionDraftCommand
@@ -1288,13 +1330,20 @@ async def _command_actor(
 
 
 async def _finish(
-    uow: AssignmentUnitOfWork, update_id: int, actor_id: UUID, assignment: Assignment
+    uow: AssignmentUnitOfWork,
+    update_id: int,
+    actor_id: UUID,
+    assignment: Assignment,
+    command: DecideAssignmentCommand | None = None,
 ) -> None:
+    outcome = f"assignment:{assignment.id}"
+    if command is not None and command.actor_member_id is not None:
+        outcome = f"web_assignment:{actor_id}:{assignment.id}:{command.decision}"
     await uow.add_receipt(
         update_id=update_id,
         update_type="assignment_workflow",
         actor_id=actor_id,
-        outcome_code=f"assignment:{assignment.id}",
+        outcome_code=outcome,
     )
     await uow.commit()
 
@@ -1307,6 +1356,15 @@ async def _assignment_replay(uow: AssignmentUnitOfWork, outcome: str) -> Assignm
     if assignment is None:
         raise LookupError("Stored assignment outcome does not exist.")
     return assignment
+
+
+async def _ensure_web_decision_access(
+    uow: AssignmentUnitOfWork, actor_id: UUID, assignment: Assignment
+) -> None:
+    task = await uow.lock_task(assignment.task_id)
+    if task is None or task.creator_id != actor_id:
+        raise PermissionError("Assignment decision is not owned by this member.")
+    await uow.ensure_task_test_access(task_id=task.id, member_id=actor_id)
 
 
 async def _draft_replay(

@@ -17,6 +17,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from community_bot.application import assignments as assignment_app
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
@@ -47,7 +48,7 @@ from community_bot.infrastructure.db.models import (
     TestRunParticipantModel as DbTestRunParticipantModel,
 )
 from community_bot.transport.web import _accept_update_id, _submission_update_id, create_web_app
-from tests.integration.test_assignments import _freeform_task, _published_task
+from tests.integration.test_assignments import _community_task, _freeform_task, _published_task
 from tests.integration.test_task_creation import prepare_member
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -1183,6 +1184,179 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         ]
         assert await schema_snapshot(database.engine) == denied_before
 
+    await database.dispose()
+
+
+async def test_creator_review_api_is_private_exact_and_domain_owned(database_url: str) -> None:
+    database = Database(database_url)
+    author, task = await _freeform_task(database, update_base=54_000)
+    performer = await prepare_member(database, telegram_user_id=54_100)
+    service = assignment_app.AssignmentService(database.unit_of_work)
+    assignment = await service.accept(
+        assignment_app.AcceptAssignmentCommand(54_200, performer.telegram_user_id, task.id)
+    )
+    await service.submit(
+        assignment_app.SubmitResultCommand(
+            54_201,
+            performer.telegram_user_id,
+            assignment.id,
+            uuid4(),
+            {"result": "Literal creator review result."},
+        )
+    )
+    reviewer, community_id = await _community_task(database, update_base=54_300)
+    _other, hidden_task = await _freeform_task(database, update_base=54_400)
+    _low_owner, low_task = await _freeform_task(database, update_base=54_500)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        author.role = "administrator"
+        session.add(author)
+        community_source = await session.get(TaskModel, community_id)
+        hidden_source = await session.get(TaskModel, hidden_task.id)
+        low_source = await session.get(TaskModel, low_task.id)
+        assert community_source and hidden_source and low_source  # noqa: PT018
+
+        def clone(source: TaskModel, **changes: object) -> TaskModel:
+            values = {
+                column.key: getattr(source, column.key)
+                for column in inspect(TaskModel).columns
+                if column.key not in {"id", "created_at", "updated_at"}
+            }
+            return TaskModel(**(values | changes | {"publish_command_id": uuid4()}))
+
+        run = DbTestRunModel(marker="TEST-CB73-HIDDEN", started_by_member_id=author.id)
+        session.add(run)
+        await session.flush()
+        community = clone(community_source, created_by_admin_id=author.id)
+        community.reviewer_admin_id = reviewer.id
+        community.community_approved_by_admin_id = reviewer.id
+        community_tasks = [community]
+        community_tasks.extend(clone(community) for _index in range(51))
+        hidden = clone(hidden_source, creator_id=author.id, test_run_id=run.id)
+        low = clone(low_source, creator_id=author.id, credit_reward_per_performer=1)
+        low.reserved_credit_total = 1
+        session.add_all((*community_tasks, hidden, low))
+        await session.flush()
+        now = datetime.datetime.now(datetime.UTC)
+        rows = [
+            AssignmentModel(
+                task_id=current.id,
+                performer_id=performer.id,
+                slot_number=1,
+                status="submitted",
+                accepted_at=now,
+                submitted_at=now,
+                review_deadline_at=now + datetime.timedelta(hours=72),
+            )
+            for current in (*community_tasks, hidden, low)
+        ]
+        session.add_all(rows)
+        await session.flush()
+        session.add_all(
+            [
+                AssignmentResultVersionModel(
+                    assignment_id=row.id,
+                    version=1,
+                    payload_json={"result": f"hidden-{current.id}"},
+                    submit_command_id=uuid4(),
+                )
+                for current, row in zip((*community_tasks, hidden, low), rows, strict=True)
+            ]
+        )
+
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(author.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        page = await client.get("/api/v1/assignment-reviews")
+        assert page.status_code == 200
+        items = {UUID(item["id"]): item for item in page.json()["items"]}
+        assert set(items) == {assignment.id, rows[-1].id}
+        assert items[assignment.id]["available_decisions"] == ["full", "partial", "reject"]
+        assert items[rows[-1].id]["available_decisions"] == ["full", "reject"]
+        assert items[assignment.id]["result"] == "Literal creator review result."
+        detail = await client.get(f"/api/v1/assignment-reviews/{assignment.id}")
+        assert detail.status_code == 200
+        for row in (rows[0], rows[-2]):
+            hidden = await client.get(f"/api/v1/assignment-reviews/{row.id}")
+            assert hidden.status_code == 404
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as foreign:
+            await foreign.post(
+                "/api/v1/auth/telegram",
+                content=proof(performer.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+            assert (await foreign.get("/api/v1/assignment-reviews")).json() == {"items": []}
+            assert (
+                await foreign.get(f"/api/v1/assignment-reviews/{assignment.id}")
+            ).status_code == 404
+        headers = {"origin": ORIGIN, "idempotency-key": "5473"}
+        reject = await client.post(
+            f"/api/v1/assignment-reviews/{assignment.id}/decision",
+            headers=headers,
+            json={"decision": "reject"},
+        )
+        assert reject.status_code == 204
+
+        async def replay_reject() -> int:
+            response = await client.post(
+                reject.request.url.path, headers=headers, json={"decision": "reject"}
+            )
+            return response.status_code
+
+        assert await replay_reject() == 204
+        assert (
+            await client.post(
+                reject.request.url.path, headers=headers, json={"decision": "partial"}
+            )
+        ).status_code == 409
+        async with sessions() as session:
+            stored = await session.get(AssignmentModel, assignment.id)
+            assert stored is not None
+            assert stored.status == "rejected_pending_dispute"
+            assert stored.reject_dispute_deadline_at is not None
+            assert stored.rejected_at is not None
+            assert stored.reject_dispute_deadline_at - stored.rejected_at == datetime.timedelta(
+                hours=24
+            )
+            ledger_count = await session.scalar(
+                select(func.count())
+                .select_from(AccountTransactionModel)
+                .where(AccountTransactionModel.assignment_id == assignment.id)
+            )
+            reliability_count = await session.scalar(
+                select(func.count())
+                .select_from(ReliabilityEventModel)
+                .where(ReliabilityEventModel.assignment_id == assignment.id)
+            )
+            outbox_count = await session.scalar(
+                select(func.count())
+                .select_from(OutboxEventModel)
+                .where(OutboxEventModel.aggregate_id == assignment.id)
+            )
+            assert (ledger_count, reliability_count, outbox_count) == (0, 1, 3)
+        await service.finalize_rejection(
+            assignment_id=assignment.id,
+            command_id=uuid4(),
+            now=stored.reject_dispute_deadline_at,
+        )
+        assert await replay_reject() == 204
+        async with sessions.begin() as session:
+            await session.execute(
+                update(MemberModel).where(MemberModel.id == author.id).values(status="paused")
+            )
+        assert await replay_reject() == 409
+        inactive_list = await client.get("/api/v1/assignment-reviews")
+        inactive_detail = await client.get(f"/api/v1/assignment-reviews/{assignment.id}")
+        assert (inactive_list.status_code, inactive_detail.status_code) == (403, 404)
     await database.dispose()
 
 

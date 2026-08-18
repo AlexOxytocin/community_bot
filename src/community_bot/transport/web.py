@@ -32,6 +32,7 @@ from community_bot.application.assignments import (
     AssignmentService,
     BeginSubmissionCommand,
     ConfirmSubmissionDraftCommand,
+    DecideAssignmentCommand,
     SaveSubmissionDraftCommand,
 )
 from community_bot.application.identity import ActorContext
@@ -52,7 +53,7 @@ from community_bot.application.tasks import (
     TaskService,
 )
 from community_bot.bootstrap.settings import Settings
-from community_bot.domain.assignments import AssignmentError, SubmissionDraft
+from community_bot.domain.assignments import AssignmentDecision, AssignmentError, SubmissionDraft
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import (
     TASK_TIME_SIZE_SPECS,
@@ -199,6 +200,24 @@ class AssignmentCardDto(_Dto):
 class AssignmentsDto(_Dto):
     items: tuple[AssignmentCardDto, ...]
     next_cursor: str | None
+
+
+class AssignmentReviewDto(_Dto):
+    id: UUID
+    task_title: str
+    performer_display_name: str
+    submitted_at: datetime.datetime
+    review_deadline_at: datetime.datetime | None
+    result: str
+    available_decisions: tuple[AssignmentDecision, ...]
+
+
+class AssignmentReviewsDto(_Dto):
+    items: tuple[AssignmentReviewDto, ...]
+
+
+class AssignmentDecisionRequest(_Dto):
+    decision: AssignmentDecision
 
 
 class ModerationCaseDto(_Dto):
@@ -660,6 +679,62 @@ def create_web_app(
             return _error_response(404, "not_found")
         return _json_response(_assignment_detail_dto(card))
 
+    @app.get("/api/v1/assignment-reviews", response_model=AssignmentReviewsDto)
+    async def assignment_reviews(
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            cards = await assignments.creator_review_cards(actor=actor)
+        except PermissionError:
+            return _error_response(403, "assignment_unavailable")
+        items = tuple(_assignment_review_dto(card) for card in cards)
+        return _json_response(AssignmentReviewsDto(items=items))
+
+    @app.get("/api/v1/assignment-reviews/{assignment_id}", response_model=AssignmentReviewDto)
+    async def assignment_review(
+        assignment_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> JSONResponse:
+        try:
+            cards = await assignments.creator_review_cards(actor=actor, assignment_id=assignment_id)
+        except PermissionError:
+            return _error_response(404, "not_found")
+        if not cards:
+            return _error_response(404, "not_found")
+        return _json_response(_assignment_review_dto(cards[0]))
+
+    @app.post("/api/v1/assignment-reviews/{assignment_id}/decision", status_code=204)
+    async def decide_assignment(assignment_id: UUID, request: Request) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "AssignmentDecisionRequest | None",
+            await _submission_request(request, AssignmentDecisionRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        update_id = _submission_update_id(
+            actor.member_id,
+            assignment_id,
+            "decide",
+            operation_key,
+            namespace=b"assignment-review-v1",
+        )
+        try:
+            await assignments.decide(
+                DecideAssignmentCommand(
+                    update_id,
+                    None,
+                    assignment_id,
+                    UUID(int=update_id),
+                    payload.decision,
+                    actor.member_id,
+                )
+            )
+        except (AssignmentError, LookupError, PermissionError):
+            return _error_response(409, "assignment_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.get("/api/v1/moderation/cases", response_model=ModerationCasesDto)
     async def moderation_cases(
         actor: ActorContext = Depends(current_actor),
@@ -1038,8 +1113,11 @@ def _canonical_uuid(value: str) -> UUID | None:
 
 
 async def _submission_request(
-    request: Request, model: type[SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest]
-) -> SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest | None:
+    request: Request,
+    model: type[
+        SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest | AssignmentDecisionRequest
+    ],
+) -> SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest | AssignmentDecisionRequest | None:
     if request.headers.get("content-type", "").lower() != "application/json":
         return None
     try:
@@ -1195,6 +1273,20 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
         minimum_level=task.minimum_level,
         performer_slots=task.performer_slots,
         submission_contract=cast('Literal["freeform_result_v1"] | None', card.submission_contract),
+    )
+
+
+def _assignment_review_dto(card: AssignmentCard) -> AssignmentReviewDto:
+    if card.assignment.submitted_at is None or card.result_summary is None:
+        raise ValueError("Assignment review projection is incomplete.")
+    return AssignmentReviewDto(
+        id=card.assignment.id,
+        task_title=card.task_title,
+        performer_display_name=card.performer_display_name,
+        submitted_at=card.assignment.submitted_at,
+        review_deadline_at=card.assignment.review_deadline_at,
+        result=card.result_summary,
+        available_decisions=card.available_decisions,
     )
 
 
