@@ -406,8 +406,10 @@ def test_preflight_rejects_malformed_migration_output(
 ) -> None:
     manifest = contract.verify_bundle(_bundle(tmp_path))[0]
     monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+    commands: list[list[str]] = []
 
     def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(argv)
         if argv[:3] == ["docker", "image", "inspect"]:
             return SimpleNamespace(
                 stdout=json.dumps(
@@ -428,7 +430,7 @@ def test_preflight_rejects_malformed_migration_output(
             )
         if argv[:2] == ["docker", "run"]:
             return SimpleNamespace(stdout=malformed if source == "image" else "migration_head\n")
-        if "psql" in argv:
+        if "psql" in " ".join(argv):
             return SimpleNamespace(stdout=malformed if source == "live" else "migration_head\n")
         return SimpleNamespace(stdout="")
 
@@ -436,6 +438,12 @@ def test_preflight_rejects_malformed_migration_output(
 
     with pytest.raises(contract.ContractError, match="migration head"):
         contract._preflight(tmp_path, manifest, tmp_path, None)
+
+    if source == "live":
+        psql_command = next(command for command in commands if "psql" in " ".join(command))
+        assert psql_command[-3:-1] == ["sh", "-c"]
+        assert '--username="$POSTGRES_USER"' in psql_command[-1]
+        assert '--dbname="$POSTGRES_DB"' in psql_command[-1]
 
 
 def test_initial_activation_rejects_existing_processes_before_mutation(
@@ -528,7 +536,7 @@ def test_activate_a_then_b_then_rollback_consumes_previous(  # noqa: C901, PLR09
                     }
                 ]
             )
-        elif argv[:2] == ["docker", "run"] or "psql" in argv:
+        elif argv[:2] == ["docker", "run"] or "psql" in " ".join(argv):
             stdout = "migration_head\n"
         elif "ps" in argv and "--format" in argv:
             stdout = "\n".join(

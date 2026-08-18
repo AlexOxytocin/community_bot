@@ -463,11 +463,13 @@ def _preflight(
                 "exec",
                 "-T",
                 "postgres",
-                "psql",
-                "--tuples-only",
-                "--no-align",
-                "--command",
-                "SELECT version_num FROM alembic_version ORDER BY version_num",
+                "sh",
+                "-c",
+                (
+                    'exec psql --username="$POSTGRES_USER" '
+                    '--dbname="$POSTGRES_DB" --tuples-only --no-align '
+                    "--command 'SELECT version_num FROM alembic_version ORDER BY version_num'"
+                ),
             ],
             env=env,
             capture_output=True,
