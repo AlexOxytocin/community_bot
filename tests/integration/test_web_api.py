@@ -27,6 +27,7 @@ from community_bot.infrastructure.db.models import (
     AssignmentDisputeModel,
     AssignmentModel,
     AssignmentResultVersionModel,
+    AssignmentSubmissionDraftModel,
     AuditEventModel,
     DisputeEvidenceModel,
     MemberModel,
@@ -40,8 +41,8 @@ from community_bot.infrastructure.db.models import (
     WebSessionModel,
 )
 from community_bot.infrastructure.db.models import TestRunModel as DbTestRunModel
-from community_bot.transport.web import _accept_update_id, create_web_app
-from tests.integration.test_assignments import _published_task
+from community_bot.transport.web import _accept_update_id, _submission_update_id, create_web_app
+from tests.integration.test_assignments import _freeform_task, _published_task
 from tests.integration.test_task_creation import prepare_member
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -618,6 +619,200 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
     await database.dispose()
 
 
+async def test_web_submission_draft_is_bounded_exact_and_template_closed(database_url: str) -> None:
+    database = Database(database_url)
+    _author, freeform_task = await _freeform_task(database, update_base=52_750)
+    _template_author, template_task = await _published_task(database, update_base=52_850)
+    performer = await prepare_member(database, telegram_user_id=52_751)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(performer.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        accepted = await client.post(
+            f"/api/v1/tasks/{freeform_task.id}/assignments",
+            headers={"origin": ORIGIN, "idempotency-key": "92750"},
+        )
+        assert accepted.status_code == 201, accepted.text
+        assignment_id = accepted.json()["id"]
+        detail = await client.get(f"/api/v1/assignments/{assignment_id}")
+        assert detail.json()["submission_contract"] == "freeform_result_v1"
+
+        template_accepted = await client.post(
+            f"/api/v1/tasks/{template_task.id}/assignments",
+            headers={"origin": ORIGIN, "idempotency-key": "92756"},
+        )
+        assert template_accepted.status_code == 201
+        template_assignment_id = template_accepted.json()["id"]
+        template_closed = await client.post(
+            f"/api/v1/assignments/{template_assignment_id}/submission-drafts",
+            headers={"origin": ORIGIN, "idempotency-key": "92757"},
+        )
+        assert template_closed.status_code == 409
+
+        missing_origin = await client.post(
+            f"/api/v1/assignments/{assignment_id}/submission-drafts",
+            headers={"idempotency-key": "92751"},
+        )
+        assert missing_origin.status_code == 403
+        invalid_begin = await client.post(
+            "/api/v1/assignments/not-a-uuid/submission-drafts",
+            headers={"origin": ORIGIN, "idempotency-key": "92758"},
+        )
+        nonempty_begin = await client.post(
+            f"/api/v1/assignments/{assignment_id}/submission-drafts",
+            headers={"origin": ORIGIN, "idempotency-key": "92759"},
+            content=b"x",
+        )
+        missing_assignment = await client.post(
+            f"/api/v1/assignments/{uuid4()}/submission-drafts",
+            headers={"origin": ORIGIN, "idempotency-key": "92760"},
+        )
+        assert [
+            invalid_begin.status_code,
+            nonempty_begin.status_code,
+            missing_assignment.status_code,
+        ] == [
+            422,
+            422,
+            409,
+        ]
+        begin = await client.post(
+            f"/api/v1/assignments/{assignment_id}/submission-drafts",
+            headers={"origin": ORIGIN, "idempotency-key": "92751"},
+        )
+        assert begin.status_code == 200, begin.text
+        draft = begin.json()
+        headers = {"origin": ORIGIN, "idempotency-key": "92752", "content-type": "application/json"}
+        invalid_save = await client.put(
+            "/api/v1/submission-drafts/not-a-uuid",
+            headers=headers,
+            json={"expected_revision": 0, "payload": {"result": "x"}},
+        )
+        invalid_revision = await client.put(
+            f"/api/v1/submission-drafts/{draft['id']}",
+            headers=headers | {"idempotency-key": "92761"},
+            json={"expected_revision": True, "payload": {"result": "x"}},
+        )
+        oversized = await client.put(
+            f"/api/v1/submission-drafts/{draft['id']}",
+            headers=headers | {"idempotency-key": "92762"},
+            content=b"{" + b"x" * 4096,
+        )
+        assert [invalid_save.status_code, invalid_revision.status_code, oversized.status_code] == [
+            422,
+            422,
+            422,
+        ]
+        saved = await client.put(
+            f"/api/v1/submission-drafts/{draft['id']}",
+            headers=headers,
+            json={
+                "expected_revision": draft["revision"],
+                "payload": {"result": "Useful escaped <script>result</script>."},
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["result"] == "Useful escaped <script>result</script>."
+        replay = await client.put(
+            f"/api/v1/submission-drafts/{draft['id']}",
+            headers=headers,
+            json={
+                "expected_revision": draft["revision"],
+                "payload": {"result": "Useful escaped <script>result</script>."},
+            },
+        )
+        assert replay.json() == saved.json()
+        conflict = await client.put(
+            f"/api/v1/submission-drafts/{draft['id']}",
+            headers=headers,
+            json={
+                "expected_revision": draft["revision"],
+                "payload": {"result": "Changed command."},
+            },
+        )
+        assert conflict.status_code == 409
+        malformed = await client.put(
+            f"/api/v1/submission-drafts/{draft['id']}",
+            headers={"origin": ORIGIN, "idempotency-key": "92753", "content-type": "text/plain"},
+            content=b"x",
+        )
+        assert malformed.status_code == 422
+        confirm_headers = {
+            "origin": ORIGIN,
+            "idempotency-key": "92754",
+            "content-type": "application/json",
+        }
+        invalid_confirm = await client.post(
+            "/api/v1/submission-drafts/not-a-uuid/confirm",
+            headers=confirm_headers,
+            json={"expected_revision": saved.json()["revision"]},
+        )
+        invalid_confirm_revision = await client.post(
+            f"/api/v1/submission-drafts/{draft['id']}/confirm",
+            headers=confirm_headers | {"idempotency-key": "92763"},
+            json={"expected_revision": True},
+        )
+        assert [invalid_confirm.status_code, invalid_confirm_revision.status_code] == [422, 422]
+        first, second = await asyncio.gather(
+            client.post(
+                f"/api/v1/submission-drafts/{draft['id']}/confirm",
+                headers=confirm_headers,
+                json={"expected_revision": saved.json()["revision"]},
+            ),
+            client.post(
+                f"/api/v1/submission-drafts/{draft['id']}/confirm",
+                headers=confirm_headers,
+                json={"expected_revision": saved.json()["revision"]},
+            ),
+        )
+        assert {first.status_code, second.status_code} == {204}
+        confirm_conflict = await client.post(
+            f"/api/v1/submission-drafts/{draft['id']}/confirm",
+            headers=confirm_headers,
+            json={"expected_revision": saved.json()["revision"] + 1},
+        )
+        assert confirm_conflict.status_code == 409
+        stale_confirm = await client.post(
+            f"/api/v1/submission-drafts/{draft['id']}/confirm",
+            headers=confirm_headers | {"idempotency-key": "92764"},
+            json={"expected_revision": saved.json()["revision"]},
+        )
+        assert stale_confirm.status_code == 409
+        refreshed = await client.get(f"/api/v1/assignments/{assignment_id}")
+        assert refreshed.json()["assignment_status"] == "submitted"
+
+    begin_update_id = _submission_update_id(performer.id, UUID(assignment_id), "begin", "92751")
+    confirm_update_id = _submission_update_id(performer.id, UUID(draft["id"]), "confirm", "92754")
+    async with sessions() as session:
+        assert await session.get(ProcessedTelegramUpdateModel, begin_update_id) is not None
+        assert await session.get(ProcessedTelegramUpdateModel, confirm_update_id) is not None
+        assert (
+            await session.scalar(
+                select(func.count(AssignmentResultVersionModel.id)).where(
+                    AssignmentResultVersionModel.assignment_id == UUID(assignment_id)
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(AssignmentSubmissionDraftModel.id)).where(
+                    AssignmentSubmissionDraftModel.assignment_id == UUID(template_assignment_id)
+                )
+            )
+            == 0
+        )
+    await database.dispose()
+
+
 async def test_active_assignment_api_paginates_privately_without_effects(
     database_url: str,
 ) -> None:
@@ -821,6 +1016,7 @@ async def test_active_assignment_api_paginates_privately_without_effects(
             "city",
             "minimum_level",
             "performer_slots",
+            "submission_contract",
         }
         assert detail.json()["result_summary"] == "Visible result"
         assert detail.json()["case_status"] == "open"

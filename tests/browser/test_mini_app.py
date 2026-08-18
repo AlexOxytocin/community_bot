@@ -753,3 +753,126 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         assert page.get_by_role("button", name=re.compile("Собрать план")).count() == 1
         assert page.get_by_role("button", name="Назад").count() == 0
         browser.close()
+
+
+def _freeform_submission_rows() -> tuple[str, str, dict[str, object], dict[str, object]]:
+    assignment_id = "00000000-0000-0000-0000-000000000071"
+    draft_id = "00000000-0000-0000-0000-000000000072"
+    assignment = {
+        "id": assignment_id,
+        "task_id": "00000000-0000-0000-0000-000000000070",
+        "task_title": "Проверить форму",
+        "task_origin": "member",
+        "assignment_status": "accepted",
+        "accepted_at": "2026-08-17T20:00:00Z",
+        "submitted_at": None,
+        "review_deadline_at": None,
+        "reject_dispute_deadline_at": None,
+        "reviewed_at": None,
+        "task_deadline_at": "2026-08-21T20:00:00Z",
+        "result_summary": None,
+        "case_status": None,
+    }
+    detail = assignment | {
+        "category_name": "Практическая помощь",
+        "category_icon": None,
+        "task_kind": "solo",
+        "time_size": "s",
+        "description": "Проверить форму без исполнения HTML",
+        "performer_instructions": "Заполнить результат",
+        "completion_criteria": "Есть понятный итог",
+        "reward_per_performer": 3,
+        "format": "online",
+        "city": None,
+        "minimum_level": 1,
+        "performer_slots": 1,
+        "submission_contract": "freeform_result_v1",
+    }
+    submitted = detail | {"assignment_status": "submitted", "result_summary": "Результат отправлен"}
+    return assignment_id, draft_id, assignment, submitted
+
+
+def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    assignment_id, draft_id, assignment, submitted = _freeform_submission_rows()
+    detail = submitted | {"assignment_status": "accepted", "result_summary": None}
+    current_detail: dict[str, Any] = {"value": detail}
+    begin_keys: list[str] = []
+    confirm_keys: list[str] = []
+    pending_confirm: list[Route] = []
+
+    def save(route: Route) -> None:
+        request = route.request
+        assert request.headers["idempotency-key"].isdecimal()
+        body = request.post_data_json
+        assert isinstance(body, dict)
+        assert body["expected_revision"] == 0
+        assert body["payload"]["result"] == "<script>globalThis.pwned=true</script>"
+        route.fulfill(json={"id": draft_id, "revision": 1, "result": body["payload"]["result"]})
+
+    def begin(route: Route) -> None:
+        begin_keys.append(route.request.headers["idempotency-key"])
+        if len(begin_keys) == 1:
+            route.abort()
+        else:
+            route.fulfill(json={"id": draft_id, "revision": 0, "result": None})
+
+    def confirm(route: Route) -> None:
+        confirm_keys.append(route.request.headers["idempotency-key"])
+        assert route.request.post_data_json == {"expected_revision": 1}
+        if len(confirm_keys) == 1:
+            route.fulfill(status=502, body="upstream unavailable", content_type="text/plain")
+            return
+        current_detail["value"] = submitted
+        pending_confirm.append(route)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route(
+            "**/api/v1/tasks", lambda route: route.fulfill(json={"items": [], "next_cursor": None})
+        )
+        page.route(
+            "**/api/v1/assignments?*",
+            lambda route: route.fulfill(json={"items": [assignment], "next_cursor": None}),
+        )
+        page.route(
+            f"**/api/v1/assignments/{assignment_id}",
+            lambda route: route.fulfill(json=current_detail["value"]),
+        )
+        page.route(
+            f"**/api/v1/assignments/{assignment_id}/submission-drafts",
+            begin,
+        )
+        page.route(f"**/api/v1/submission-drafts/{draft_id}", save)
+        page.route(f"**/api/v1/submission-drafts/{draft_id}/confirm", confirm)
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name=re.compile("Проверить форму")).click()
+        page.get_by_role("button", name="Начать отправку").click()
+        page.get_by_text("Сеть недоступна. Повторите запрос — он останется тем же.").wait_for()
+        assert not page.get_by_role("button", name="Начать отправку").is_disabled()
+        page.get_by_role("button", name="Начать отправку").click()
+        result = page.get_by_role("textbox", name="Результат")
+        assert result.evaluate("node => node === document.activeElement")
+        assert begin_keys[0] == begin_keys[1]
+        result.fill("<script>globalThis.pwned=true</script>")
+        page.get_by_role("button", name="Предпросмотр").click()
+        page.get_by_text("Подтвердите отправку.").wait_for()
+        assert page.evaluate("globalThis.pwned") is None
+        page.get_by_role("button", name="Подтвердить отправку").click()
+        page.get_by_text("Не удалось сохранить результат.").wait_for()  # noqa: RUF001
+        page.get_by_role("button", name="Подтвердить отправку").click()
+        assert confirm_keys[0] == confirm_keys[1]
+        assert len(pending_confirm) == 1
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Взятые мной").wait_for()
+        pending_confirm.pop().fulfill(status=204)
+        page.wait_for_timeout(50)
+        assert page.get_by_role("heading", name="Взятые мной").count() == 1
+        page.get_by_role("button", name=re.compile("Проверить форму")).click()
+        page.get_by_text("Результат отправлен").first.wait_for()
+        assert page.get_by_role("button", name="Начать отправку").count() == 0
+        browser.close()

@@ -20,7 +20,7 @@ from uuid import UUID
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
@@ -29,6 +29,9 @@ from community_bot.application.assignments import (
     AcceptAssignmentCommand,
     AssignmentCard,
     AssignmentService,
+    BeginSubmissionCommand,
+    ConfirmSubmissionDraftCommand,
+    SaveSubmissionDraftCommand,
 )
 from community_bot.application.identity import ActorContext
 from community_bot.application.moderation import ModerationCase, ModerationService
@@ -41,7 +44,7 @@ from community_bot.application.reputation import (
 )
 from community_bot.application.tasks import PublishedTask, TaskService
 from community_bot.bootstrap.settings import Settings
-from community_bot.domain.assignments import AssignmentError
+from community_bot.domain.assignments import AssignmentError, SubmissionDraft
 from community_bot.domain.tasks import TaskError
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
@@ -54,6 +57,7 @@ _PROOF_MAX_BYTES = 8192
 _PROOF_MAX_FIELDS = 32
 _MAX_TELEGRAM_USER_ID = 2**63 - 1
 _MAX_IDEMPOTENCY_KEY = 2**63 - 1
+_SUBMISSION_BODY_MAX_BYTES = 4096
 _STATIC_DIR = Path(__file__).with_name("static")
 _PUBLIC_ERROR_CODES = frozenset(
     {
@@ -211,6 +215,22 @@ class AssignmentDetailDto(AssignmentCardDto):
     city: str | None
     minimum_level: int
     performer_slots: int
+    submission_contract: Literal["freeform_result_v1"] | None
+
+
+class SubmissionDraftDto(_Dto):
+    id: UUID
+    revision: int
+    result: str | None
+
+
+class SaveSubmissionDraftRequest(_Dto):
+    expected_revision: int = Field(ge=0, strict=True)
+    payload: dict[str, object]
+
+
+class ConfirmSubmissionDraftRequest(_Dto):
+    expected_revision: int = Field(ge=0, strict=True)
 
 
 class LeaderboardItemDto(_Dto):
@@ -562,6 +582,102 @@ def create_web_app(
             status_code=201,
         )
 
+    @app.post("/api/v1/assignments/{assignment_id}/submission-drafts")
+    async def begin_submission_draft(assignment_id: str, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        parsed_assignment_id = _canonical_uuid(assignment_id)
+        if parsed_assignment_id is None:
+            return _error_response(422, "invalid_request")
+        try:
+            await _bounded_body(request, limit=0)
+        except (OverflowError, ValueError):
+            return _error_response(422, "invalid_request")
+        try:
+            draft = await assignments.begin_submission(
+                BeginSubmissionCommand(
+                    update_id=_submission_update_id(
+                        actor.member_id, parsed_assignment_id, "begin", operation_key
+                    ),
+                    actor_telegram_user_id=None,
+                    assignment_id=parsed_assignment_id,
+                    actor_member_id=actor.member_id,
+                    replay_fingerprint=_submission_fingerprint("begin"),
+                )
+            )
+        except (AssignmentError, LookupError, PermissionError):
+            return _error_response(409, "assignment_unavailable")
+        return _json_response(_submission_draft_dto(draft))
+
+    @app.put("/api/v1/submission-drafts/{draft_id}")
+    async def save_submission_draft(draft_id: str, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        parsed_draft_id = _canonical_uuid(draft_id)
+        if parsed_draft_id is None:
+            return _error_response(422, "invalid_request")
+        payload = cast(
+            "SaveSubmissionDraftRequest | None",
+            await _submission_request(request, SaveSubmissionDraftRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        fingerprint = _submission_fingerprint(
+            "save", payload.expected_revision, payload=payload.payload
+        )
+        try:
+            draft = await assignments.save_submission_draft(
+                SaveSubmissionDraftCommand(
+                    update_id=_submission_update_id(
+                        actor.member_id, parsed_draft_id, "save", operation_key
+                    ),
+                    actor_telegram_user_id=None,
+                    draft_id=parsed_draft_id,
+                    expected_revision=payload.expected_revision,
+                    payload=payload.payload,
+                    actor_member_id=actor.member_id,
+                    replay_fingerprint=fingerprint,
+                )
+            )
+        except (AssignmentError, LookupError, PermissionError):
+            return _error_response(409, "assignment_unavailable")
+        return _json_response(_submission_draft_dto(draft))
+
+    @app.post("/api/v1/submission-drafts/{draft_id}/confirm", status_code=204)
+    async def confirm_submission_draft(draft_id: str, request: Request) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        parsed_draft_id = _canonical_uuid(draft_id)
+        if parsed_draft_id is None:
+            return _error_response(422, "invalid_request")
+        payload = cast(
+            "ConfirmSubmissionDraftRequest | None",
+            await _submission_request(request, ConfirmSubmissionDraftRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        try:
+            await assignments.confirm_submission_draft(
+                ConfirmSubmissionDraftCommand(
+                    update_id=_submission_update_id(
+                        actor.member_id, parsed_draft_id, "confirm", operation_key
+                    ),
+                    actor_telegram_user_id=None,
+                    draft_id=parsed_draft_id,
+                    expected_revision=payload.expected_revision,
+                    actor_member_id=actor.member_id,
+                    replay_fingerprint=_submission_fingerprint(
+                        "confirm", payload.expected_revision
+                    ),
+                )
+            )
+        except (AssignmentError, LookupError, PermissionError):
+            return _error_response(409, "assignment_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.get("/", include_in_schema=False)
     async def mini_app() -> HTMLResponse:
         return HTMLResponse(
@@ -712,6 +828,52 @@ def _accept_update_id(member_id: UUID, task_id: UUID, operation_key: str) -> int
     return resolved or 1
 
 
+def _submission_update_id(
+    member_id: UUID, resource_id: UUID, operation: str, operation_key: str
+) -> int:
+    parts = (
+        b"submission-v1",
+        operation.encode("ascii"),
+        member_id.bytes,
+        resource_id.bytes,
+        operation_key.encode("ascii"),
+    )
+    encoded = b"".join(len(part).to_bytes(2, "big") + part for part in parts)
+    resolved = int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") & _MAX_IDEMPOTENCY_KEY
+    return resolved or 1
+
+
+def _submission_fingerprint(
+    operation: str,
+    expected_revision: int | None = None,
+    *,
+    payload: dict[str, object] | None = None,
+) -> str:
+    command = {"operation": operation, "expected_revision": expected_revision, "payload": payload}
+    canonical = json.dumps(command, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _canonical_uuid(value: str) -> UUID | None:
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return None
+    return parsed if str(parsed) == value else None
+
+
+async def _submission_request(
+    request: Request, model: type[SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest]
+) -> SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest | None:
+    if request.headers.get("content-type", "").lower() != "application/json":
+        return None
+    try:
+        body = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
+        return model.model_validate_json(body)
+    except (OverflowError, ValueError, ValidationError):
+        return None
+
+
 def _assignment_cursor(cursor: tuple[datetime.datetime, UUID]) -> str:
     accepted_at, assignment_id = cursor
     timestamp = accepted_at.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
@@ -857,6 +1019,17 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
         city=task.city,
         minimum_level=task.minimum_level,
         performer_slots=task.performer_slots,
+        submission_contract=cast('Literal["freeform_result_v1"] | None', card.submission_contract),
+    )
+
+
+def _submission_draft_dto(draft: SubmissionDraft) -> SubmissionDraftDto:
+    value = None if draft.payload is None else draft.payload.get("result")
+    result = value if isinstance(value, str) else None
+    return SubmissionDraftDto(
+        id=draft.id,
+        revision=draft.revision,
+        result=result,
     )
 
 
