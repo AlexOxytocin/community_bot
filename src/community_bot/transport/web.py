@@ -220,6 +220,11 @@ class AssignmentDecisionRequest(_Dto):
     decision: AssignmentDecision
 
 
+class AssignmentDisputeRequest(_Dto):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    comment: str = Field(min_length=1)
+
+
 class ModerationCaseDto(_Dto):
     id: UUID
     assignment_id: UUID
@@ -249,6 +254,7 @@ class AssignmentDetailDto(AssignmentCardDto):
     minimum_level: int
     performer_slots: int
     submission_contract: Literal["freeform_result_v1"] | None
+    can_dispute: bool
 
 
 class SubmissionDraftDto(_Dto):
@@ -678,6 +684,43 @@ def create_web_app(
         except LookupError:
             return _error_response(404, "not_found")
         return _json_response(_assignment_detail_dto(card))
+
+    @app.post("/api/v1/assignments/{assignment_id}/disputes", status_code=204)
+    async def open_assignment_dispute(assignment_id: str, request: Request) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        parsed_assignment_id = _canonical_uuid(assignment_id)
+        if parsed_assignment_id is None:
+            return _error_response(422, "invalid_request")
+        payload = cast(
+            "AssignmentDisputeRequest | None",
+            await _submission_request(request, AssignmentDisputeRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        update_id = _submission_update_id(
+            actor.member_id,
+            parsed_assignment_id,
+            "dispute",
+            operation_key,
+            namespace=b"assignment-dispute-v1",
+        )
+        try:
+            await assignments.dispute(
+                update_id=update_id,
+                actor_telegram_user_id=None,
+                assignment_id=parsed_assignment_id,
+                command_id=UUID(int=update_id),
+                comment=payload.comment,
+                actor_member_id=actor.member_id,
+                replay_fingerprint=_submission_fingerprint(
+                    "dispute", payload={"comment": payload.comment}
+                ),
+            )
+        except (AssignmentError, LookupError, PermissionError):
+            return _error_response(409, "assignment_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/assignment-reviews", response_model=AssignmentReviewsDto)
     async def assignment_reviews(
@@ -1115,9 +1158,18 @@ def _canonical_uuid(value: str) -> UUID | None:
 async def _submission_request(
     request: Request,
     model: type[
-        SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest | AssignmentDecisionRequest
+        SaveSubmissionDraftRequest
+        | ConfirmSubmissionDraftRequest
+        | AssignmentDecisionRequest
+        | AssignmentDisputeRequest
     ],
-) -> SaveSubmissionDraftRequest | ConfirmSubmissionDraftRequest | AssignmentDecisionRequest | None:
+) -> (
+    SaveSubmissionDraftRequest
+    | ConfirmSubmissionDraftRequest
+    | AssignmentDecisionRequest
+    | AssignmentDisputeRequest
+    | None
+):
     if request.headers.get("content-type", "").lower() != "application/json":
         return None
     try:
@@ -1273,6 +1325,7 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
         minimum_level=task.minimum_level,
         performer_slots=task.performer_slots,
         submission_contract=cast('Literal["freeform_result_v1"] | None', card.submission_contract),
+        can_dispute=card.can_dispute,
     )
 
 

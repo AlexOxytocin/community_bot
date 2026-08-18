@@ -1137,6 +1137,7 @@ async def test_active_assignment_api_paginates_privately_without_effects(
             "minimum_level",
             "performer_slots",
             "submission_contract",
+            "can_dispute",
         }
         assert detail.json()["result_summary"] == "Visible result"
         assert detail.json()["case_status"] == "open"
@@ -1184,6 +1185,130 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         ]
         assert await schema_snapshot(database.engine) == denied_before
 
+    await database.dispose()
+
+
+async def test_performer_dispute_api_is_exact_private_and_scope_owned(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    performer = await prepare_member(database, telegram_user_id=54_700)
+    foreign = await prepare_member(database, telegram_user_id=54_701)
+    fixtures = [
+        await _freeform_task(database, update_base=value) for value in (54_800, 55_000, 55_200)
+    ]
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    now = datetime.datetime.now(datetime.UTC)
+    rows = [
+        AssignmentModel(
+            task_id=task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="rejected_pending_dispute",
+            rejected_at=now,
+            reject_dispute_deadline_at=now + datetime.timedelta(hours=24),
+        )
+        for _author, task in fixtures
+    ]
+    async with sessions.begin() as session:
+        session.add_all(rows)
+        await session.flush()
+    first, second, hidden = rows
+    hidden_author, _hidden_task = fixtures[-1]
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(performer.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        path = f"/api/v1/assignments/{first.id}/disputes"
+        headers = {"origin": ORIGIN, "idempotency-key": "55701"}
+        detail = await client.get(f"/api/v1/assignments/{first.id}")
+        assert detail.status_code == 200
+        assert detail.json()["can_dispute"] is True
+        assert detail.json()["reject_dispute_deadline_at"] is not None
+        _schema, baseline = await schema_snapshot(database.engine)
+        for body in ({}, {"comment": ""}, {"comment": "   "}):
+            invalid = await client.post(path, headers=headers, json=body)
+            assert (invalid.status_code, invalid.json()) == (422, {"code": "invalid_request"})
+        assert (await schema_snapshot(database.engine))[1] == baseline
+
+        async def post(target: UUID, key: str, comment: str) -> Response:
+            return await client.post(
+                f"/api/v1/assignments/{target}/disputes",
+                headers={"origin": ORIGIN, "idempotency-key": key},
+                json={"comment": comment},
+            )
+
+        exact = await asyncio.gather(
+            post(first.id, "55702", "Private exact reason"),
+            post(first.id, "55702", " Private exact reason "),
+        )
+        assert [response.status_code for response in exact] == [204, 204]
+        disputed_detail = await client.get(f"/api/v1/assignments/{first.id}")
+        assert disputed_detail.json()["can_dispute"] is False
+        assert disputed_detail.json()["case_status"] == "open"
+        assert "Private exact reason" not in disputed_detail.text
+        conflict = await asyncio.gather(
+            post(second.id, "55703", "First private reason"),
+            post(second.id, "55703", "Conflicting private reason"),
+        )
+        assert sorted(response.status_code for response in conflict) == [204, 409]
+        assert (await post(first.id, "55704", "Already open")).status_code == 409
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as outsider:
+            await outsider.post(
+                "/api/v1/auth/telegram",
+                content=proof(foreign.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+            denied = await outsider.post(path, headers=headers, json={"comment": "Foreign"})
+            assert (denied.status_code, denied.json()) == (
+                409,
+                {"code": "assignment_unavailable"},
+            )
+
+        async with sessions.begin() as session:
+            run = DbTestRunModel(marker="TEST-CB74-HIDDEN", started_by_member_id=hidden_author.id)
+            session.add(run)
+            await session.flush()
+            session.add(DbTestRunParticipantModel(run_id=run.id, member_id=performer.id))
+        hidden_response = await post(hidden.id, "55705", "Hidden")
+        assert (hidden_response.status_code, hidden_response.json()) == (
+            409,
+            {"code": "assignment_unavailable"},
+        )
+        replay_after_scope_change = await post(first.id, "55702", "Private exact reason")
+        assert replay_after_scope_change.status_code == 409
+        async with sessions.begin() as session:
+            participant = await session.get(DbTestRunParticipantModel, (run.id, performer.id))
+            stored_hidden = await session.get(AssignmentModel, hidden.id)
+            assert participant is not None and stored_hidden is not None  # noqa: PT018
+            participant.is_active = False
+            participant.left_at = datetime.datetime.now(datetime.UTC)
+            stored_hidden.reject_dispute_deadline_at = datetime.datetime.now(datetime.UTC)
+        assert (await post(hidden.id, "55706", "Expired")).status_code == 409
+
+    _schema, final = await schema_snapshot(database.engine)
+    effect_tables = (
+        "assignment_disputes",
+        "moderation_cases",
+        "outbox_events",
+        "processed_telegram_updates",
+        "account_transactions",
+        "reliability_events",
+        "audit_events",
+    )
+    assert tuple(final[name] - baseline[name] for name in effect_tables) == (2, 2, 2, 2, 0, 0, 0)
+    async with sessions() as session:
+        payloads = (await session.scalars(select(OutboxEventModel.payload_json))).all()
+    assert "Private" not in json.dumps(payloads)
     await database.dispose()
 
 

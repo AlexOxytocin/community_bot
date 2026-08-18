@@ -529,11 +529,21 @@ async def test_dispute_resolution_preserves_ledger_and_audit(database_url: str) 
                 )
             )
         ).all()
+        audit = (
+            await session.scalars(
+                select(AuditEventModel).where(
+                    AuditEventModel.action == "moderation_case_resolved",
+                    AuditEventModel.entity_type == "moderation_case",
+                    AuditEventModel.entity_id == str(case.id),
+                )
+            )
+        ).all()
     assert stored is not None and stored.status == "partially_approved"
     assert dispute_count == 1
     assert resolution_count == 1
     assert int(reliability_count or 0) >= 2
     assert transaction_count == 2
+    assert len(audit) == 1 and audit[0].actor_member_id == moderator.id
     assert all(private_comment not in str(payload) for payload in payloads)
     await database.dispose()
 

@@ -662,10 +662,13 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         "city": None,
         "minimum_level": 1,
         "performer_slots": 1,
+        "submission_contract": None,
+        "can_dispute": False,
     }
     list_mode: dict[str, Any] = {"status": 200, "items": []}
     detail_mode: dict[str, Any] = {"status": 200, "pending": False}
     pending_routes: list[Route] = []
+    dispute_keys: list[str] = []
 
     def assignments_route(route: Route) -> None:
         route.fulfill(
@@ -679,6 +682,12 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
             return
         route.fulfill(status=detail_mode["status"], json=detail)
 
+    def dispute_route(route: Route) -> None:
+        dispute_keys.append(route.request.headers["idempotency-key"])
+        assert route.request.post_data_json == {"comment": "Нужна независимая проверка"}
+        detail.update(assignment_status="disputed", case_status="open", can_dispute=False)
+        route.fulfill(status=204)
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
@@ -689,6 +698,8 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         )
         page.route("**/api/v1/assignments?*", assignments_route)
         page.route(f"**/api/v1/assignments/{assignment_id}", detail_route)
+        page.route(f"**/api/v1/assignments/{assignment_id}/disputes", dispute_route)
+        page.on("dialog", lambda dialog: dialog.accept())
         page.goto(mini_app_url)
 
         page.get_by_role("button", name="Мои задания").click()
@@ -752,6 +763,29 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         assert page.get_by_text("Собрать понятный план").count() == 0
         assert page.get_by_role("button", name=re.compile("Собрать план")).count() == 1
         assert page.get_by_role("button", name="Назад").count() == 0
+
+        detail.update(
+            assignment_status="rejected_pending_dispute",
+            reject_dispute_deadline_at="2026-08-21T20:30:00Z",
+            case_status=None,
+            can_dispute=True,
+        )
+        detail_mode["pending"] = False
+        page.get_by_role("button", name=re.compile("Собрать план")).click()
+        page.get_by_text("Условия спора").wait_for()
+        assert page.locator("time[datetime='2026-08-21T20:30:00Z']").count() == 1
+        page.get_by_label("Почему результат нужно пересмотреть").fill("Нужна независимая проверка")
+        page.get_by_role("button", name="Подать спор").click()
+        page.get_by_text("Передан команде модерации").wait_for()
+        assert len(dispute_keys) == 1
+
+        page.get_by_role("button", name="Назад").click()
+        detail.update(
+            assignment_status="rejected_pending_dispute", case_status=None, can_dispute=False
+        )
+        page.get_by_role("button", name=re.compile("Собрать план")).click()
+        page.get_by_text("Срок подачи спора истёк.").wait_for()
+        assert page.get_by_role("button", name="Подать спор").count() == 0
         browser.close()
 
 
