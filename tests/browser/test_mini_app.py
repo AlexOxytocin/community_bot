@@ -6,6 +6,7 @@ import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -26,7 +27,10 @@ class _AssetsHandler(http.server.SimpleHTTPRequestHandler):
         del format, args
 
     def translate_path(self, path: str) -> str:
-        relative = "index.html" if path == "/" else path.removeprefix("/mini-assets/")
+        request_path = urlsplit(path).path
+        relative = (
+            "index.html" if request_path == "/" else request_path.removeprefix("/mini-assets/")
+        )
         return str(STATIC_DIR / relative)
 
 
