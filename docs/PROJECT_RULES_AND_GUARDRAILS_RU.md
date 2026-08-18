@@ -88,6 +88,12 @@
   проверки → commit → push → запрос на слияние → CI/review → merge в `main`,
   если gate не заблокирован. Для задачных веток это постоянное намерение
   владельца.
+- После merge deployable code, runtime config, migrations или frontend проходят
+  delivery gate [ADR-0019](adr/0019-single-pilot-post-task-delivery-gate.md):
+  green main CI → exact immutable artifact → manual-first activation на одном
+  pilot → public URL smoke → Jira evidence. Docs/tests/`tasks/**`-only diff
+  получает явный skip; migration требует owner gate. `Done` разрешён только
+  после green public smoke либо документированного owner waiver.
 - Прямые коммиты задачи в `main` запрещены; изменение попадает в `main` через проверенный запрос на слияние, кроме явного начального решения владельца.
 - Ветка `dev` вводится только отдельным ADR, если появится параллельная команда или независимый цикл релизов.
 - Ветки и запросы на слияние не создаются повторно без проверки существующего состояния удалённого репозитория.

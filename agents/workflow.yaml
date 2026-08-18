@@ -267,6 +267,31 @@ phases:
       - durable_docs_updated
       - only_non_secret_conclusions_indexed
 
+post_merge_delivery:
+  decision: ADR-0019
+  deploy_when_diff_contains:
+    - deployable_code
+    - runtime_config
+    - migrations
+    - frontend
+  skip_when_diff_contains_only:
+    - docs
+    - tests
+    - task_artifacts
+  sequence:
+    - merge_and_green_main_ci
+    - exact_immutable_release_artifact
+    - manual_first_single_pilot_activation
+    - public_url_smoke
+    - privacy_safe_jira_evidence
+  migration_change_requires_owner_gate: true
+  done_requires: successful_public_smoke_or_documented_owner_waiver
+  blocker_without_waiver_is_done: false
+  compatible_rollback_tuples: 1
+  delivery_is_serialized: true
+  supersession_requires_monotonic_artifact_and_both_smoke_scopes: true
+  automatic_cd_or_ssh_framework: forbidden
+
 mutation_policy:
   jira_read: allowed_when_requested
   jira_issue_create_for_requested_bug_feature_or_process_change: standing_owner_intent

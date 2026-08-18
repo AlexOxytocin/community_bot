@@ -375,12 +375,22 @@ async function loadModeration(push = true) {
   }
 }
 
-async function bootstrap() {
+async function bootstrap(authAttempted = false) {
   try {
-    const [me, catalog] = await Promise.all([
-      fetch("/api/v1/me", { credentials: "same-origin" }),
-      fetch("/api/v1/tasks", { credentials: "same-origin" }),
-    ]);
+    const me = await fetch("/api/v1/me", { credentials: "same-origin" });
+    if (me.status === 401 && !authAttempted) {
+      const initData = globalThis.Telegram?.WebApp?.initData;
+      if (!initData) throw new Error("telegram_init_data_missing");
+      const auth = await fetch("/api/v1/auth/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: initData,
+        credentials: "same-origin",
+      });
+      if (!auth.ok) throw new Error("telegram_auth_failed");
+      return bootstrap(true);
+    }
+    const catalog = await fetch("/api/v1/tasks", { credentials: "same-origin" });
     if (!me.ok || !catalog.ok) throw new Error("bootstrap_failed");
     const [profile, page] = await Promise.all([me.json(), catalog.json()]);
     welcome.textContent = profile.display_name

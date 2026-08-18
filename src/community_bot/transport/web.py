@@ -564,7 +564,7 @@ def create_web_app(
             headers={
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (
-                    "default-src 'self'; script-src 'self'; "
+                    "default-src 'self'; script-src 'self' https://telegram.org; "
                     "style-src 'self'; font-src 'self'; img-src 'none'; object-src 'none'; "
                     "base-uri 'none'; frame-ancestors https://web.telegram.org "
                     "https://*.telegram.org"
