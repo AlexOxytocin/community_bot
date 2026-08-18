@@ -928,10 +928,12 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             now=now,
         )
 
-    async def ensure_task_test_access(self, *, task_id: UUID, member_id: UUID) -> None:
+    async def ensure_task_test_access(
+        self, *, member_id: UUID, task_id: UUID | None = None, draft_id: UUID | None = None
+    ) -> None:
         """Enforce the test-scope boundary for direct task commands."""
         await task_store.ensure_test_access(
-            self._require_session(), task_id=task_id, member_id=member_id
+            self._require_session(), task_id=task_id, draft_id=draft_id, member_id=member_id
         )
 
     async def add_task_outbox(

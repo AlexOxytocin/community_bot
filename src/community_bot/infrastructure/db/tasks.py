@@ -585,10 +585,17 @@ async def add_task_outbox(
 
 
 async def ensure_test_access(
-    session: AsyncSession, *, task_id: uuid.UUID, member_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    member_id: uuid.UUID,
+    task_id: uuid.UUID | None = None,
+    draft_id: uuid.UUID | None = None,
 ) -> None:
-    """Require the task and actor to share the same active test scope."""
-    task_run_id = await session.scalar(select(TaskModel.test_run_id).where(TaskModel.id == task_id))
+    """Require a task resource and actor to share the same active test scope."""
+    model, resource_id = (
+        (TaskModel, task_id) if task_id is not None else (TaskCreationDraftModel, draft_id)
+    )
+    task_run_id = await session.scalar(select(model.test_run_id).where(model.id == resource_id))
     scope = await active_scope(session, member_id)
     if task_run_id != (None if scope is None else scope.id):
         raise PermissionError("Task is outside the actor test scope.")

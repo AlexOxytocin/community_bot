@@ -1,38 +1,23 @@
-# CB-70 — независимая проверка плана
+# CB-70 — независимая проверка 20/80 плана
 
 **Status: approved**
 
-Проверено содержание `plan.md` с reviewer hash `38A0BD90…`; после вердикта в
-плане изменена только строка статуса. Итоговый hash
-`97736974EF0E5203800A2F34BFA160D4E91F847A9E5CE9A5DD85CCF22CDDCAC0`.
-Блокирующих замечаний нет.
+План после owner decision проверен повторно. Hard ledger точен:
+`170 + 15 + 140 + 125 = 450 net runtime LOC`; новые границы остаются тонким
+web adapter поверх существующего task engine.
 
-## Подтверждённые границы
+Проверены и приняты: один GET/POST resource path с закрытыми
+`start/save/publish`, canonical operation identity и fingerprint, exact replay,
+active test-run isolation, expired-preview recovery, immutable publish result,
+web-only отказ от `conversation_states` и неизменность legacy Telegram
+семантики. DELETE/REUSE map исключает экспериментальные per-step routes,
+renderer и actor-native изменения `advance`/`edit_draft_step`.
 
-- Пять routes переиспользуют existing `start/advance/edit/preview/publish`;
-  второго engine, form/schema framework, migration или persistence owner нет.
-- Actor-native web path не принимает Telegram identity и не изменяет
-  `conversation_states`; permissive Telegram edit semantics сохранены.
-- Test-run isolation остаётся fail-closed и не блокирует участника навсегда:
-  direct mismatched access запрещён, valid start атомарно supersede-ит старый
-  current draft без чтения или копирования payload.
-- Current draft и preview строятся в одной transaction/revision. Просроченный
-  preview после restart возвращает safe `needs_edit=true`, а web edit проверяет
-  exact revision под draft lock.
-- Same-key replay имеет один receipt; different-key business retry публикации
-  возвращает тот же immutable `task_id` без повторных reserve/audit/outbox
-  effects и сохраняет existing отдельный receipt.
-- Domain validators остаются владельцами reward, URL, deadline, slots и
-  format/city. DTO/DOM не публикуют private/internal поля и raw schema.
-- Test matrix покрывает scope transitions, restart/recovery, stale/conflict,
-  concurrent publish, privacy, Telegram regression и один browser journey.
+Ponytail: `Lean plan`; повторно используются existing validators, draft/publish,
+receipt и static primitives; новый framework, owner, table, migration,
+dependency или generic renderer не вводятся.
 
-## Ponytail
-
-`Lean already. Ship.`
-
-## Остаточный риск
-
-Заявленные transaction/replay/privacy свойства должны быть подтверждены
-runtime diff и запланированными PostgreSQL/browser gates. До merge CB-69 общие
-`web.py` и static assets остаются stop gate для реализации CB-70.
+Implementation разрешена только после явного принятия владельцем сужения
+durable-granularity. Это продуктовое решение не заменяется данным review.
+Перед implementation весь экспериментальный runtime/test diff должен быть
+полностью удалён.

@@ -32,6 +32,7 @@ from community_bot.application.tasks import (
     AdvanceDraftCommand,
     PublishedTask,
     PublishTaskCommand,
+    SaveWebTaskDraftCommand,
     TaskService,
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
@@ -65,6 +66,10 @@ from community_bot.infrastructure.db.models import (
     TaskCreationDraftModel,
     TaskModel,
     TaskTemplateModel,
+)
+from community_bot.infrastructure.db.models import TestRunModel as DbTestRunModel
+from community_bot.infrastructure.db.models import (
+    TestRunParticipantModel as DbTestRunParticipantModel,
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -258,6 +263,115 @@ async def complete_freeform_preview(  # noqa: PLR0913
     )
     assert preview.reserved_credit_total == performer_slots * reward
     return preview.draft.id, preview.draft.revision
+
+
+async def test_web_draft_scope_follows_public_active_and_stale_transitions(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=20_070)
+    service = TaskService(database.unit_of_work)
+    category = await category_id(database, "practical_help")
+    selected_template = await template_id(database, "repository_first_impression")
+    template_draft = await service.start(
+        update_id=8_000_000_000_070_000,
+        actor_telegram_user_id=member.telegram_user_id,
+        template_id=selected_template,
+    )
+    assert template_draft is not None
+    with pytest.raises(TaskError):
+        await service.publish(
+            PublishTaskCommand(
+                8_000_000_000_070_006,
+                None,
+                template_draft.id,
+                template_draft.revision,
+                member.id,
+                "hidden-template",
+            )
+        )
+
+    public = await service.start(
+        update_id=8_000_000_000_070_001,
+        actor_telegram_user_id=None,
+        template_id=None,
+        actor_member_id=member.id,
+        replay_fingerprint="public-start",
+    )
+    assert public is not None
+    assert public.id != template_draft.id
+    form = SaveWebTaskDraftCommand(
+        8_000_000_000_070_002,
+        member.id,
+        public.id,
+        0,
+        category,
+        TaskKind.SOLO,
+        TaskTimeSize.S,
+        "Публичный черновик",
+        "Описание публичного черновика для проверки изоляции.",
+        "Есть проверяемый результат.",
+        3,
+        datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2),
+        TaskFormat.ONLINE,
+        None,
+        {"url": "https://example.com/public"},
+        1,
+        "public-save",
+    )
+    await service.save_web(form)
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        run = DbTestRunModel(marker="TEST-CB70-DRAFT", started_by_member_id=member.id)
+        session.add(run)
+        await session.flush()
+        session.add(DbTestRunParticipantModel(run_id=run.id, member_id=member.id))
+    assert (await service.web_state(member.id))[1] is None
+    with pytest.raises(PermissionError, match="test scope"):
+        await service.save_web(replace(form, update_id=8_000_000_000_070_003))
+
+    scoped = await service.start(
+        update_id=8_000_000_000_070_004,
+        actor_telegram_user_id=None,
+        template_id=None,
+        actor_member_id=member.id,
+        replay_fingerprint="scoped-start",
+    )
+    replay = await service.start(
+        update_id=8_000_000_000_070_004,
+        actor_telegram_user_id=None,
+        template_id=None,
+        actor_member_id=member.id,
+        replay_fingerprint="scoped-start",
+    )
+    assert scoped is not None
+    assert replay is not None
+    assert scoped.id == replay.id
+    assert scoped.title is None
+    assert scoped.test_run_id == run.id
+
+    async with sessions.begin() as session:
+        participant = await session.get(DbTestRunParticipantModel, (run.id, member.id))
+        stored_run = await session.get(DbTestRunModel, run.id)
+        assert participant is not None
+        assert stored_run is not None
+        participant.is_active = False
+        stored_run.status = "completed"
+        stored_run.ended_at = datetime.datetime.now(datetime.UTC)
+    assert (await service.web_state(member.id))[1] is None
+    restored = await service.start(
+        update_id=8_000_000_000_070_005,
+        actor_telegram_user_id=None,
+        template_id=None,
+        actor_member_id=member.id,
+        replay_fingerprint="restored-start",
+    )
+    assert restored is not None
+    assert restored.test_run_id is None
+    assert restored.title is None
+    assert restored.id not in {public.id, scoped.id}
+    await database.dispose()
 
 
 async def scalar_count(database: Database, model: type[object]) -> int:

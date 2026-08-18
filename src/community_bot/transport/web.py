@@ -18,9 +18,10 @@ from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import UUID
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
@@ -42,10 +43,23 @@ from community_bot.application.reputation import (
     SafeProfile,
     normalize_member_search_query,
 )
-from community_bot.application.tasks import PublishedTask, TaskService
+from community_bot.application.tasks import (
+    PublishedTask,
+    PublishTaskCommand,
+    SaveWebTaskDraftCommand,
+    TaskDraft,
+    TaskPreview,
+    TaskService,
+)
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import AssignmentError, SubmissionDraft
-from community_bot.domain.tasks import TaskError
+from community_bot.domain.catalog import TaskFormat
+from community_bot.domain.tasks import (
+    TASK_TIME_SIZE_SPECS,
+    TaskError,
+    TaskKind,
+    TaskTimeSize,
+)
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
 
@@ -231,6 +245,36 @@ class SaveSubmissionDraftRequest(_Dto):
 
 class ConfirmSubmissionDraftRequest(_Dto):
     expected_revision: int = Field(ge=0, strict=True)
+
+
+class TaskFormRequest(_Dto):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    category_id: UUID
+    task_kind: TaskKind
+    time_size: TaskTimeSize
+    title: str
+    description: str
+    completion_criteria: str
+    credit_reward_per_performer: int = Field(strict=True)
+    deadline_at: datetime.datetime
+    format: TaskFormat
+    city: str | None = None
+    materials: dict[Literal["text", "url"], str]
+    performer_slots: int = Field(strict=True)
+
+    @field_validator("deadline_at")
+    @classmethod
+    def canonical_deadline(cls, value: datetime.datetime) -> datetime.datetime:
+        """Project aware timestamps to UTC without time-dependent validation."""
+        return value.astimezone(datetime.UTC) if value.tzinfo is not None else value
+
+
+class TaskCreationRequest(_Dto):
+    action: Literal["start", "save", "publish"]
+    draft_id: UUID | None = None
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
+    form: TaskFormRequest | None = None
 
 
 class LeaderboardItemDto(_Dto):
@@ -455,6 +499,101 @@ def create_web_app(
                 next_cursor=page.next_cursor_task_id,
             )
         )
+
+    @app.get("/api/v1/task-creation")
+    async def task_creation(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
+        try:
+            categories, draft, preview, needs_edit = await tasks.web_state(actor.member_id)
+        except PermissionError:
+            return _error_response(403, "task_catalog_unavailable")
+        return _json_response(
+            {
+                "categories": [
+                    {"id": str(item.id), "name": item.name, "icon": item.icon}
+                    for item in categories
+                ],
+                "time_sizes": [
+                    {
+                        "value": size.value,
+                        "label": spec.label,
+                        "reward_options": spec.reward_options,
+                        "minimum_reward": spec.minimum_reward,
+                    }
+                    for size, spec in TASK_TIME_SIZE_SPECS.items()
+                ],
+                "draft": None if draft is None else _task_draft_json(draft),
+                "preview": None if preview is None else _task_preview_json(preview),
+                "needs_edit": needs_edit,
+            }
+        )
+
+    @app.post("/api/v1/task-creation")
+    async def change_task_creation(request: Request) -> Response:
+        _require_origin(request, origin)
+        if request.headers.get("content-type", "").lower() != "application/json":
+            return _error_response(422, "invalid_request")
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        key = _idempotency_key(request)
+        try:
+            raw = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
+            parsed = json.loads(raw)
+            model = TaskCreationRequest.model_validate(parsed)
+            expected = {
+                "start": {"action"},
+                "save": {"action", "draft_id", "expected_revision", "form"},
+                "publish": {"action", "draft_id", "expected_revision"},
+            }[model.action]
+        except (OverflowError, ValueError, ValidationError, AttributeError):
+            return _error_response(422, "invalid_request")
+        if model.model_fields_set != expected or any(
+            getattr(model, field) is None for field in expected
+        ):
+            return _error_response(422, "invalid_request")
+        resource = actor.member_id if model.action == "start" else cast("UUID", model.draft_id)
+        fingerprint = _submission_fingerprint(
+            model.action,
+            getattr(model, "expected_revision", None),
+            payload=model.form.model_dump(mode="json") if model.form else None,
+        )
+        update_id = _submission_update_id(
+            actor.member_id, resource, model.action, key, namespace=b"task-creation-v1"
+        )
+        try:
+            if model.action == "start":
+                await tasks.start(
+                    update_id=update_id,
+                    actor_telegram_user_id=None,
+                    template_id=None,
+                    actor_member_id=actor.member_id,
+                    replay_fingerprint=fingerprint,
+                )
+            elif model.action == "save":
+                form = cast("TaskFormRequest", model.form)
+                await tasks.save_web(
+                    SaveWebTaskDraftCommand(
+                        update_id=update_id,
+                        actor_member_id=actor.member_id,
+                        draft_id=cast("UUID", model.draft_id),
+                        expected_revision=cast("int", model.expected_revision),
+                        replay_fingerprint=fingerprint,
+                        **form.model_dump(),
+                    )
+                )
+            else:
+                published = await tasks.publish(
+                    PublishTaskCommand(
+                        update_id,
+                        None,
+                        cast("UUID", model.draft_id),
+                        cast("int", model.expected_revision),
+                        actor.member_id,
+                        fingerprint,
+                    )
+                )
+                return _json_response({"task_id": str(published.id)})
+        except (TaskError, LookupError, PermissionError):
+            return _error_response(409, "task_catalog_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/leaderboard", response_model=LeaderboardDto)
     async def leaderboard(
@@ -829,10 +968,14 @@ def _accept_update_id(member_id: UUID, task_id: UUID, operation_key: str) -> int
 
 
 def _submission_update_id(
-    member_id: UUID, resource_id: UUID, operation: str, operation_key: str
+    member_id: UUID,
+    resource_id: UUID,
+    operation: str,
+    operation_key: str,
+    namespace: bytes = b"submission-v1",
 ) -> int:
     parts = (
-        b"submission-v1",
+        namespace,
         operation.encode("ascii"),
         member_id.bytes,
         resource_id.bytes,
@@ -852,6 +995,38 @@ def _submission_fingerprint(
     command = {"operation": operation, "expected_revision": expected_revision, "payload": payload}
     canonical = json.dumps(command, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _task_draft_json(draft: TaskDraft) -> dict[str, object]:
+    fields = (
+        "task_kind",
+        "time_size",
+        "title",
+        "description",
+        "completion_criteria",
+        "credit_reward_per_performer",
+        "deadline_at",
+        "format",
+        "city",
+        "materials",
+        "performer_slots",
+    )
+    values = {field: getattr(draft, field) for field in fields}
+    values["category_id"] = None if draft.category_id is None else str(draft.category_id)
+    return {
+        "id": str(draft.id),
+        "revision": draft.revision,
+        "values": values,
+    }
+
+
+def _task_preview_json(preview: TaskPreview) -> dict[str, object]:
+    return {
+        "title": preview.draft.title,
+        "description": preview.draft.description,
+        "completion_criteria": preview.completion_criteria,
+        "reward_total": preview.reserved_credit_total,
+    }
 
 
 def _canonical_uuid(value: str) -> UUID | None:
@@ -1046,9 +1221,9 @@ def _moderation_case_dto(case: ModerationCase) -> ModerationCaseDto:
     )
 
 
-def _json_response(model: BaseModel, *, status_code: int = 200) -> JSONResponse:
+def _json_response(model: object, *, status_code: int = 200) -> JSONResponse:
     return JSONResponse(
-        model.model_dump(mode="json"),
+        model.model_dump(mode="json") if isinstance(model, BaseModel) else jsonable_encoder(model),
         status_code=status_code,
         headers={"Cache-Control": "no-store"},
     )

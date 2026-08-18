@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID
 
 from community_bot.domain.assignments import AssignmentStatus
@@ -244,9 +244,34 @@ class PublishTaskCommand:
     """Publish one preview revision exactly once."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     draft_id: UUID
     expected_revision: int
+    actor_member_id: UUID | None = None
+    replay_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SaveWebTaskDraftCommand:
+    """Atomically persist one complete Mini App task form as a preview."""
+
+    update_id: int
+    actor_member_id: UUID
+    draft_id: UUID
+    expected_revision: int
+    category_id: UUID
+    task_kind: TaskKind
+    time_size: TaskTimeSize
+    title: str
+    description: str
+    completion_criteria: str
+    credit_reward_per_performer: int
+    deadline_at: datetime.datetime
+    format: TaskFormat
+    city: str | None
+    materials: Mapping[str, object]
+    performer_slots: int
+    replay_fingerprint: str
 
 
 class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
@@ -384,7 +409,9 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         cursor_task_id: UUID | None,
         now: datetime.datetime,
     ) -> tuple[PublishedTask, ...]: ...
-    async def ensure_task_test_access(self, *, task_id: UUID, member_id: UUID) -> None: ...
+    async def ensure_task_test_access(
+        self, *, member_id: UUID, task_id: UUID | None = None, draft_id: UUID | None = None
+    ) -> None: ...
     async def add_task_outbox(
         self, *, event_type: str, task: PublishedTask, business_key: str
     ) -> None: ...
@@ -421,24 +448,44 @@ class TaskService:
         """Configure the shared caller-owned transaction factory."""
         self._unit_of_work_factory = unit_of_work_factory
 
-    async def start(
+    async def start(  # noqa: PLR0913
         self,
         *,
         update_id: int,
-        actor_telegram_user_id: int,
+        actor_telegram_user_id: int | None,
         template_id: UUID | None,
         origin: str = "member",
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> TaskDraft | None:
         """Create a new current draft or resume the existing current draft."""
         async with self._unit_of_work_factory() as uow:
-            replay = await _begin_update(uow, update_id)
-            if replay is not None:
-                return await _draft_from_outcome(uow, replay)
-            await uow.acquire_task_identity_gate(actor_telegram_user_id)
-            actor = await _active_actor(uow, actor_telegram_user_id)
+            if actor_member_id is None:
+                replay = await _begin_update(uow, update_id)
+                if replay is not None:
+                    return await _draft_from_outcome(uow, replay)
+                if actor_telegram_user_id is None:
+                    raise PermissionError("Task actor identity is missing.")
+                await uow.acquire_task_identity_gate(actor_telegram_user_id)
+                actor = await _active_actor(uow, actor_telegram_user_id)
+            else:
+                actor = await _active_context_actor(uow, actor_member_id)
+                await uow.acquire_task_identity_gate(actor.telegram_user_id)
+                replay = await _begin_update(uow, update_id)
+                if replay is not None:
+                    return await _web_draft_replay(uow, replay, actor.id, replay_fingerprint or "")
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.CREATE_TASK)
             if template_id is None:
                 draft = await uow.get_current_task_draft(actor.id)
+                if draft is not None and actor_member_id is not None:
+                    draft = (
+                        None if draft.template_id is not None or draft.origin != "member" else draft
+                    )
+                if draft is not None and actor_member_id is not None:
+                    try:
+                        await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor.id)
+                    except PermissionError:
+                        draft = None
                 if draft is None:
                     if origin != "member":
                         raise TaskError("Free-form community task creation is unavailable.")
@@ -468,7 +515,7 @@ class TaskService:
                     origin=origin,
                 )
                 outcome = f"task_draft:{draft.id}"
-            if draft is not None:
+            if draft is not None and actor_member_id is None:
                 await uow.claim_text_flow(
                     member_id=actor.id,
                     flow_type="task",
@@ -476,8 +523,95 @@ class TaskService:
                     reference_id=draft.id,
                     revision=draft.revision,
                 )
-            await _finish(uow, update_id, actor, outcome, "task_draft")
+            if actor_member_id is None:
+                await _finish(uow, update_id, actor, outcome, "task_draft")
+            else:
+                await _finish_receipt(
+                    uow,
+                    update_id,
+                    actor,
+                    f"web_task_draft:{draft.id}:{replay_fingerprint}",
+                )
             return draft
+
+    async def web_state(
+        self, actor_member_id: UUID
+    ) -> tuple[tuple[TaskCategoryOption, ...], TaskDraft | None, TaskPreview | None, bool]:
+        """Return the actor's scoped free-form draft and valid preview, if any."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_context_actor(uow, actor_member_id)
+            categories = await uow.list_task_categories(actor_role=actor.role)
+            draft = await uow.get_current_task_draft(actor.id)
+            if draft is None:
+                return categories, None, None, False
+            try:
+                await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor.id)
+            except PermissionError:
+                return categories, None, None, False
+            if draft.template_id is not None or draft.origin != "member":
+                return categories, None, None, False
+            if draft.current_step is not TaskDraftStep.PREVIEW:
+                return categories, draft, None, False
+            category = next((item for item in categories if item.id == draft.category_id), None)
+            try:
+                return categories, draft, await _freeform_preview(uow, draft, category), False
+            except TaskError:
+                return categories, draft, None, True
+
+    async def save_web(self, command: SaveWebTaskDraftCommand) -> TaskDraft:
+        """Validate and save the complete fixed form under one draft lock."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_context_actor(uow, command.actor_member_id)
+            await uow.acquire_task_identity_gate(actor.telegram_user_id)
+            replay = await _begin_update(uow, command.update_id)
+            if replay is not None:
+                return await _web_draft_replay(uow, replay, actor.id, command.replay_fingerprint)
+            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.CREATE_TASK)
+            draft = await uow.lock_task_draft(command.draft_id)
+            if (
+                draft is None
+                or draft.creator_id != actor.id
+                or draft.template_id is not None
+                or draft.origin != "member"
+            ):
+                raise PermissionError("Task draft is unavailable.")
+            await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor.id)
+            _expect(draft, draft.current_step, command.expected_revision)
+            category = await uow.task_category_for_creation(
+                category_id=command.category_id, actor_role=actor.role
+            )
+            task_format, city = validate_task_format(
+                command.format, template_format=TaskFormat.ANY, city=command.city
+            )
+            candidate = _replace_draft(
+                draft,
+                category_id=command.category_id,
+                task_kind=command.task_kind,
+                time_size=command.time_size,
+                title=validate_freeform_text(command.title, field="title"),
+                description=validate_freeform_text(command.description, field="description"),
+                completion_criteria=validate_freeform_text(
+                    command.completion_criteria, field="completion_criteria"
+                ),
+                credit_reward_per_performer=command.credit_reward_per_performer,
+                estimated_minutes=TASK_TIME_SIZE_SPECS[command.time_size].estimated_minutes,
+                deadline_at=validate_deadline(command.deadline_at, now=_utc_now()),
+                format=task_format,
+                city=city,
+                materials=validate_freeform_materials(command.materials),
+                performer_slots=command.performer_slots,
+                current_step=TaskDraftStep.PREVIEW,
+                revision=draft.revision + 1,
+            )
+            _validate_freeform_publishable(candidate, category)
+            saved = await uow.save_task_draft(candidate)
+            await _finish_receipt(
+                uow,
+                command.update_id,
+                actor,
+                f"web_task_draft:{saved.id}:{command.replay_fingerprint}",
+            )
+            return saved
 
     async def community_reviewers(
         self, actor_telegram_user_id: int
@@ -816,33 +950,7 @@ class TaskService:
                 )
             )
             if draft.template_id is None:
-                _validate_freeform_publishable(draft, category)
-                if (
-                    draft.performer_slots is None
-                    or draft.credit_reward_per_performer is None
-                    or draft.title is None
-                    or draft.description is None
-                    or draft.completion_criteria is None
-                ):
-                    message = "Task preview is incomplete."
-                    raise TaskError(message)
-                return TaskPreview(
-                    draft,
-                    await uow.member_display_name(draft.creator_id),
-                    None if category is None else category.name,
-                    None if category is None else category.icon,
-                    draft.task_kind,
-                    draft.time_size,
-                    draft.title,
-                    draft.description,
-                    "Следуйте описанию задания и критериям результата.",
-                    ("description",),
-                    draft.completion_criteria,
-                    draft.credit_reward_per_performer,
-                    draft.credit_reward_per_performer * draft.performer_slots,
-                )
-            if draft.template_id is None:
-                raise TaskError("Task preview is incomplete.")
+                return await _freeform_preview(uow, draft, category)
             template = await uow.catalog_template(draft.template_id)
             if template is None or draft.performer_slots is None:
                 raise TaskError("Task preview is incomplete.")
@@ -871,13 +979,38 @@ class TaskService:
     async def publish(self, command: PublishTaskCommand) -> PublishedTask | TaskDraft:  # noqa: PLR0915
         """Atomically reserve credits and publish one exact preview revision."""
         async with self._unit_of_work_factory() as uow:
-            replay = await _begin_update(uow, command.update_id)
-            if replay is not None:
-                return await _publication_from_outcome(uow, replay)
-            await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
+            if command.actor_member_id is None:
+                replay = await _begin_update(uow, command.update_id)
+                if replay is not None:
+                    return await _publication_from_outcome(uow, replay)
+                if command.actor_telegram_user_id is None:
+                    raise PermissionError("Task actor identity is missing.")
+                await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
+                web_actor = None
+            else:
+                web_actor = await _active_context_actor(uow, command.actor_member_id)
+                await uow.acquire_task_identity_gate(web_actor.telegram_user_id)
+                replay = await _begin_update(uow, command.update_id)
+                if replay is not None:
+                    return await _web_publication_replay(
+                        uow,
+                        replay,
+                        web_actor.id,
+                        command.draft_id,
+                        command.replay_fingerprint or "",
+                    )
             preliminary = await uow.get_task_draft(command.draft_id)
-            if preliminary is None:
+            if preliminary is None or (
+                web_actor is not None
+                and (
+                    preliminary.creator_id != web_actor.id
+                    or preliminary.template_id is not None
+                    or preliminary.origin != "member"
+                )
+            ):
                 raise TaskError("Task draft does not exist.")
+            if web_actor is not None:
+                await uow.ensure_task_test_access(draft_id=preliminary.id, member_id=web_actor.id)
             await uow.acquire_task_command_gate(preliminary.publish_command_id)
             await uow.acquire_catalog_mutation_gate()
             template_before = (
@@ -885,7 +1018,11 @@ class TaskService:
                 if preliminary.template_id is None
                 else await uow.catalog_template(preliminary.template_id)
             )
-            actor_snapshot = await _active_actor(uow, command.actor_telegram_user_id)
+            actor_snapshot = (
+                web_actor
+                if web_actor is not None
+                else await _active_actor(uow, command.actor_telegram_user_id or 0)
+            )
             category_before = (
                 None
                 if preliminary.category_id is None
@@ -944,7 +1081,7 @@ class TaskService:
                     )
                 )
                 actor = prepared.members[preliminary.creator_id]
-            if actor.telegram_user_id != command.actor_telegram_user_id:
+            if web_actor is None and actor.telegram_user_id != command.actor_telegram_user_id:
                 raise PermissionError("Task draft is not owned by this member.")
             _require_active(actor)
             draft = await uow.lock_task_draft(command.draft_id)
@@ -966,7 +1103,14 @@ class TaskService:
                     raise StaleTaskDraftError("Task publication identity is conflicting.")
                 if prepared is not None:
                     await prepared.apply()
-                await _finish_receipt(uow, command.update_id, actor, f"task:{existing.id}")
+                await _finish_receipt(
+                    uow,
+                    command.update_id,
+                    actor,
+                    _web_task_outcome(existing.id, draft.id, command.replay_fingerprint)
+                    if web_actor is not None
+                    else f"task:{existing.id}",
+                )
                 return existing
             if (
                 draft.origin == "community"
@@ -1035,6 +1179,7 @@ class TaskService:
                 actor=actor,
                 draft=draft,
                 template=template,
+                web_fingerprint=command.replay_fingerprint if web_actor is not None else None,
             )
 
     async def confirm_community_publication(
@@ -1617,8 +1762,8 @@ async def _active_actor(uow: TaskUnitOfWork, telegram_user_id: int) -> Member:
     return actor
 
 
-async def _active_context_actor(uow: TaskUnitOfWork, context: ActorContext) -> Member:
-    actor = await uow.get_member(context.member_id)
+async def _active_context_actor(uow: TaskUnitOfWork, context: ActorContext | UUID) -> Member:
+    actor = await uow.get_member(context if isinstance(context, UUID) else context.member_id)
     if actor is None:
         raise PermissionError("Task actor is not a registered member.")
     _require_active(actor)
@@ -1913,6 +2058,27 @@ def _validate_freeform_publishable(
     validate_task_format(draft.format, template_format=TaskFormat.ANY, city=draft.city)
 
 
+async def _freeform_preview(
+    uow: TaskUnitOfWork, draft: TaskDraft, category: TaskCategoryOption | None
+) -> TaskPreview:
+    _validate_freeform_publishable(draft, category)
+    return TaskPreview(
+        draft,
+        await uow.member_display_name(draft.creator_id),
+        category.name if category else None,
+        category.icon if category else None,
+        draft.task_kind,
+        draft.time_size,
+        cast("str", draft.title),
+        cast("str", draft.description),
+        "Следуйте описанию задания и критериям результата.",
+        ("description",),
+        cast("str", draft.completion_criteria),
+        cast("int", draft.credit_reward_per_performer),
+        cast("int", draft.credit_reward_per_performer) * cast("int", draft.performer_slots),
+    )
+
+
 def _plain_input_payload(schema: Mapping[str, object], text: str) -> dict[str, object]:
     """Map one human description to a template's required fields without JSON input."""
     properties = schema.get("properties")
@@ -1990,13 +2156,14 @@ async def _request_community_publication(
     return updated
 
 
-async def _publish_locked_draft(
+async def _publish_locked_draft(  # noqa: PLR0913
     *,
     uow: TaskUnitOfWork,
     update_id: int,
     actor: Member,
     draft: TaskDraft,
     template: CatalogTemplate | None,
+    web_fingerprint: str | None = None,
 ) -> PublishedTask:
     task = await uow.insert_published_task(draft=draft, template=template)
     await uow.save_task_draft(
@@ -2007,7 +2174,10 @@ async def _publish_locked_draft(
             revision=draft.revision + 1,
         )
     )
-    await uow.clear_text_flow(member_id=draft.creator_id, flow_type="task", reference_id=draft.id)
+    if web_fingerprint is None:
+        await uow.clear_text_flow(
+            member_id=draft.creator_id, flow_type="task", reference_id=draft.id
+        )
     await uow.append_audit_event(
         actor_member_id=actor.id,
         action="task_published",
@@ -2020,7 +2190,9 @@ async def _publish_locked_draft(
         task=task,
         business_key=f"task.published:{task.id}",
     )
-    await _finish_receipt(uow, update_id, actor, f"task:{task.id}")
+    await _finish_receipt(
+        uow, update_id, actor, _web_task_outcome(task.id, draft.id, web_fingerprint)
+    )
     return task
 
 
@@ -2057,6 +2229,38 @@ async def _draft_from_outcome(uow: TaskUnitOfWork, outcome: str) -> TaskDraft | 
     if not outcome.startswith("task_draft:"):
         raise TaskError("Telegram update was already used by another operation.")
     return await uow.get_task_draft(UUID(outcome.split(":", 1)[1]))
+
+
+async def _web_draft_replay(
+    uow: TaskUnitOfWork, outcome: str, actor_id: UUID, fingerprint: str
+) -> TaskDraft:
+    marker, raw_id, stored = outcome.split(":", 2)
+    if marker != "web_task_draft" or stored != fingerprint:
+        raise TaskError("Stored task draft outcome does not match command.")
+    draft = await uow.get_task_draft(UUID(raw_id))
+    if draft is None or draft.creator_id != actor_id:
+        raise PermissionError("Task draft is unavailable.")
+    await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor_id)
+    return draft
+
+
+async def _web_publication_replay(
+    uow: TaskUnitOfWork, outcome: str, actor_id: UUID, draft_id: UUID, fingerprint: str
+) -> PublishedTask:
+    marker, raw_task, raw_draft, stored = outcome.split(":", 3)
+    if marker != "web_task" or raw_draft != str(draft_id) or stored != fingerprint:
+        raise TaskError("Stored task publication outcome does not match command.")
+    task = await uow.get_task(UUID(raw_task))
+    if task is None or task.creator_id != actor_id:
+        raise PermissionError("Task publication is unavailable.")
+    await uow.ensure_task_test_access(task_id=task.id, member_id=actor_id)
+    return task
+
+
+def _web_task_outcome(task_id: UUID, draft_id: UUID, fingerprint: str | None) -> str:
+    return (
+        f"task:{task_id}" if fingerprint is None else f"web_task:{task_id}:{draft_id}:{fingerprint}"
+    )
 
 
 async def _publication_from_outcome(uow: TaskUnitOfWork, outcome: str) -> PublishedTask | TaskDraft:
