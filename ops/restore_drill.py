@@ -18,12 +18,11 @@ from ops._runtime import (
     default_root_dir,
     fail,
     operations_environment,
-    read_current_image,
     read_dotenv,
     require_env_values,
     require_non_empty_file,
     run_checked,
-    validate_environment_file,
+    selected_release,
 )
 
 DRILL_DATABASE = "community_bot_restore_drill"
@@ -75,17 +74,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 def restore_drill(backup_file: Path) -> int:
     """Restore a dump, validate revision and ledger caches, then remove the drill DB."""
     root_dir = default_root_dir()
-    env_file = root_dir / "shared" / ".env"
 
     require_non_empty_file(backup_file, "Backup or environment file is missing.")
-    validate_environment_file(env_file)
-    image_reference = read_current_image(root_dir)
+    with selected_release(root_dir) as selection:
+        return _restore_selected(backup_file, *selection)
+
+
+def _restore_selected(
+    backup_file: Path, project_dir: Path, env_file: Path, image: str, release: str
+) -> int:
+    """Run the drill while ``selected_release`` retains the shared operations lock."""
     env_values = require_env_values(read_dotenv(env_file), "POSTGRES_USER", "POSTGRES_DB")
     postgres_user = env_values["POSTGRES_USER"]
     production_database = env_values["POSTGRES_DB"]
     require_distinct_database_names(production_database)
-    environment = operations_environment(env_file, image_reference)
-    compose = compose_command(root_dir, env_file)
+    environment = operations_environment(env_file, image, release)
+    compose = compose_command(project_dir, env_file)
 
     cleanup_drill_database(
         compose,
@@ -93,7 +97,7 @@ def restore_drill(backup_file: Path) -> int:
         postgres_user,
         verification_database=production_database,
     )
-    expected_head = read_image_migration_head(image_reference)
+    expected_head = read_image_migration_head(image)
     production_revisions = read_database_revisions(
         compose,
         environment,

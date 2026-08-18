@@ -1,0 +1,77 @@
+name: Publish reviewed release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+  pull-requests: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out merged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - name: Download unique reviewed-tree proof
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          read -r base_sha head_sha extra <<<"$(git show -s --format='%P' HEAD)"
+          test -n "${base_sha}" && test -n "${head_sha}" && test -z "${extra:-}"
+          pulls="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls?per_page=100")"
+          pr_number="$(jq -er --arg commit "${GITHUB_SHA}" --arg head "${head_sha}" \
+            '[.[][] | select(.merged_at and .merge_commit_sha == $commit and .base.ref == "main" and .head.sha == $head)] | if length == 1 then .[0].number else error("ambiguous merged pull request") end' <<<"${pulls}")"
+          runs="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&head_sha=${head_sha}&per_page=100")"
+          run_id="$(jq -er '[.[].workflow_runs[] | select(.conclusion == "success")] | if length == 1 then .[0].id else error("ambiguous successful CI run") end' <<<"${runs}")"
+          artifacts="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")"
+          artifact_id="$(jq -er '[.[].artifacts[] | select(.name == "verified-merge-tree" and (.expired | not))] | if length == 1 then .[0].id else error("missing reviewed-tree proof") end' <<<"${artifacts}")"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > proof.zip
+          test "$(unzip -Z1 proof.zip)" = provenance.json
+          unzip -q proof.zip
+          echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
+      - name: Set up arm64 emulation
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish immutable image
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/alexoxytocin/community_bot:${{ github.sha }}
+          build-args: RELEASE=${{ github.sha }}
+      - name: Build and verify bounded release bundle
+        env:
+          IMAGE: ghcr.io/alexoxytocin/community_bot@${{ steps.image.outputs.digest }}
+          PR_NUMBER: ${{ steps.proof.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          migration_head="$(docker run --rm --platform linux/arm64 "${IMAGE}" community-migration-head)"
+          python ops/release_contract.py build --source . --output release-bundle.tar \
+            --evidence provenance.json --commit-sha "${GITHUB_SHA}" --pr-number "${PR_NUMBER}" \
+            --release-run-number "${GITHUB_RUN_NUMBER}" --release-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --image "${IMAGE}" --migration-head "${migration_head}"
+          python ops/release_contract.py verify release-bundle.tar
+      - name: Upload the only release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-mini-app-release-${{ github.run_number }}-${{ github.run_attempt }}
+          path: release-bundle.tar
+          if-no-files-found: error
+          retention-days: 30

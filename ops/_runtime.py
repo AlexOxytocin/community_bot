@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import json
 import os
 import re
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-IMAGE_REFERENCE_RE = re.compile(r"^(ghcr\.io/.+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64})$")
+IMAGE_REFERENCE_RE = re.compile(r"^ghcr\.io/.+@sha256:[0-9a-f]{64}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class OpsError(RuntimeError):
@@ -45,12 +52,6 @@ def validate_environment_file(path: Path) -> None:
         )
 
 
-def require_file(path: Path, message: str) -> None:
-    """Require an existing regular file."""
-    if not path.is_file():
-        raise OpsError(message)
-
-
 def require_non_empty_file(path: Path, message: str) -> None:
     """Require an existing non-empty regular file."""
     if not path.is_file() or path.stat().st_size == 0:
@@ -58,38 +59,124 @@ def require_non_empty_file(path: Path, message: str) -> None:
 
 
 def validate_image_reference(image_reference: str) -> None:
-    """Require a GHCR digest or local immutable Docker image ID."""
+    """Require the immutable GHCR reference published by the release contract."""
     if IMAGE_REFERENCE_RE.fullmatch(image_reference) is None:
-        raise OpsError("Production deployment requires an immutable image digest or image ID.")
+        raise OpsError("Production deployment requires an immutable image digest.")
 
 
-def read_current_image(root_dir: Path) -> str:
-    """Read and validate the current release image identity."""
-    current_image_file = root_dir / "shared" / "releases" / "current-image"
-    require_file(current_image_file, "Production environment file is missing.")
-    image_reference = current_image_file.read_text(encoding="utf-8").strip()
-    validate_image_reference(image_reference)
-    return image_reference
+@contextmanager
+def selected_release(root_dir: Path | None = None) -> Iterator[tuple[Path, Path, str, str]]:
+    """Yield one ready tuple while retaining the shared Linux operations lock."""
+    root = root_dir or default_root_dir()
+    state_dir = root / "shared" / "releases"
+    with _shared_lock(state_dir / "operations.lock"):
+        active_file = state_dir / "active.json"
+        validate_environment_file(active_file)
+        state = _json(_read_bytes(active_file))
+        current = state.get("current")
+        previous = state.get("previous")
+        previous_sha = previous.get("manifest_sha256") if isinstance(previous, dict) else None
+        if (
+            set(state) != {"status", "operation", "current", "previous"}
+            or state["status"] != "ready"
+            or state["operation"] is not None
+            or not isinstance(current, dict)
+            or set(current) != {"manifest_sha256"}
+            or (
+                previous is not None
+                and (not isinstance(previous, dict) or set(previous) != {"manifest_sha256"})
+            )
+        ):
+            raise OpsError("Release operations are blocked while the active state is pending.")
+        if previous is not None and (
+            not isinstance(previous_sha, str) or SHA256_RE.fullmatch(previous_sha) is None
+        ):
+            raise OpsError("Active release state has an invalid previous manifest identity.")
+        manifest_sha256 = current["manifest_sha256"]
+        if not isinstance(manifest_sha256, str) or SHA256_RE.fullmatch(manifest_sha256) is None:
+            raise OpsError("Active release state has an invalid manifest identity.")
+        project_dir = state_dir / manifest_sha256
+        manifest_file = project_dir / "manifest.json"
+        validate_environment_file(manifest_file)
+        manifest_bytes = _read_bytes(manifest_file)
+        manifest = _json(manifest_bytes)
+        image, release = manifest.get("image"), manifest.get("commit_sha")
+        if (
+            hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha256
+            or manifest.get("contract_version") != "community-mini-app-release/v1"
+            or manifest.get("repository") != "AlexOxytocin/community_bot"
+            or not isinstance(image, str)
+            or not isinstance(release, str)
+            or SHA1_RE.fullmatch(release) is None
+        ):
+            raise OpsError("Selected release manifest has an invalid identity.")
+        validate_image_reference(image)
+        validate_environment_file(project_dir / "compose.production.yaml")
+        env_file = root / "shared" / ".env"
+        validate_environment_file(env_file)
+        yield project_dir, env_file, image, release
 
 
-def compose_command(root_dir: Path, env_file: Path) -> list[str]:
+@contextmanager
+def _shared_lock(path: Path) -> Iterator[None]:
+    """Lock the same file as activation for the entire caller operation."""
+    validate_environment_file(path)
+    with path.open("rb") as lock:
+        if os.name != "posix":  # pragma: no cover - production hosts are Linux.
+            raise OpsError("Operations lock requires Linux flock support.")
+        fcntl = importlib.import_module("fcntl")
+        flock = fcntl.flock
+        flock(lock, fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            flock(lock, fcntl.LOCK_UN)
+
+
+def _json(raw: bytes) -> dict[str, object]:
+    """Read one object and reject duplicate object keys."""
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise OpsError("Release JSON is invalid.") from exc
+    if not isinstance(value, dict):
+        raise OpsError("Release JSON is invalid.")
+    return value
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("duplicate JSON key")
+    return value
+
+
+def _read_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise OpsError("Release file is missing or unsafe.") from exc
+
+
+def compose_command(project_dir: Path, env_file: Path) -> list[str]:
     """Build the Docker Compose command prefix used by all host operations."""
     return [
         "docker",
         "compose",
         "--project-directory",
-        str(root_dir / "current"),
+        str(project_dir),
         "--env-file",
         str(env_file),
         "-f",
-        str(root_dir / "current" / "compose.production.yaml"),
+        str(project_dir / "compose.production.yaml"),
     ]
 
 
-def operations_environment(env_file: Path, image_reference: str) -> dict[str, str]:
-    """Return a process environment with Compose image variables injected."""
+def operations_environment(env_file: Path, image_reference: str, release: str) -> dict[str, str]:
+    """Return process variables bound to one selected release tuple."""
     environment = os.environ.copy()
     environment["COMMUNITY_BOT_IMAGE"] = image_reference
+    environment["COMMUNITY_BOT_RELEASE"] = release
     environment["COMMUNITY_BOT_ENV_FILE"] = str(env_file)
     return environment
 

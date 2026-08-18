@@ -18,11 +18,10 @@ from ops._runtime import (
     default_root_dir,
     fail,
     operations_environment,
-    read_current_image,
     read_dotenv,
     require_env_values,
     run_checked,
-    validate_environment_file,
+    selected_release,
 )
 
 
@@ -41,15 +40,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 def create_backup() -> Path:
     """Create one custom-format dump and prune local dumps older than seven days."""
     root_dir = default_root_dir()
-    env_file = root_dir / "shared" / ".env"
     backup_dir = Path(os.environ.get("COMMUNITY_BOT_BACKUP_DIR", "/var/backups/community-bot"))
 
-    validate_environment_file(env_file)
-    image_reference = read_current_image(root_dir)
-    env_values = require_env_values(read_dotenv(env_file), "POSTGRES_DB", "POSTGRES_USER")
-    environment = operations_environment(env_file, image_reference)
-    compose = compose_command(root_dir, env_file)
+    with selected_release(root_dir) as (project_dir, env_file, image, release):
+        env_values = require_env_values(read_dotenv(env_file), "POSTGRES_DB", "POSTGRES_USER")
+        return _create_backup(
+            backup_dir,
+            env_values,
+            compose_command(project_dir, env_file),
+            operations_environment(env_file, image, release),
+        )
 
+
+def _create_backup(
+    backup_dir: Path,
+    env_values: dict[str, str],
+    compose: list[str],
+    environment: dict[str, str],
+) -> Path:
+    """Write and retain one dump while the release selection remains locked."""
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     backup_dir.chmod(0o700)
     timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
