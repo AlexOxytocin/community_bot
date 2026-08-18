@@ -187,7 +187,7 @@ def _reviewed_evidence() -> dict[str, Any]:
         "pr_number": 17,
         "base_sha": "1" * 40,
         "head_sha": "2" * 40,
-        "synthetic_merge_sha": "3" * 40,
+        "synthetic_merge_sha": "6" * 40,
         "tree_sha": "4" * 40,
         "workflow_ref": (f"{contract.REPOSITORY}/.github/workflows/ci.yml@refs/pull/17/merge"),
         "run_id": 23,
@@ -226,10 +226,10 @@ def _use_worktree_blobs(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("field", "bad_value"),
     [
-        ("base_sha", "A" * 40),
-        ("head_sha", "2" * 39),
-        ("synthetic_merge_sha", "6" * 40),
-        ("tree_sha", "not-a-sha"),
+        ("base_sha", "7" * 40),
+        ("head_sha", "8" * 40),
+        ("synthetic_merge_sha", "6" * 39),
+        ("tree_sha", "9" * 40),
         ("workflow_ref", "AlexOxytocin/community_bot/.github/workflows/ci.yml@refs/heads/main"),
         ("run_id", 0),
         ("run_attempt", "1"),
