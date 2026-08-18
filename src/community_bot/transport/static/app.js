@@ -759,6 +759,55 @@ function renderSubmission(assignment, draft) {
   return boundary;
 }
 
+function renderDispute(assignment) {
+  const form = element("form", undefined, "submission-form");
+  const label = element("label", "Почему результат нужно пересмотреть", "section");
+  const comment = document.createElement("textarea");
+  comment.id = "dispute-comment";
+  comment.name = "comment";
+  comment.required = true;
+  comment.rows = 5;
+  label.htmlFor = comment.id;
+  label.append(comment);
+  const submit = element("button", "Подать спор", "primary");
+  submit.type = "submit";
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+  let operationKey = null;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const normalized = comment.value.trim();
+    if (!normalized || !globalThis.confirm(
+      "Подать спор? Комментарий увидит только команда модерации.",
+    )) return;
+    submit.disabled = true;
+    status.className = "status";
+    status.textContent = "Подаём спор…";
+    operationKey ||= newOperationKey();
+    try {
+      await submissionRequest(
+        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/disputes",
+        "POST",
+        operationKey,
+        { comment: normalized },
+      );
+      await showAssignmentDetail(assignment.id, false);
+    } catch (error) {
+      if (error?.status === 409) {
+        await showAssignmentDetail(assignment.id, false);
+        return;
+      }
+      status.textContent = error instanceof TypeError
+        ? "Сеть недоступна. Повторите запрос — он останется тем же."
+        : "Не удалось подать спор. Проверьте комментарий и состояние назначения.";
+      if (!retryableSubmissionError(error)) operationKey = null;
+      submit.disabled = false;
+    }
+  });
+  form.append(label, submit, status);
+  return form;
+}
+
 async function showAssignmentDetail(assignmentId, push = true) {
   const revision = ++screenRevision;
   returnFocusAssignmentId = assignmentId;
@@ -796,6 +845,20 @@ async function showAssignmentDetail(assignmentId, push = true) {
     if (assignment.review_deadline_at) {
       detail.append(dateSection("Срок проверки", assignment.review_deadline_at));
     }
+    if (assignment.reject_dispute_deadline_at) {
+      detail.append(dateSection("Подать спор до", assignment.reject_dispute_deadline_at));
+    }
+    if (assignment.case_status) {
+      detail.append(section("Спор", "Передан команде модерации"));
+    } else if (assignment.assignment_status === "rejected_pending_dispute") {
+      detail.append(section(
+        "Условия спора",
+        assignment.can_dispute
+          ? "Опишите причину до указанного срока. Комментарий увидит только команда модерации."
+          : "Срок подачи спора истёк.",
+      ));
+    }
+    if (assignment.can_dispute) detail.append(renderDispute(assignment));
     if (assignment.assignment_status === "accepted"
       && assignment.submission_contract === "freeform_result_v1") {
       detail.append(renderSubmission(assignment, null));

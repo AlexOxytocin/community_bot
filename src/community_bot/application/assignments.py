@@ -143,6 +143,15 @@ class AssignmentCard:
             return (AssignmentDecision.FULL, AssignmentDecision.REJECT)
         return tuple(AssignmentDecision)
 
+    @property
+    def can_dispute(self) -> bool:
+        """Expose current eligibility without duplicating its domain rule."""
+        try:
+            require_dispute_allowed(self.assignment, now=datetime.datetime.now(datetime.UTC))
+        except AssignmentError:
+            return False
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class AssignmentCardPage:
@@ -1017,25 +1026,43 @@ class AssignmentService:
             await _finish(uow, command.update_id, actor.id, updated, command)
             return updated
 
-    async def dispute(
+    async def dispute(  # noqa: PLR0913
         self,
         *,
         update_id: int,
-        actor_telegram_user_id: int,
+        actor_telegram_user_id: int | None,
         assignment_id: UUID,
         command_id: UUID,
         comment: str,
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> Assignment:
         """Open one private dispute inside the protected 24-hour window."""
         normalized = comment.strip()
         if not normalized:
             raise AssignmentError("Dispute comment is required.")
         async with self._unit_of_work_factory() as uow:
-            replay = await _begin(uow, update_id)
-            if replay is not None:
-                return await _assignment_replay(uow, replay)
-            await uow.acquire_task_identity_gate(actor_telegram_user_id)
-            actor = await _actor(uow, actor_telegram_user_id)
+            if actor_member_id is None:
+                replay = await _begin(uow, update_id)
+                if replay is not None:
+                    return await _assignment_replay(uow, replay)
+                if actor_telegram_user_id is None:
+                    raise PermissionError("Assignment actor is required.")
+                await uow.acquire_task_identity_gate(actor_telegram_user_id)
+                actor = await _actor(uow, actor_telegram_user_id)
+            else:
+                actor = await uow.get_member(actor_member_id)
+                if actor is None or actor.status is not MemberStatus.ACTIVE:
+                    raise PermissionError("Only an active member can use assignment workflows.")
+                await uow.acquire_task_identity_gate(actor.telegram_user_id)
+                replay = await _begin(uow, update_id)
+                if replay is not None:
+                    return await _web_dispute_replay(
+                        uow,
+                        replay,
+                        actor_id=actor.id,
+                        replay_fingerprint=replay_fingerprint,
+                    )
             assignment = await uow.get_assignment(assignment_id)
             if assignment is None or assignment.performer_id != actor.id:
                 raise PermissionError("Assignment is not owned by this member.")
@@ -1043,6 +1070,8 @@ class AssignmentService:
             assignment = await uow.lock_assignment(assignment.id)
             if assignment is None:
                 raise LookupError("Assignment does not exist.")
+            if actor_member_id is not None:
+                await uow.ensure_task_test_access(task_id=assignment.task_id, member_id=actor.id)
             require_dispute_allowed(assignment, now=datetime.datetime.now(datetime.UTC))
             await uow.open_assignment_dispute(
                 assignment_id=assignment.id,
@@ -1063,7 +1092,12 @@ class AssignmentService:
                 event_type="assignment_disputed",
                 business_key=f"assignment:{assignment.id}:disputed",
             )
-            await _finish(uow, update_id, actor.id, updated)
+            outcome = None
+            if actor_member_id is not None:
+                if replay_fingerprint is None:
+                    raise AssignmentError("Web dispute fingerprint is required.")
+                outcome = f"web_dispute:{actor.id}:{updated.id}:{replay_fingerprint}"
+            await _finish(uow, update_id, actor.id, updated, outcome_code=outcome)
             return updated
 
     async def finalize_review(
@@ -1329,14 +1363,15 @@ async def _command_actor(
     return actor
 
 
-async def _finish(
+async def _finish(  # noqa: PLR0913, PLR0917
     uow: AssignmentUnitOfWork,
     update_id: int,
     actor_id: UUID,
     assignment: Assignment,
     command: DecideAssignmentCommand | None = None,
+    outcome_code: str | None = None,
 ) -> None:
-    outcome = f"assignment:{assignment.id}"
+    outcome = outcome_code or f"assignment:{assignment.id}"
     if command is not None and command.actor_member_id is not None:
         outcome = f"web_assignment:{actor_id}:{assignment.id}:{command.decision}"
     await uow.add_receipt(
@@ -1355,6 +1390,33 @@ async def _assignment_replay(uow: AssignmentUnitOfWork, outcome: str) -> Assignm
     assignment = await uow.get_assignment(UUID(raw_id))
     if assignment is None:
         raise LookupError("Stored assignment outcome does not exist.")
+    return assignment
+
+
+async def _web_dispute_replay(
+    uow: AssignmentUnitOfWork,
+    outcome: str,
+    *,
+    actor_id: UUID,
+    replay_fingerprint: str | None,
+) -> Assignment:
+    try:
+        marker, raw_actor_id, raw_assignment_id, stored_fingerprint = outcome.split(":", 3)
+        stored_actor_id = UUID(raw_actor_id)
+        stored_assignment_id = UUID(raw_assignment_id)
+    except ValueError as error:
+        raise AssignmentError("Stored dispute outcome does not match command.") from error
+    if (
+        marker != "web_dispute"
+        or stored_actor_id != actor_id
+        or replay_fingerprint is None
+        or stored_fingerprint != replay_fingerprint
+    ):
+        raise AssignmentError("Stored dispute outcome does not match command.")
+    assignment = await uow.get_assignment(stored_assignment_id)
+    if assignment is None or assignment.performer_id != actor_id:
+        raise PermissionError("Assignment is not owned by this member.")
+    await uow.ensure_task_test_access(task_id=assignment.task_id, member_id=actor_id)
     return assignment
 
 

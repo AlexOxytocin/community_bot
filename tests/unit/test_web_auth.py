@@ -275,6 +275,7 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/tasks/{task_id}/assignments", ("POST",)),
         ("/api/v1/assignments", ("GET",)),
         ("/api/v1/assignments/{assignment_id}", ("GET",)),
+        ("/api/v1/assignments/{assignment_id}/disputes", ("POST",)),
         ("/api/v1/assignment-reviews", ("GET",)),
         ("/api/v1/assignment-reviews/{assignment_id}", ("GET",)),
         ("/api/v1/assignment-reviews/{assignment_id}/decision", ("POST",)),
