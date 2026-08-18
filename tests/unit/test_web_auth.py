@@ -688,6 +688,9 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     bridge = b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
     assert index.content.index(bridge) < index.content.index(b"</head>")
     assert index.content.index(bridge) < index.content.index(b"/mini-assets/app.js")
+    assert b"__RELEASE__" not in index.content
+    assert b"/mini-assets/app.js?release=local" in index.content
+    assert b"/mini-assets/styles.css?release=local" in index.content
     assert index.headers["x-content-type-options"] == "nosniff"
     design_font = (
         Path(__file__).parents[2] / "docs/release-2/design/assets/Manrope[wght].ttf"

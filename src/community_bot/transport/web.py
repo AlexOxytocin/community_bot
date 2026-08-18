@@ -14,12 +14,12 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, cast
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import UUID
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -240,6 +240,11 @@ def create_web_app(
     tasks = TaskService(database.unit_of_work)
     assignments = AssignmentService(database.unit_of_work)
     moderation = ModerationService(database.unit_of_work)
+    index_html = (
+        (_STATIC_DIR / "index.html")
+        .read_text(encoding="utf-8")
+        .replace("__RELEASE__", quote(settings.release, safe=""))
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -558,9 +563,9 @@ def create_web_app(
         )
 
     @app.get("/", include_in_schema=False)
-    async def mini_app() -> FileResponse:
-        return FileResponse(
-            _STATIC_DIR / "index.html",
+    async def mini_app() -> HTMLResponse:
+        return HTMLResponse(
+            index_html,
             headers={
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (
