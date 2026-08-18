@@ -27,7 +27,9 @@ from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import TaskError, TaskKind, TaskStatus, TaskTimeSize
 from community_bot.transport.web import (
     _accept_update_id,
+    _assignment_cursor,
     _member_query,
+    _parse_assignment_cursor,
     _session_digest,
     _task_dto,
     create_web_app,
@@ -190,6 +192,8 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/tasks", ("GET",)),
         ("/api/v1/tasks/{task_id}/assignments", ("POST",)),
+        ("/api/v1/assignments", ("GET",)),
+        ("/api/v1/assignments/{assignment_id}", ("GET",)),
         ("/api/v1/leaderboard", ("GET",)),
         ("/", ("GET",)),
     }
@@ -468,6 +472,19 @@ def test_accept_update_id_is_task_and_actor_bound() -> None:
     assert resolved != _accept_update_id(uuid4(), task_id, "42")
     assert resolved != _accept_update_id(member_id, uuid4(), "42")
     assert resolved != _accept_update_id(member_id, task_id, "43")
+
+
+def test_assignment_cursor_is_canonical_and_strict() -> None:
+    cursor = (
+        datetime.datetime(2026, 8, 17, 20, 0, tzinfo=datetime.UTC),
+        UUID("00000000-0000-0000-0000-000000000054"),
+    )
+    encoded = _assignment_cursor(cursor)
+    assert _parse_assignment_cursor(encoded) == cursor
+    assert _parse_assignment_cursor(None) is None
+    for invalid in ("", "!", encoded + "=", encoded.lower(), "A" * 129):
+        with pytest.raises(ValueError, match="Invalid assignment cursor"):
+            _parse_assignment_cursor(invalid)
 
 
 @pytest.mark.asyncio

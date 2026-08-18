@@ -6,9 +6,14 @@ const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
 const welcome = document.getElementById("welcome");
 const back = document.getElementById("back");
+const catalogNav = document.getElementById("catalog-nav");
+const assignmentsNav = document.getElementById("assignments-nav");
 let tasks = [];
+let assignments = [];
 let pendingKey = null;
 let returnFocusTaskId = null;
+let returnFocusAssignmentId = null;
+let screenRevision = 0;
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -25,6 +30,58 @@ const section = (heading, value) => {
   return node;
 };
 
+const setNavigation = (screen) => {
+  catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
+  assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
+};
+
+const formatDate = (value) => new Intl.DateTimeFormat("ru", {
+  dateStyle: "medium",
+  timeStyle: "short",
+}).format(new Date(value));
+
+const time = (value) => {
+  const node = element("time", formatDate(value));
+  node.dateTime = value;
+  return node;
+};
+
+const dateSection = (heading, value) => {
+  const node = element("section", undefined, "section");
+  node.append(element("h3", heading), time(value));
+  return node;
+};
+
+const requestError = (response) => {
+  if (response.status === 401) return "session_expired";
+  if (response.status === 403) return "account_unavailable";
+  if (response.status === 404) return "not_found";
+  return "request_failed";
+};
+
+const assignmentError = (code, retry) => {
+  if (code === "session_expired") {
+    return [element("p", "Сессия истекла. Закройте и снова откройте Mini App.", "status")];
+  }
+  if (code === "account_unavailable") {
+    return [element("p", "Назначения недоступны для этого аккаунта.", "status")];
+  }
+  if (code === "not_found") {
+    return [element("p", "Назначение больше не входит в активные.", "status")];
+  }
+  const nodes = [element("p", "Не удалось загрузить активные назначения.", "status")];
+  if (retry) nodes.push(retry);
+  return nodes;
+};
+
+const assignmentStatus = (value) => ({
+  accepted: "Принято",
+  submitted: "Результат отправлен",
+  rejected_pending_dispute: "Ожидает решения",
+  disputed: "Открыт спор",
+  reviewer_required: "Нужен проверяющий",
+}[value] || value);
+
 const newOperationKey = () => {
   const words = new Uint32Array(2);
   crypto.getRandomValues(words);
@@ -33,7 +90,9 @@ const newOperationKey = () => {
 };
 
 function renderCatalog() {
+  screenRevision += 1;
   pendingKey = null;
+  setNavigation("catalog");
   title.textContent = "Каталог";
   back.classList.add("hidden");
   if (!tasks.length) {
@@ -56,7 +115,7 @@ function renderCatalog() {
         "meta",
       ),
     );
-    button.addEventListener("click", () => showDetail(task));
+    button.addEventListener("click", () => showTaskDetail(task));
     if (task.id === returnFocusTaskId) focusTarget = button;
     list.append(button);
   }
@@ -65,11 +124,13 @@ function renderCatalog() {
   returnFocusTaskId = null;
 }
 
-function showDetail(task) {
+function showTaskDetail(task, push = true) {
+  screenRevision += 1;
   returnFocusTaskId = task.id;
+  setNavigation("");
   title.textContent = "Карточка задания";
   back.classList.remove("hidden");
-  history.pushState({ taskId: task.id }, "", "#task");
+  if (push) history.pushState({ screen: "task", taskId: task.id }, "", "#task");
   const detail = element("article", undefined, "card detail");
   detail.append(element("h3", task.title), section("Описание", task.description));
   detail.append(section("Критерии выполнения", task.completion_criteria));
@@ -120,6 +181,117 @@ async function acceptTask(task, button, status) {
   }
 }
 
+function renderAssignments(revision = ++screenRevision) {
+  if (revision !== screenRevision) return;
+  setNavigation("assignments");
+  title.textContent = "Взятые мной";
+  back.classList.add("hidden");
+  if (!assignments.length) {
+    replaceContent(element("p", "Активных назначений пока нет.", "status muted"));
+    return;
+  }
+  const intro = element("p", "Активные назначения", "muted");
+  const list = element("ul", undefined, "list");
+  let focusTarget = null;
+  for (const assignment of assignments) {
+    const button = element("button", undefined, "card");
+    button.type = "button";
+    const deadline = element("p", "Срок: ", "meta");
+    deadline.append(time(assignment.task_deadline_at));
+    button.append(
+      element("h3", assignment.task_title),
+      element("p", assignmentStatus(assignment.assignment_status), "muted"),
+      deadline,
+    );
+    if (assignment.result_summary) {
+      button.append(element("p", assignment.result_summary, "muted"));
+    }
+    button.addEventListener("click", () => showAssignmentDetail(assignment.id));
+    if (assignment.id === returnFocusAssignmentId) focusTarget = button;
+    const item = element("li");
+    item.append(button);
+    list.append(item);
+  }
+  replaceContent(intro, list);
+  focusTarget?.focus();
+  returnFocusAssignmentId = null;
+}
+
+async function loadAssignments(push = true) {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "assignments" }, "", "#assignments");
+  setNavigation("assignments");
+  title.textContent = "Взятые мной";
+  back.classList.add("hidden");
+  replaceContent(element("p", "Загружаем активные назначения…", "status muted"));
+  try {
+    const response = await fetch(
+      "/api/v1/assignments?status=active&limit=20",
+      { credentials: "same-origin" },
+    );
+    if (!response.ok) throw new Error(requestError(response));
+    if (revision !== screenRevision) return;
+    assignments = (await response.json()).items;
+    if (revision !== screenRevision) return;
+    renderAssignments(revision);
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    const retry = element("button", "Повторить", "primary");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadAssignments(false));
+    replaceContent(...assignmentError(error.message, retry));
+  }
+}
+
+async function showAssignmentDetail(assignmentId, push = true) {
+  const revision = ++screenRevision;
+  returnFocusAssignmentId = assignmentId;
+  if (push) {
+    history.pushState(
+      { screen: "assignment", assignmentId },
+      "",
+      "#assignment/" + assignmentId,
+    );
+  }
+  setNavigation("");
+  title.textContent = "Активное назначение";
+  back.classList.remove("hidden");
+  replaceContent(element("p", "Загружаем назначение…", "status muted"));
+  try {
+    const response = await fetch(
+      "/api/v1/assignments/" + assignmentId,
+      { credentials: "same-origin" },
+    );
+    if (!response.ok) throw new Error(requestError(response));
+    const assignment = await response.json();
+    if (revision !== screenRevision) return;
+    const detail = element("article", undefined, "card detail");
+    detail.append(
+      element("h3", assignment.task_title),
+      section("Статус", assignmentStatus(assignment.assignment_status)),
+      dateSection("Срок", assignment.task_deadline_at),
+      section("Описание", assignment.description),
+      section("Критерии выполнения", assignment.completion_criteria),
+      section("Как выполнять", assignment.performer_instructions),
+    );
+    if (assignment.result_summary) {
+      detail.append(section("Последний результат", assignment.result_summary));
+    }
+    if (assignment.review_deadline_at) {
+      detail.append(dateSection("Срок проверки", assignment.review_deadline_at));
+    }
+    replaceContent(detail);
+    back.focus();
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    const code = error.message === "request_failed" ? "detail_failed" : error.message;
+    const nodes = code === "detail_failed"
+      ? [element("p", "Не удалось загрузить назначение. Вернитесь назад и повторите.", "status")]
+      : assignmentError(code);
+    replaceContent(...nodes);
+  }
+}
+
 async function bootstrap() {
   try {
     const [me, catalog] = await Promise.all([
@@ -131,6 +303,7 @@ async function bootstrap() {
     welcome.textContent = profile.display_name
       + ", выберите понятное задание и помогите сообществу.";
     tasks = page.items;
+    history.replaceState({ screen: "catalog" }, "", "#catalog");
     renderCatalog();
   } catch {
     replaceContent(
@@ -143,6 +316,22 @@ async function bootstrap() {
   }
 }
 
+catalogNav.addEventListener("click", () => {
+  history.pushState({ screen: "catalog" }, "", "#catalog");
+  renderCatalog();
+});
+assignmentsNav.addEventListener("click", () => loadAssignments());
 back.addEventListener("click", () => history.back());
-globalThis.addEventListener("popstate", renderCatalog);
+globalThis.addEventListener("popstate", (event) => {
+  if (event.state?.screen === "task") {
+    const task = tasks.find((item) => item.id === event.state.taskId);
+    if (task) showTaskDetail(task, false);
+  } else if (event.state?.screen === "assignments") {
+    renderAssignments();
+  } else if (event.state?.screen === "assignment") {
+    showAssignmentDetail(event.state.assignmentId, false);
+  } else {
+    renderCatalog();
+  }
+});
 bootstrap();

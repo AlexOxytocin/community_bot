@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from community_bot.application.catalog import CatalogTemplate
     from community_bot.application.conversations import TextFlow
     from community_bot.application.economy import ActiveProductConfig, EconomyMutationPort
+    from community_bot.application.identity import ActorContext
     from community_bot.application.tasks import PublishedTask
     from community_bot.domain.economy import ResolvedLevel
 
@@ -121,6 +122,14 @@ class AssignmentCard:
     case_id: UUID | None
     case_status: str | None
     case_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class AssignmentCardPage:
+    """One stable page of active performer assignments."""
+
+    items: tuple[AssignmentCard, ...]
+    next_cursor: tuple[datetime.datetime, UUID] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +432,42 @@ class AssignmentService:
             card = await uow.get_assignment_card(actor.id, assignment_id)
             if card is None:
                 raise PermissionError("Assignment is not visible to this member.")
+            return card
+
+    async def active_cards(
+        self,
+        *,
+        actor: ActorContext,
+        limit: int = 20,
+        cursor: tuple[datetime.datetime, UUID] | None = None,
+    ) -> AssignmentCardPage:
+        """Return a stable page of the active performer's own assignments."""
+        if not 1 <= limit <= _MAX_ASSIGNMENT_CARDS:
+            raise AssignmentError("Assignment card page size must be between 1 and 50.")
+        async with self._unit_of_work_factory() as uow:
+            member = await _context_actor(uow, actor)
+            rows = await uow.list_assignment_cards(
+                member.id,
+                limit=limit + 1,
+                statuses=tuple(sorted(status.value for status in ACTIVE_ASSIGNMENT_STATUSES)),
+                before_order_at=None if cursor is None else cursor[0],
+                before_id=None if cursor is None else cursor[1],
+            )
+        items = rows[:limit]
+        return AssignmentCardPage(
+            items=items,
+            next_cursor=(items[-1].assignment.accepted_at, items[-1].assignment.id)
+            if len(rows) > limit
+            else None,
+        )
+
+    async def active_card(self, *, actor: ActorContext, assignment_id: UUID) -> AssignmentCard:
+        """Return one active performer-owned assignment without exposing history."""
+        async with self._unit_of_work_factory() as uow:
+            member = await _context_actor(uow, actor)
+            card = await uow.get_assignment_card(member.id, assignment_id)
+            if card is None or card.assignment.status not in ACTIVE_ASSIGNMENT_STATUSES:
+                raise LookupError("Active assignment is not visible to this member.")
             return card
 
     async def begin_dispute(
@@ -1172,6 +1217,13 @@ async def _begin(uow: AssignmentUnitOfWork, update_id: int) -> str | None:
 
 async def _actor(uow: AssignmentUnitOfWork, telegram_user_id: int) -> Member:
     actor = await uow.get_member_by_telegram_user_id(telegram_user_id)
+    if actor is None or actor.status is not MemberStatus.ACTIVE:
+        raise PermissionError("Only an active member can use assignment workflows.")
+    return actor
+
+
+async def _context_actor(uow: AssignmentUnitOfWork, context: ActorContext) -> Member:
+    actor = await uow.get_member(context.member_id)
     if actor is None or actor.status is not MemberStatus.ACTIVE:
         raise PermissionError("Only an active member can use assignment workflows.")
     return actor
