@@ -487,9 +487,7 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
     performer = await add_member(database, 52_123)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
-        run = DbTestRunModel(
-            marker="TEST-MODERATION-RESOLUTION", started_by_member_id=moderator.id
-        )
+        run = DbTestRunModel(marker="TEST-MODERATION-RESOLUTION", started_by_member_id=moderator.id)
         session.add(run)
         await session.flush()
         session.add_all(
