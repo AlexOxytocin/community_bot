@@ -8,11 +8,13 @@ const welcome = document.getElementById("welcome");
 const back = document.getElementById("back");
 const catalogNav = document.getElementById("catalog-nav");
 const assignmentsNav = document.getElementById("assignments-nav");
+const moderationNav = document.getElementById("moderation-nav");
 let tasks = [];
 let assignments = [];
 let pendingKey = null;
 let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
+let returnFocusModeration = false;
 let screenRevision = 0;
 
 const element = (tag, text, className) => {
@@ -33,6 +35,12 @@ const section = (heading, value) => {
 const setNavigation = (screen) => {
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
+  moderationNav.setAttribute("aria-pressed", String(screen === "moderation"));
+};
+
+const restoreModerationFocus = () => {
+  if (returnFocusModeration) moderationNav.focus();
+  returnFocusModeration = false;
 };
 
 const formatDate = (value) => new Intl.DateTimeFormat("ru", {
@@ -97,6 +105,7 @@ function renderCatalog() {
   back.classList.add("hidden");
   if (!tasks.length) {
     replaceContent(element("p", "Сейчас нет доступных заданий.", "status muted"));
+    restoreModerationFocus();
     return;
   }
   const list = element("div", undefined, "list");
@@ -122,6 +131,7 @@ function renderCatalog() {
   replaceContent(list);
   focusTarget?.focus();
   returnFocusTaskId = null;
+  restoreModerationFocus();
 }
 
 function showTaskDetail(task, push = true) {
@@ -188,6 +198,7 @@ function renderAssignments(revision = ++screenRevision) {
   back.classList.add("hidden");
   if (!assignments.length) {
     replaceContent(element("p", "Активных назначений пока нет.", "status muted"));
+    restoreModerationFocus();
     return;
   }
   const intro = element("p", "Активные назначения", "muted");
@@ -215,6 +226,7 @@ function renderAssignments(revision = ++screenRevision) {
   replaceContent(intro, list);
   focusTarget?.focus();
   returnFocusAssignmentId = null;
+  restoreModerationFocus();
 }
 
 async function loadAssignments(push = true) {
@@ -292,6 +304,77 @@ async function showAssignmentDetail(assignmentId, push = true) {
   }
 }
 
+const moderationCaseType = (value) => ({
+  dispute: "Спор по заданию",
+  fraud_review: "Проверка операции",
+}[value] || "Кейс модерации");
+
+const moderationStatus = (value) => ({
+  open: "Открыт",
+  appealed: "Обжалован",
+}[value] || value);
+
+const moderationError = (code, retry) => {
+  if (code === "session_expired") {
+    return [element("p", "Сессия истекла. Закройте и снова откройте Mini App.", "status")];
+  }
+  if (code === "account_unavailable") {
+    return [element("p", "Очередь модерации недоступна для этого аккаунта.", "status")];
+  }
+  return [
+    element("p", "Не удалось загрузить очередь модерации.", "status"),
+    retry,
+  ];
+};
+
+async function loadModeration(push = true) {
+  const revision = ++screenRevision;
+  returnFocusModeration = true;
+  if (push) history.pushState({ screen: "moderation" }, "", "#moderation");
+  setNavigation("moderation");
+  title.textContent = "Очередь модерации";
+  back.classList.remove("hidden");
+  replaceContent(element("p", "Загружаем открытые кейсы…", "status muted"));
+  back.focus();
+  try {
+    const response = await fetch(
+      "/api/v1/moderation/cases?limit=20",
+      { credentials: "same-origin" },
+    );
+    if (!response.ok) throw new Error(requestError(response));
+    const cases = (await response.json()).items;
+    if (revision !== screenRevision) return;
+    if (!cases.length) {
+      replaceContent(element("p", "Открытых кейсов нет.", "status muted"));
+      return;
+    }
+    const list = element("ul", undefined, "list");
+    for (const item of cases) {
+      const card = element("article", undefined, "card");
+      const opened = element("p", "Открыт: ", "meta");
+      opened.append(time(item.opened_at));
+      card.append(
+        element("h3", moderationCaseType(item.case_type)),
+        element("p", moderationStatus(item.status), "muted"),
+        opened,
+      );
+      if (item.current_code) {
+        card.append(element("p", "Текущее решение: " + item.current_code, "meta"));
+      }
+      const row = element("li");
+      row.append(card);
+      list.append(row);
+    }
+    replaceContent(list);
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    const retry = element("button", "Повторить", "primary");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadModeration(false));
+    replaceContent(...moderationError(error.message, retry));
+  }
+}
+
 async function bootstrap() {
   try {
     const [me, catalog] = await Promise.all([
@@ -303,8 +386,10 @@ async function bootstrap() {
     welcome.textContent = profile.display_name
       + ", выберите понятное задание и помогите сообществу.";
     tasks = page.items;
+    const initialScreen = location.hash;
     history.replaceState({ screen: "catalog" }, "", "#catalog");
     renderCatalog();
+    if (initialScreen === "#moderation") loadModeration();
   } catch {
     replaceContent(
       element(
@@ -321,6 +406,7 @@ catalogNav.addEventListener("click", () => {
   renderCatalog();
 });
 assignmentsNav.addEventListener("click", () => loadAssignments());
+moderationNav.addEventListener("click", () => loadModeration());
 back.addEventListener("click", () => history.back());
 globalThis.addEventListener("popstate", (event) => {
   if (event.state?.screen === "task") {
@@ -330,6 +416,8 @@ globalThis.addEventListener("popstate", (event) => {
     renderAssignments();
   } else if (event.state?.screen === "assignment") {
     showAssignmentDetail(event.state.assignmentId, false);
+  } else if (event.state?.screen === "moderation") {
+    loadModeration(false);
   } else {
     renderCatalog();
   }

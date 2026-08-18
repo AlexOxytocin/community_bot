@@ -11,7 +11,7 @@ import json
 import secrets
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
@@ -29,6 +29,7 @@ from community_bot.application.assignments import (
     AssignmentService,
 )
 from community_bot.application.identity import ActorContext
+from community_bot.application.moderation import ModerationCase, ModerationService
 from community_bot.application.registration import RegistrationService
 from community_bot.application.reputation import (
     ProfileUnavailableError,
@@ -179,6 +180,21 @@ class AssignmentsDto(_Dto):
     next_cursor: str | None
 
 
+class ModerationCaseDto(_Dto):
+    id: UUID
+    assignment_id: UUID
+    case_type: str
+    status: Literal["open", "appealed"]
+    revision: int
+    current_code: str | None
+    opened_at: datetime.datetime
+    resolved_at: datetime.datetime | None
+
+
+class ModerationCasesDto(_Dto):
+    items: tuple[ModerationCaseDto, ...]
+
+
 class AssignmentDetailDto(AssignmentCardDto):
     category_name: str | None
     category_icon: str | None
@@ -215,6 +231,7 @@ def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
     reputation = ReputationService(database.unit_of_work)
     tasks = TaskService(database.unit_of_work)
     assignments = AssignmentService(database.unit_of_work)
+    moderation = ModerationService(database.unit_of_work)
     app = FastAPI(docs_url=None, redoc_url=None)
 
     @app.exception_handler(RequestValidationError)
@@ -442,6 +459,19 @@ def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
         except LookupError:
             return _error_response(404, "not_found")
         return _json_response(_assignment_detail_dto(card))
+
+    @app.get("/api/v1/moderation/cases", response_model=ModerationCasesDto)
+    async def moderation_cases(
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    ) -> JSONResponse:
+        try:
+            cases = await moderation.queue(actor, limit=limit)
+        except PermissionError:
+            return _error_response(403, "moderation_unavailable")
+        return _json_response(
+            ModerationCasesDto(items=tuple(_moderation_case_dto(item) for item in cases))
+        )
 
     @app.post(
         "/api/v1/tasks/{task_id}/assignments",
@@ -786,6 +816,19 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
         city=task.city,
         minimum_level=task.minimum_level,
         performer_slots=task.performer_slots,
+    )
+
+
+def _moderation_case_dto(case: ModerationCase) -> ModerationCaseDto:
+    return ModerationCaseDto(
+        id=case.id,
+        assignment_id=case.assignment_id,
+        case_type=case.case_type,
+        status=cast('Literal["open", "appealed"]', case.status),
+        revision=case.revision,
+        current_code=None if case.current_code is None else case.current_code.value,
+        opened_at=case.opened_at,
+        resolved_at=case.resolved_at,
     )
 
 

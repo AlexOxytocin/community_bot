@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from types import TracebackType
     from uuid import UUID
 
+    from community_bot.application.identity import ActorContext
+
 
 @dataclass(frozen=True, slots=True)
 class ModerationCase:
@@ -213,7 +215,9 @@ ModerationCommand = (
 class ModerationMutationPort(Protocol):  # pragma: no cover - structural typing contract.
     """PostgreSQL-backed moderation operations within a caller-owned UoW."""
 
-    async def list_cases(self, *, limit: int = 20) -> tuple[ModerationCase, ...]: ...
+    async def list_cases(
+        self, *, limit: int = 20, include_fraud_review: bool = True
+    ) -> tuple[ModerationCase, ...]: ...
 
     async def list_paid_assignments(self, *, limit: int = 20) -> tuple[PaidAssignment, ...]: ...
 
@@ -271,6 +275,8 @@ class ModerationUnitOfWork(Protocol):  # pragma: no cover - structural typing co
 
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
 
+    async def get_member(self, member_id: UUID) -> Member | None: ...
+
     async def add_receipt(
         self, *, update_id: int, update_type: str, actor_id: UUID, outcome_code: str
     ) -> None: ...
@@ -290,15 +296,19 @@ class ModerationService:
     def __init__(self, unit_of_work_factory: ModerationUnitOfWorkFactory) -> None:
         self._unit_of_work_factory = unit_of_work_factory
 
-    async def queue(self, actor_telegram_user_id: int) -> tuple[ModerationCase, ...]:
-        """Return the current queue to active moderation staff."""
+    async def queue(self, actor: ActorContext, *, limit: int = 20) -> tuple[ModerationCase, ...]:
+        """Return the current web queue to active moderation staff."""
         async with self._unit_of_work_factory() as uow:
-            actor = await _active_staff(uow, actor_telegram_user_id)
-            cases = await uow.moderation.list_cases()
-            return (
-                cases
-                if actor.role is MemberRole.ADMINISTRATOR
-                else tuple(item for item in cases if item.case_type != "fraud_review")
+            member = await uow.get_member(actor.member_id)
+            if (
+                member is None
+                or member.status is not MemberStatus.ACTIVE
+                or member.role not in {MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}
+            ):
+                raise PermissionError("Only active moderation staff may view the queue.")
+            return await uow.moderation.list_cases(
+                limit=limit,
+                include_fraud_review=member.role is MemberRole.ADMINISTRATOR,
             )
 
     async def is_administrator(self, actor_telegram_user_id: int) -> bool:
