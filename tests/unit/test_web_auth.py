@@ -22,15 +22,20 @@ from sqlalchemy.exc import SQLAlchemyError
 from community_bot.application.reputation import ProfileUnavailableError
 from community_bot.application.tasks import TaskService
 from community_bot.bootstrap.settings import Settings
-from community_bot.domain.assignments import AssignmentError
+from community_bot.domain.assignments import AssignmentError, SubmissionDraft
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.tasks import TaskError, TaskKind, TaskStatus, TaskTimeSize
 from community_bot.transport.web import (
+    ConfirmSubmissionDraftRequest,
+    SaveSubmissionDraftRequest,
     _accept_update_id,
     _assignment_cursor,
     _member_query,
     _parse_assignment_cursor,
     _session_digest,
+    _submission_draft_dto,
+    _submission_fingerprint,
+    _submission_update_id,
     _task_dto,
     create_web_app,
     validate_telegram_init_data,
@@ -267,6 +272,9 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/tasks/{task_id}/assignments", ("POST",)),
         ("/api/v1/assignments", ("GET",)),
         ("/api/v1/assignments/{assignment_id}", ("GET",)),
+        ("/api/v1/assignments/{assignment_id}/submission-drafts", ("POST",)),
+        ("/api/v1/submission-drafts/{draft_id}", ("PUT",)),
+        ("/api/v1/submission-drafts/{draft_id}/confirm", ("POST",)),
         ("/api/v1/moderation/cases", ("GET",)),
         ("/api/v1/leaderboard", ("GET",)),
         ("/", ("GET",)),
@@ -285,6 +293,34 @@ def test_web_config_and_route_set_are_closed() -> None:
                 settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=origin),
                 database=cast("Database", database),
             )
+
+
+def test_submission_operation_identity_binds_resource_and_command() -> None:
+    member_id = UUID("00000000-0000-0000-0000-000000000001")
+    resource_id = UUID("00000000-0000-0000-0000-000000000002")
+    assert _submission_update_id(member_id, resource_id, "save", "7") == _submission_update_id(
+        member_id, resource_id, "save", "7"
+    )
+    assert _submission_update_id(member_id, resource_id, "save", "7") != _submission_update_id(
+        member_id, resource_id, "confirm", "7"
+    )
+    first = _submission_fingerprint("save", 2, payload={"result": "one"})
+    assert first == _submission_fingerprint("save", 2, payload={"result": "one"})
+    assert first != _submission_fingerprint("save", 2, payload={"result": "two"})
+
+
+def test_submission_draft_projection_is_allowlisted_and_revisions_are_strict() -> None:
+    draft = SubmissionDraft(
+        uuid4(), uuid4(), uuid4(), uuid4(), 3, {"result": "safe", "private": "NO"}, None
+    )
+    assert _submission_draft_dto(draft).model_dump() == {
+        "id": draft.id,
+        "revision": 3,
+        "result": "safe",
+    }
+    for model in (SaveSubmissionDraftRequest, ConfirmSubmissionDraftRequest):
+        with pytest.raises(ValueError):
+            model.model_validate({"expected_revision": "3", "payload": {"result": "x"}})
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID
 
 from community_bot.domain.assignments import (
@@ -82,8 +82,10 @@ class BeginSubmissionCommand:
     """Start or resume durable result input for one assignment."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     assignment_id: UUID
+    actor_member_id: UUID | None = None
+    replay_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,10 +93,12 @@ class SaveSubmissionDraftCommand:
     """Validate and persist one result preview."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     draft_id: UUID
     expected_revision: int
     payload: Mapping[str, object]
+    actor_member_id: UUID | None = None
+    replay_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,9 +106,11 @@ class ConfirmSubmissionDraftCommand:
     """Confirm a durable result preview exactly once."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     draft_id: UUID
     expected_revision: int
+    actor_member_id: UUID | None = None
+    replay_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +128,11 @@ class AssignmentCard:
     case_id: UUID | None
     case_status: str | None
     case_revision: int | None
+
+    @property
+    def submission_contract(self) -> str | None:
+        """Expose only the one result contract this Mini App can render."""
+        return "freeform_result_v1" if self.task.template_id is None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,7 +349,7 @@ class AssignmentService:
                 if task is None:
                     raise LookupError("Assignment task does not exist.")
                 return assignment, task
-            actor = await _accept_actor(uow, command)
+            actor = await _command_actor(uow, command)
             await uow.acquire_task_identity_gate(actor.telegram_user_id)
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.ACCEPT_TASK)
             await uow.acquire_assignment_limit_gate(actor.id)
@@ -553,11 +564,15 @@ class AssignmentService:
     async def begin_submission(self, command: BeginSubmissionCommand) -> SubmissionDraft:
         """Start or resume result input with all state persisted in PostgreSQL."""
         async with self._unit_of_work_factory() as uow:
-            replay = await _begin(uow, command.update_id)
+            actor, replay = await _submission_start(uow, command)
             if replay is not None:
-                return await _draft_replay(uow, replay)
-            await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
-            actor = await _actor(uow, command.actor_telegram_user_id)
+                return await _draft_replay(
+                    uow,
+                    replay,
+                    actor_member_id=command.actor_member_id,
+                    replay_fingerprint=command.replay_fingerprint,
+                )
+            actor = cast("Member", actor)
             preliminary = await uow.get_assignment(command.assignment_id)
             if preliminary is None or preliminary.performer_id != actor.id:
                 raise PermissionError("Assignment is not owned by this member.")
@@ -566,6 +581,9 @@ class AssignmentService:
             assignment = await uow.lock_assignment(preliminary.id)
             if task is None or assignment is None:
                 raise LookupError("Assignment task does not exist.")
+            await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
+            if command.actor_member_id is not None:
+                _require_freeform_submission(task)
             if task.origin == "community" and task.reviewer_admin_id == actor.id:
                 raise PermissionError("Community reviewer cannot perform the task.")
             require_submit_allowed(
@@ -574,18 +592,19 @@ class AssignmentService:
             draft = await uow.create_or_get_submission_draft(
                 assignment_id=assignment.id, performer_id=actor.id
             )
-            await uow.claim_text_flow(
-                member_id=actor.id,
-                flow_type="assignment_result",
-                step="text",
-                reference_id=draft.id,
-                revision=draft.revision,
-            )
+            if command.actor_member_id is None:
+                await uow.claim_text_flow(
+                    member_id=actor.id,
+                    flow_type="assignment_result",
+                    step="text",
+                    reference_id=draft.id,
+                    revision=draft.revision,
+                )
             await uow.add_receipt(
                 update_id=command.update_id,
                 update_type="assignment_workflow",
                 actor_id=actor.id,
-                outcome_code=f"draft:{draft.id}",
+                outcome_code=_submission_draft_outcome(draft.id, command.replay_fingerprint),
             )
             await uow.commit()
             return draft
@@ -593,11 +612,15 @@ class AssignmentService:
     async def save_submission_draft(self, command: SaveSubmissionDraftCommand) -> SubmissionDraft:
         """Persist a schema-valid preview without submitting the assignment."""
         async with self._unit_of_work_factory() as uow:
-            replay = await _begin(uow, command.update_id)
+            actor, replay = await _submission_start(uow, command)
             if replay is not None:
-                return await _draft_replay(uow, replay)
-            await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
-            actor = await _actor(uow, command.actor_telegram_user_id)
+                return await _draft_replay(
+                    uow,
+                    replay,
+                    actor_member_id=command.actor_member_id,
+                    replay_fingerprint=command.replay_fingerprint,
+                )
+            actor = cast("Member", actor)
             preliminary = await uow.get_submission_draft(command.draft_id)
             if preliminary is None or preliminary.performer_id != actor.id:
                 raise PermissionError("Submission draft is not owned by this member.")
@@ -612,27 +635,34 @@ class AssignmentService:
                 raise LookupError("Submission draft context does not exist.")
             if assignment.performer_id != actor.id or draft.assignment_id != assignment.id:
                 raise PermissionError("Submission draft is not owned by this member.")
+            await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
+            if command.actor_member_id is not None:
+                _require_freeform_submission(task)
             require_submit_allowed(
                 assignment, task_deadline=task.deadline_at, now=datetime.datetime.now(datetime.UTC)
             )
             payload = await _validate_result_payload(uow, task, command.payload)
-            saved = await uow.save_submission_draft_payload(
-                draft_id=draft.id,
-                expected_revision=command.expected_revision,
-                payload=payload,
-            )
-            await uow.claim_text_flow(
-                member_id=actor.id,
-                flow_type="assignment_result",
-                step="preview",
-                reference_id=saved.id,
-                revision=saved.revision,
-            )
+            try:
+                saved = await uow.save_submission_draft_payload(
+                    draft_id=draft.id,
+                    expected_revision=command.expected_revision,
+                    payload=payload,
+                )
+            except ValueError as error:
+                raise AssignmentError("Submission draft revision is stale.") from error
+            if command.actor_member_id is None:
+                await uow.claim_text_flow(
+                    member_id=actor.id,
+                    flow_type="assignment_result",
+                    step="preview",
+                    reference_id=saved.id,
+                    revision=saved.revision,
+                )
             await uow.add_receipt(
                 update_id=command.update_id,
                 update_type="assignment_workflow",
                 actor_id=actor.id,
-                outcome_code=f"draft:{saved.id}",
+                outcome_code=_submission_draft_outcome(saved.id, command.replay_fingerprint),
             )
             await uow.commit()
             return saved
@@ -642,11 +672,15 @@ class AssignmentService:
     ) -> ResultVersion:
         """Append the preview as a result under its stable command identity."""
         async with self._unit_of_work_factory() as uow:
-            replay = await _begin(uow, command.update_id)
+            actor, replay = await _submission_start(uow, command)
             if replay is not None:
-                return await _result_replay(uow, replay)
-            await uow.acquire_task_identity_gate(command.actor_telegram_user_id)
-            actor = await _actor(uow, command.actor_telegram_user_id)
+                return await _result_replay(
+                    uow,
+                    replay,
+                    actor_member_id=command.actor_member_id,
+                    replay_fingerprint=command.replay_fingerprint,
+                )
+            actor = cast("Member", actor)
             preliminary = await uow.get_submission_draft(command.draft_id)
             if preliminary is None or preliminary.performer_id != actor.id:
                 raise PermissionError("Submission draft is not owned by this member.")
@@ -661,6 +695,9 @@ class AssignmentService:
                 raise LookupError("Submission draft context does not exist.")
             if assignment.performer_id != actor.id or draft.assignment_id != assignment.id:
                 raise PermissionError("Submission draft is not owned by this member.")
+            await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
+            if command.actor_member_id is not None:
+                _require_freeform_submission(task)
             if draft.revision != command.expected_revision:
                 raise AssignmentError("Submission draft revision is stale.")
             if draft.submitted_result_id is not None:
@@ -677,11 +714,12 @@ class AssignmentService:
                 now=now,
             )
             await uow.complete_submission_draft(draft_id=draft.id, result_id=result.id)
-            await uow.clear_text_flow(
-                member_id=actor.id,
-                flow_type="assignment_result",
-                reference_id=draft.id,
-            )
+            if command.actor_member_id is None:
+                await uow.clear_text_flow(
+                    member_id=actor.id,
+                    flow_type="assignment_result",
+                    reference_id=draft.id,
+                )
             updated = await uow.lock_assignment(assignment.id)
             if updated is None:
                 raise LookupError("Assignment does not exist.")
@@ -694,7 +732,7 @@ class AssignmentService:
                 update_id=command.update_id,
                 update_type="assignment_workflow",
                 actor_id=actor.id,
-                outcome_code=f"result:{result.id}",
+                outcome_code=_submission_result_outcome(result.id, command.replay_fingerprint),
             )
             await uow.commit()
             return result
@@ -1229,7 +1267,15 @@ async def _context_actor(uow: AssignmentUnitOfWork, context: ActorContext) -> Me
     return actor
 
 
-async def _accept_actor(uow: AssignmentUnitOfWork, command: AcceptAssignmentCommand) -> Member:
+async def _command_actor(
+    uow: AssignmentUnitOfWork,
+    command: (
+        AcceptAssignmentCommand
+        | BeginSubmissionCommand
+        | SaveSubmissionDraftCommand
+        | ConfirmSubmissionDraftCommand
+    ),
+) -> Member:
     if command.actor_member_id is not None:
         actor = await uow.get_member(command.actor_member_id)
     elif command.actor_telegram_user_id is not None:
@@ -1263,24 +1309,114 @@ async def _assignment_replay(uow: AssignmentUnitOfWork, outcome: str) -> Assignm
     return assignment
 
 
-async def _draft_replay(uow: AssignmentUnitOfWork, outcome: str) -> SubmissionDraft:
-    marker, separator, raw_id = outcome.partition(":")
-    if marker != "draft" or not separator:
+async def _draft_replay(
+    uow: AssignmentUnitOfWork,
+    outcome: str,
+    *,
+    actor_member_id: UUID | None = None,
+    replay_fingerprint: str | None = None,
+) -> SubmissionDraft:
+    marker, separator, remainder = outcome.partition(":")
+    if marker == "draft" and separator and actor_member_id is None:
+        raw_id = remainder
+    elif marker == "web_draft" and separator:
+        raw_id, fingerprint_separator, stored_fingerprint = remainder.partition(":")
+        if (
+            actor_member_id is None
+            or not fingerprint_separator
+            or replay_fingerprint != stored_fingerprint
+        ):
+            raise AssignmentError("Stored submission draft outcome does not match command.")
+    else:
         raise AssignmentError("Telegram update belongs to another operation.")
     draft = await uow.get_submission_draft(UUID(raw_id))
     if draft is None:
         raise LookupError("Stored submission draft does not exist.")
+    if actor_member_id is not None and draft.performer_id != actor_member_id:
+        raise PermissionError("Submission draft is not owned by this member.")
     return draft
 
 
-async def _result_replay(uow: AssignmentUnitOfWork, outcome: str) -> ResultVersion:
-    marker, separator, raw_id = outcome.partition(":")
-    if marker != "result" or not separator:
+async def _result_replay(
+    uow: AssignmentUnitOfWork,
+    outcome: str,
+    *,
+    actor_member_id: UUID | None = None,
+    replay_fingerprint: str | None = None,
+) -> ResultVersion:
+    marker, separator, remainder = outcome.partition(":")
+    if marker == "result" and separator and actor_member_id is None:
+        raw_id = remainder
+    elif marker == "web_result" and separator:
+        raw_id, fingerprint_separator, stored_fingerprint = remainder.partition(":")
+        if (
+            actor_member_id is None
+            or not fingerprint_separator
+            or replay_fingerprint != stored_fingerprint
+        ):
+            raise AssignmentError("Stored submission result outcome does not match command.")
+    else:
         raise AssignmentError("Telegram update belongs to another operation.")
     result = await uow.get_assignment_result(UUID(raw_id))
     if result is None:
         raise LookupError("Stored submission result does not exist.")
+    if actor_member_id is not None:
+        assignment = await uow.get_assignment(result.assignment_id)
+        if assignment is None or assignment.performer_id != actor_member_id:
+            raise PermissionError("Submission result is not owned by this member.")
     return result
+
+
+async def _submission_start(
+    uow: AssignmentUnitOfWork,
+    command: BeginSubmissionCommand | SaveSubmissionDraftCommand | ConfirmSubmissionDraftCommand,
+) -> tuple[Member | None, str | None]:
+    if command.actor_member_id is None:
+        replay = await _begin(uow, command.update_id)
+        if replay is not None:
+            return None, replay
+    actor = await _command_actor(uow, command)
+    await uow.acquire_task_identity_gate(actor.telegram_user_id)
+    replay = await _begin(uow, command.update_id)
+    if replay is not None:
+        await _ensure_submission_replay_access(uow, command, actor)
+    return actor, replay
+
+
+async def _ensure_submission_replay_access(
+    uow: AssignmentUnitOfWork,
+    command: BeginSubmissionCommand | SaveSubmissionDraftCommand | ConfirmSubmissionDraftCommand,
+    actor: Member,
+) -> None:
+    if isinstance(command, BeginSubmissionCommand):
+        assignment = await uow.get_assignment(command.assignment_id)
+    else:
+        draft = await uow.get_submission_draft(command.draft_id)
+        assignment = None if draft is None else await uow.get_assignment(draft.assignment_id)
+    if assignment is None or assignment.performer_id != actor.id:
+        raise PermissionError("Submission is not owned by this member.")
+    await uow.ensure_task_test_access(task_id=assignment.task_id, member_id=actor.id)
+
+
+def _require_freeform_submission(task: PublishedTask) -> None:
+    if task.template_id is not None:
+        raise AssignmentError("Mini App submission is unavailable for this template.")
+
+
+def _submission_draft_outcome(draft_id: UUID, replay_fingerprint: str | None) -> str:
+    return (
+        f"draft:{draft_id}"
+        if replay_fingerprint is None
+        else f"web_draft:{draft_id}:{replay_fingerprint}"
+    )
+
+
+def _submission_result_outcome(result_id: UUID, replay_fingerprint: str | None) -> str:
+    return (
+        f"result:{result_id}"
+        if replay_fingerprint is None
+        else f"web_result:{result_id}:{replay_fingerprint}"
+    )
 
 
 async def _validate_result_payload(

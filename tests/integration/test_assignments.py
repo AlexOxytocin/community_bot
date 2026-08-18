@@ -15,11 +15,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from community_bot.application.assignments import (
     AcceptAssignmentCommand,
     AssignmentService,
+    BeginSubmissionCommand,
+    ConfirmSubmissionDraftCommand,
     DecideAssignmentCommand,
+    SaveSubmissionDraftCommand,
     SubmitResultCommand,
 )
 from community_bot.application.tasks import PublishTaskCommand, TaskService
-from community_bot.domain.assignments import AssignmentDecision, AssignmentError, AssignmentStatus
+from community_bot.domain.assignments import (
+    AssignmentDecision,
+    AssignmentError,
+    AssignmentStatus,
+    SubmissionDraft,
+)
 from community_bot.domain.members import MemberRole
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
@@ -28,14 +36,21 @@ from community_bot.infrastructure.db.models import (
     AssignmentModel,
     AssignmentResultVersionModel,
     AuditEventModel,
+    ConversationStateModel,
     MemberModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
     ReliabilityEventModel,
     TaskModel,
 )
+from community_bot.infrastructure.db.models import TestRunModel as DbTestRunModel
+from community_bot.infrastructure.db.models import (
+    TestRunParticipantModel as DbTestRunParticipantModel,
+)
 from tests.integration.test_task_creation import (
     add_member,
+    category_id,
+    complete_freeform_preview,
     complete_preview,
     prepare_member,
     template_id,
@@ -59,6 +74,20 @@ async def _published_task(database: Database, *, update_base: int, performer_slo
         PublishTaskCommand(update_base * 10 + 10, author.telegram_user_id, draft_id, revision)
     )
     return author, task
+
+
+async def _freeform_task(database: Database, *, update_base: int):  # noqa: ANN202
+    author = await prepare_member(database, telegram_user_id=update_base)
+    service = TaskService(database.unit_of_work)
+    draft_id, revision = await complete_freeform_preview(
+        service,
+        member=author,
+        selected_category_id=await category_id(database, "evaluation_testing"),
+        update_base=update_base * 10,
+    )
+    return author, await service.publish(
+        PublishTaskCommand(update_base * 10 + 20, author.telegram_user_id, draft_id, revision)
+    )
 
 
 async def _community_task(  # noqa: ANN202
@@ -351,6 +380,228 @@ async def test_web_actor_replay_and_natural_assignment_idempotency(
             )
             == 2
         )
+    await database.dispose()
+
+
+async def test_web_submission_draft_is_durable_exact_and_actor_native(database_url: str) -> None:
+    database = Database(database_url)
+    _author, task = await _freeform_task(database, update_base=3195)
+    performer = await prepare_member(database, telegram_user_id=3196)
+    service = AssignmentService(database.unit_of_work)
+    assignment = await service.accept(
+        AcceptAssignmentCommand(8_000_000_000_031_960, None, task.id, actor_member_id=performer.id)
+    )
+    begin = BeginSubmissionCommand(
+        8_000_000_000_031_961,
+        None,
+        assignment.id,
+        actor_member_id=performer.id,
+        replay_fingerprint="begin",
+    )
+    draft = await service.begin_submission(begin)
+    resumed = await service.begin_submission(
+        BeginSubmissionCommand(
+            8_000_000_000_031_962,
+            None,
+            assignment.id,
+            actor_member_id=performer.id,
+            replay_fingerprint="begin",
+        )
+    )
+    assert resumed.id == draft.id
+    save_one = SaveSubmissionDraftCommand(
+        8_000_000_000_031_963,
+        None,
+        draft.id,
+        draft.revision,
+        {"result": "A detailed, useful result for the task."},
+        actor_member_id=performer.id,
+        replay_fingerprint="save-one",
+    )
+    save_two = SaveSubmissionDraftCommand(
+        8_000_000_000_031_969,
+        None,
+        draft.id,
+        draft.revision,
+        {"result": "A different concurrent result."},
+        actor_member_id=performer.id,
+        replay_fingerprint="save-concurrent",
+    )
+    outcomes = await asyncio.gather(
+        service.save_submission_draft(save_one),
+        service.save_submission_draft(save_two),
+        return_exceptions=True,
+    )
+    saved = next(outcome for outcome in outcomes if isinstance(outcome, SubmissionDraft))
+    winner = save_one if saved.payload == save_one.payload else save_two
+    assert sum(isinstance(outcome, AssignmentError) for outcome in outcomes) == 1
+    assert saved.payload in (save_one.payload, save_two.payload)
+    with pytest.raises(AssignmentError, match="does not match command"):
+        await service.save_submission_draft(
+            SaveSubmissionDraftCommand(
+                winner.update_id,
+                None,
+                draft.id,
+                draft.revision,
+                {"result": "A conflicting replay command."},
+                actor_member_id=performer.id,
+                replay_fingerprint="save-conflict",
+            )
+        )
+    confirm = ConfirmSubmissionDraftCommand(
+        8_000_000_000_031_964,
+        None,
+        draft.id,
+        saved.revision,
+        actor_member_id=performer.id,
+        replay_fingerprint="confirm-one",
+    )
+    first, replayed = await asyncio.gather(
+        service.confirm_submission_draft(confirm), service.confirm_submission_draft(confirm)
+    )
+    assert first.id == replayed.id
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count(AssignmentResultVersionModel.id)).where(
+                    AssignmentResultVersionModel.assignment_id == assignment.id
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(OutboxEventModel.id)).where(
+                    OutboxEventModel.business_key == f"assignment:{assignment.id}:result:1"
+                )
+            )
+            == 1
+        )
+        assert await session.get(ConversationStateModel, performer.id) is None
+
+    _legacy_author, legacy_task = await _published_task(database, update_base=3199)
+    legacy_assignment = await service.accept(
+        AcceptAssignmentCommand(8_000_000_000_031_965, performer.telegram_user_id, legacy_task.id)
+    )
+    legacy_begin = BeginSubmissionCommand(
+        8_000_000_000_031_966,
+        performer.telegram_user_id,
+        legacy_assignment.id,
+    )
+    legacy_draft = await service.begin_submission(legacy_begin)
+    assert (await service.begin_submission(legacy_begin)).id == legacy_draft.id
+    async with sessions() as session:
+        state = await session.get(ConversationStateModel, performer.id)
+        assert state is not None
+        assert state.current_step == "text"
+    legacy_save = SaveSubmissionDraftCommand(
+        8_000_000_000_031_967,
+        performer.telegram_user_id,
+        legacy_draft.id,
+        legacy_draft.revision,
+        {
+            "summary": "Legacy transport keeps its durable template flow.",
+            "findings": ["Template validation is still active."],
+            "evidence": [],
+        },
+    )
+    legacy_saved = await service.save_submission_draft(legacy_save)
+    assert (await service.save_submission_draft(legacy_save)).id == legacy_draft.id
+    async with sessions() as session:
+        state = await session.get(ConversationStateModel, performer.id)
+        assert state is not None
+        assert state.current_step == "preview"
+    legacy_confirm = ConfirmSubmissionDraftCommand(
+        8_000_000_000_031_968,
+        performer.telegram_user_id,
+        legacy_draft.id,
+        legacy_saved.revision,
+    )
+    legacy_result = await service.confirm_submission_draft(legacy_confirm)
+    assert (await service.confirm_submission_draft(legacy_confirm)).id == legacy_result.id
+    async with sessions() as session:
+        assert await session.get(ConversationStateModel, performer.id) is None
+    await database.dispose()
+
+
+async def test_web_submission_replay_rechecks_test_scope(database_url: str) -> None:
+    database = Database(database_url)
+    _author, source_task = await _freeform_task(database, update_base=3197)
+    performer = await prepare_member(database, telegram_user_id=3198)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        source = await session.get(TaskModel, source_task.id)
+        assert source is not None
+        run = DbTestRunModel(marker="TEST-CB69-REPLAY", started_by_member_id=performer.id)
+        session.add(run)
+        await session.flush()
+        task = TaskModel(
+            origin=source.origin,
+            test_run_id=run.id,
+            template_id=source.template_id,
+            template_version=source.template_version,
+            creator_id=source.creator_id,
+            author_display_name=source.author_display_name,
+            category_id=source.category_id,
+            time_size=source.time_size,
+            title="Test-scope submission replay",
+            description=source.description,
+            completion_criteria=source.completion_criteria,
+            materials_json=source.materials_json,
+            input_payload_json=source.input_payload_json,
+            credit_reward_per_performer=source.credit_reward_per_performer,
+            performer_slots=source.performer_slots,
+            reserved_credit_total=source.reserved_credit_total,
+            estimated_minutes=source.estimated_minutes,
+            minimum_level=source.minimum_level,
+            format=source.format,
+            city=source.city,
+            deadline_at=source.deadline_at,
+            status="published",
+            safety_snapshot_json=source.safety_snapshot_json,
+            publish_command_id=uuid4(),
+            published_at=source.published_at,
+        )
+        session.add_all((task, DbTestRunParticipantModel(run_id=run.id, member_id=performer.id)))
+        await session.flush()
+        task_id = task.id
+    service = AssignmentService(database.unit_of_work)
+    assignment = await service.accept(
+        AcceptAssignmentCommand(8_000_000_000_031_980, None, task_id, actor_member_id=performer.id)
+    )
+    command = BeginSubmissionCommand(
+        8_000_000_000_031_981,
+        None,
+        assignment.id,
+        actor_member_id=performer.id,
+        replay_fingerprint="test-scope",
+    )
+    draft = await service.begin_submission(command)
+    async with sessions.begin() as session:
+        participant = await session.get(DbTestRunParticipantModel, (task.test_run_id, performer.id))
+        assert participant is not None
+        participant.is_active = False
+    with pytest.raises(PermissionError, match="test scope"):
+        await service.begin_submission(command)
+    async with sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count(ProcessedTelegramUpdateModel.update_id)).where(
+                    ProcessedTelegramUpdateModel.update_id == command.update_id
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(AssignmentResultVersionModel.id)).where(
+                    AssignmentResultVersionModel.assignment_id == assignment.id
+                )
+            )
+            == 0
+        )
+    assert draft.id
     await database.dispose()
 
 

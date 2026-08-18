@@ -413,6 +413,163 @@ async function loadAssignments(push = true) {
   }
 }
 
+const submissionMessage = (error) => error instanceof TypeError
+  ? "Сеть недоступна. Повторите запрос — он останется тем же."
+  : "Не удалось сохранить результат. Проверьте назначение и повторите.";
+
+const retryableSubmissionError = (error) => error instanceof TypeError || error?.status >= 500;
+
+async function submissionResponse(response) {
+  let payload = null;
+  if (response.status !== 204) {
+    try {
+      payload = await response.json();
+    } catch {
+      const error = new Error("request_failed");
+      error.status = response.status;
+      throw error;
+    }
+  }
+  if (!response.ok) {
+    const error = new Error(payload?.code || "request_failed");
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+async function submissionRequest(path, method, operationKey, body) {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": operationKey,
+    },
+    body: JSON.stringify(body),
+    credentials: "same-origin",
+  });
+  return submissionResponse(response);
+}
+
+function renderSubmission(assignment, draft) {
+  const submissionRevision = screenRevision;
+  const boundary = element("section", undefined, "submission");
+  boundary.append(element("h3", "Отправить результат"));
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+
+  if (!draft) {
+    const begin = element("button", "Начать отправку", "primary");
+    begin.type = "button";
+    let beginKey = null;
+    begin.addEventListener("click", async () => {
+      begin.disabled = true;
+      status.className = "status";
+      status.textContent = "Открываем черновик…";
+      beginKey ||= newOperationKey();
+      try {
+        const response = await fetch(
+          "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/submission-drafts",
+          {
+            method: "POST",
+            headers: { "Idempotency-Key": beginKey },
+            credentials: "same-origin",
+          },
+        );
+        const payload = await submissionResponse(response);
+        const next = renderSubmission(assignment, payload);
+        boundary.replaceWith(next);
+        next.querySelector("textarea")?.focus();
+      } catch (error) {
+        status.textContent = submissionMessage(error);
+        if (!retryableSubmissionError(error)) beginKey = null;
+        begin.disabled = false;
+      }
+    });
+    boundary.append(status, begin);
+    return boundary;
+  }
+
+  const form = element("form", undefined, "submission-form");
+  const label = element("label", "Результат", "section");
+  const input = document.createElement("textarea");
+  input.name = "result";
+  input.required = true;
+  input.rows = 6;
+  input.value = typeof draft.result === "string" ? draft.result : "";
+  label.htmlFor = "submission-result";
+  input.id = "submission-result";
+  label.append(input);
+  const preview = element("button", "Предпросмотр", "primary");
+  preview.type = "submit";
+  let saveKey = null;
+  let confirmKey = null;
+
+  const addPreview = (saved) => {
+    const previewCard = element("section", undefined, "section submission-preview");
+    previewCard.append(
+      element("h4", "Предпросмотр"),
+      element("p", typeof saved.result === "string" ? saved.result : ""),
+    );
+    const confirm = element("button", "Подтвердить отправку", "primary");
+    confirm.type = "button";
+    confirm.addEventListener("click", async () => {
+      confirm.disabled = true;
+      status.className = "status";
+      status.textContent = "Отправляем результат…";
+      confirmKey ||= newOperationKey();
+      try {
+        await submissionRequest(
+          "/api/v1/submission-drafts/" + encodeURIComponent(saved.id) + "/confirm",
+          "POST",
+          confirmKey,
+          { expected_revision: saved.revision },
+        );
+        if (submissionRevision === screenRevision) {
+          await showAssignmentDetail(assignment.id, false);
+        }
+      } catch (error) {
+        status.textContent = submissionMessage(error);
+        if (!retryableSubmissionError(error)) confirmKey = null;
+        confirm.disabled = false;
+      }
+    });
+    previewCard.append(confirm);
+    form.querySelector(".submission-preview")?.remove();
+    form.append(previewCard);
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    preview.disabled = true;
+    status.className = "status";
+    status.textContent = "Сохраняем предпросмотр…";
+    saveKey ||= newOperationKey();
+    try {
+      const saved = await submissionRequest(
+        "/api/v1/submission-drafts/" + encodeURIComponent(draft.id),
+        "PUT",
+        saveKey,
+        { expected_revision: draft.revision, payload: { result: input.value } },
+      );
+      draft = saved;
+      saveKey = null;
+      status.className = "status success";
+      status.textContent = "Предпросмотр сохранён. Подтвердите отправку.";
+      addPreview(saved);
+    } catch (error) {
+      status.textContent = submissionMessage(error);
+      if (!retryableSubmissionError(error)) saveKey = null;
+    } finally {
+      preview.disabled = false;
+    }
+  });
+  form.append(label, preview);
+  boundary.append(form, status);
+  if (draft.result !== null) addPreview(draft);
+  return boundary;
+}
+
 async function showAssignmentDetail(assignmentId, push = true) {
   const revision = ++screenRevision;
   returnFocusAssignmentId = assignmentId;
@@ -449,6 +606,10 @@ async function showAssignmentDetail(assignmentId, push = true) {
     }
     if (assignment.review_deadline_at) {
       detail.append(dateSection("Срок проверки", assignment.review_deadline_at));
+    }
+    if (assignment.assignment_status === "accepted"
+      && assignment.submission_contract === "freeform_result_v1") {
+      detail.append(renderSubmission(assignment, null));
     }
     replaceContent(detail);
     back.focus();
