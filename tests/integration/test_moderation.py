@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select, update
@@ -756,7 +756,11 @@ async def test_alert_penalty_is_bounded_and_closes_the_episode(
 
 
 async def _open_dispute_fixture(
-    database: Database, creator: MemberModel, performer: MemberModel
+    database: Database,
+    creator: MemberModel,
+    performer: MemberModel,
+    *,
+    test_run_id: UUID | None = None,
 ) -> ModerationCaseModel:
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
@@ -766,6 +770,7 @@ async def _open_dispute_fixture(
         now = datetime.datetime.now(datetime.UTC)
         task = TaskModel(
             id=uuid4(),
+            test_run_id=test_run_id,
             origin="member",
             template_id=template.id,
             template_version=template.version,

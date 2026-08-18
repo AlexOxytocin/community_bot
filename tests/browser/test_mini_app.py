@@ -349,13 +349,15 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         browser.close()
 
 
-def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
+def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
     malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
     mode: dict[str, Any] = {"name": "pending"}
     pending: list[Route] = []
     requests: list[tuple[str, str]] = []
+    resolution_keys: list[str] = []
+    resolution_mode = {"name": "retry"}
 
     def moderation_route(route: Route) -> None:
         requests.append((route.request.method, route.request.url))
@@ -370,6 +372,38 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
         else:
             route.abort()
 
+    def detail_route(route: Route) -> None:
+        route.fulfill(
+            json={
+                "id": "00000000-0000-0000-0000-000000000061",
+                "status": "open",
+                "revision": 0,
+                "task_title": "Проверить отчёт",
+                "task_origin": "member",
+                "credit_reward_per_performer": 4,
+                "assignment_status": "disputed",
+                "result_summary": malicious,
+                "dispute_reason": "Результат отклонён без пояснений",
+                "allowed_resolution_codes": ["full_payment", "partial_payment"],
+                "opened_at": "2026-08-17T20:00:00Z",
+            }
+        )
+
+    def resolution_route(route: Route) -> None:
+        resolution_keys.append(route.request.headers["idempotency-key"])
+        assert route.request.post_data_json == {
+            "expected_revision": 0,
+            "code": "partial_payment",
+            "reason": "Подтверждена половина результата",
+        }
+        if resolution_mode["name"] == "retry" and len(resolution_keys) == 1:
+            route.fulfill(status=502, body="upstream unavailable", content_type="text/plain")
+        elif resolution_mode["name"] == "conflict":
+            route.fulfill(status=409, json={"code": "moderation_unavailable"})
+        else:
+            mode["name"] = "empty"
+            route.fulfill(status=204, body="")
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
@@ -382,6 +416,8 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.route("**/api/v1/moderation/cases?*", moderation_route)
+        page.route("**/api/v1/moderation/cases/*/resolution", resolution_route)
+        page.route("**/api/v1/moderation/cases/*", detail_route)
 
         page.goto(mini_app_url + "#moderation")
         moderation_nav = page.get_by_role("button", name="Модерация")
@@ -394,9 +430,9 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
                         "id": "00000000-0000-0000-0000-000000000061",
                         "assignment_id": "00000000-0000-0000-0000-000000000062",
                         "case_type": "dispute",
-                        "status": "appealed",
-                        "revision": 1,
-                        "current_code": malicious,
+                        "status": "open",
+                        "revision": 0,
+                        "current_code": None,
                         "opened_at": "2026-08-17T20:00:00Z",
                         "resolved_at": None,
                         "reason": "PRIVATE_REASON",
@@ -406,15 +442,87 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
             }
         )
         page.get_by_text("Спор по заданию").wait_for()
-        assert malicious in page.locator("body").inner_text()
         assert "PRIVATE_REASON" not in page.locator("body").inner_text()
         assert "PRIVATE_EVIDENCE" not in page.locator("body").inner_text()
-        assert page.locator("article button, article a, img, [onerror], [onclick]").count() == 0
+        assert page.locator("img, [onerror], [onclick]").count() == 0
         assert page.locator("script").count() == 2
+
+        page.get_by_role("button", name="Спор по заданию").click()
+        page.get_by_role("heading", name="Решение по спору").wait_for()
+        page.get_by_role("combobox", name="Решение").wait_for()
+        assert malicious in page.locator("body").inner_text()
+        assert page.locator("img, [onerror], [onclick]").count() == 0
+        resolution = page.get_by_role("combobox", name="Решение")
+        assert resolution.evaluate("node => node === document.activeElement")
+        resolution.select_option("partial_payment")
+        reason = page.get_by_role("textbox", name="Причина решения")
+        reason.fill("Подтверждена половина результата")
+        reason.press("Tab")
+        review = page.get_by_role("button", name="Проверить решение")
+        assert review.evaluate("node => node === document.activeElement")
+        review.press("Enter")
+        confirm = page.get_by_role("button", name="Подтвердить решение")
+        assert confirm.evaluate("node => node === document.activeElement")
+        assert resolution_keys == []
+        confirm.click()
+        page.get_by_text("Не удалось применить решение.").wait_for()  # noqa: RUF001
+        confirm.click()
+        page.get_by_text("Открытых кейсов нет.").wait_for()
+        assert len(resolution_keys) == 2
+        assert resolution_keys[0] == resolution_keys[1]
 
         page.get_by_role("button", name="Назад").click()
         page.get_by_role("heading", name="Каталог").wait_for()
         assert moderation_nav.evaluate("node => node === document.activeElement")
+
+        mode["name"] = "pending"
+        resolution_mode["name"] = "conflict"
+        moderation_nav.click()
+        pending.pop().fulfill(
+            json={
+                "items": [
+                    {
+                        "id": "00000000-0000-0000-0000-000000000061",
+                        "assignment_id": "00000000-0000-0000-0000-000000000062",
+                        "case_type": "dispute",
+                        "status": "open",
+                        "revision": 0,
+                        "current_code": None,
+                        "opened_at": "2026-08-17T20:00:00Z",
+                        "resolved_at": None,
+                    }
+                ]
+            }
+        )
+        page.get_by_role("button", name="Спор по заданию").click()
+        page.get_by_role("combobox", name="Решение").select_option("partial_payment")
+        page.get_by_role("textbox", name="Причина решения").fill("Подтверждена половина результата")
+        page.get_by_role("button", name="Проверить решение").click()
+        page.get_by_role("button", name="Подтвердить решение").click()
+        page.get_by_text("Кейс уже изменился").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        pending.pop().fulfill(
+            json={
+                "items": [
+                    {
+                        "id": "00000000-0000-0000-0000-000000000061",
+                        "assignment_id": "00000000-0000-0000-0000-000000000062",
+                        "case_type": "dispute",
+                        "status": "open",
+                        "revision": 0,
+                        "current_code": None,
+                        "opened_at": "2026-08-17T20:00:00Z",
+                        "resolved_at": None,
+                    }
+                ]
+            }
+        )
+        page.get_by_role("button", name="Спор по заданию").wait_for()
+        assert page.get_by_role("button", name="Спор по заданию").evaluate(
+            "node => node === document.activeElement"
+        )
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
 
         mode["name"] = "empty"
         moderation_nav.click()

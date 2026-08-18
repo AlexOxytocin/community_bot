@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, Self, cast
+from uuid import UUID
 
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.domain.moderation import (
@@ -19,7 +20,6 @@ from community_bot.domain.moderation import (
 
 if TYPE_CHECKING:
     from types import TracebackType
-    from uuid import UUID
 
     from community_bot.application.identity import ActorContext
 
@@ -36,6 +36,20 @@ class ModerationCase:
     current_code: ResolutionCode | None
     opened_at: datetime.datetime
     resolved_at: datetime.datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModerationCaseDetail:
+    """Allowlisted dispute context visible to an eligible moderation actor."""
+
+    case: ModerationCase
+    task_title: str
+    task_origin: str
+    credit_reward_per_performer: int
+    assignment_status: str
+    result_summary: str | None
+    dispute_reason: str
+    allowed_resolution_codes: tuple[ResolutionCode, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,12 +111,15 @@ class ResolveCaseCommand:
     """Apply one initial or appealed deterministic resolution."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None
     case_id: UUID
     command_id: UUID
     expected_revision: int
     code: ResolutionCode
     reason: str
+    actor_member_id: UUID | None = None
+    replay_fingerprint: str | None = None
+    initial_dispute_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,8 +233,12 @@ class ModerationMutationPort(Protocol):  # pragma: no cover - structural typing 
     """PostgreSQL-backed moderation operations within a caller-owned UoW."""
 
     async def list_cases(
-        self, *, limit: int = 20, include_fraud_review: bool = True
+        self, *, actor: Member, limit: int = 20, include_fraud_review: bool = True
     ) -> tuple[ModerationCase, ...]: ...
+
+    async def case_detail(self, case_id: UUID, actor: Member) -> ModerationCaseDetail: ...
+
+    async def replay_web_resolution(self, case_id: UUID, actor: Member) -> ModerationCase: ...
 
     async def list_paid_assignments(self, *, limit: int = 20) -> tuple[PaidAssignment, ...]: ...
 
@@ -271,6 +292,8 @@ class ModerationUnitOfWork(Protocol):  # pragma: no cover - structural typing co
 
     async def acquire_update_gate(self, update_id: int) -> None: ...
 
+    async def acquire_task_identity_gate(self, telegram_user_id: int) -> None: ...
+
     async def get_receipt_outcome(self, update_id: int) -> str | None: ...
 
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None: ...
@@ -307,9 +330,22 @@ class ModerationService:
             ):
                 raise PermissionError("Only active moderation staff may view the queue.")
             return await uow.moderation.list_cases(
+                actor=member,
                 limit=limit,
                 include_fraud_review=member.role is MemberRole.ADMINISTRATOR,
             )
+
+    async def detail(self, actor: ActorContext, case_id: UUID) -> ModerationCaseDetail:
+        """Return one initial dispute only when the active staff actor may decide it."""
+        async with self._unit_of_work_factory() as uow:
+            member = await uow.get_member(actor.member_id)
+            if (
+                member is None
+                or member.status is not MemberStatus.ACTIVE
+                or member.role not in {MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}
+            ):
+                raise PermissionError("Only active moderation staff may view a case.")
+            return await uow.moderation.case_detail(case_id, member)
 
     async def is_administrator(self, actor_telegram_user_id: int) -> bool:
         """Return whether this Telegram identity is an active administrator."""
@@ -395,23 +431,47 @@ class ModerationService:
 
     async def _mutate(self, command: ModerationCommand, **policy: object) -> object:
         update_id = int(command.update_id)
-        telegram_user_id = int(command.actor_telegram_user_id)
         operation = str(policy.pop("operation"))
         async with self._unit_of_work_factory() as uow:
-            await uow.acquire_update_gate(update_id)
-            stored = await uow.get_receipt_outcome(update_id)
-            if stored is not None:
-                _stored_marker(stored)
-                return await uow.moderation.replay(stored)
-            if policy.get("member_allowed"):
-                actor = await _active_member(uow, telegram_user_id)
+            actor_member_id = getattr(command, "actor_member_id", None)
+            if actor_member_id is not None:
+                actor = await uow.get_member(actor_member_id)
+                if (
+                    actor is None
+                    or actor.status is not MemberStatus.ACTIVE
+                    or actor.role not in {MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}
+                ):
+                    raise PermissionError(
+                        "Only active moderation staff may perform this operation."
+                    )
+                await uow.acquire_task_identity_gate(actor.telegram_user_id)
+                await uow.acquire_update_gate(update_id)
+                stored = await uow.get_receipt_outcome(update_id)
+                if stored is not None:
+                    return await _web_resolution_replay(uow, command, actor, stored)
             else:
-                actor = await _active_staff(uow, telegram_user_id)
+                telegram_user_id = command.actor_telegram_user_id
+                if telegram_user_id is None:
+                    raise PermissionError("Moderation actor is required.")
+                await uow.acquire_update_gate(update_id)
+                stored = await uow.get_receipt_outcome(update_id)
+                if stored is not None:
+                    _stored_marker(stored)
+                    return await uow.moderation.replay(stored)
+                if policy.get("member_allowed"):
+                    actor = await _active_member(uow, telegram_user_id)
+                else:
+                    actor = await _active_staff(uow, telegram_user_id)
             if policy.get("administrator") and actor.role is not MemberRole.ADMINISTRATOR:
                 raise PermissionError("Only an active administrator may perform this operation.")
             result = await getattr(uow.moderation, operation)(command, actor)
             entity_id = getattr(result, "id", result)
             marker = f"moderation:{operation}:{entity_id}"
+            if actor_member_id is not None:
+                fingerprint = getattr(command, "replay_fingerprint", None)
+                if operation != "resolve_case" or fingerprint is None:
+                    raise ModerationApplicationError("Web resolution fingerprint is required.")
+                marker = f"web_moderation:{actor.id}:{entity_id}:{fingerprint}"
             await uow.add_receipt(
                 update_id=update_id,
                 update_type="moderation",
@@ -420,6 +480,31 @@ class ModerationService:
             )
             await uow.commit()
             return result
+
+
+async def _web_resolution_replay(
+    uow: ModerationUnitOfWork,
+    command: ModerationCommand,
+    actor: Member,
+    outcome: str,
+) -> ModerationCase:
+    try:
+        marker, raw_actor_id, raw_case_id, stored_fingerprint = outcome.split(":", 3)
+        stored_actor_id = UUID(raw_actor_id)
+        stored_case_id = UUID(raw_case_id)
+    except ValueError as error:
+        raise ModerationApplicationError("Stored resolution does not match command.") from error
+    fingerprint = getattr(command, "replay_fingerprint", None)
+    case_id = getattr(command, "case_id", None)
+    if (
+        marker != "web_moderation"
+        or stored_actor_id != actor.id
+        or stored_case_id != case_id
+        or fingerprint is None
+        or stored_fingerprint != fingerprint
+    ):
+        raise ModerationApplicationError("Stored resolution does not match command.")
+    return await uow.moderation.replay_web_resolution(stored_case_id, actor)
 
 
 async def _active_member(uow: ModerationUnitOfWork, telegram_user_id: int) -> Member:

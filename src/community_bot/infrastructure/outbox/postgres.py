@@ -466,6 +466,8 @@ class PostgresNotificationQueue:
                 task = await session.get(TaskModel, assignment.task_id)
                 if task is not None and task.creator_id is not None:
                     member_ids.add(task.creator_id)
+                if task is not None and task.test_run_id is not None:
+                    member_ids.intersection_update(await participant_ids(session, task.test_run_id))
         elif event.aggregate_type == "interaction_alert":
             alert = await session.get(InteractionAlertModel, event.aggregate_id)
             if alert is None:

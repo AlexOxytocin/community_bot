@@ -36,7 +36,13 @@ from community_bot.application.assignments import (
     SaveSubmissionDraftCommand,
 )
 from community_bot.application.identity import ActorContext
-from community_bot.application.moderation import ModerationCase, ModerationService
+from community_bot.application.moderation import (
+    ModerationApplicationError,
+    ModerationCase,
+    ModerationCaseDetail,
+    ModerationService,
+    ResolveCaseCommand,
+)
 from community_bot.application.registration import RegistrationService
 from community_bot.application.reputation import (
     ProfileUnavailableError,
@@ -55,6 +61,7 @@ from community_bot.application.tasks import (
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import AssignmentDecision, AssignmentError, SubmissionDraft
 from community_bot.domain.catalog import TaskFormat
+from community_bot.domain.moderation import ModerationError, ResolutionCode
 from community_bot.domain.tasks import (
     TASK_TIME_SIZE_SPECS,
     TaskError,
@@ -238,6 +245,27 @@ class ModerationCaseDto(_Dto):
 
 class ModerationCasesDto(_Dto):
     items: tuple[ModerationCaseDto, ...]
+
+
+class ModerationCaseDetailDto(_Dto):
+    id: UUID
+    status: Literal["open"]
+    revision: int
+    task_title: str
+    task_origin: Literal["member", "community"]
+    credit_reward_per_performer: int
+    assignment_status: str
+    result_summary: str | None
+    dispute_reason: str
+    allowed_resolution_codes: tuple[ResolutionCode, ...]
+    opened_at: datetime.datetime
+
+
+class ModerationResolutionRequest(_Dto):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_revision: int = Field(ge=0, strict=True)
+    code: ResolutionCode
+    reason: str = Field(min_length=1)
 
 
 class AssignmentDetailDto(AssignmentCardDto):
@@ -791,6 +819,58 @@ def create_web_app(
             ModerationCasesDto(items=tuple(_moderation_case_dto(item) for item in cases))
         )
 
+    @app.get("/api/v1/moderation/cases/{case_id}", response_model=ModerationCaseDetailDto)
+    async def moderation_case(
+        case_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> JSONResponse:
+        try:
+            detail = await moderation.detail(actor, case_id)
+        except (LookupError, PermissionError):
+            return _error_response(404, "not_found")
+        return _json_response(_moderation_case_detail_dto(detail))
+
+    @app.post("/api/v1/moderation/cases/{case_id}/resolution", status_code=204)
+    async def resolve_moderation_case(case_id: UUID, request: Request) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "ModerationResolutionRequest | None",
+            await _submission_request(request, ModerationResolutionRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        update_id = _submission_update_id(
+            actor.member_id,
+            case_id,
+            "resolve",
+            operation_key,
+            namespace=b"moderation-resolution-v1",
+        )
+        fingerprint = _submission_fingerprint(
+            "moderation_resolution",
+            payload.expected_revision,
+            payload={"code": payload.code.value, "reason": payload.reason},
+        )
+        try:
+            await moderation.resolve(
+                ResolveCaseCommand(
+                    update_id=update_id,
+                    actor_telegram_user_id=None,
+                    case_id=case_id,
+                    command_id=UUID(int=update_id),
+                    expected_revision=payload.expected_revision,
+                    code=payload.code,
+                    reason=payload.reason,
+                    actor_member_id=actor.member_id,
+                    replay_fingerprint=fingerprint,
+                    initial_dispute_only=True,
+                )
+            )
+        except (LookupError, PermissionError, ModerationError, ModerationApplicationError):
+            return _error_response(409, "moderation_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.post(
         "/api/v1/tasks/{task_id}/assignments",
         response_model=AssignmentDto,
@@ -1162,12 +1242,14 @@ async def _submission_request(
         | ConfirmSubmissionDraftRequest
         | AssignmentDecisionRequest
         | AssignmentDisputeRequest
+        | ModerationResolutionRequest
     ],
 ) -> (
     SaveSubmissionDraftRequest
     | ConfirmSubmissionDraftRequest
     | AssignmentDecisionRequest
     | AssignmentDisputeRequest
+    | ModerationResolutionRequest
     | None
 ):
     if request.headers.get("content-type", "").lower() != "application/json":
@@ -1363,6 +1445,22 @@ def _moderation_case_dto(case: ModerationCase) -> ModerationCaseDto:
         current_code=None if case.current_code is None else case.current_code.value,
         opened_at=case.opened_at,
         resolved_at=case.resolved_at,
+    )
+
+
+def _moderation_case_detail_dto(detail: ModerationCaseDetail) -> ModerationCaseDetailDto:
+    return ModerationCaseDetailDto(
+        id=detail.case.id,
+        status=cast('Literal["open"]', detail.case.status),
+        revision=detail.case.revision,
+        task_title=detail.task_title,
+        task_origin=cast('Literal["member", "community"]', detail.task_origin),
+        credit_reward_per_performer=detail.credit_reward_per_performer,
+        assignment_status=detail.assignment_status,
+        result_summary=detail.result_summary,
+        dispute_reason=detail.dispute_reason,
+        allowed_resolution_codes=detail.allowed_resolution_codes,
+        opened_at=detail.case.opened_at,
     )
 
 
