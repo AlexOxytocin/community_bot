@@ -441,6 +441,7 @@ def test_preflight_rejects_malformed_migration_output(
 def test_initial_activation_rejects_existing_processes_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
     root = tmp_path / "host"
     releases = root / "shared" / "releases"
     releases.mkdir(parents=True)
@@ -486,6 +487,7 @@ def test_initial_activation_rejects_existing_processes_before_mutation(
 def test_activate_a_then_b_then_rollback_consumes_previous(  # noqa: C901, PLR0915
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
     root = tmp_path / "host"
     releases = root / "shared" / "releases"
     releases.mkdir(parents=True)
@@ -654,6 +656,7 @@ def test_activate_a_then_b_then_rollback_consumes_previous(  # noqa: C901, PLR09
 def test_rollback_rejects_other_pending_operation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
     digest = "a" * 64
 
     @contextmanager

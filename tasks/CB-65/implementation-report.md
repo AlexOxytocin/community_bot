@@ -21,11 +21,11 @@ Production additions — `931`:
 - `ops/restore_drill.py`: `12`;
 - `ops/release_contract.py`: `714`.
 
-Targeted test additions — `827`:
+Targeted test additions — `830`:
 
 - `tests/unit/test_operations.py`: `86`;
 - `tests/unit/test_restore_drill.py`: `23`;
-- `tests/unit/test_release_contract.py`: `718`.
+- `tests/unit/test_release_contract.py`: `721`.
 
 От audit candidate `622/176` physical additions delta равна `+222/+434`.
 Production delta: formatter раскрыл плотные semicolon/long-line конструкции
@@ -36,8 +36,9 @@ mocked A→B→rollback scenario (`137 -> 511`), плюс узкий ready/pendi
 oracle `_runtime.py` (`16 -> 76`). Новых semantic surfaces, files,
 dependencies, processes, classes или framework этот рост не добавил.
 
-После единственного consolidated security remediation cycle delta составила
-ещё `+87/+217`: exact Git blob/type/dirty gates, bounded bundle read,
+После единственного consolidated security remediation cycle и точечной
+Linux CI portability correction delta составила ещё `+87/+220`: exact Git
+blob/type/dirty gates, bounded bundle read,
 crash-resumable rollback, clean-initial process gate, directory durability,
 exact migration-output parser и closed previous-state validation добавлены
 в существующие paths вместе с representative oracles. Это не новые surfaces.
@@ -74,6 +75,9 @@ exact migration-output parser и closed previous-state validation добавле
 - workflow YAML/static publication contract — pass;
 - один local `docker compose -f compose.production.yaml config --quiet` smoke — pass;
 - Python compile, `git diff --check`, R1 inventory и scoped secret/legacy scan — pass.
+- первый PR Quality run выявил только Linux non-root test seam; три mocked
+  host-flow tests получили explicit `geteuid=0` injection, повторный scoped
+  suite — `126 passed`.
 
 Aggregate coverage старых `_runtime` helpers не используется как gate согласно
 owner correction; unrelated legacy helper tests ради процента не добавлялись.
