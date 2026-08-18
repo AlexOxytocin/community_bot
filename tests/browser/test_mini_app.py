@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.browser
 
 STATIC_DIR = Path(__file__).parents[2] / "src/community_bot/transport/static"
+TELEGRAM_BRIDGE_URL = "https://telegram.org/js/telegram-web-app.js"
 
 
 class _AssetsHandler(http.server.SimpleHTTPRequestHandler):
@@ -45,6 +46,142 @@ def mini_app_url() -> Iterator[str]:
         server.server_close()
 
 
+def _new_page(browser: Any, *, bridge: str = "") -> Any:  # noqa: ANN401
+    page = browser.new_page()
+    page.route(
+        TELEGRAM_BRIDGE_URL,
+        lambda route: route.fulfill(body=bridge, content_type="application/javascript"),
+    )
+    return page
+
+
+def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    init_data = "query_id=AAE&user=%7B%22id%22%3A1%7D&hash=proof"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+
+        page = _new_page(
+            browser,
+            bridge=f'globalThis.Telegram = {{WebApp: {{initData: "{init_data}"}}}};',
+        )
+        requests: list[Any] = []
+        console_messages: list[str] = []
+        page.on("console", lambda message: console_messages.append(message.text))
+        me_calls = 0
+
+        def me(route: Route) -> None:
+            nonlocal me_calls
+            me_calls += 1
+            if me_calls == 1:
+                route.fulfill(status=401, json={"code": "unauthorized"})
+            else:
+                assert "community_session=test" in route.request.headers.get("cookie", "")
+                route.fulfill(json={"display_name": "Алекс"})
+
+        def auth(route: Route) -> None:
+            requests.append(route.request)
+            route.fulfill(
+                status=204,
+                headers={"set-cookie": "community_session=test; Path=/; SameSite=Strict"},
+            )
+
+        page.route("**/api/v1/me", me)
+        page.route("**/api/v1/auth/telegram", auth)
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+        page.get_by_text("Алекс, выберите понятное задание").wait_for()
+        assert me_calls == 2
+        assert len(requests) == 1
+        assert requests[0].post_data == init_data
+        assert requests[0].headers["content-type"] == "text/plain; charset=utf-8"
+        assert requests[0].headers["origin"] == mini_app_url.rstrip("/")
+        assert requests[0].url == mini_app_url + "api/v1/auth/telegram"
+        assert page.evaluate("[localStorage.length, sessionStorage.length]") == [0, 0]
+        assert all(init_data not in message for message in console_messages)
+
+        existing = _new_page(
+            browser,
+            bridge=f'globalThis.Telegram = {{WebApp: {{initData: "{init_data}"}}}};',
+        )
+        auth_calls = 0
+
+        def unexpected_auth(route: Route) -> None:
+            nonlocal auth_calls
+            auth_calls += 1
+            route.abort()
+
+        existing.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(json={"display_name": "Сессия"}),
+        )
+        existing.route("**/api/v1/auth/telegram", unexpected_auth)
+        existing.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        existing.goto(mini_app_url)
+        existing.get_by_text("Сессия, выберите понятное задание").wait_for()
+        assert auth_calls == 0
+
+        invalid = _new_page(
+            browser,
+            bridge=f'globalThis.Telegram = {{WebApp: {{initData: "{init_data}"}}}};',
+        )
+        invalid_me_calls = 0
+        invalid_task_calls = 0
+
+        def invalid_me(route: Route) -> None:
+            nonlocal invalid_me_calls
+            invalid_me_calls += 1
+            route.fulfill(status=401, json={"code": "unauthorized"})
+
+        def invalid_tasks(route: Route) -> None:
+            nonlocal invalid_task_calls
+            invalid_task_calls += 1
+            route.abort()
+
+        invalid.route("**/api/v1/me", invalid_me)
+        invalid.route(
+            "**/api/v1/auth/telegram",
+            lambda route: route.fulfill(status=403, json={"code": "invalid_telegram_proof"}),
+        )
+        invalid.route("**/api/v1/tasks", invalid_tasks)
+        invalid.goto(mini_app_url)
+        invalid.get_by_text("Откройте Mini App ещё раз.").wait_for()
+        assert invalid_me_calls == 1
+        assert invalid_task_calls == 0
+
+        outside = _new_page(browser)
+        outside_auth_calls = 0
+        task_calls = 0
+
+        def outside_auth(route: Route) -> None:
+            nonlocal outside_auth_calls
+            outside_auth_calls += 1
+            route.abort()
+
+        def tasks(route: Route) -> None:
+            nonlocal task_calls
+            task_calls += 1
+            route.abort()
+
+        outside.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(status=401, json={"code": "unauthorized"}),
+        )
+        outside.route("**/api/v1/auth/telegram", outside_auth)
+        outside.route("**/api/v1/tasks", tasks)
+        outside.goto(mini_app_url)
+        outside.get_by_text("Откройте Mini App ещё раз.").wait_for()
+        assert outside_auth_calls == task_calls == 0
+        browser.close()
+
+
 def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
@@ -55,7 +192,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
     assignment_title = "Помочь с планом"  # noqa: RUF001
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        page = browser.new_page()
+        page = _new_page(browser)
         requests: list[str] = []
         page.on("request", lambda request: requests.append(request.url))
         page.add_init_script(
@@ -158,7 +295,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         assert page.locator("body").inner_text().count(malicious) >= 4
         assert javascript_url in page.locator("body").inner_text()
         assert page.locator("img, a, [onerror], [onclick], [href^='javascript:']").count() == 0
-        assert page.locator("script").count() == 1
+        assert page.locator("script").count() == 2
         assert page.evaluate("globalThis.pwned") is None
         assert (
             page.evaluate(
@@ -231,7 +368,7 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        page = browser.new_page()
+        page = _new_page(browser)
         page.route(
             "**/api/v1/me",
             lambda route: route.fulfill(json={"display_name": "Алекс"}),
@@ -269,7 +406,7 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
         assert "PRIVATE_REASON" not in page.locator("body").inner_text()
         assert "PRIVATE_EVIDENCE" not in page.locator("body").inner_text()
         assert page.locator("article button, article a, img, [onerror], [onclick]").count() == 0
-        assert page.locator("script").count() == 1
+        assert page.locator("script").count() == 2
 
         page.get_by_role("button", name="Назад").click()
         page.get_by_role("heading", name="Каталог").wait_for()
@@ -354,7 +491,7 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        page = browser.new_page()
+        page = _new_page(browser)
         page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
         page.route(
             "**/api/v1/tasks",

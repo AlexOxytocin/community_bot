@@ -33,3 +33,4 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0016 — Mini App как единственный пользовательский интерфейс](0016-mini-app-only-runtime.md)
 - [ADR-0017 — Минимальное ядро Community Mini App](0017-lean-community-mini-app-core.md)
 - [ADR-0018 — Проверяемая пара image и host package](0018-reviewed-image-and-host-package-tuple.md)
+- [ADR-0019 — Single-pilot post-task delivery gate](0019-single-pilot-post-task-delivery-gate.md)

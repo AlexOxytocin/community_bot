@@ -199,6 +199,21 @@ compact bugfix note с фактической причиной, правкой, 
 4. Слияние запроса в `main` выполнить после успешных CI и проверки; если gate заблокирован, зафиксировать блокер в Jira.
 5. Комментарий или переход Jira после создания запроса либо слияния должен описывать только фактически выполненные действия.
 
+## Post-merge delivery gate
+
+После merge задача классифицируется по фактическому diff. Deployable code,
+runtime config, migrations и frontend последовательно проходят green main CI,
+exact immutable artifact, manual-first activation на одном pilot, public URL
+smoke и privacy-safe Jira evidence по [ADR-0019](adr/0019-single-pilot-post-task-delivery-gate.md).
+Docs/tests/`tasks/**`-only diff получает явный skip. Migration-changing release
+требует owner gate; сохраняется один compatible rollback.
+
+Pilot deliveries сериализуются. Более новый merge может заменить ожидающий
+artifact только если exact monotonic artifact содержит оба merge и smoke
+покрывает обе области; обе Jira-задачи фиксируют фактический artifact и решение
+`deploy|superseded|skip`. Blocker без owner-approved waiver не переводит задачу
+в `Done`. Automatic CD и SSH framework этим процессом не вводятся.
+
 ## Фаза 9. Память
 
 Обновить каноническую документацию и ADR, затем проиндексировать только долговременные несекретные выводы в MemPalace.

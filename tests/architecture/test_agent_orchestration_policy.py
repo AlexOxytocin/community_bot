@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "agents" / "config.yaml"
+WORKFLOW_PATH = ROOT / "agents" / "workflow.yaml"
 GLOBAL_PROFILES = {
     "luna_explorer",
     "luna_worker",
@@ -276,6 +277,34 @@ def _validate_policy(config: YamlMap, *, root: Path = ROOT) -> None:
 
 def test_agent_orchestration_policy_is_valid() -> None:
     _validate_policy(_load_config())
+
+
+def test_post_merge_delivery_gate_is_exact() -> None:
+    workflow = _mapping(yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8")))
+    assert _mapping(workflow["post_merge_delivery"]) == {
+        "decision": "ADR-0019",
+        "deploy_when_diff_contains": [
+            "deployable_code",
+            "runtime_config",
+            "migrations",
+            "frontend",
+        ],
+        "skip_when_diff_contains_only": ["docs", "tests", "task_artifacts"],
+        "sequence": [
+            "merge_and_green_main_ci",
+            "exact_immutable_release_artifact",
+            "manual_first_single_pilot_activation",
+            "public_url_smoke",
+            "privacy_safe_jira_evidence",
+        ],
+        "migration_change_requires_owner_gate": True,
+        "done_requires": "successful_public_smoke_or_documented_owner_waiver",
+        "blocker_without_waiver_is_done": False,
+        "compatible_rollback_tuples": 1,
+        "delivery_is_serialized": True,
+        "supersession_requires_monotonic_artifact_and_both_smoke_scopes": True,
+        "automatic_cd_or_ssh_framework": "forbidden",
+    }
 
 
 def test_conditional_route_document_drift_is_rejected() -> None:
