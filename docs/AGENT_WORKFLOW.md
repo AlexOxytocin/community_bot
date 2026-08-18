@@ -201,18 +201,20 @@ compact bugfix note с фактической причиной, правкой, 
 
 ## Post-merge delivery gate
 
-После merge задача классифицируется по фактическому diff. Deployable code,
-runtime config, migrations и frontend последовательно проходят green main CI,
-exact immutable artifact, manual-first activation на одном pilot, public URL
-smoke и privacy-safe Jira evidence по [ADR-0019](adr/0019-single-pilot-post-task-delivery-gate.md).
-Docs/tests/`tasks/**`-only diff получает явный skip. Migration-changing release
-требует owner gate; сохраняется один compatible rollback.
+После merge каждая продуктовая задача, а также любая задача с runtime diff,
+последовательно проходит green main CI, новый exact immutable artifact,
+manual-first production activation на одном pilot, public URL smoke и
+privacy-safe Jira evidence по
+[ADR-0019](adr/0019-single-pilot-post-task-delivery-gate.md). Только
+process/docs-only задача без runtime diff получает явный skip.
+Migration-changing release требует owner gate; сохраняется один compatible
+rollback.
 
 Pilot deliveries сериализуются. Более новый merge может заменить ожидающий
 artifact только если exact monotonic artifact содержит оба merge и smoke
 покрывает обе области; обе Jira-задачи фиксируют фактический artifact и решение
-`deploy|superseded|skip`. Blocker без owner-approved waiver не переводит задачу
-в `Done`. Automatic CD и SSH framework этим процессом не вводятся.
+`deploy|superseded|skip`. До green public smoke задача не переводится в `Done`;
+waiver не допускается. Automatic CD и SSH framework этим процессом не вводятся.
 
 ## Фаза 9. Память
 

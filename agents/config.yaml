@@ -68,6 +68,55 @@ roles:
 
 orchestration_policy:
   policy_id: community_bot.orchestration.v2
+
+  orchestrator_boundary:
+    mode: coordination_only_fail_closed
+    allowlist:
+      - read_only_portfolio_dependency_and_state_analysis
+      - jira_issue_creation_and_prioritization
+      - visible_task_thread_start_stop_and_read_only_monitoring
+      - compact_handoff_and_successor_thread_creation
+      - owner_decision_request
+      - aggregate_status
+    denylist:
+      - code_changes
+      - documentation_changes
+      - repository_or_task_artifact_changes
+      - tests_or_verification_execution
+      - jira_task_execution
+      - existing_jira_issue_execution_state_changes
+      - task_git_operations
+      - pull_request_or_merge
+      - release_or_deploy
+      - terminal_jira_transition
+    unspecified_or_ambiguous_action: execution_and_blocked
+    execution_owner: matching_user_visible_task_thread
+    subagent_is_user_visible_task_thread: false
+    subagent_scope: matching_task_thread_only
+    task_identity:
+      one_current_visible_thread_per_issue: true
+      branch: task/{issue_key}
+      successor_reuses_issue_and_branch: true
+    recovery:
+      triggers:
+        - task_thread_completed
+        - task_thread_blocked
+        - task_thread_context_lost
+      action: create_successor_with_compact_handoff
+      orchestrator_takeover: forbidden
+    delivery:
+      delivery_when_any:
+        - product_task
+        - any_runtime_diff
+      required_steps_after_main_merge:
+        - new_immutable_release
+        - production_activation
+        - public_smoke
+      jira_done_requires_green_public_smoke: true
+      process_or_docs_only_without_runtime_diff: skip
+      owner: matching_user_visible_task_thread
+      orchestrator: monitor_only
+
   external_execution_policy:
     policy_id: codex.agent-budget.v1
     locator: windows_user_profile/.codex/policies/agent-budget.yaml

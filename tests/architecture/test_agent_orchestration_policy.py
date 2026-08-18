@@ -280,26 +280,37 @@ def test_agent_orchestration_policy_is_valid() -> None:
 
 
 def test_post_merge_delivery_gate_is_exact() -> None:
+    config = _load_config()
+    policy = _project_policy(config)
+    orchestrator = _mapping(policy["orchestrator_boundary"])
+    assert _mapping(orchestrator["delivery"])["delivery_when_any"] == [
+        "product_task",
+        "any_runtime_diff",
+    ]
+
     workflow = _mapping(yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8")))
+    execution_boundary = _mapping(workflow["execution_boundary"])
+    assert _mapping(execution_boundary["delivery"])["delivery_when_any"] == [
+        "product_task",
+        "any_runtime_diff",
+    ]
     assert _mapping(workflow["post_merge_delivery"]) == {
         "decision": "ADR-0019",
-        "deploy_when_diff_contains": [
-            "deployable_code",
-            "runtime_config",
-            "migrations",
-            "frontend",
+        "delivery_when_any": [
+            "product_task",
+            "any_runtime_diff",
         ],
-        "skip_when_diff_contains_only": ["docs", "tests", "task_artifacts"],
+        "skip_only_when": "process_or_docs_only_task_without_runtime_diff",
         "sequence": [
             "merge_and_green_main_ci",
-            "exact_immutable_release_artifact",
-            "manual_first_single_pilot_activation",
+            "new_exact_immutable_release_artifact",
+            "manual_first_single_pilot_production_activation",
             "public_url_smoke",
             "privacy_safe_jira_evidence",
         ],
         "migration_change_requires_owner_gate": True,
-        "done_requires": "successful_public_smoke_or_documented_owner_waiver",
-        "blocker_without_waiver_is_done": False,
+        "done_requires": "successful_public_smoke",
+        "done_without_public_smoke": "forbidden",
         "compatible_rollback_tuples": 1,
         "delivery_is_serialized": True,
         "supersession_requires_monotonic_artifact_and_both_smoke_scopes": True,

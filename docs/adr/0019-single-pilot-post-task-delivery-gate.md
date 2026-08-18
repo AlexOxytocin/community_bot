@@ -21,20 +21,22 @@ pilot не оправдывает automatic CD или SSH framework, но тре
 
 ## Решение
 
-1. После merge в `main` и green main CI задача классифицируется по diff:
-   deployable code, runtime config, migrations или frontend требуют delivery;
-   docs/tests/`tasks/**`-only изменения получают явный skip.
-2. Delivery использует exact immutable release artifact проверенного merge и
-   manual-first activation ADR-0018 на одном pilot. Новая CD-платформа не
-   создаётся.
+1. После merge в `main` и green main CI каждая продуктовая задача требует
+   delivery независимо от формы diff. Любая другая задача с runtime diff также
+   требует delivery. Только process/docs-only задача без runtime diff получает
+   явный skip.
+2. Delivery использует новый exact immutable release artifact проверенного
+   merge и manual-first production activation ADR-0018 на одном pilot. Новая
+   CD-платформа не создаётся.
 3. После activation обязателен public smoke соответствующего URL и privacy-safe
    Jira evidence, связывающий merge/run/artifact/manifest/image/migration и
    результат smoke.
 4. Migration-changing release всегда требует отдельного owner gate до server
    mutation. Schema downgrade и automatic recovery не допускаются.
-5. Deployable task получает `Done` только после green public smoke либо явного
-   owner-approved waiver. Документированный blocker оставляет задачу не в
-   `Done` до устранения или отдельного waiver. Skip фиксируется с причиной.
+5. Задача, для которой delivery обязателен, получает `Done` только после green
+   public smoke. Waiver не допускается: документированный blocker оставляет
+   задачу не в `Done` до устранения. Skip фиксируется с причиной и разрешён
+   только process/docs-only задаче без runtime diff.
 6. Для compatible releases сохраняется ровно одна previous tuple и rollback по
    ADR-0018.
 7. Первый CB-57 cutover выполняется manual-first: owner-approved mutation freeze,
@@ -52,8 +54,8 @@ pilot не оправдывает automatic CD или SSH framework, но тре
     rollout CB-57 это включает минимальный official Telegram bridge и
     server-validated fresh-session handshake; baseline artifact без handshake не
     разворачивается. После merge выбирается новый exact green artifact.
-11. Pilot delivery выполняется последовательно. Более новый deployable merge до
-    activation может supersede предыдущий только exact monotonic artifact,
+11. Pilot delivery выполняется последовательно. Более новый delivery-required
+    merge до activation может supersede предыдущий только exact monotonic artifact,
     который доказанно содержит оба merge и проходит smoke scopes обеих задач.
     Каждая Jira issue фиксирует фактически активированный artifact и решение
     `deploy|superseded|skip`; stale activation и `Done` до smoke запрещены.
@@ -90,8 +92,9 @@ availability.
 
 ## Последствия
 
-- Каждая deployable задача имеет один явный production gate и доказуемую release
-  identity; non-deployable задачи не создают бессмысленный deploy.
+- Каждая продуктовая задача и любая задача с runtime diff имеют один явный
+  production gate и доказуемую release identity; process/docs-only задача без
+  runtime diff не создаёт бессмысленный deploy.
 - Owner остаётся trust boundary migration и manual activation.
 - First cutover имеет короткую mutation freeze и дополнительный restore step, но
   сохраняет old data boundary для initial rollback.

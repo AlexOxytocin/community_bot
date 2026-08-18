@@ -163,10 +163,9 @@ commit/push/PR/merge после успешных gates. Оно не считае
 Если Telegram-сценарий ещё не проверен на рабочем экземпляре после deployment,
 это явно указывается как невыполненный production gate.
 
-Для merged задачи с deployable code, runtime config, migrations или frontend
-Jira evidence по ADR-0019 содержит exact merge, release run, artifact, manifest,
-image, migration head и результат public URL smoke. Docs/tests/`tasks/**`-only
-изменение фиксируется как `skip` с причиной. При supersession обе задачи
-ссылаются на один monotonic artifact и свои smoke scopes. До green smoke задача
-остаётся не в `Done`, если владелец явно не оформил waiver; blocker сам по себе
-waiver не заменяет.
+Для каждой merged продуктовой задачи, а также любой задачи с runtime diff, Jira
+evidence по ADR-0019 содержит exact merge, новый release run, artifact,
+manifest, image, migration head и результат public URL smoke. Только
+process/docs-only задача без runtime diff фиксируется как `skip` с причиной.
+При supersession обе задачи ссылаются на один monotonic artifact и свои smoke
+scopes. До green smoke задача остаётся не в `Done`; waiver не допускается.

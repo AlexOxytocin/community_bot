@@ -88,12 +88,13 @@
   проверки → commit → push → запрос на слияние → CI/review → merge в `main`,
   если gate не заблокирован. Для задачных веток это постоянное намерение
   владельца.
-- После merge deployable code, runtime config, migrations или frontend проходят
-  delivery gate [ADR-0019](adr/0019-single-pilot-post-task-delivery-gate.md):
-  green main CI → exact immutable artifact → manual-first activation на одном
-  pilot → public URL smoke → Jira evidence. Docs/tests/`tasks/**`-only diff
-  получает явный skip; migration требует owner gate. `Done` разрешён только
-  после green public smoke либо документированного owner waiver.
+- После merge каждая продуктовая задача, а также любая задача с runtime diff,
+  проходит delivery gate
+  [ADR-0019](adr/0019-single-pilot-post-task-delivery-gate.md): green main CI →
+  новый exact immutable artifact → manual-first production activation на одном
+  pilot → public URL smoke → Jira evidence. Только process/docs-only задача без
+  runtime diff получает явный skip; migration требует owner gate. `Done`
+  разрешён только после green public smoke, без waiver.
 - Прямые коммиты задачи в `main` запрещены; изменение попадает в `main` через проверенный запрос на слияние, кроме явного начального решения владельца.
 - Ветка `dev` вводится только отдельным ADR, если появится параллельная команда или независимый цикл релизов.
 - Ветки и запросы на слияние не создаются повторно без проверки существующего состояния удалённого репозитория.
@@ -245,6 +246,37 @@ ADR обязателен, если решение:
 - Каждая инструкция содержит идентификаторы правил, закрытый список сценариев ошибок, декларацию идемпотентности, именованную версионированную схему результата и проверяемые критерии завершения.
 - Новая исполняемая роль создаётся только из подтверждённой продуктовой необходимости.
 - Текущие инженерные роли: `developer`, `analyst-architect`, `plan-reviewer`, `final-review`.
+
+### Fail-closed граница Оркестратора
+
+Пользовательский поток «Оркестратор» не является исполнителем Jira-задач. Его
+закрытый allowlist ограничен следующими действиями:
+
+- read-only анализ портфеля, зависимостей и состояния;
+- создание и приоритизация Jira-задач;
+- запуск, остановка и read-only monitoring видимых task-thread;
+- compact handoff и создание successor-thread;
+- запрос owner decision и сводный статус.
+
+Оркестратор не пишет никакой код или документацию, не создаёт task artifacts,
+не выполняет никакие тесты, работу Jira-задачи, Git-операции задачи, PR/merge,
+release/deploy и terminal Jira transition. Любое действие вне allowlist или
+неоднозначное действие считается execution и блокируется.
+
+Любое state-changing действие конкретной Jira-задачи выполняется только в
+отдельном видимом task-thread с её ключом. Внутренний subagent не заменяет
+видимый task-thread и допустим только внутри task-thread соответствующей задачи.
+Если такой поток завершился, заблокирован или потерял контекст, Оркестратор
+создаёт successor-thread с compact handoff для того же Jira key и ветки; сам
+работу не подхватывает. Инвариант исполнения: один Jira key → один текущий
+видимый task-thread → одна ветка `task/<ISSUE-KEY>`.
+
+Каждая продуктовая задача, а также любая задача с runtime diff, после merge в
+`main` требует в своём task-thread нового immutable release, production
+activation и public smoke; Jira `Done` разрешён только после green smoke.
+Только process/docs-only задача без runtime diff получает явный deploy skip.
+Оркестратор контролирует этот gate, но не выполняет release/deploy или Jira
+`Done`.
 
 ## Память и секреты
 

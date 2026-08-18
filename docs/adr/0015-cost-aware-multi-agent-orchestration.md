@@ -15,6 +15,26 @@ review-артефактов оставалось ограниченным, но 
 
 ## Решение
 
+- Разделить пользовательские потоки по fail-closed границе: «Оркестратор»
+  выполняет только закрытый allowlist координации, а любое действие конкретной
+  Jira-задачи выполняется в отдельном видимом task-thread. Неоднозначное
+  действие считается execution и блокируется.
+- Закрытый allowlist Оркестратора: read-only анализ портфеля, зависимостей и
+  состояния; создание и приоритизация Jira; запуск, остановка и read-only
+  monitoring task-thread; compact handoff и successor-thread; запрос owner
+  decision и сводный статус. Код, документация, task artifacts, тесты,
+  task Git operations, PR/merge, release/deploy и terminal Jira transition
+  Оркестратору запрещены.
+- Внутренний subagent не является пользовательским task-thread и может работать
+  только внутри потока соответствующей задачи. При завершении, блокировке или
+  потере контекста Оркестратор создаёт successor-thread с handoff для того же
+  Jira key и ветки, не подхватывая исполнение сам.
+- Сохранять один текущий видимый task-thread и одну `task/<ISSUE-KEY>` branch на
+  Jira key. Каждая продуктовая задача, а также любая задача с runtime diff,
+  после merge получает в своём task-thread новый immutable release, production
+  activation и public smoke до Jira `Done`; только process/docs-only задача без
+  runtime diff получает skip. Оркестратор контролирует delivery gate, но не
+  исполняет его.
 - По явному решению владельца после review escalation хранить модели,
   reasoning effort и execution budgets в глобальной политике
   `codex.agent-budget.v1`. Community Bot ссылается на policy/profile ids и не
@@ -50,6 +70,12 @@ review-артефактов оставалось ограниченным, но 
 
 ## Последствия
 
+- Возврат subagent, завершение task-thread или потеря его контекста больше не
+  разрешают Оркестратору takeover; продолжение идёт только через successor и
+  compact handoff.
+- Instruction-level enforcement остаётся fail-closed, но не маскируется
+  декоративным runtime guard: репозиторий не получает надёжный identity-сигнал
+  активного Codex-thread.
 - Многопоточность сохраняется, но fan-out и управляющий трафик ограничены.
 - Долгая полезная реализация может закончиться через progress extension или
   компактную передачу в свежий контекст.
