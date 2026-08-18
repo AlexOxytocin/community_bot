@@ -117,8 +117,11 @@ function renderCatalog() {
   setNavigation("catalog");
   title.textContent = "Каталог";
   back.classList.add("hidden");
+  const create = element("button", "Создать задание", "primary");
+  create.type = "button";
+  create.addEventListener("click", () => openTaskCreation(true));
   if (!tasks.length) {
-    replaceContent(element("p", "Сейчас нет доступных заданий.", "status muted"));
+    replaceContent(create, element("p", "Сейчас нет доступных заданий.", "status muted"));
     restoreModerationFocus();
     restoreProfileFocus();
     return;
@@ -143,11 +146,84 @@ function renderCatalog() {
     if (task.id === returnFocusTaskId) focusTarget = button;
     list.append(button);
   }
-  replaceContent(list);
+  replaceContent(create, list);
   focusTarget?.focus();
   returnFocusTaskId = null;
   restoreModerationFocus();
   restoreProfileFocus();
+}
+
+async function taskCreationCommand(body) {
+  const response = await fetch("/api/v1/task-creation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": newOperationKey() },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  return submissionResponse(response);
+}
+
+function renderTaskCreation(state) {
+  const draft = state.draft;
+  if (!draft) return replaceContent(element("p", "Черновик недоступен.", "status"));
+  if (state.preview && !state.needs_edit) {
+    const card = element("article", undefined, "card detail");
+    card.append(element("h3", state.preview.title), section("Описание", state.preview.description));
+    card.append(section("Критерии", state.preview.completion_criteria));
+    card.append(section("Резерв", String(state.preview.reward_total) + " кредитов"));
+    const publish = element("button", "Опубликовать", "primary");
+    publish.type = "button";
+    publish.addEventListener("click", async () => {
+      publish.disabled = true;
+      try {
+        const result = await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
+        history.replaceState({ screen: "catalog" }, "", "#catalog");
+        const home = element("button", "В каталог", "primary");
+        home.addEventListener("click", renderCatalog);
+        replaceContent(element("p", "Задание опубликовано: " + result.task_id, "status success"), home);
+      } catch { publish.disabled = false; }
+    });
+    card.append(publish);
+    return replaceContent(card);
+  }
+  const values = draft.values;
+  const form = element("form", undefined, "task-form");
+  form.innerHTML = '<label class="section">Тип<select name="task_kind"><option value="solo">Личное</option><option value="group">Групповое</option></select></label><label class="section">Категория<select name="category_id"></select></label><label class="section">Размер<select name="time_size"></select></label><label class="section">Награда<input name="credit_reward_per_performer" type="number" min="1" required></label><label class="section">Формат<select name="format"><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label><label class="section">Название<input name="title" required></label><label class="section">Описание<textarea name="description" required></textarea></label><label class="section">Критерии выполнения<textarea name="completion_criteria" required></textarea></label><label class="section">Срок<input name="deadline_at" type="datetime-local" required></label><label class="section">Число исполнителей<input name="performer_slots" type="number" min="1" required></label><label class="section">Город для офлайн-задания<input name="city"></label><label class="section">Материалы<textarea name="material_text"></textarea></label><label class="section">Ссылка<input name="material_url" type="url"></label>';
+  for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
+  for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
+  for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
+  for (const name of ["title", "description", "completion_criteria", "city"]) form[name].value = values[name] || "";
+  form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
+  form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
+  form.performer_slots.value = values.performer_slots || 1;
+  form.material_text.value = values.materials?.text || "";
+  form.material_url.value = values.materials?.url || "";
+  const submit = element("button", "Предпросмотр", "primary");
+  submit.type = "submit";
+  form.append(submit);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    const value = Object.fromEntries(new FormData(form));
+    const materials = Object.fromEntries([["text", value.material_text], ["url", value.material_url]].filter(([, item]) => item));
+    try {
+      await taskCreationCommand({ action: "save", draft_id: draft.id, expected_revision: draft.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
+      await openTaskCreation(false, false);
+    } catch { submit.disabled = false; }
+  });
+  replaceContent(state.needs_edit ? element("p", "Предпросмотр устарел. Обновите данные.", "status") : form, form);
+}
+
+async function openTaskCreation(start, push = true) {
+  if (push) history.pushState({ screen: "task-creation" }, "", "#task-creation");
+  setNavigation("");
+  title.textContent = "Создать задание";
+  back.classList.remove("hidden");
+  replaceContent(element("p", "Загружаем черновик…", "status muted"));
+  try {
+    if (start) await taskCreationCommand({ action: "start" });
+    renderTaskCreation(await getJson("/api/v1/task-creation"));
+  } catch { replaceContent(element("p", "Не удалось открыть создание задания.", "status")); }
 }
 
 const boundaryError = (heading, message, retry) => {
@@ -751,6 +827,8 @@ globalThis.addEventListener("popstate", (event) => {
     loadProfile(false);
   } else if (event.state?.screen === "moderation") {
     loadModeration(false);
+  } else if (event.state?.screen === "task-creation") {
+    openTaskCreation(false, false);
   } else {
     renderCatalog();
   }

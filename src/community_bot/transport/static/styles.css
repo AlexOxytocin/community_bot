@@ -54,8 +54,9 @@ button.card { cursor: pointer; }
 button.card:hover { background: var(--app-surface-raised); }
 .meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--app-text-muted); font-size: 13px; }
 .detail { display: grid; gap: 16px; }
-.submission, .submission-form { display: grid; gap: 12px; }
-.submission textarea { width: 100%; min-height: 8rem; resize: vertical; border: 1px solid var(--app-border); border-radius: 12px; padding: 12px; background: var(--app-surface-raised); color: var(--app-text); font: inherit; }
+.submission, .submission-form, .task-form { display: grid; gap: 12px; }
+.submission textarea, .task-form input, .task-form textarea, .task-form select { width: 100%; min-height: 44px; border: 1px solid var(--app-border); border-radius: 12px; padding: 12px; background: var(--app-surface-raised); color: var(--app-text); font: inherit; }
+.submission textarea, .task-form textarea { min-height: 8rem; resize: vertical; }
 .submission-preview { padding: 12px; border: 1px solid var(--app-border); border-radius: 12px; }
 .profile-boundary { display: grid; gap: 12px; }
 .section { display: grid; gap: 6px; }

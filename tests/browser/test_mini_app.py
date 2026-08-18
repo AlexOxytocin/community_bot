@@ -876,3 +876,88 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: P
         page.get_by_text("Результат отправлен").first.wait_for()
         assert page.get_by_role("button", name="Начать отправку").count() == 0
         browser.close()
+
+
+def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    draft_id = "00000000-0000-0000-0000-000000000070"
+    task_id = "00000000-0000-0000-0000-000000000071"
+    state: dict[str, Any] = {"stage": "draft", "values": {}}
+    actions: list[str] = []
+
+    def creation(route: Route) -> None:
+        if route.request.method == "GET":
+            values = state["values"]
+            preview = None
+            needs_edit = state["stage"] == "expired"
+            if state["stage"] == "preview":
+                preview = {
+                    "title": values["title"],
+                    "description": values["description"],
+                    "completion_criteria": values["completion_criteria"],
+                    "reward_total": 6,
+                }
+            route.fulfill(
+                json={
+                    "categories": [{"id": task_id, "name": "Практическая помощь", "icon": "⭐"}],
+                    "time_sizes": [
+                        {
+                            "value": "s",
+                            "label": "15-40 минут",
+                            "reward_options": [2, 3, 4],
+                            "minimum_reward": 2,
+                        }
+                    ],
+                    "draft": {
+                        "id": draft_id,
+                        "revision": 0 if state["stage"] == "draft" else 1 if needs_edit else 2,
+                        "values": values,
+                    },
+                    "preview": preview,
+                    "needs_edit": needs_edit,
+                }
+            )
+            return
+        body = route.request.post_data_json
+        assert body is not None
+        actions.append(body["action"])
+        assert route.request.headers["idempotency-key"].isdecimal()
+        if body["action"] == "save":
+            state["values"] = body["form"]
+            state["stage"] = "expired" if actions.count("save") == 1 else "preview"
+        if body["action"] == "publish":
+            route.fulfill(json={"task_id": task_id})
+        else:
+            route.fulfill(status=204)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route(
+            "**/api/v1/tasks", lambda route: route.fulfill(json={"items": [], "next_cursor": None})
+        )
+        page.route("**/api/v1/task-creation", creation)
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="Создать задание").click()
+        page.get_by_label("Тип").select_option("group")
+        page.get_by_label("Категория").select_option(task_id)
+        page.get_by_label("Размер").select_option("s")
+        page.get_by_label("Награда").fill("3")
+        page.get_by_label("Название").fill("<script>globalThis.pwned=true</script>")
+        page.get_by_label("Описание").fill("Проверить безопасный предпросмотр.")
+        page.get_by_label("Критерии выполнения").fill("Есть результат.")
+        page.get_by_label("Срок").fill("2026-08-21T20:00")
+        page.get_by_label("Число исполнителей").fill("2")
+        page.get_by_label("Материалы").fill("Описание материала")
+        page.get_by_role("button", name="Предпросмотр").click()
+        page.get_by_text("Предпросмотр устарел").wait_for()
+        page.get_by_role("button", name="Предпросмотр").click()
+        page.get_by_role("button", name="Опубликовать").click()
+        page.get_by_text("Задание опубликовано").wait_for()
+        assert page.evaluate("globalThis.pwned") is None
+        page.go_back()
+        page.get_by_role("button", name="Создать задание").wait_for()
+        assert actions == ["start", "save", "save", "publish"]
+        browser.close()

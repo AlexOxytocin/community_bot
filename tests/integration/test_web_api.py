@@ -29,6 +29,7 @@ from community_bot.infrastructure.db.models import (
     AssignmentResultVersionModel,
     AssignmentSubmissionDraftModel,
     AuditEventModel,
+    ConversationStateModel,
     DisputeEvidenceModel,
     MemberModel,
     ModerationCaseModel,
@@ -36,11 +37,15 @@ from community_bot.infrastructure.db.models import (
     ProcessedTelegramUpdateModel,
     ReliabilityEventModel,
     TaskCategoryModel,
+    TaskCreationDraftModel,
     TaskModel,
     TaskTemplateModel,
     WebSessionModel,
 )
 from community_bot.infrastructure.db.models import TestRunModel as DbTestRunModel
+from community_bot.infrastructure.db.models import (
+    TestRunParticipantModel as DbTestRunParticipantModel,
+)
 from community_bot.transport.web import _accept_update_id, _submission_update_id, create_web_app
 from tests.integration.test_assignments import _freeform_task, _published_task
 from tests.integration.test_task_creation import prepare_member
@@ -89,6 +94,120 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
         reason="Web API integration config.",
     )
     return member
+
+
+async def test_task_creation_resource_recovers_and_publishes_exactly_once(
+    database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=52_070)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    now = datetime.datetime.now(datetime.UTC)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(member.telegram_user_id, now=now),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        headers = {"origin": ORIGIN, "idempotency-key": "7001"}
+        invalid_type = await client.post(
+            "/api/v1/task-creation", content=b'{"action":"start"}', headers=headers
+        )
+        assert invalid_type.status_code == 422
+        assert (
+            await client.post("/api/v1/task-creation", json={"action": "start"}, headers=headers)
+        ).status_code == 204
+        state = (await client.get("/api/v1/task-creation")).json()
+        draft_id = state["draft"]["id"]
+        form = {
+            "category_id": state["categories"][0]["id"],
+            "task_kind": "group",
+            "time_size": "s",
+            "title": "  Помочь с проверкой  ",  # noqa: RUF001
+            "description": "  Проверить понятный результат и вернуть замечания.  ",
+            "completion_criteria": "  Есть конкретный список замечаний.  ",
+            "credit_reward_per_performer": 3,
+            "deadline_at": (now + datetime.timedelta(days=2)).isoformat(),
+            "format": "online",
+            "city": "  Buenos Aires  ",
+            "materials": {"url": "  https://example.com/task  "},
+            "performer_slots": 2,
+        }
+        save = {"action": "save", "draft_id": draft_id, "expected_revision": 0, "form": form}
+        save_headers = {"origin": ORIGIN, "idempotency-key": "7002"}
+        normalized = save | {
+            "form": form
+            | {
+                "title": form["title"].strip(),
+                "description": form["description"].strip(),
+                "completion_criteria": form["completion_criteria"].strip(),
+                "city": form["city"].strip(),
+                "materials": {"url": form["materials"]["url"].strip()},
+            }
+        }
+        assert (
+            await client.post("/api/v1/task-creation", json=normalized, headers=save_headers)
+        ).status_code == 204
+        monkeypatch.setattr(
+            "community_bot.application.tasks._utc_now",
+            lambda: now + datetime.timedelta(days=3),
+        )
+        assert (
+            await client.post("/api/v1/task-creation", json=save, headers=save_headers)
+        ).status_code == 204
+        monkeypatch.setattr("community_bot.application.tasks._utc_now", lambda: now)
+        conflict = save | {"form": form | {"title": "Другой payload"}}
+        assert (
+            await client.post("/api/v1/task-creation", json=conflict, headers=save_headers)
+        ).status_code == 409
+        preview = (await client.get("/api/v1/task-creation")).json()
+        assert preview["preview"]["reward_total"] == 6
+        assert preview["draft"]["values"]["title"] == "Помочь с проверкой"  # noqa: RUF001
+        assert preview["draft"]["values"]["materials"] == {"url": "https://example.com/task"}
+        assert preview["draft"]["values"]["city"] == "Buenos Aires"
+
+        sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+        async with sessions.begin() as session:
+            stored = await session.get(TaskCreationDraftModel, UUID(draft_id))
+            assert stored is not None
+            stored.deadline_at = now - datetime.timedelta(minutes=1)
+        expired = (await client.get("/api/v1/task-creation")).json()
+        assert expired["needs_edit"] is True
+        assert expired["preview"] is None
+        repaired = save | {"expected_revision": 1, "form": form}
+        assert (
+            await client.post(
+                "/api/v1/task-creation",
+                json=repaired,
+                headers={"origin": ORIGIN, "idempotency-key": "7003"},
+            )
+        ).status_code == 204
+        publish = {"action": "publish", "draft_id": draft_id, "expected_revision": 2}
+        publish_headers = {"origin": ORIGIN, "idempotency-key": "7004"}
+        first = await client.post("/api/v1/task-creation", json=publish, headers=publish_headers)
+        replay = await client.post("/api/v1/task-creation", json=publish, headers=publish_headers)
+        assert first.status_code == replay.status_code == 200
+        assert first.json() == replay.json()
+
+        async with sessions.begin() as session:
+            run = DbTestRunModel(marker="TEST-CB70-PUBLISH", started_by_member_id=member.id)
+            session.add(run)
+            await session.flush()
+            session.add(DbTestRunParticipantModel(run_id=run.id, member_id=member.id))
+        stale_replay = await client.post(
+            "/api/v1/task-creation", json=publish, headers=publish_headers
+        )
+        assert stale_replay.status_code == 409
+
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(TaskModel)) == 1
+        assert await session.scalar(select(func.count()).select_from(ConversationStateModel)) == 0
 
 
 async def schema_snapshot(engine: AsyncEngine) -> tuple[set[str], dict[str, int]]:

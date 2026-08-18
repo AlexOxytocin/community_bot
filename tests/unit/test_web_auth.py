@@ -28,6 +28,7 @@ from community_bot.domain.tasks import TaskError, TaskKind, TaskStatus, TaskTime
 from community_bot.transport.web import (
     ConfirmSubmissionDraftRequest,
     SaveSubmissionDraftRequest,
+    TaskFormRequest,
     _accept_update_id,
     _assignment_cursor,
     _member_query,
@@ -269,6 +270,8 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/tasks", ("GET",)),
+        ("/api/v1/task-creation", ("GET",)),
+        ("/api/v1/task-creation", ("POST",)),
         ("/api/v1/tasks/{task_id}/assignments", ("POST",)),
         ("/api/v1/assignments", ("GET",)),
         ("/api/v1/assignments/{assignment_id}", ("GET",)),
@@ -293,6 +296,59 @@ def test_web_config_and_route_set_are_closed() -> None:
                 settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=origin),
                 database=cast("Database", database),
             )
+
+
+@pytest.mark.asyncio
+async def test_task_creation_rejects_null_and_non_json_commands() -> None:
+    database = FakeDatabase()
+    database.resolve_member = True
+    app = _app(database)
+    headers = {"origin": ORIGIN, "idempotency-key": "70"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url=ORIGIN,
+        cookies={"__Host-community_session": SESSION_TOKEN},
+    ) as client:
+        non_json = await client.post(
+            "/api/v1/task-creation", content=b'{"action":"start"}', headers=headers
+        )
+        null_save = await client.post(
+            "/api/v1/task-creation",
+            json={"action": "save", "draft_id": None, "expected_revision": None, "form": None},
+            headers=headers,
+        )
+        null_publish = await client.post(
+            "/api/v1/task-creation",
+            json={"action": "publish", "draft_id": None, "expected_revision": None},
+            headers=headers,
+        )
+    assert [non_json.status_code, null_save.status_code, null_publish.status_code] == [422] * 3
+
+
+def test_task_form_normalizes_before_fingerprinting() -> None:
+    source_deadline = datetime.datetime(
+        2020, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=-3))
+    )
+    form = TaskFormRequest(
+        category_id=uuid4(),
+        task_kind=TaskKind.SOLO,
+        time_size=TaskTimeSize.S,
+        title="  title  ",
+        description="  description  ",
+        completion_criteria="  complete  ",
+        credit_reward_per_performer=3,
+        deadline_at=source_deadline,
+        format=TaskFormat.ONLINE,
+        city="  City  ",
+        materials={"url": "  https://example.com/item  "},
+        performer_slots=1,
+    )
+    assert form.title == "title"
+    assert form.description == "description"
+    assert form.completion_criteria == "complete"
+    assert form.city == "City"
+    assert form.materials == {"url": "https://example.com/item"}
+    assert form.deadline_at == source_deadline.astimezone(datetime.UTC)
 
 
 def test_submission_operation_identity_binds_resource_and_command() -> None:
