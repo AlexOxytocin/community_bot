@@ -8,11 +8,12 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.notifications import DeliveryClaim, NotificationWorker
+from community_bot.bootstrap.migration_head import single_migration_head
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.notifications import DeliveryWindow, RetryPolicy
 from community_bot.infrastructure.db import Database, readiness_report
@@ -607,7 +608,9 @@ async def test_poison_event_is_bounded_and_does_not_block_neighbor(
     await database.dispose()
 
 
-async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: str) -> None:
+async def test_readiness_checks_head_heartbeat_and_failed_outbox(  # noqa: PLR0915
+    database_url: str,
+) -> None:
     """Readiness is green only with the current schema, fresh process, and no poison rows."""
     database = Database(database_url)
     queue = PostgresNotificationQueue(database.session_factory)
@@ -615,7 +618,7 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
     await queue.heartbeat(
         process_name="community-worker",
         release="sha",
-        migration_revision="0014",
+        migration_revision=single_migration_head(),
         now=now,
     )
     missing_config = await readiness_report(
@@ -665,12 +668,68 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
         heartbeat_not_before=now + datetime.timedelta(seconds=1),
         now=now,
     )
+    restart_at = now + datetime.timedelta(seconds=1)
+    await queue.heartbeat(
+        process_name="community-worker",
+        release="sha",
+        migration_revision=single_migration_head(),
+        now=restart_at,
+    )
+    after_restart_tick = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="sha",
+        heartbeat_not_before=restart_at,
+        now=restart_at,
+    )
     stale = await readiness_report(
         database_url,
         process_name="community-worker",
         heartbeat_max_age=datetime.timedelta(minutes=3),
         now=now + datetime.timedelta(minutes=4),
     )
+    await queue.heartbeat(
+        process_name="community-worker",
+        release="sha",
+        migration_revision="wrong-revision",
+        now=now,
+    )
+    wrong_revision = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="sha",
+        now=now,
+    )
+    await queue.heartbeat(
+        process_name="community-worker",
+        release="sha",
+        migration_revision=single_migration_head(),
+        now=now + datetime.timedelta(seconds=6),
+    )
+    future = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="sha",
+        now=now,
+    )
+    async with sessions.begin() as session:
+        await session.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES ('unexpected-head')")
+        )
+    multiple_db_heads = await readiness_report(
+        database_url,
+        process_name="community-worker",
+        heartbeat_max_age=datetime.timedelta(minutes=3),
+        expected_release="sha",
+        now=now,
+    )
+    async with sessions.begin() as session:
+        await session.execute(
+            text("DELETE FROM alembic_version WHERE version_num = 'unexpected-head'")
+        )
 
     async with sessions.begin() as session:
         persisted = await session.get(MemberModel, admin.id)
@@ -692,8 +751,16 @@ async def test_readiness_checks_head_heartbeat_and_failed_outbox(database_url: s
     assert wrong_release.code == "heartbeat_release_mismatch"
     assert not before_deploy.healthy
     assert before_deploy.code == "heartbeat_before_deploy"
+    assert after_restart_tick.healthy
+    assert after_restart_tick.code == "ready"
     assert not stale.healthy
     assert stale.code == "heartbeat_stale"
+    assert not wrong_revision.healthy
+    assert wrong_revision.code == "heartbeat_revision_mismatch"
+    assert not future.healthy
+    assert future.code == "heartbeat_in_future"
+    assert not multiple_db_heads.healthy
+    assert multiple_db_heads.code == "migration_mismatch"
     assert not stale_config.healthy
     assert stale_config.code == "product_config_incomplete"
     assert active.version == 2

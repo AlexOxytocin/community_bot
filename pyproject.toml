@@ -16,6 +16,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2,<3",
     "structlog>=25,<26",
     "tzdata>=2025,<2027",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.scripts]
@@ -25,6 +26,7 @@ community-bootstrap-product-config = "community_bot.bootstrap.product_config_cli
 community-health = "community_bot.bootstrap.health:main"
 community-migrate = "community_bot.bootstrap.migrate:main"
 community-migration-head = "community_bot.bootstrap.migration_head:main"
+community-web = "community_bot.bootstrap.web:main"
 community-worker = "community_bot.worker.entrypoint:main"
 
 [build-system]

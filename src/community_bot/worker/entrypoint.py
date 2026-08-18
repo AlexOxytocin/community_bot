@@ -13,6 +13,7 @@ from aiogram import Bot
 
 from community_bot.application.assignments import AssignmentDeadlineWorker, AssignmentService
 from community_bot.application.notifications import NotificationWorker
+from community_bot.bootstrap.migration_head import single_migration_head
 from community_bot.bootstrap.settings import get_settings
 from community_bot.domain.notifications import DeliveryWindow
 from community_bot.infrastructure.db import Database
@@ -85,6 +86,7 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
         batch_size=settings.worker_batch_size,
     )
     logger = structlog.get_logger(process="community-worker")
+    migration_revision = single_migration_head()
     try:
         while True:
             now = datetime.datetime.now(datetime.UTC)
@@ -93,7 +95,7 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
             await queue.heartbeat(
                 process_name="community-worker",
                 release=settings.release,
-                migration_revision="0020",
+                migration_revision=migration_revision,
                 now=now,
             )
             logger.info(

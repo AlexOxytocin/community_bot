@@ -22,7 +22,8 @@ COPY alembic.ini ./
 RUN uv sync --locked --no-default-groups
 
 LABEL org.opencontainers.image.source="https://github.com/AlexOxytocin/community_bot"
-LABEL org.opencontainers.image.description="Community Mini App backend worker"
+LABEL org.opencontainers.image.description="Community Mini App backend"
+LABEL org.opencontainers.image.revision="$RELEASE"
 
 USER 65532:65532
 

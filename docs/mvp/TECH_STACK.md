@@ -29,10 +29,18 @@ Backend остаётся модульным монолитом. Domain/applicati
 | Mutation identity | namespaced operation ID + payload fingerprint + stored outcome |
 | Rollout | server-side fail-closed gates |
 
-FastAPI/frontend ещё не реализуются в CB-62; они входят в CB-51—CB-57.
+FastAPI и статический frontend реализованы в CB-52—CB-55. CB-56 добавляет только
+внутренний ASGI process и readiness-контракт; публичный HTTPS остаётся отдельным
+owner-gated шагом.
 
 ## Runtime после очистки
 
-Текущий transitional Compose содержит PostgreSQL, одноразовый `migrate` и `worker`. Публичного HTTP-порта пока нет. Старый `bot` process и release workflow удалены. Backup и restore drill сохранены как защита данных до появления нового deployment-контура.
+Текущий Compose содержит PostgreSQL, одноразовый `migrate`, `worker` и внутренний
+`web`. Все три application process используют один image; `web` доступен только
+в internal network и не публикует host port. `/healthz` доказывает живой ASGI
+process, а `/readyz` fail-closed проверяет PostgreSQL, exact Alembic head,
+product config, release/revision/freshness worker heartbeat и failed outbox.
+Публичного HTTPS/TLS edge и release workflow пока нет. Backup и restore drill
+сохранены как защита данных до появления нового deployment-контура.
 
 Не добавляются без отдельного решения: Redis, Celery, внешний брокер, Kubernetes, микросервисы, browser auth и LLM в критических доменных решениях.

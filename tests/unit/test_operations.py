@@ -8,21 +8,36 @@ from pathlib import Path
 import yaml
 
 
-def test_production_compose_contains_only_database_migration_and_worker() -> None:
-    """The transitional runtime has no public port or legacy bot process."""
+def test_production_compose_contains_internal_web_without_public_ports() -> None:
+    """One image serves the private database, migration, worker, and web contract."""
     root = Path(__file__).parents[2]
     manifest = yaml.safe_load((root / "compose.production.yaml").read_text(encoding="utf-8"))
     services = manifest["services"]
 
-    assert set(services) == {"postgres", "migrate", "worker"}
+    assert set(services) == {"postgres", "migrate", "worker", "web"}
     assert "ports" not in services["postgres"]
+    assert "ports" not in services["web"]
     assert services["postgres"]["networks"] == ["internal"]
     assert manifest["networks"]["internal"]["internal"] is True
     assert services["worker"]["networks"] == ["internal", "egress"]
-    assert {services[name]["image"] for name in ("migrate", "worker")} == {"${COMMUNITY_BOT_IMAGE}"}
+    assert services["web"]["networks"] == ["internal"]
+    assert {services[name]["image"] for name in ("migrate", "worker", "web")} == {
+        "${COMMUNITY_BOT_IMAGE}"
+    }
     assert services["migrate"]["command"] == "community-migrate"
     assert services["worker"]["command"] == "community-worker"
+    assert services["web"]["command"] == "community-web"
     assert services["worker"]["healthcheck"]["test"][-1] == "community-worker"
+    assert "/readyz" in services["web"]["healthcheck"]["test"][-1]
+    assert services["worker"]["depends_on"]["migrate"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert services["web"]["depends_on"]["worker"]["condition"] == "service_healthy"
+    assert all(
+        service["environment"]["RELEASE"]
+        == "${COMMUNITY_BOT_RELEASE:?COMMUNITY_BOT_RELEASE is required}"
+        for service in (services["migrate"], services["worker"], services["web"])
+    )
 
     serialized = json.dumps(manifest["services"]).lower()
     assert '"bot"' not in serialized
@@ -59,6 +74,8 @@ def test_ci_has_no_release_or_legacy_runtime_dependency() -> None:
     assert "push:" not in ci
     assert "uv run ty check src tests ops" in ci
     assert "uv run pytest" in ci
+    workflow = yaml.safe_load(ci)
+    assert "image-contract" in workflow["jobs"]["verified-merge-tree"]["needs"]
     assert "verify_release_provenance.py" not in ci
     assert not (root / ".github" / "workflows" / "release.yml").exists()
 

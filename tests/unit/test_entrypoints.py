@@ -72,7 +72,7 @@ async def test_worker_once_composes_ticks_heartbeats_and_closes(  # noqa: C901
             pass
 
         async def heartbeat(self, **kwargs: object) -> None:
-            assert kwargs["migration_revision"] == "0020"
+            assert kwargs["migration_revision"] == "packaged-head"
             events.append("heartbeat")
 
     class Bot:
@@ -105,6 +105,7 @@ async def test_worker_once_composes_ticks_heartbeats_and_closes(  # noqa: C901
     monkeypatch.setattr(entrypoint, "Bot", Bot)
     monkeypatch.setattr(entrypoint, "NotificationWorker", NotificationWorker)
     monkeypatch.setattr(entrypoint, "AssignmentDeadlineWorker", DeadlineWorker)
+    monkeypatch.setattr(entrypoint, "single_migration_head", lambda: "packaged-head")
 
     await entrypoint._run(once=True, window=DeliveryWindow())  # noqa: SLF001
 
