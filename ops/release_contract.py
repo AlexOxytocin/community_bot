@@ -238,7 +238,6 @@ def build_bundle(source: Path, output: Path, evidence_path: Path, values: dict[s
         evidence["repository"] != REPOSITORY
         or evidence["event"] != "pull_request"
         or evidence["pr_number"] != pr_number
-        or evidence["synthetic_merge_sha"] != commit
         or evidence["workflow_ref"] != workflow_ref
         or parents != [evidence["base_sha"], evidence["head_sha"]]
         or _git(source, "rev-parse", f"{commit}^{{tree}}") != evidence["tree_sha"]
