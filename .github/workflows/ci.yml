@@ -133,7 +133,7 @@ jobs:
       - name: Verify immutable runtime identity
         run: |
           set -euo pipefail
-          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "${COMMUNITY_BOT_IMAGE}")" = "${COMMUNITY_BOT_RELEASE}"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${COMMUNITY_BOT_IMAGE}")" = "${COMMUNITY_BOT_RELEASE}"
           docker run --rm "${COMMUNITY_BOT_IMAGE}" community-migration-head
           docker run --rm \
             -e ENVIRONMENT=production \

@@ -67,6 +67,11 @@ acceptance — CB-57.
   80%; browser и PostgreSQL tests включены;
 - `git diff --check` — green.
 
+Первый PR run подтвердил Quality и PostgreSQL jobs, но обнаружил quoting defect
+в Go template OCI-label inspection до запуска Compose smoke. Backslash внутри
+single-quoted Bash template удалён; это CI-only исправление проверено точечной
+operations-проверкой и повторным обязательным PR run.
+
 ## Отклонения от предварительного file map
 
 Operational route contract проверяется в существующем
