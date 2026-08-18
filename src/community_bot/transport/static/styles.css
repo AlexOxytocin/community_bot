@@ -38,12 +38,13 @@ button { font: inherit; }
 .hero { padding: 24px 0 28px; }
 .eyebrow { margin: 0 0 8px; color: var(--app-accent); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 h1, h2, h3, p { overflow-wrap: anywhere; }
+h4 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
 h1 { margin: 0; font-size: clamp(28px, 8vw, 38px); line-height: 1.15; }
 h2 { margin: 0; font-size: 22px; }
 h3 { margin: 0; font-size: 17px; }
 .lead, .muted { color: var(--app-text-muted); }
 .lead { margin: 10px 0 0; }
-.tabs { display: flex; gap: 8px; margin-top: 20px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 .tabs button { min-height: 44px; border: 1px solid var(--app-border); border-radius: 12px; padding: 8px 14px; background: transparent; color: var(--app-text); cursor: pointer; }
 .tabs button[aria-pressed="true"] { border-color: var(--app-accent); color: var(--app-accent); }
 .screen-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
@@ -53,6 +54,7 @@ button.card { cursor: pointer; }
 button.card:hover { background: var(--app-surface-raised); }
 .meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--app-text-muted); font-size: 13px; }
 .detail { display: grid; gap: 16px; }
+.profile-boundary { display: grid; gap: 12px; }
 .section { display: grid; gap: 6px; }
 .primary, .back { min-height: 44px; border-radius: 12px; cursor: pointer; }
 .primary { border: 0; padding: 10px 16px; background: var(--app-accent); color: var(--app-accent-text); font-weight: 700; }

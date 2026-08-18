@@ -7,6 +7,7 @@ const title = document.getElementById("screen-title");
 const welcome = document.getElementById("welcome");
 const back = document.getElementById("back");
 const catalogNav = document.getElementById("catalog-nav");
+const profileNav = document.getElementById("profile-nav");
 const assignmentsNav = document.getElementById("assignments-nav");
 const moderationNav = document.getElementById("moderation-nav");
 let tasks = [];
@@ -15,6 +16,7 @@ let pendingKey = null;
 let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
 let returnFocusModeration = false;
+let returnFocusProfile = false;
 let screenRevision = 0;
 
 const element = (tag, text, className) => {
@@ -34,6 +36,7 @@ const section = (heading, value) => {
 
 const setNavigation = (screen) => {
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
+  profileNav.setAttribute("aria-pressed", String(screen === "profile"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
   moderationNav.setAttribute("aria-pressed", String(screen === "moderation"));
 };
@@ -41,6 +44,11 @@ const setNavigation = (screen) => {
 const restoreModerationFocus = () => {
   if (returnFocusModeration) moderationNav.focus();
   returnFocusModeration = false;
+};
+
+const restoreProfileFocus = () => {
+  if (returnFocusProfile) profileNav.focus();
+  returnFocusProfile = false;
 };
 
 const formatDate = (value) => new Intl.DateTimeFormat("ru", {
@@ -65,6 +73,12 @@ const requestError = (response) => {
   if (response.status === 403) return "account_unavailable";
   if (response.status === 404) return "not_found";
   return "request_failed";
+};
+
+const getJson = async (path) => {
+  const response = await fetch(path, { credentials: "same-origin" });
+  if (!response.ok) throw new Error(requestError(response));
+  return response.json();
 };
 
 const assignmentError = (code, retry) => {
@@ -106,6 +120,7 @@ function renderCatalog() {
   if (!tasks.length) {
     replaceContent(element("p", "Сейчас нет доступных заданий.", "status muted"));
     restoreModerationFocus();
+    restoreProfileFocus();
     return;
   }
   const list = element("div", undefined, "list");
@@ -132,6 +147,149 @@ function renderCatalog() {
   focusTarget?.focus();
   returnFocusTaskId = null;
   restoreModerationFocus();
+  restoreProfileFocus();
+}
+
+const boundaryError = (heading, message, retry) => {
+  const node = element("section", undefined, "section profile-boundary");
+  node.append(element("h3", heading));
+  node.append(element("p", message, "status"));
+  node.append(retry);
+  return node;
+};
+
+const valueSection = (heading, value) => {
+  const normalized = Array.isArray(value) ? value.join(", ") : value;
+  return normalized == null || normalized === ""
+    ? null
+    : section(heading, String(normalized));
+};
+
+const reliabilityText = (value) => value == null ? "Недостаточно данных" : String(value);
+
+function profileDetails(me, member) {
+  const card = element("article", undefined, "card detail");
+  const fields = [
+    ["Город", me.city],
+    ["Часовой пояс", me.timezone],
+    ["О себе", me.short_bio],
+    ["Текущая цель", me.current_goal],
+    ["Категории помощи", me.help_categories],
+    ["Навыки", me.skill_tags],
+    ["Доступность", me.availability],
+    ["Баланс", me.credit_balance],
+    ["Опыт", me.experience_total],
+    ["Уровень", me.level && me.level.display_name
+      ? String(me.level.number) + " · " + me.level.display_name
+      : null],
+    ["Карма", member.karma
+      ? String(member.karma.score) + " · оценок: " + String(member.karma.count)
+      : null],
+    ["Надёжность", member.reliability ? reliabilityText(member.reliability.rate) : null],
+    ["Принято заданий", member.reliability && member.reliability.accepted],
+    ["Подтверждённый вес", member.reliability && member.reliability.approved_weight],
+    ["Неявки", member.reliability && member.reliability.no_show],
+  ];
+  card.append(element("h3", me.display_name));
+  for (const [heading, value] of fields) {
+    const item = valueSection(heading, value);
+    if (item) card.append(item);
+  }
+  return card;
+}
+
+function leaderboardDetails(items) {
+  const boundary = element("section", undefined, "profile-boundary");
+  boundary.append(element("h3", "Таблица вклада"));
+  if (!items.length) {
+    boundary.append(element("p", "Таблица вклада пока пуста.", "status muted"));
+    return boundary;
+  }
+  const list = element("ol", undefined, "list leaderboard");
+  for (const item of items) {
+    const row = element("li", undefined, "card");
+    row.append(
+      element("h4", String(item.rank) + ". " + item.display_name),
+      element("p", "Опыт: " + String(item.experience), "meta"),
+      element("p", "Получатели помощи: " + String(item.unique_recipients), "meta"),
+      element("p", "Надёжность: " + reliabilityText(item.reliability), "meta"),
+      element("p", "Неявки: " + String(item.no_show), "meta"),
+    );
+    list.append(row);
+  }
+  boundary.append(list);
+  return boundary;
+}
+
+function renderProfile(state, revision) {
+  if (revision !== screenRevision) return;
+  const profileBoundary = state.profile
+    ? profileDetails(state.profile.me, state.profile.member)
+    : state.profileError
+      ? boundaryError("Мои показатели", "Не удалось загрузить профиль.", state.profileRetry)
+      : element("p", "Загружаем профиль…", "status muted");
+  const leaderboardBoundary = state.leaderboard
+    ? leaderboardDetails(state.leaderboard)
+    : state.leaderboardError
+      ? boundaryError(
+        "Таблица вклада",
+        "Не удалось загрузить таблицу вклада.",
+        state.leaderboardRetry,
+      )
+      : element("p", "Загружаем таблицу вклада…", "status muted");
+  replaceContent(profileBoundary, leaderboardBoundary);
+}
+
+async function loadOwnProfile(state, revision) {
+  state.profile = null;
+  state.profileError = false;
+  renderProfile(state, revision);
+  try {
+    const me = await getJson("/api/v1/me");
+    if (revision !== screenRevision) return;
+    const member = await getJson("/api/v1/members/" + encodeURIComponent(me.member_id));
+    if (revision !== screenRevision) return;
+    state.profile = { me, member };
+  } catch {
+    if (revision !== screenRevision) return;
+    state.profileError = true;
+  }
+  renderProfile(state, revision);
+}
+
+async function loadLeaderboard(state, revision) {
+  state.leaderboard = null;
+  state.leaderboardError = false;
+  renderProfile(state, revision);
+  try {
+    const page = await getJson("/api/v1/leaderboard?limit=30");
+    if (revision !== screenRevision) return;
+    state.leaderboard = page.items;
+  } catch {
+    if (revision !== screenRevision) return;
+    state.leaderboardError = true;
+  }
+  renderProfile(state, revision);
+}
+
+function loadProfile(push = true) {
+  const revision = ++screenRevision;
+  const state = { profile: null, leaderboard: null, profileError: false, leaderboardError: false };
+  state.profileRetry = element("button", "Повторить профиль", "primary");
+  state.profileRetry.type = "button";
+  state.profileRetry.addEventListener("click", () => loadOwnProfile(state, revision));
+  state.leaderboardRetry = element("button", "Повторить таблицу", "primary");
+  state.leaderboardRetry.type = "button";
+  state.leaderboardRetry.addEventListener("click", () => loadLeaderboard(state, revision));
+  returnFocusProfile = true;
+  if (push) history.pushState({ screen: "profile" }, "", "#profile");
+  setNavigation("profile");
+  title.textContent = "Профиль";
+  back.classList.remove("hidden");
+  renderProfile(state, revision);
+  back.focus();
+  void loadOwnProfile(state, revision);
+  void loadLeaderboard(state, revision);
 }
 
 function showTaskDetail(task, push = true) {
@@ -399,6 +557,7 @@ async function bootstrap(authAttempted = false) {
     const initialScreen = location.hash;
     history.replaceState({ screen: "catalog" }, "", "#catalog");
     renderCatalog();
+    if (initialScreen === "#profile") loadProfile();
     if (initialScreen === "#moderation") loadModeration();
   } catch {
     replaceContent(
@@ -416,6 +575,7 @@ catalogNav.addEventListener("click", () => {
   renderCatalog();
 });
 assignmentsNav.addEventListener("click", () => loadAssignments());
+profileNav.addEventListener("click", () => loadProfile());
 moderationNav.addEventListener("click", () => loadModeration());
 back.addEventListener("click", () => history.back());
 globalThis.addEventListener("popstate", (event) => {
@@ -426,6 +586,8 @@ globalThis.addEventListener("popstate", (event) => {
     renderAssignments();
   } else if (event.state?.screen === "assignment") {
     showAssignmentDetail(event.state.assignmentId, false);
+  } else if (event.state?.screen === "profile") {
+    loadProfile(false);
   } else if (event.state?.screen === "moderation") {
     loadModeration(false);
   } else {

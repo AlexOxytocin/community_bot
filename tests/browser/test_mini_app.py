@@ -444,6 +444,192 @@ def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
         browser.close()
 
 
+def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C901, PLR0915
+    mini_app_url: str,
+) -> None:
+    member_id = "00000000-0000-0000-0000-000000000068"
+    malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
+    private_marker = "PRIVATE_PROFILE_MARKER"
+    me = {
+        "member_id": member_id,
+        "display_name": malicious,
+        "city": "Буэнос-Айрес",
+        "timezone": "America/Argentina/Buenos_Aires",
+        "short_bio": "Помогаю собирать ясные планы.",
+        "current_goal": "Найти партнёров для пилота.",
+        "help_categories": ["Стратегия", "Текст"],
+        "skill_tags": ["Фасилитация", "Редактура"],
+        "availability": "По вечерам",
+        "credit_balance": 7,
+        "experience_total": 12,
+        "level": {"number": 2, "display_name": "Участник"},
+        "private_top_level": private_marker,
+    }
+    member = {
+        "member_id": member_id,
+        "telegram_username": private_marker,
+        "display_name": malicious,
+        "karma": {"score": 3, "count": 4, "comment": private_marker},
+        "reliability": {
+            "accepted": 4,
+            "approved_weight": "3.5",
+            "no_show": 1,
+            "rate": None,
+            "private": private_marker,
+        },
+        "unknown": private_marker,
+    }
+    leaderboard = {
+        "items": [
+            {
+                "rank": 1,
+                "member_id": private_marker,
+                "display_name": malicious,
+                "experience": 12,
+                "unique_recipients": 3,
+                "reliability": None,
+                "no_show": 1,
+                "unknown": private_marker,
+            }
+        ],
+        "private": private_marker,
+    }
+    modes = {"member": "pending", "leaderboard": "pending"}
+    pending: list[Route] = []
+    requests: list[tuple[str, str]] = []
+    capture_requests = False
+
+    def me_route(route: Route) -> None:
+        route.fulfill(json=me)
+
+    def fulfill_by_mode(route: Route, mode: str, payload: dict[str, Any]) -> None:
+        if mode == "pending":
+            pending.append(route)
+        elif mode == "error":
+            route.fulfill(status=503, json={"code": "request_failed"})
+        else:
+            route.fulfill(json=payload)
+
+    def member_route(route: Route) -> None:
+        fulfill_by_mode(route, modes["member"], member)
+
+    def leaderboard_route(route: Route) -> None:
+        payload = {"items": []} if modes["leaderboard"] == "empty" else leaderboard
+        fulfill_by_mode(route, modes["leaderboard"], payload)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 375, "height": 800})
+        page.on(
+            "request",
+            lambda request: (
+                requests.append((request.method, urlsplit(request.url).path))
+                if capture_requests
+                else None
+            ),
+        )
+        page.route("**/api/v1/me", me_route)
+        page.route(f"**/api/v1/members/{member_id}", member_route)
+        page.route("**/api/v1/leaderboard?*", leaderboard_route)
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+        page.get_by_text("выберите понятное задание").wait_for()
+
+        capture_requests = True
+        profile_nav = page.get_by_role("button", name="Профиль")
+        profile_nav.click()
+        page.get_by_text("Загружаем профиль…").wait_for()
+        page.get_by_text("Загружаем таблицу вклада…").wait_for()
+        page.wait_for_timeout(50)
+        assert len(pending) == 2
+        for route in pending[:]:
+            if "/members/" in route.request.url:
+                route.fulfill(json=member)
+            else:
+                route.fulfill(json=leaderboard)
+            pending.remove(route)
+
+        page.locator("h3", has_text=malicious).wait_for()
+        for value in (
+            "Буэнос-Айрес",
+            "America/Argentina/Buenos_Aires",
+            "Помогаю собирать ясные планы.",
+            "Найти партнёров для пилота.",
+            "Стратегия, Текст",
+            "Фасилитация, Редактура",
+            "По вечерам",
+            "7",
+            "12",
+            "2 · Участник",
+            "3 · оценок: 4",
+            "3.5",
+            "Недостаточно данных",
+            "Получатели помощи: 3",
+            "Неявки: 1",
+        ):
+            assert page.get_by_text(value, exact=True).count() >= 1
+        body = page.locator("body").inner_text()
+        assert malicious in body
+        assert private_marker not in body
+        assert page.locator("img, [onerror], [onclick]").count() == 0
+        assert page.locator("script").count() == 2
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+        modes.update(member="success", leaderboard="success")
+        me.update(help_categories=[], skill_tags=[])
+        profile_nav.click()
+        page.locator("h3", has_text=malicious).wait_for()
+        assert page.get_by_role("heading", name="Категории помощи").count() == 0
+        assert page.get_by_role("heading", name="Навыки").count() == 0
+
+        modes.update(member="error", leaderboard="success")
+        profile_nav.click()
+        page.get_by_text("Не удалось загрузить профиль.").wait_for()  # noqa: RUF001
+        assert page.get_by_text("Таблица вклада").count() == 1
+        modes["member"] = "success"
+        page.get_by_role("button", name="Повторить профиль").click()
+        page.locator("h3", has_text=malicious).wait_for()
+
+        modes.update(member="success", leaderboard="error")
+        profile_nav.click()
+        page.get_by_text("Не удалось загрузить таблицу вклада.").wait_for()  # noqa: RUF001
+        modes["leaderboard"] = "success"
+        page.get_by_role("button", name="Повторить таблицу").click()
+        page.get_by_text("Получатели помощи: 3").wait_for()
+
+        modes["leaderboard"] = "empty"
+        profile_nav.click()
+        page.get_by_text("Таблица вклада пока пуста.").wait_for()
+
+        page.get_by_role("button", name="Каталог").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+        modes.update(member="pending", leaderboard="pending")
+        profile_nav.click()
+        page.get_by_text("Загружаем профиль…").wait_for()
+        page.wait_for_timeout(50)
+        assert len(pending) == 2
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+        for route in pending[:]:
+            route.fulfill(json=member if "/members/" in route.request.url else leaderboard)
+            pending.remove(route)
+        page.wait_for_timeout(50)
+        assert page.get_by_role("heading", name="Профиль").count() == 0
+        assert profile_nav.evaluate("node => node === document.activeElement")
+        assert requests
+        assert all(method == "GET" for method, _path in requests)
+        assert {
+            "/api/v1/me",
+            f"/api/v1/members/{member_id}",
+            "/api/v1/leaderboard",
+        } == {path for _method, path in requests}
+        browser.close()
+
+
 def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
