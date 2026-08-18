@@ -2,7 +2,7 @@
 
 ## Статус
 
-`Status: resolved`
+`Status: blocked`
 
 Owner amendment разрешил ровно один седьмой файл — существующий authoritative
 UoW forwarder `infrastructure/db/database.py` — и absolute ceiling 550 строк.
@@ -46,3 +46,24 @@ owner. Поэтому runtime/test diff после finding не изменён.
 
 Предыдущий `final-review.md` остаётся историей finding; после полного targeted
 gate требуется независимый re-review до публикации.
+
+## Новый blocker обязательного CI после approved re-review
+
+После approved re-review создан PR #81. Обязательный GitHub CI обнаружил не
+runtime-дефект, а закрытый route-contract, который не входит в targeted suite:
+`tests/unit/test_web_auth.py::test_web_config_and_route_set_are_closed` ожидает
+точное множество HTTP-маршрутов. Три новых creator-review route закономерно
+являются extra items; остальные 420 non-PostgreSQL тестов прошли.
+
+Корректное causal исправление — добавить эти три маршрута в существующий exact
+route oracle. Оно требует изменить восьмой implementation/test файл
+`tests/unit/test_web_auth.py`. Ни один из семи текущих файлов нельзя честно
+устранить: application protocol/service, PostgreSQL query, UoW forwarder, HTTP,
+Mini App JS, integration oracle и browser oracle владеют разными обязательными
+частями принятого контракта. Перенос или удаление любого из них ослабит
+pre-LIMIT privacy, exact detail, HTTP либо browser acceptance.
+
+Owner ceiling разрешает максимум семь implementation/test файлов и прямо
+запрещает дальнейший scope expansion. Поэтому runtime/test diff после CI не
+изменён. PR #81 остаётся open с failed `Quality`; merge/release/deploy/Jira Done
+fail-closed до отдельного owner amendment на существующий route-contract файл.
