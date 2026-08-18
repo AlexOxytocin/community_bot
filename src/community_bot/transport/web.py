@@ -10,17 +10,20 @@ import hmac
 import json
 import secrets
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.staticfiles import StaticFiles
 
+from community_bot.application.assignments import AcceptAssignmentCommand, AssignmentService
 from community_bot.application.identity import ActorContext
 from community_bot.application.registration import RegistrationService
 from community_bot.application.reputation import (
@@ -31,6 +34,8 @@ from community_bot.application.reputation import (
 )
 from community_bot.application.tasks import PublishedTask, TaskService
 from community_bot.bootstrap.settings import Settings
+from community_bot.domain.assignments import AssignmentError
+from community_bot.domain.tasks import TaskError
 from community_bot.infrastructure.db.database import Database
 
 _COOKIE_NAME = "__Host-community_session"
@@ -40,12 +45,17 @@ _PROOF_FUTURE_SKEW_SECONDS = 30
 _PROOF_MAX_BYTES = 8192
 _PROOF_MAX_FIELDS = 32
 _MAX_TELEGRAM_USER_ID = 2**63 - 1
+_MAX_IDEMPOTENCY_KEY = 2**63 - 1
+_STATIC_DIR = Path(__file__).with_name("static")
 _PUBLIC_ERROR_CODES = frozenset(
     {
         "invalid_member_query",
+        "invalid_idempotency_key",
         "invalid_origin",
+        "invalid_request",
         "not_found",
         "profile_unavailable",
+        "assignment_unavailable",
         "task_catalog_unavailable",
         "unauthorized",
     }
@@ -124,11 +134,24 @@ class TaskDto(_Dto):
     city: str | None
     deadline_at: datetime.datetime
     status: str
+    description: str
+    completion_criteria: str
+    performer_instructions: str
+    materials: dict[str, str]
+    public_input: dict[str, object]
 
 
 class TasksDto(_Dto):
     items: tuple[TaskDto, ...]
     next_cursor: UUID | None
+
+
+class AssignmentDto(_Dto):
+    id: UUID
+    task_id: UUID
+    slot_number: int
+    status: str
+    accepted_at: datetime.datetime
 
 
 class LeaderboardItemDto(_Dto):
@@ -151,6 +174,7 @@ def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
     registration = RegistrationService(database.unit_of_work)
     reputation = ReputationService(database.unit_of_work)
     tasks = TaskService(database.unit_of_work)
+    assignments = AssignmentService(database.unit_of_work)
     app = FastAPI(docs_url=None, redoc_url=None)
 
     @app.exception_handler(RequestValidationError)
@@ -340,6 +364,72 @@ def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
             )
         )
 
+    @app.post(
+        "/api/v1/tasks/{task_id}/assignments",
+        response_model=AssignmentDto,
+        status_code=201,
+    )
+    async def accept_task(task_id: str, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        try:
+            parsed_task_id = UUID(task_id)
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        if str(parsed_task_id) != task_id:
+            return _error_response(422, "invalid_request")
+        try:
+            body = await _bounded_body(request, limit=0)
+        except (OverflowError, ValueError):
+            return _error_response(422, "invalid_request")
+        if body:
+            return _error_response(422, "invalid_request")
+        update_id = _accept_update_id(
+            actor.member_id,
+            parsed_task_id,
+            operation_key,
+        )
+        try:
+            assignment, _task = await assignments.accept_with_task(
+                AcceptAssignmentCommand(
+                    update_id=update_id,
+                    actor_telegram_user_id=None,
+                    task_id=parsed_task_id,
+                    actor_member_id=actor.member_id,
+                )
+            )
+        except (AssignmentError, LookupError, PermissionError, TaskError):
+            return _error_response(409, "assignment_unavailable")
+        return _json_response(
+            AssignmentDto(
+                id=assignment.id,
+                task_id=assignment.task_id,
+                slot_number=assignment.slot_number,
+                status=assignment.status.value,
+                accepted_at=assignment.accepted_at,
+            ),
+            status_code=201,
+        )
+
+    @app.get("/", include_in_schema=False)
+    async def mini_app() -> FileResponse:
+        return FileResponse(
+            _STATIC_DIR / "index.html",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": (
+                    "default-src 'self'; script-src 'self'; "
+                    "style-src 'self'; font-src 'self'; img-src 'none'; object-src 'none'; "
+                    "base-uri 'none'; frame-ancestors https://web.telegram.org "
+                    "https://*.telegram.org"
+                ),
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    app.mount("/mini-assets", StaticFiles(directory=_STATIC_DIR), name="mini-assets")
     return app
 
 
@@ -445,8 +535,31 @@ def _web_config(settings: Settings) -> tuple[str, str]:
 
 
 def _require_origin(request: Request, expected: str) -> None:
-    if request.headers.get("origin") != expected:
+    if request.headers.getlist("origin") != [expected]:
         raise HTTPException(status_code=403, detail="invalid_origin")
+
+
+def _idempotency_key(request: Request) -> str:
+    values = request.headers.getlist("idempotency-key")
+    if len(values) != 1:
+        raise HTTPException(status_code=422, detail="invalid_idempotency_key")
+    value = values[0]
+    if (
+        not value.isascii()
+        or not value.isdecimal()
+        or value.startswith("0")
+        or len(value) > 19
+        or int(value) > _MAX_IDEMPOTENCY_KEY
+    ):
+        raise HTTPException(status_code=422, detail="invalid_idempotency_key")
+    return value
+
+
+def _accept_update_id(member_id: UUID, task_id: UUID, operation_key: str) -> int:
+    parts = (b"accept", member_id.bytes, task_id.bytes, operation_key.encode("ascii"))
+    encoded = b"".join(len(part).to_bytes(2, "big") + part for part in parts)
+    resolved = int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") & _MAX_IDEMPOTENCY_KEY
+    return resolved or 1
 
 
 def _session_digest(token: str | None) -> bytes | None:
@@ -513,11 +626,28 @@ def _task_dto(task: PublishedTask) -> TaskDto:
         city=task.city,
         deadline_at=task.deadline_at,
         status=task.status.value,
+        description=task.description,
+        completion_criteria=task.completion_criteria,
+        performer_instructions=task.performer_instructions,
+        materials={
+            key: value
+            for key in ("text", "url")
+            if isinstance((value := task.materials.get(key)), str)
+        },
+        public_input={
+            key: task.input_payload[key]
+            for key in task.public_input_keys
+            if key in task.input_payload
+        },
     )
 
 
-def _json_response(model: BaseModel) -> JSONResponse:
-    return JSONResponse(model.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
+def _json_response(model: BaseModel, *, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        model.model_dump(mode="json"),
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _error_response(status_code: int, code: str) -> JSONResponse:

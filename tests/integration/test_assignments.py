@@ -27,9 +27,11 @@ from community_bot.infrastructure.db.models import (
     AssignmentDisputeModel,
     AssignmentModel,
     AssignmentResultVersionModel,
+    AuditEventModel,
     MemberModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
+    ReliabilityEventModel,
     TaskModel,
 )
 from tests.integration.test_task_creation import (
@@ -196,6 +198,159 @@ async def test_full_exchange_is_atomic_and_exactly_once(database_url: str) -> No
                 ),
                 {"id": assignment.id},
             )
+    await database.dispose()
+
+
+async def test_web_actor_replay_and_natural_assignment_idempotency(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    _author, task = await _published_task(database, update_base=3190)
+    performer = await prepare_member(database, telegram_user_id=3191)
+    other = await prepare_member(database, telegram_user_id=3192)
+    service = AssignmentService(database.unit_of_work)
+
+    first_command = AcceptAssignmentCommand(
+        8_000_000_000_031_901,
+        None,
+        task.id,
+        actor_member_id=performer.id,
+    )
+    first, replayed = await asyncio.gather(
+        service.accept(first_command),
+        service.accept(first_command),
+    )
+    assert first.id == replayed.id
+
+    _race_author, race_task = await _published_task(database, update_base=3193)
+    different_first, different_second = await asyncio.gather(
+        service.accept(
+            AcceptAssignmentCommand(
+                8_000_000_000_031_902,
+                None,
+                race_task.id,
+                actor_member_id=performer.id,
+            )
+        ),
+        service.accept(
+            AcceptAssignmentCommand(
+                8_000_000_000_031_903,
+                None,
+                race_task.id,
+                actor_member_id=performer.id,
+            )
+        ),
+    )
+    assert different_first.id == different_second.id
+    replay = await service.accept(first_command)
+    assert replay.id == first.id
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        stored_performer = await session.get(MemberModel, performer.id)
+        assert stored_performer is not None
+        stored_performer.status = "paused"
+    status_changed_replay = await service.accept(first_command)
+    assert status_changed_replay.id == first.id
+    with pytest.raises(PermissionError):
+        await service.accept(
+            AcceptAssignmentCommand(
+                8_000_000_000_031_904,
+                None,
+                task.id,
+                actor_member_id=performer.id,
+            )
+        )
+    async with sessions.begin() as session:
+        stored_performer = await session.get(MemberModel, performer.id)
+        assert stored_performer is not None
+        stored_performer.status = "active"
+
+    with pytest.raises(AssignmentError, match="another operation"):
+        await service.accept(
+            AcceptAssignmentCommand(8_000_000_000_031_901, None, task.id, actor_member_id=other.id)
+        )
+
+    _other_author, other_task = await _published_task(database, update_base=3250)
+    with pytest.raises(AssignmentError, match="another operation"):
+        await service.accept(
+            AcceptAssignmentCommand(
+                8_000_000_000_031_901,
+                None,
+                other_task.id,
+                actor_member_id=performer.id,
+            )
+        )
+
+    async with sessions.begin() as session:
+        stored_assignment = await session.get(AssignmentModel, first.id)
+        assert stored_assignment is not None
+        stored_assignment.status = AssignmentStatus.CANCELLED.value
+    with pytest.raises(AssignmentError, match="cannot be accepted again"):
+        await service.accept(
+            AcceptAssignmentCommand(
+                8_000_000_000_031_905,
+                None,
+                task.id,
+                actor_member_id=performer.id,
+            )
+        )
+
+    async with sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count(AssignmentModel.id)).where(
+                    AssignmentModel.task_id.in_((task.id, race_task.id)),
+                    AssignmentModel.performer_id == performer.id,
+                )
+            )
+            == 2
+        )
+        assert (
+            await session.scalar(
+                select(func.count(ReliabilityEventModel.id)).where(
+                    ReliabilityEventModel.assignment_id.in_((first.id, different_first.id)),
+                    ReliabilityEventModel.event_type == "accepted",
+                )
+            )
+            == 2
+        )
+        assert (
+            await session.scalar(
+                select(func.count(AuditEventModel.id)).where(
+                    AuditEventModel.action == "assignment_accepted",
+                    AuditEventModel.entity_id.in_((str(first.id), str(different_first.id))),
+                )
+            )
+            == 2
+        )
+        assert (
+            await session.scalar(
+                select(func.count(OutboxEventModel.id)).where(
+                    OutboxEventModel.business_key.in_(
+                        (
+                            f"assignment:{first.id}:accepted",
+                            f"assignment:{different_first.id}:accepted",
+                        )
+                    )
+                )
+            )
+            == 2
+        )
+        assert (
+            await session.scalar(
+                select(func.count(ProcessedTelegramUpdateModel.update_id)).where(
+                    ProcessedTelegramUpdateModel.update_id.in_(
+                        (
+                            8_000_000_000_031_901,
+                            8_000_000_000_031_902,
+                            8_000_000_000_031_903,
+                        )
+                    )
+                )
+            )
+            == 2
+        )
     await database.dispose()
 
 

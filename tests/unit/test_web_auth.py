@@ -7,11 +7,12 @@ import hmac
 import inspect
 import json
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 from urllib.parse import urlencode
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -21,9 +22,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from community_bot.application.reputation import ProfileUnavailableError
 from community_bot.application.tasks import TaskService
 from community_bot.bootstrap.settings import Settings
+from community_bot.domain.assignments import AssignmentError
 from community_bot.domain.catalog import TaskFormat
-from community_bot.domain.tasks import TaskKind, TaskStatus, TaskTimeSize
+from community_bot.domain.tasks import TaskError, TaskKind, TaskStatus, TaskTimeSize
 from community_bot.transport.web import (
+    _accept_update_id,
     _member_query,
     _session_digest,
     _task_dto,
@@ -176,6 +179,7 @@ def test_web_config_and_route_set_are_closed() -> None:
             tuple(sorted(cast("Route", route).methods or ())),
         )
         for route in app.routes
+        if hasattr(route, "methods")
     }
     assert routes == {
         ("/openapi.json", ("GET", "HEAD")),
@@ -185,8 +189,11 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/tasks", ("GET",)),
+        ("/api/v1/tasks/{task_id}/assignments", ("POST",)),
         ("/api/v1/leaderboard", ("GET",)),
+        ("/", ("GET",)),
     }
+    assert any(getattr(route, "path", None) == "/mini-assets" for route in app.routes)
     assert Settings().mini_app_origin is None
     for origin in (
         None,
@@ -426,15 +433,169 @@ def test_task_dto_preserves_only_public_projection() -> None:
             city=None,
             deadline_at=datetime.datetime.now(datetime.UTC),
             status=TaskStatus.PUBLISHED,
+            description="Public description",
+            completion_criteria="Done",
+            performer_instructions="Follow instructions",
+            materials={"text": "Read me", "url": "https://example.test", "private": "x"},
+            input_payload={"public": "shown", "private": "hidden"},
+            public_input_keys=("public",),
         ),
     )
     payload = _task_dto(task).model_dump(mode="json")
     assert payload["task_kind"] == "solo"
     assert payload["time_size"] == "s"
+    assert payload["description"] == "Public description"
+    assert payload["materials"] == {
+        "text": "Read me",
+        "url": "https://example.test",
+    }
+    assert payload["public_input"] == {"public": "shown"}
     assert "input_payload" not in payload
-    assert "description" not in payload
 
     empty_task = SimpleNamespace(**(vars(task) | {"task_kind": None, "time_size": None}))
     empty_enums = _task_dto(cast("PublishedTask", empty_task))
     assert empty_enums.task_kind is None
     assert empty_enums.time_size is None
+
+
+def test_accept_update_id_is_task_and_actor_bound() -> None:
+    member_id = UUID("00000000-0000-0000-0000-000000000001")
+    task_id = UUID("00000000-0000-0000-0000-000000000002")
+    resolved = _accept_update_id(member_id, task_id, "42")
+
+    assert resolved == _accept_update_id(member_id, task_id, "42")
+    assert 1 <= resolved <= 2**63 - 1
+    assert resolved != _accept_update_id(uuid4(), task_id, "42")
+    assert resolved != _accept_update_id(member_id, uuid4(), "42")
+    assert resolved != _accept_update_id(member_id, task_id, "43")
+
+
+@pytest.mark.asyncio
+async def test_accept_transport_precedence_is_origin_session_then_key() -> None:
+    database = FakeDatabase()
+    app = _app(database)
+    task_id = uuid4()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        invalid_origin = await client.post(
+            f"/api/v1/tasks/{task_id}/assignments",
+            headers=[("origin", "https://wrong.example"), ("idempotency-key", "00")],
+        )
+        assert invalid_origin.status_code == 403
+        assert invalid_origin.json() == {"code": "invalid_origin"}
+        duplicate_origin = await client.post(
+            f"/api/v1/tasks/{task_id}/assignments",
+            headers=[
+                ("origin", ORIGIN),
+                ("origin", ORIGIN),
+                ("idempotency-key", "1"),
+            ],
+        )
+        assert duplicate_origin.status_code == 403
+        assert duplicate_origin.json() == {"code": "invalid_origin"}
+
+        invalid_session = await client.post(
+            f"/api/v1/tasks/{task_id}/assignments",
+            headers={"origin": ORIGIN, "idempotency-key": "00"},
+        )
+        assert invalid_session.status_code == 401
+
+        database.resolve_member = True
+        client.cookies.set("__Host-community_session", SESSION_TOKEN)
+        malformed = (None, "", "0", "00", "+1", "-1", " 1", str(2**63))
+        for value in malformed:
+            headers = {"origin": ORIGIN}
+            if value is not None:
+                headers["idempotency-key"] = value
+            response = await client.post(
+                f"/api/v1/tasks/{task_id}/assignments",
+                headers=headers,
+            )
+            assert response.status_code == 422
+            assert response.json() == {"code": "invalid_idempotency_key"}
+
+        non_ascii = await client.post(
+            f"/api/v1/tasks/{task_id}/assignments",
+            headers=[
+                (b"origin", ORIGIN.encode()),
+                (b"idempotency-key", b"\xd9\xa1"),
+            ],
+        )
+        assert non_ascii.status_code == 422
+        assert non_ascii.json() == {"code": "invalid_idempotency_key"}
+
+        duplicate_key = await client.post(
+            f"/api/v1/tasks/{task_id}/assignments",
+            headers=[
+                ("origin", ORIGIN),
+                ("idempotency-key", "1"),
+                ("idempotency-key", "2"),
+            ],
+        )
+        assert duplicate_key.status_code == 422
+        assert duplicate_key.json() == {"code": "invalid_idempotency_key"}
+
+
+@pytest.mark.asyncio
+async def test_accept_request_shape_and_expected_owner_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = FakeDatabase()
+    database.resolve_member = True
+    app = _app(database)
+    task_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    owner = AsyncMock()
+    monkeypatch.setattr(
+        "community_bot.application.assignments.AssignmentService.accept_with_task",
+        owner,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url=ORIGIN,
+        cookies={"__Host-community_session": SESSION_TOKEN},
+    ) as client:
+        for path, content in (
+            (str(task_id).upper(), b""),
+            (str(task_id), b"not-empty"),
+        ):
+            response = await client.post(
+                f"/api/v1/tasks/{path}/assignments",
+                headers={"origin": ORIGIN, "idempotency-key": "1"},
+                content=content,
+            )
+            assert response.status_code == 422
+            assert response.json() == {"code": "invalid_request"}
+            assert response.headers["cache-control"] == "no-store"
+        owner.assert_not_awaited()
+
+        for error in (
+            AssignmentError("unavailable"),
+            LookupError("unavailable"),
+            PermissionError("unavailable"),
+            TaskError("unavailable"),
+        ):
+            owner.side_effect = error
+            response = await client.post(
+                f"/api/v1/tasks/{task_id}/assignments",
+                headers={"origin": ORIGIN, "idempotency-key": "1"},
+            )
+            assert response.status_code == 409
+            assert response.json() == {"code": "assignment_unavailable"}
+            assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
+    app = _app(FakeDatabase())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        index = await client.get("/")
+        font = await client.get("/mini-assets/manrope.ttf")
+        app_module = await client.get("/mini-assets/app.js")
+
+    assert index.status_code == font.status_code == app_module.status_code == 200
+    assert "default-src 'self'" in index.headers["content-security-policy"]
+    assert "script-src 'self'" in index.headers["content-security-policy"]
+    assert index.headers["x-content-type-options"] == "nosniff"
+    design_font = (
+        Path(__file__).parents[2] / "docs/release-2/design/assets/Manrope[wght].ttf"
+    ).read_bytes()
+    assert hashlib.sha256(font.content).digest() == hashlib.sha256(design_font).digest()
