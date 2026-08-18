@@ -29,8 +29,12 @@ Telegram остаётся только для запуска Mini App, auth proo
    consumer.
 4. `CB-53` — frontend shell, routing и platform bridge.
 5. `CB-54`—`CB-55` — продуктовые экраны и административные сценарии.
-6. `CB-56` — новый HTTPS/deployment/observability контур.
-7. `CB-57` — browser, integration и live Mini App acceptance.
+6. `CB-56` — внутренний `community-web` process и честный readiness текущего backend.
+7. `CB-65` — отдельный image↔host-package provenance/security gate будущего rollout.
+8. `CB-57` — public HTTPS, production deployment и live Mini App acceptance.
+
+Compact DB import/cutover остаётся будущей областью `CB-64` и не блокирует
+internal web readiness текущей схемы.
 
 ## Обязательные свойства
 
@@ -40,4 +44,6 @@ Telegram остаётся только для запуска Mini App, auth proo
 - mutation replay/conflict детерминирован;
 - state, ledger, audit и outbox не расходятся;
 - прямой URL не обходит authorization или rollout gate;
-- новый deployment не объявляется готовым без PostgreSQL, migration и restore доказательств.
+- internal readiness не считается production deployment или live acceptance;
+- будущий deployment не объявляется готовым без PostgreSQL, migration, immutable
+  image↔host-package provenance и restore доказательств.

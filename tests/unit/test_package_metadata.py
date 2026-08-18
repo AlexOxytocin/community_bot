@@ -29,5 +29,6 @@ def test_package_metadata_is_consistently_1_0_0() -> None:
         "community-health",
         "community-migrate",
         "community-migration-head",
+        "community-web",
         "community-worker",
     }

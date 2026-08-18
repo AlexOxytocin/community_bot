@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import pytest
 
 from community_bot.bootstrap.settings import Settings
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_settings_have_safe_development_defaults() -> None:
@@ -46,3 +43,11 @@ def test_settings_normalize_standard_postgresql_url() -> None:
     )
 
     assert settings.database_url.startswith("postgresql+asyncpg://")
+
+
+def test_production_settings_require_full_lowercase_git_sha() -> None:
+    with pytest.raises(ValueError, match="full lowercase Git SHA"):
+        Settings(_env_file=None, environment="production", release="manual")
+
+    release = "a" * 40
+    assert Settings(_env_file=None, environment="production", release=release).release == release

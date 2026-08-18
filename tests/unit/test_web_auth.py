@@ -62,6 +62,7 @@ class FakeDatabase:
         self.fail_create = False
         self.resolve_member = False
         self.return_member = True
+        self.disposed = False
 
     def unit_of_work(self) -> None:
         raise AssertionError("Read services are not used by auth tests.")
@@ -83,6 +84,9 @@ class FakeDatabase:
 
     async def revoke_web_session(self, **_values: object) -> None:
         return None
+
+    async def dispose(self) -> None:
+        self.disposed = True
 
 
 def _app(database: FakeDatabase) -> FastAPI:
@@ -119,6 +123,73 @@ async def _authenticate(
     return await client.post(
         "/api/v1/auth/telegram", content=content, headers=headers or AUTH_HEADERS
     )
+
+
+@pytest.mark.asyncio
+async def test_operational_routes_are_private_safe_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_at = datetime.datetime(2026, 8, 18, tzinfo=datetime.UTC)
+    captured: dict[str, object] = {}
+
+    async def fake_readiness_report(database_url: str, **kwargs: object) -> object:
+        captured.update(database_url=database_url, **kwargs)
+        return SimpleNamespace(
+            healthy=False,
+            as_dict=lambda: {
+                "healthy": False,
+                "database": True,
+                "migration": True,
+                "product_config": True,
+                "heartbeat": False,
+                "failed_outbox_events": 0,
+                "code": "heartbeat_before_deploy",
+            },
+        )
+
+    monkeypatch.setattr("community_bot.transport.web.readiness_report", fake_readiness_report)
+    settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, release="a" * 40)
+    app = create_web_app(
+        settings=settings,
+        database=cast("Database", FakeDatabase()),
+        heartbeat_not_before=started_at,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        live = await client.get("/healthz")
+        ready = await client.get("/readyz")
+
+    assert live.status_code == 200
+    assert live.json() == {"status": "alive"}
+    assert ready.status_code == 503
+    assert ready.json()["code"] == "heartbeat_before_deploy"
+    assert ready.headers["cache-control"] == "no-store"
+    assert captured["expected_release"] == "a" * 40
+    assert captured["heartbeat_not_before"] == started_at
+    assert "database_url" not in ready.text
+    assert settings.release not in ready.text
+
+
+@pytest.mark.asyncio
+async def test_web_lifespan_disposes_database_on_the_server_loop() -> None:
+    database = FakeDatabase()
+    app = _app(database)
+
+    async with app.router.lifespan_context(app):
+        assert not database.disposed
+
+    assert database.disposed
+
+
+@pytest.mark.asyncio
+async def test_web_lifespan_disposes_database_after_application_failure() -> None:
+    database = FakeDatabase()
+    app = _app(database)
+
+    with pytest.raises(RuntimeError, match="application failed"):
+        async with app.router.lifespan_context(app):
+            raise RuntimeError("application failed")
+
+    assert database.disposed
 
 
 def test_frozen_proof_and_exact_failure_cases() -> None:
@@ -185,6 +256,8 @@ def test_web_config_and_route_set_are_closed() -> None:
     }
     assert routes == {
         ("/openapi.json", ("GET", "HEAD")),
+        ("/healthz", ("GET",)),
+        ("/readyz", ("GET",)),
         ("/api/v1/auth/telegram", ("POST",)),
         ("/api/v1/session", ("DELETE",)),
         ("/api/v1/me", ("GET",)),

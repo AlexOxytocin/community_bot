@@ -28,7 +28,7 @@ services:
     restart: "no"
     env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
     environment:
-      RELEASE: ${COMMUNITY_BOT_RELEASE:-manual}
+      RELEASE: ${COMMUNITY_BOT_RELEASE:?COMMUNITY_BOT_RELEASE is required}
     depends_on:
       postgres:
         condition: service_healthy
@@ -43,10 +43,10 @@ services:
     stop_grace_period: 30s
     env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
     environment:
-      RELEASE: ${COMMUNITY_BOT_RELEASE:-manual}
+      RELEASE: ${COMMUNITY_BOT_RELEASE:?COMMUNITY_BOT_RELEASE is required}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "community-health", "--process", "community-worker"]
       interval: 30s
@@ -54,6 +54,32 @@ services:
       retries: 5
       start_period: 30s
     networks: [internal, egress]
+    logging: *logging
+
+  web:
+    image: ${COMMUNITY_BOT_IMAGE}
+    command: community-web
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: ${COMMUNITY_BOT_ENV_FILE:-.env.production}
+    environment:
+      RELEASE: ${COMMUNITY_BOT_RELEASE:?COMMUNITY_BOT_RELEASE is required}
+    depends_on:
+      worker:
+        condition: service_healthy
+    expose: ["8000"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [internal]
     logging: *logging
 
 volumes:

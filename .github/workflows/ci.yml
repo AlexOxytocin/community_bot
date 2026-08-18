@@ -69,7 +69,7 @@ jobs:
 
   verified-merge-tree:
     name: Verified merge tree
-    needs: [quality, postgresql]
+    needs: [quality, postgresql, image-contract]
     runs-on: ubuntu-latest
     steps:
       - name: Check out synthetic merge commit
@@ -111,3 +111,82 @@ jobs:
           path: provenance.json
           if-no-files-found: error
           retention-days: 30
+
+  image-contract:
+    name: Internal image contract
+    needs: [quality]
+    runs-on: ubuntu-latest
+    env:
+      COMMUNITY_BOT_ENV_FILE: .env.example
+      COMMUNITY_BOT_IMAGE: community-bot:ci
+      COMMUNITY_BOT_RELEASE: ${{ github.sha }}
+      POSTGRES_DB: community_bot
+      POSTGRES_USER: community_bot
+      POSTGRES_PASSWORD: community_bot
+    steps:
+      - name: Check out synthetic merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Validate private Compose contract
+        run: docker compose -f compose.production.yaml config --quiet
+      - name: Build reviewed image without publication
+        run: docker build --build-arg RELEASE="${COMMUNITY_BOT_RELEASE}" --tag "${COMMUNITY_BOT_IMAGE}" .
+      - name: Verify immutable runtime identity
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${COMMUNITY_BOT_IMAGE}")" = "${COMMUNITY_BOT_RELEASE}"
+          docker run --rm "${COMMUNITY_BOT_IMAGE}" community-migration-head
+          docker run --rm \
+            -e ENVIRONMENT=production \
+            -e RELEASE="${COMMUNITY_BOT_RELEASE}" \
+            -e BOT_TOKEN='123456:CI_PLACEHOLDER_TOKEN' \
+            -e MINI_APP_ORIGIN='https://example.invalid' \
+            "${COMMUNITY_BOT_IMAGE}" community-web --check
+      - name: Prepare disposable runtime configuration
+        run: |
+          smoke_env="${RUNNER_TEMP}/community-bot-smoke.env"
+          cat > "${smoke_env}" <<EOF
+          ENVIRONMENT=production
+          DATABASE_URL=postgresql+asyncpg://community_bot:community_bot@postgres:5432/community_bot
+          BOT_TOKEN=123456:TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+          MINI_APP_ORIGIN=https://example.invalid
+          RELEASE=${COMMUNITY_BOT_RELEASE}
+          WORKER_POLL_INTERVAL_SECONDS=15
+          HEARTBEAT_MAX_AGE_SECONDS=60
+          EOF
+          echo "COMMUNITY_BOT_ENV_FILE=${smoke_env}" >> "${GITHUB_ENV}"
+      - name: Start disposable internal Compose runtime
+        run: |
+          set -euo pipefail
+          docker compose -f compose.production.yaml up -d --wait postgres
+          docker compose -f compose.production.yaml run --rm migrate
+          docker compose -f compose.production.yaml run --rm worker \
+            community-bootstrap-admin --telegram-user-id 1 --reason initial_install
+          docker compose -f compose.production.yaml run --rm worker \
+            community-bootstrap-product-config
+          docker compose -f compose.production.yaml up -d --wait --wait-timeout 120 web
+      - name: Prove liveness, readiness, and restart boundary
+        run: |
+          set -euo pipefail
+          docker compose -f compose.production.yaml exec -T web python -c \
+            "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status == 200"
+          docker compose -f compose.production.yaml exec -T web python -c \
+            "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).status == 200"
+          docker compose -f compose.production.yaml stop worker
+          docker compose -f compose.production.yaml restart web
+          for attempt in $(seq 1 20); do
+            if docker compose -f compose.production.yaml exec -T web python -c \
+              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"; then
+              break
+            fi
+            test "${attempt}" -lt 20
+            sleep 1
+          done
+          docker compose -f compose.production.yaml exec -T web python -c \
+            "import http.client; connection=http.client.HTTPConnection('127.0.0.1', 8000, timeout=5); connection.request('GET', '/readyz'); assert connection.getresponse().status == 503"
+          docker compose -f compose.production.yaml start worker
+          docker compose -f compose.production.yaml up -d --wait --wait-timeout 120 web
+          docker compose -f compose.production.yaml exec -T web python -c \
+            "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).status == 200"
+      - name: Stop disposable internal Compose runtime
+        if: always()
+        run: docker compose -f compose.production.yaml down -v

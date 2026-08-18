@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +46,14 @@ class Settings(BaseSettings):
         if value.startswith("postgres://"):
             return value.replace("postgres://", "postgresql+asyncpg://", 1)
         return value
+
+    @model_validator(mode="after")
+    def require_immutable_production_release(self) -> Settings:
+        """Reject ambiguous runtime identity in the production configuration."""
+        if self.environment == "production" and re.fullmatch(r"[0-9a-f]{40}", self.release) is None:
+            msg = "production RELEASE must be a full lowercase Git SHA"
+            raise ValueError(msg)
+        return self
 
 
 @lru_cache(maxsize=1)

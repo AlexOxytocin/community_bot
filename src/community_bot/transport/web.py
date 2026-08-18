@@ -9,6 +9,8 @@ import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -42,6 +44,7 @@ from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import AssignmentError
 from community_bot.domain.tasks import TaskError
 from community_bot.infrastructure.db.database import Database
+from community_bot.infrastructure.db.health import readiness_report
 
 _COOKIE_NAME = "__Host-community_session"
 _SESSION_SECONDS = 900
@@ -224,7 +227,12 @@ class LeaderboardDto(_Dto):
     items: tuple[LeaderboardItemDto, ...]
 
 
-def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
+def create_web_app(
+    *,
+    settings: Settings,
+    database: Database,
+    heartbeat_not_before: datetime.datetime | None = None,
+) -> FastAPI:
     """Build the web-only application after strict config validation."""
     bot_token, origin = _web_config(settings)
     registration = RegistrationService(database.unit_of_work)
@@ -232,7 +240,35 @@ def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
     tasks = TaskService(database.unit_of_work)
     assignments = AssignmentService(database.unit_of_work)
     moderation = ModerationService(database.unit_of_work)
-    app = FastAPI(docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await database.dispose()
+
+    app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
+    started_at = heartbeat_not_before or datetime.datetime.now(datetime.UTC)
+
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        return JSONResponse({"status": "alive"}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/readyz")
+    async def readyz() -> JSONResponse:
+        report = await readiness_report(
+            settings.database_url,
+            process_name="community-worker",
+            heartbeat_max_age=datetime.timedelta(seconds=settings.heartbeat_max_age_seconds),
+            expected_release=settings.release,
+            heartbeat_not_before=started_at,
+        )
+        return JSONResponse(
+            report.as_dict(),
+            status_code=200 if report.healthy else 503,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, _error: RequestValidationError) -> JSONResponse:
