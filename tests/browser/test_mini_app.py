@@ -208,6 +208,101 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         browser.close()
 
 
+def test_moderation_queue_loading_empty_closed_and_back_focus(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
+    mode: dict[str, Any] = {"name": "pending"}
+    pending: list[Route] = []
+    requests: list[tuple[str, str]] = []
+
+    def moderation_route(route: Route) -> None:
+        requests.append((route.request.method, route.request.url))
+        if mode["name"] == "pending":
+            pending.append(route)
+        elif mode["name"] == "empty":
+            route.fulfill(json={"items": []})
+        elif mode["name"] == "closed":
+            route.fulfill(status=403, json={"code": "moderation_unavailable"})
+        elif mode["name"] == "unauthorized":
+            route.fulfill(status=401, json={"code": "unauthorized"})
+        else:
+            route.abort()
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(json={"display_name": "Алекс"}),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route("**/api/v1/moderation/cases?*", moderation_route)
+
+        page.goto(mini_app_url + "#moderation")
+        moderation_nav = page.get_by_role("button", name="Модерация")
+        page.get_by_text("Загружаем открытые кейсы…").wait_for()
+        assert len(pending) == 1
+        pending.pop().fulfill(
+            json={
+                "items": [
+                    {
+                        "id": "00000000-0000-0000-0000-000000000061",
+                        "assignment_id": "00000000-0000-0000-0000-000000000062",
+                        "case_type": "dispute",
+                        "status": "appealed",
+                        "revision": 1,
+                        "current_code": malicious,
+                        "opened_at": "2026-08-17T20:00:00Z",
+                        "resolved_at": None,
+                        "reason": "PRIVATE_REASON",
+                        "evidence": "PRIVATE_EVIDENCE",
+                    }
+                ]
+            }
+        )
+        page.get_by_text("Спор по заданию").wait_for()
+        assert malicious in page.locator("body").inner_text()
+        assert "PRIVATE_REASON" not in page.locator("body").inner_text()
+        assert "PRIVATE_EVIDENCE" not in page.locator("body").inner_text()
+        assert page.locator("article button, article a, img, [onerror], [onclick]").count() == 0
+        assert page.locator("script").count() == 1
+
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+        assert moderation_nav.evaluate("node => node === document.activeElement")
+
+        mode["name"] = "empty"
+        moderation_nav.click()
+        page.get_by_text("Открытых кейсов нет.").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+
+        mode["name"] = "closed"
+        moderation_nav.click()
+        page.get_by_text("Очередь модерации недоступна для этого аккаунта.").wait_for()
+        assert "Moderator" not in page.locator("body").inner_text()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+
+        mode["name"] = "unauthorized"
+        moderation_nav.click()
+        page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+
+        mode["name"] = "network"
+        moderation_nav.click()
+        page.get_by_text("Не удалось загрузить очередь модерации.").wait_for()  # noqa: RUF001
+        assert page.get_by_role("button", name="Повторить").count() == 1
+        assert requests
+        assert all(method == "GET" for method, _url in requests)
+        browser.close()
+
+
 def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:

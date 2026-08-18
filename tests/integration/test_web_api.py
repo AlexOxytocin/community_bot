@@ -23,6 +23,7 @@ from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
+    AccountTransactionModel,
     AssignmentDisputeModel,
     AssignmentModel,
     AssignmentResultVersionModel,
@@ -33,7 +34,9 @@ from community_bot.infrastructure.db.models import (
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
     ReliabilityEventModel,
+    TaskCategoryModel,
     TaskModel,
+    TaskTemplateModel,
     WebSessionModel,
 )
 from community_bot.infrastructure.db.models import TestRunModel as DbTestRunModel
@@ -100,6 +103,226 @@ async def schema_snapshot(engine: AsyncEngine) -> tuple[set[str], dict[str, int]
             for table in tables - {"alembic_version"}
         }
     return tables, counts
+
+
+async def test_web_moderation_cases_authorizes_filters_and_projects_safe_queue(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    administrator = await active_member(database, 52_101)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    now = datetime.datetime.now(datetime.UTC)
+    async with sessions.begin() as session:
+        moderator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=52_102,
+            display_name="Moderator",
+            timezone="UTC",
+            role=MemberRole.MODERATOR.value,
+            status=MemberStatus.ACTIVE.value,
+        )
+        member = MemberModel(
+            id=uuid4(),
+            telegram_user_id=52_103,
+            display_name="Member",
+            timezone="UTC",
+            role=MemberRole.MEMBER.value,
+            status=MemberStatus.ACTIVE.value,
+        )
+        paused_moderator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=52_104,
+            display_name="Paused moderator",
+            timezone="UTC",
+            role=MemberRole.MODERATOR.value,
+            status=MemberStatus.PAUSED.value,
+        )
+        restricted_moderator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=52_105,
+            display_name="Restricted moderator",
+            timezone="UTC",
+            role=MemberRole.MODERATOR.value,
+            status=MemberStatus.RESTRICTED.value,
+        )
+        session.add_all((moderator, member, paused_moderator, restricted_moderator))
+        category = await session.scalar(select(TaskCategoryModel).limit(1))
+        template = await session.scalar(select(TaskTemplateModel).limit(1))
+        assert category is not None
+        assert template is not None
+        task = TaskModel(
+            origin="member",
+            template_id=template.id,
+            template_version=template.version,
+            creator_id=administrator.id,
+            author_display_name=administrator.display_name,
+            category_id=category.id,
+            title="Moderation queue fixture",
+            description="Safe public task.",
+            completion_criteria="Complete the task.",
+            materials_json={},
+            input_payload_json={},
+            credit_reward_per_performer=1,
+            performer_slots=4,
+            reserved_credit_total=4,
+            estimated_minutes=10,
+            minimum_level=1,
+            format="online",
+            deadline_at=now + datetime.timedelta(days=1),
+            status="settling",
+            safety_snapshot_json={},
+            publish_command_id=uuid4(),
+            published_at=now - datetime.timedelta(days=1),
+        )
+        session.add(task)
+        await session.flush()
+        performers = (moderator, member, paused_moderator, administrator)
+        assignments = [
+            AssignmentModel(
+                task_id=task.id,
+                performer_id=performer.id,
+                slot_number=index,
+                status="disputed",
+                accepted_at=now - datetime.timedelta(hours=2),
+            )
+            for index, performer in enumerate(performers, start=1)
+        ]
+        session.add_all(assignments)
+        await session.flush()
+        case_rows = (
+            (assignments[0], "fraud_review", "open", now - datetime.timedelta(minutes=4)),
+            (assignments[1], "dispute", "open", now - datetime.timedelta(minutes=3)),
+            (assignments[2], "dispute", "appealed", now - datetime.timedelta(minutes=2)),
+            (assignments[3], "dispute", "resolved", now - datetime.timedelta(minutes=1)),
+        )
+        cases = []
+        for assignment, case_type, status, opened_at in case_rows:
+            case = ModerationCaseModel(
+                assignment_id=assignment.id,
+                case_type=case_type,
+                status=status,
+                opened_by_member_id=moderator.id,
+                open_command_id=uuid4(),
+                open_payload_hash="PRIVATE_HASH",
+                reason="PRIVATE_REASON",
+                opened_at=opened_at,
+            )
+            session.add(case)
+            cases.append(case)
+        await session.flush()
+        fraud_id, visible_id, appealed_id, _resolved_id = (case.id for case in cases)
+
+    settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url)
+    app = create_web_app(settings=settings, database=database)
+
+    async def authenticate(telegram_user_id: int) -> str:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+            authenticated = await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+            assert authenticated.status_code == 204
+            token = client.cookies.get("__Host-community_session")
+            assert token is not None
+            return token
+
+    tokens = {
+        actor.telegram_user_id: await authenticate(actor.telegram_user_id)
+        for actor in (administrator, moderator, member, paused_moderator, restricted_moderator)
+    }
+
+    async def response_for(telegram_user_id: int, path: str) -> Response:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+            return await client.get(
+                path,
+                headers={"cookie": f"__Host-community_session={tokens[telegram_user_id]}"},
+            )
+
+    async def persistent_snapshot() -> tuple[tuple[int, ...], tuple[tuple[object, ...], ...]]:
+        async with sessions() as session:
+            values = []
+            for model in (
+                ProcessedTelegramUpdateModel,
+                AccountTransactionModel,
+                AuditEventModel,
+                OutboxEventModel,
+            ):
+                values.append(  # noqa: PERF401 - each scalar read must be awaited.
+                    int(await session.scalar(select(func.count()).select_from(model)) or 0)
+                )
+            stored_cases = tuple(
+                (
+                    case.id,
+                    case.status,
+                    case.revision,
+                    case.current_resolution_id,
+                    case.resolved_at,
+                    case.reason,
+                    case.open_payload_hash,
+                )
+                for case in (
+                    await session.scalars(
+                        select(ModerationCaseModel).order_by(ModerationCaseModel.id)
+                    )
+                ).all()
+            )
+            return tuple(values), stored_cases
+
+    before_state = await persistent_snapshot()
+
+    moderator_first = await response_for(
+        moderator.telegram_user_id, "/api/v1/moderation/cases?limit=1"
+    )
+    assert moderator_first.status_code == 200
+    assert moderator_first.headers["cache-control"] == "no-store"
+    assert [item["id"] for item in moderator_first.json()["items"]] == [str(visible_id)]
+    moderator_page = await response_for(
+        moderator.telegram_user_id, "/api/v1/moderation/cases?limit=2"
+    )
+    assert [item["id"] for item in moderator_page.json()["items"]] == [
+        str(visible_id),
+        str(appealed_id),
+    ]
+    administrator_first = await response_for(
+        administrator.telegram_user_id, "/api/v1/moderation/cases?limit=1"
+    )
+    assert [item["id"] for item in administrator_first.json()["items"]] == [str(fraud_id)]
+
+    allowlist = {
+        "id",
+        "assignment_id",
+        "case_type",
+        "status",
+        "revision",
+        "current_code",
+        "opened_at",
+        "resolved_at",
+    }
+    assert set(moderator_first.json()["items"][0]) == allowlist
+    serialized = moderator_page.text.lower()
+    for forbidden in ("private_reason", "private_hash", "evidence", "telegram", "audit", "outbox"):
+        assert forbidden not in serialized
+
+    for actor in (member, paused_moderator, restricted_moderator):
+        denied = await response_for(actor.telegram_user_id, "/api/v1/moderation/cases")
+        assert denied.status_code == 403
+        assert denied.json() == {"code": "moderation_unavailable"}
+        assert denied.headers["cache-control"] == "no-store"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        anonymous = await client.get("/api/v1/moderation/cases")
+    assert anonymous.status_code == 401
+    assert anonymous.json() == {"code": "unauthorized"}
+    for invalid_limit in (0, 51):
+        invalid = await response_for(
+            moderator.telegram_user_id,
+            f"/api/v1/moderation/cases?limit={invalid_limit}",
+        )
+        assert invalid.status_code == 422
+        assert invalid.json() == {"code": "invalid_request"}
+
+    assert await persistent_snapshot() == before_state
 
 
 async def migrate(database_url: str, revision: str) -> None:

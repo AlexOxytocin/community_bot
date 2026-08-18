@@ -108,14 +108,20 @@ class SqlAlchemyModerationMutation:
             after_cache_flushed=after_cache_flushed,
         )
 
-    async def list_cases(self, *, limit: int = 20) -> tuple[ModerationCase, ...]:
+    async def list_cases(
+        self, *, limit: int = 20, include_fraud_review: bool = True
+    ) -> tuple[ModerationCase, ...]:
         """List current open or appealed cases without private evidence."""
+        statement = select(ModerationCaseModel).where(
+            ModerationCaseModel.status.in_(("open", "appealed"))
+        )
+        if not include_fraud_review:
+            statement = statement.where(ModerationCaseModel.case_type != "fraud_review")
         models = (
             await self._session.scalars(
-                select(ModerationCaseModel)
-                .where(ModerationCaseModel.status.in_(("open", "appealed")))
-                .order_by(ModerationCaseModel.opened_at, ModerationCaseModel.id)
-                .limit(limit)
+                statement.order_by(ModerationCaseModel.opened_at, ModerationCaseModel.id).limit(
+                    limit
+                )
             )
         ).all()
         return tuple([await self._case(model) for model in models])
