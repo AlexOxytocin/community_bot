@@ -70,9 +70,10 @@ schema-changing rollout требуют отдельного owner-authorized gat
 ## Post-task delivery
 
 Принятый [ADR-0019](../adr/0019-single-pilot-post-task-delivery-gate.md)
-связывает каждый deployable merge с exact immutable artifact, manual-first
-activation на одном pilot, public URL smoke и Jira evidence. Docs/tests/
-`tasks/**`-only задачи получают явный skip. Migration-changing release требует
-owner gate; `Done` до green public smoke допускается только по явному
-документированному waiver. Deliveries выполняются последовательно, с одним
-compatible rollback и без automatic CD/SSH framework.
+связывает каждую продуктовую задачу после merge, а также любую задачу с runtime
+diff, с новым exact immutable artifact, manual-first production activation на
+одном pilot, public URL smoke и Jira evidence. Только process/docs-only задача
+без runtime diff получает явный skip. Migration-changing release требует owner
+gate; `Done` до green public smoke запрещён без исключений. Deliveries
+выполняются последовательно, с одним compatible rollback и без automatic
+CD/SSH framework.

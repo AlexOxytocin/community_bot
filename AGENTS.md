@@ -51,6 +51,30 @@
   merge после успешных gates. Перед повтором потенциально частично выполненной
   операции проверить внешнее состояние и исключить дубликат.
 
+## Fail-closed граница Оркестратора
+
+- Пользовательский поток «Оркестратор» только координирует. Его закрытый
+  allowlist: read-only анализ портфеля, зависимостей и состояния; создание и
+  приоритизация Jira-задач; запуск, остановка и read-only monitoring видимых
+  task-thread; compact handoff и successor-thread; запрос owner decision и
+  сводный статус.
+- Оркестратор не пишет код или документацию, не создаёт task artifacts, не
+  выполняет тесты, работу Jira-задачи, Git-операции задачи, PR/merge,
+  release/deploy и terminal Jira transition. Любое действие вне allowlist или
+  неоднозначное действие считается execution и блокируется.
+- State-changing работу конкретной Jira-задачи выполняет только отдельный
+  видимый task-thread с её ключом. Внутренний subagent не является таким
+  потоком и допустим только внутри соответствующего task-thread.
+- Если task-thread завершился, заблокирован или потерял контекст, Оркестратор
+  создаёт successor-thread с compact handoff для того же Jira key и ветки;
+  takeover запрещён. Инвариант: один Jira key → один текущий видимый task-thread
+  → одна ветка `task/<ISSUE-KEY>`.
+- Каждая продуктовая задача, а также любая задача с runtime diff, после merge в
+  `main` требует в своём task-thread нового immutable release, production
+  activation и public smoke; Jira `Done` допустим только после green smoke.
+  Только process/docs-only задача без runtime diff получает deploy skip.
+  Оркестратор лишь контролирует этот gate.
+
 ## Jira
 
 - Канонический доступ: Atlassian Rovo MCP; локальные токены Jira API не создавать.

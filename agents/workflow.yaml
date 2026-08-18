@@ -23,6 +23,25 @@ source_of_truth:
   durable_knowledge: git_docs
   retrieval_index: mempalace_community_bot
 
+execution_boundary:
+  policy_ref: agents/config.yaml#/orchestration_policy/orchestrator_boundary
+  orchestrator_actions: allowlist_only
+  unspecified_or_ambiguous_action: execution_and_blocked
+  jira_task_execution_owner: matching_user_visible_task_thread
+  existing_jira_issue_execution_state_changes: matching_user_visible_task_thread_only
+  subagent_replaces_user_visible_task_thread: false
+  recovery: successor_with_compact_handoff_without_orchestrator_takeover
+  identity: one_issue_one_current_visible_task_thread_one_task_branch
+  delivery:
+    delivery_when_any:
+      - product_task
+      - any_runtime_diff
+    required_steps_after_main_merge: new_release_activation_and_public_smoke
+    jira_done_requires_green_public_smoke: true
+    process_or_docs_only_without_runtime_diff: skip
+    owner: matching_user_visible_task_thread
+    orchestrator: monitor_only
+
 jira_first:
   required_for:
     - bug
@@ -269,24 +288,19 @@ phases:
 
 post_merge_delivery:
   decision: ADR-0019
-  deploy_when_diff_contains:
-    - deployable_code
-    - runtime_config
-    - migrations
-    - frontend
-  skip_when_diff_contains_only:
-    - docs
-    - tests
-    - task_artifacts
+  delivery_when_any:
+    - product_task
+    - any_runtime_diff
+  skip_only_when: process_or_docs_only_task_without_runtime_diff
   sequence:
     - merge_and_green_main_ci
-    - exact_immutable_release_artifact
-    - manual_first_single_pilot_activation
+    - new_exact_immutable_release_artifact
+    - manual_first_single_pilot_production_activation
     - public_url_smoke
     - privacy_safe_jira_evidence
   migration_change_requires_owner_gate: true
-  done_requires: successful_public_smoke_or_documented_owner_waiver
-  blocker_without_waiver_is_done: false
+  done_requires: successful_public_smoke
+  done_without_public_smoke: forbidden
   compatible_rollback_tuples: 1
   delivery_is_serialized: true
   supersession_requires_monotonic_artifact_and_both_smoke_scopes: true
