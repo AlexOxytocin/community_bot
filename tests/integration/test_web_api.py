@@ -22,6 +22,7 @@ from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
+from community_bot.domain.notifications import DeliveryWindow
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -32,8 +33,10 @@ from community_bot.infrastructure.db.models import (
     AuditEventModel,
     ConversationStateModel,
     DisputeEvidenceModel,
+    DisputeResolutionModel,
     MemberModel,
     ModerationCaseModel,
+    NotificationModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
     ReliabilityEventModel,
@@ -47,8 +50,11 @@ from community_bot.infrastructure.db.models import TestRunModel as DbTestRunMode
 from community_bot.infrastructure.db.models import (
     TestRunParticipantModel as DbTestRunParticipantModel,
 )
+from community_bot.infrastructure.outbox.postgres import PostgresNotificationQueue
 from community_bot.transport.web import _accept_update_id, _submission_update_id, create_web_app
 from tests.integration.test_assignments import _community_task, _freeform_task, _published_task
+from tests.integration.test_moderation import _open_dispute_fixture
+from tests.integration.test_reputation import add_member, prepare_config
 from tests.integration.test_task_creation import prepare_member
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -266,7 +272,15 @@ async def test_web_moderation_cases_authorizes_filters_and_projects_safe_queue(
             role=MemberRole.MODERATOR.value,
             status=MemberStatus.RESTRICTED.value,
         )
-        session.add_all((moderator, member, paused_moderator, restricted_moderator))
+        creator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=52_106,
+            display_name="Creator",
+            timezone="UTC",
+            role=MemberRole.MEMBER.value,
+            status=MemberStatus.ACTIVE.value,
+        )
+        session.add_all((moderator, member, paused_moderator, restricted_moderator, creator))
         category = await session.scalar(select(TaskCategoryModel).limit(1))
         template = await session.scalar(select(TaskTemplateModel).limit(1))
         assert category is not None
@@ -275,8 +289,8 @@ async def test_web_moderation_cases_authorizes_filters_and_projects_safe_queue(
             origin="member",
             template_id=template.id,
             template_version=template.version,
-            creator_id=administrator.id,
-            author_display_name=administrator.display_name,
+            creator_id=creator.id,
+            author_display_name=creator.display_name,
             category_id=category.id,
             title="Moderation queue fixture",
             description="Safe public task.",
@@ -313,7 +327,7 @@ async def test_web_moderation_cases_authorizes_filters_and_projects_safe_queue(
         case_rows = (
             (assignments[0], "fraud_review", "open", now - datetime.timedelta(minutes=4)),
             (assignments[1], "dispute", "open", now - datetime.timedelta(minutes=3)),
-            (assignments[2], "dispute", "appealed", now - datetime.timedelta(minutes=2)),
+            (assignments[2], "dispute", "open", now - datetime.timedelta(minutes=2)),
             (assignments[3], "dispute", "resolved", now - datetime.timedelta(minutes=1)),
         )
         cases = []
@@ -443,7 +457,223 @@ async def test_web_moderation_cases_authorizes_filters_and_projects_safe_queue(
         assert invalid.status_code == 422
         assert invalid.json() == {"code": "invalid_request"}
 
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        fraud_mutation = await client.post(
+            f"/api/v1/moderation/cases/{fraud_id}/resolution",
+            headers={
+                "cookie": (f"__Host-community_session={tokens[administrator.telegram_user_id]}"),
+                "origin": ORIGIN,
+                "idempotency-key": "750001",
+            },
+            json={
+                "expected_revision": 0,
+                "code": "fraud",
+                "reason": "Этот route не обслуживает fraud review.",
+            },
+        )
+    assert fraud_mutation.status_code == 409
+
     assert await persistent_snapshot() == before_state
+
+
+async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    administrator = await add_member(database, 52_120, role=MemberRole.ADMINISTRATOR)
+    await prepare_config(database, administrator.id)
+    moderator = await add_member(database, 52_121, role=MemberRole.MODERATOR)
+    creator = await add_member(database, 52_122)
+    performer = await add_member(database, 52_123)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        run = DbTestRunModel(marker="TEST-MODERATION-RESOLUTION", started_by_member_id=moderator.id)
+        session.add(run)
+        await session.flush()
+        session.add_all(
+            (
+                DbTestRunParticipantModel(run_id=run.id, member_id=moderator.id),
+                DbTestRunParticipantModel(run_id=run.id, member_id=performer.id),
+                DbTestRunParticipantModel(run_id=run.id, member_id=creator.id, is_active=False),
+            )
+        )
+    case = await _open_dispute_fixture(database, creator, performer, test_run_id=run.id)
+    async with sessions.begin() as session:
+        assignment = await session.get(AssignmentModel, case.assignment_id)
+        assert assignment is not None
+        session.add(
+            AssignmentResultVersionModel(
+                assignment_id=assignment.id,
+                version=1,
+                payload_json={
+                    "result": "Безопасный итог",
+                    "private": "НЕ ПОКАЗЫВАТЬ",  # noqa: RUF001
+                },
+                submit_command_id=uuid4(),
+            )
+        )
+
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+
+    async def token(member: MemberModel) -> str:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+            response = await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(member.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+            assert response.status_code == 204
+            value = client.cookies.get("__Host-community_session")
+            assert value is not None
+            return value
+
+    moderator_token = await token(moderator)
+    creator_token = await token(creator)
+    administrator_token = await token(administrator)
+    headers = {"cookie": f"__Host-community_session={moderator_token}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        hidden = await client.get(
+            f"/api/v1/moderation/cases/{case.id}",
+            headers={"cookie": f"__Host-community_session={creator_token}"},
+        )
+        assert hidden.status_code == 404
+        outside_scope = await client.get(
+            f"/api/v1/moderation/cases/{case.id}",
+            headers={"cookie": f"__Host-community_session={administrator_token}"},
+        )
+        assert outside_scope.status_code == 404
+        detail = await client.get(f"/api/v1/moderation/cases/{case.id}", headers=headers)
+        assert detail.status_code == 200
+        assert detail.headers["cache-control"] == "no-store"
+        assert detail.json() == {
+            "id": str(case.id),
+            "status": "open",
+            "revision": 0,
+            "task_title": "Disputed task",
+            "task_origin": "member",
+            "credit_reward_per_performer": 2,
+            "assignment_status": "disputed",
+            "result_summary": "Безопасный итог",
+            "dispute_reason": "The rejection is disputed.",
+            "allowed_resolution_codes": [
+                "full_payment",
+                "partial_payment",
+                "full_refund",
+                "cancel_without_fault",
+                "performer_no_show",
+                "creator_abuse",
+            ],
+            "opened_at": case.opened_at.isoformat().replace("+00:00", "Z"),
+        }
+        assert "НЕ ПОКАЗЫВАТЬ" not in detail.text  # noqa: RUF001
+        request_headers = headers | {"origin": ORIGIN, "idempotency-key": "751001"}
+        payload = {
+            "expected_revision": 0,
+            "code": "partial_payment",
+            "reason": "Подтверждена половина результата.",
+        }
+        first = await client.post(
+            f"/api/v1/moderation/cases/{case.id}/resolution",
+            headers=request_headers,
+            json=payload,
+        )
+        replay = await client.post(
+            f"/api/v1/moderation/cases/{case.id}/resolution",
+            headers=request_headers,
+            json=payload,
+        )
+        conflict = await client.post(
+            f"/api/v1/moderation/cases/{case.id}/resolution",
+            headers=request_headers,
+            json=payload | {"reason": "Другой payload."},
+        )
+        stale = await client.post(
+            f"/api/v1/moderation/cases/{case.id}/resolution",
+            headers=headers | {"origin": ORIGIN, "idempotency-key": "751002"},
+            json=payload,
+        )
+        assert first.status_code == replay.status_code == 204
+        assert conflict.status_code == stale.status_code == 409
+
+    async with sessions() as session:
+        stored_case = await session.get(ModerationCaseModel, case.id)
+        assignment = await session.get(AssignmentModel, case.assignment_id)
+        assert stored_case is not None
+        assert stored_case.status == "resolved"
+        assert stored_case.revision == 1
+        assert assignment is not None
+        assert assignment.status == "partially_approved"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DisputeResolutionModel)
+                .where(DisputeResolutionModel.case_id == case.id)
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ReliabilityEventModel)
+                .where(
+                    ReliabilityEventModel.assignment_id == case.assignment_id,
+                    ReliabilityEventModel.event_type != "accepted",
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(OutboxEventModel)
+                .where(OutboxEventModel.business_key == f"moderation-case:{case.id}:resolution:1")
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ProcessedTelegramUpdateModel)
+                .where(ProcessedTelegramUpdateModel.update_type == "moderation")
+            )
+            == 1
+        )
+        event = await session.scalar(
+            select(OutboxEventModel).where(
+                OutboxEventModel.business_key == f"moderation-case:{case.id}:resolution:1"
+            )
+        )
+        assert event is not None
+        await session.execute(
+            update(OutboxEventModel)
+            .where(OutboxEventModel.id != event.id)
+            .values(
+                next_attempt_at=datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
+            )
+        )
+    queue = PostgresNotificationQueue(database.session_factory)
+    materialized_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1)
+    claims = await queue.claim_outbox(
+        now=materialized_at,
+        limit=1,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+    assert len(claims) == 1
+    assert claims[0].aggregate_id == case.id
+    await queue.materialize(claims[0], now=materialized_at, window=DeliveryWindow())
+    async with sessions() as session:
+        recipients = set(
+            await session.scalars(
+                select(NotificationModel.member_id).where(
+                    NotificationModel.notification_type == "moderation_case_resolved"
+                )
+            )
+        )
+        assert recipients == {performer.id}
+    await database.dispose()
 
 
 async def migrate(database_url: str, revision: str) -> None:

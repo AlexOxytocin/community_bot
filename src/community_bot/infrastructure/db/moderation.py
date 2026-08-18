@@ -15,6 +15,7 @@ from sqlalchemy import and_, func, or_, select, text
 from community_bot.application.moderation import (
     InteractionAlert,
     ModerationCase,
+    ModerationCaseDetail,
     PaidAssignment,
     ResolutionPreview,
     ResolveCaseCommand,
@@ -43,6 +44,7 @@ from community_bot.domain.moderation import (
     risk_signal_key,
     validate_sanction,
 )
+from community_bot.infrastructure.db.assignments import _cards as assignment_cards
 from community_bot.infrastructure.db.economy import SqlAlchemyEconomyMutation
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -68,6 +70,7 @@ from community_bot.infrastructure.db.models import (
     SanctionEventModel,
     TaskModel,
 )
+from community_bot.infrastructure.db.test_runs import active_scope
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -109,22 +112,66 @@ class SqlAlchemyModerationMutation:
         )
 
     async def list_cases(
-        self, *, limit: int = 20, include_fraud_review: bool = True
+        self, *, actor: Member, limit: int = 20, include_fraud_review: bool = True
     ) -> tuple[ModerationCase, ...]:
         """List current open or appealed cases without private evidence."""
-        statement = select(ModerationCaseModel).where(
-            ModerationCaseModel.status.in_(("open", "appealed"))
+        _require_staff(actor)
+        scope = await active_scope(self._session, actor.id)
+        test_scope = (
+            TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+        )
+        statement = (
+            select(ModerationCaseModel, AssignmentModel, TaskModel)
+            .join(AssignmentModel, AssignmentModel.id == ModerationCaseModel.assignment_id)
+            .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+            .where(ModerationCaseModel.status.in_(("open", "appealed")), test_scope)
+            .order_by(ModerationCaseModel.opened_at, ModerationCaseModel.id)
         )
         if not include_fraud_review:
             statement = statement.where(ModerationCaseModel.case_type != "fraud_review")
-        models = (
-            await self._session.scalars(
-                statement.order_by(ModerationCaseModel.opened_at, ModerationCaseModel.id).limit(
-                    limit
+        visible = []
+        rows = await self._session.stream(statement.execution_options(yield_per=max(limit, 20)))
+        async for case, assignment, task in rows:
+            try:
+                await self._reject_conflict(
+                    actor, assignment, task, case, 1 if case.status == "open" else 2
                 )
-            )
-        ).all()
-        return tuple([await self._case(model) for model in models])
+            except PermissionError:
+                continue
+            visible.append(await self._case(case))
+            if len(visible) == limit:
+                break
+        return tuple(visible)
+
+    async def case_detail(self, case_id: uuid.UUID, actor: Member) -> ModerationCaseDetail:
+        """Return the safe initial-dispute projection and server-owned outcomes."""
+        case, assignment, task = await self._case_context(case_id, actor)
+        if case.case_type != "dispute" or case.status != "open":
+            raise LookupError("Moderation dispute is not awaiting an initial resolution.")
+        cards = await assignment_cards(
+            self._session,
+            AssignmentModel.id == assignment.id,
+            scope_member_id=actor.id,
+            assignment_id=assignment.id,
+        )
+        if not cards:
+            raise PermissionError("Moderation case is outside the actor test scope.")
+        card = cards[0]
+        return ModerationCaseDetail(
+            case=await self._case(case),
+            task_title=card.task_title,
+            task_origin=card.task_origin,
+            credit_reward_per_performer=card.task.credit_reward_per_performer,
+            assignment_status=card.assignment.status.value,
+            result_summary=card.result_summary,
+            dispute_reason=case.reason,
+            allowed_resolution_codes=self._allowed_resolution_codes(actor, task, case),
+        )
+
+    async def replay_web_resolution(self, case_id: uuid.UUID, actor: Member) -> ModerationCase:
+        """Replay a web outcome only inside the actor's current safe case scope."""
+        case, _assignment, _task = await self._case_context(case_id, actor)
+        return await self._case(case)
 
     async def list_paid_assignments(self, *, limit: int = 20) -> tuple[PaidAssignment, ...]:
         """List paid assignments without exposing private result payloads."""
@@ -325,6 +372,8 @@ class SqlAlchemyModerationMutation:
         )
         if case is None:
             raise LookupError("Moderation case does not exist.")
+        if command.initial_dispute_only and (case.case_type != "dispute" or case.status != "open"):
+            raise ModerationError("Web moderation accepts only an initial dispute resolution.")
         if case.revision != command.expected_revision:
             raise ModerationError("Moderation case revision is stale.")
         version = 1 if case.status == "open" else 2 if case.status == "appealed" else 0
@@ -346,6 +395,7 @@ class SqlAlchemyModerationMutation:
         task = await self._session.get(TaskModel, assignment.task_id)
         if task is None:
             raise LookupError("Case task does not exist.")
+        await self._require_test_scope(actor.id, task)
         await self._reject_conflict(actor, assignment, task, case, version)
         if (
             case.case_type == "fraud_review"
@@ -854,6 +904,48 @@ class SqlAlchemyModerationMutation:
         if case is None:
             raise LookupError("Moderation case does not exist.")
         await _gate(self._session, _CASE_GATE, case.assignment_id)
+
+    async def _case_context(
+        self, case_id: uuid.UUID, actor: Member
+    ) -> tuple[ModerationCaseModel, AssignmentModel, TaskModel]:
+        """Load one case and enforce staff, test-run, and conflict boundaries."""
+        _require_staff(actor)
+        case = await self._session.get(ModerationCaseModel, case_id)
+        if case is None:
+            raise LookupError("Moderation case does not exist.")
+        assignment = await self._session.get(AssignmentModel, case.assignment_id)
+        if assignment is None:
+            raise LookupError("Case assignment does not exist.")
+        task = await self._session.get(TaskModel, assignment.task_id)
+        if task is None:
+            raise LookupError("Case task does not exist.")
+        await self._require_test_scope(actor.id, task)
+        await self._reject_conflict(
+            actor, assignment, task, case, 1 if case.status != "appealed" else 2
+        )
+        return case, assignment, task
+
+    async def _require_test_scope(self, actor_id: uuid.UUID, task: TaskModel) -> None:
+        scope = await active_scope(self._session, actor_id)
+        if task.test_run_id != (None if scope is None else scope.id):
+            raise PermissionError("Moderation case is outside the actor test scope.")
+
+    @staticmethod
+    def _allowed_resolution_codes(
+        actor: Member, task: TaskModel, case: ModerationCaseModel
+    ) -> tuple[ResolutionCode, ...]:
+        if case.case_type == "fraud_review":
+            return (ResolutionCode.FRAUD,) if actor.role is MemberRole.ADMINISTRATOR else ()
+        codes = []
+        for code in ResolutionCode:
+            if code is ResolutionCode.FRAUD and actor.role is not MemberRole.ADMINISTRATOR:
+                continue
+            try:
+                resolution_effect(code, origin=task.origin)
+            except ModerationError:
+                continue
+            codes.append(code)
+        return tuple(codes)
 
     async def _fraud_sources(self, assignment_id: uuid.UUID) -> tuple[AccountTransactionModel, ...]:
         """Return every immutable positive payout eligible for exact reversal."""

@@ -17,6 +17,7 @@ let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
 let returnFocusReviewId = null;
 let returnFocusModeration = false;
+let returnFocusModerationCaseId = null;
 let returnFocusProfile = false;
 let screenRevision = 0;
 
@@ -885,6 +886,16 @@ const moderationStatus = (value) => ({
   appealed: "Обжалован",
 }[value] || value);
 
+const resolutionLabels = {
+  full_payment: "Полная выплата",
+  partial_payment: "Частичная выплата",
+  full_refund: "Полный возврат",
+  cancel_without_fault: "Отмена без вины сторон",
+  performer_no_show: "Неявка исполнителя",
+  creator_abuse: "Нарушение со стороны автора",
+  fraud: "Мошенничество",
+};
+
 const moderationError = (code, retry) => {
   if (code === "session_expired") {
     return [element("p", "Сессия истекла. Закройте и снова откройте Mini App.", "status")];
@@ -920,8 +931,11 @@ async function loadModeration(push = true) {
       return;
     }
     const list = element("ul", undefined, "list");
+    let focusTarget = null;
     for (const item of cases) {
-      const card = element("article", undefined, "card");
+      const actionable = item.case_type === "dispute" && item.status === "open";
+      const card = element(actionable ? "button" : "article", undefined, "card");
+      if (actionable) card.type = "button";
       const opened = element("p", "Открыт: ", "meta");
       opened.append(time(item.opened_at));
       card.append(
@@ -932,17 +946,152 @@ async function loadModeration(push = true) {
       if (item.current_code) {
         card.append(element("p", "Текущее решение: " + item.current_code, "meta"));
       }
+      if (actionable) {
+        card.addEventListener("click", () => showModerationCase(item.id));
+        if (item.id === returnFocusModerationCaseId) focusTarget = card;
+      }
       const row = element("li");
       row.append(card);
       list.append(row);
     }
     replaceContent(list);
+    focusTarget?.focus();
+    returnFocusModerationCaseId = null;
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadModeration(false));
     replaceContent(...moderationError(error.message, retry));
+  }
+}
+
+async function showModerationCase(caseId, push = true) {
+  const revision = ++screenRevision;
+  returnFocusModerationCaseId = caseId;
+  if (push) {
+    history.pushState(
+      { screen: "moderation-case", caseId },
+      "",
+      "#moderation-case/" + caseId,
+    );
+  }
+  setNavigation("moderation");
+  title.textContent = "Решение по спору";
+  back.classList.remove("hidden");
+  replaceContent(element("p", "Загружаем спор…", "status muted"));
+  back.focus();
+  try {
+    const dispute = await getJson(
+      "/api/v1/moderation/cases/" + encodeURIComponent(caseId),
+    );
+    if (revision !== screenRevision) return;
+    const detail = element("article", undefined, "card detail");
+    detail.append(
+      element("h3", dispute.task_title),
+      section("Источник", dispute.task_origin === "community" ? "Сообщество" : "Участник"),
+      section("Награда", String(dispute.credit_reward_per_performer) + " кредитов"),
+      section("Причина спора", dispute.dispute_reason),
+    );
+    if (dispute.result_summary) detail.append(section("Результат", dispute.result_summary));
+
+    const form = element("form", undefined, "submission");
+    const label = element("label", "Решение");
+    const select = element("select");
+    select.name = "resolution";
+    for (const code of dispute.allowed_resolution_codes) {
+      const option = element("option", resolutionLabels[code] || code);
+      option.value = code;
+      select.append(option);
+    }
+    label.append(select);
+    const reasonLabel = element("label", "Причина решения");
+    const reason = element("textarea");
+    reason.name = "reason";
+    reason.required = true;
+    reason.rows = 4;
+    reasonLabel.append(reason);
+    const status = element("p", "", "status hidden");
+    status.setAttribute("aria-live", "polite");
+    const review = element("button", "Проверить решение", "primary");
+    review.type = "submit";
+    form.append(label, reasonLabel, review, status);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const normalizedReason = reason.value.trim();
+      if (!normalizedReason) {
+        reason.focus();
+        return;
+      }
+      select.disabled = true;
+      reason.disabled = true;
+      review.remove();
+      const confirmation = section(
+        "Подтверждение",
+        (resolutionLabels[select.value] || select.value) + ". " + normalizedReason,
+      );
+      const edit = element("button", "Изменить");
+      edit.type = "button";
+      const confirm = element("button", "Подтвердить решение", "primary");
+      confirm.type = "button";
+      let operationKey = null;
+      edit.addEventListener("click", () => {
+        confirmation.remove();
+        edit.remove();
+        confirm.remove();
+        select.disabled = false;
+        reason.disabled = false;
+        status.className = "status hidden";
+        form.insertBefore(review, status);
+        reason.focus();
+      });
+      confirm.addEventListener("click", async () => {
+        edit.disabled = true;
+        confirm.disabled = true;
+        status.className = "status";
+        status.textContent = "Применяем решение…";
+        operationKey ||= newOperationKey();
+        try {
+          await submissionRequest(
+            "/api/v1/moderation/cases/" + encodeURIComponent(caseId) + "/resolution",
+            "POST",
+            operationKey,
+            {
+              expected_revision: dispute.revision,
+              code: select.value,
+              reason: normalizedReason,
+            },
+          );
+          history.back();
+        } catch (error) {
+          status.textContent = error?.status === 409
+            ? "Кейс уже изменился или больше недоступен. Вернитесь в очередь."
+            : "Не удалось применить решение. Повторите запрос — ключ останется тем же.";
+          if (!retryableSubmissionError(error)) operationKey = null;
+          edit.disabled = false;
+          confirm.disabled = false;
+          confirm.focus();
+        }
+      });
+      form.insertBefore(confirmation, status);
+      form.insertBefore(edit, status);
+      form.insertBefore(confirm, status);
+      confirm.focus();
+    });
+    detail.append(form);
+    replaceContent(detail);
+    select.focus();
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    replaceContent(
+      element(
+        "p",
+        error.message === "not_found"
+          ? "Спор больше не доступен для решения."
+          : "Не удалось загрузить спор. Вернитесь в очередь и повторите.",
+        "status",
+      ),
+    );
   }
 }
 
@@ -1007,6 +1156,8 @@ globalThis.addEventListener("popstate", (event) => {
     loadProfile(false);
   } else if (event.state?.screen === "moderation") {
     loadModeration(false);
+  } else if (event.state?.screen === "moderation-case") {
+    showModerationCase(event.state.caseId, false);
   } else if (event.state?.screen === "task-creation") {
     openTaskCreation(false, false);
   } else {
