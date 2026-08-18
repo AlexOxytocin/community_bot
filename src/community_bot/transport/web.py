@@ -11,7 +11,7 @@ import json
 import secrets
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
@@ -23,7 +23,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-from community_bot.application.assignments import AcceptAssignmentCommand, AssignmentService
+from community_bot.application.assignments import (
+    AcceptAssignmentCommand,
+    AssignmentCard,
+    AssignmentService,
+)
 from community_bot.application.identity import ActorContext
 from community_bot.application.registration import RegistrationService
 from community_bot.application.reputation import (
@@ -152,6 +156,42 @@ class AssignmentDto(_Dto):
     slot_number: int
     status: str
     accepted_at: datetime.datetime
+
+
+class AssignmentCardDto(_Dto):
+    id: UUID
+    task_id: UUID
+    task_title: str
+    task_origin: str
+    assignment_status: str
+    accepted_at: datetime.datetime
+    submitted_at: datetime.datetime | None
+    review_deadline_at: datetime.datetime | None
+    reject_dispute_deadline_at: datetime.datetime | None
+    reviewed_at: datetime.datetime | None
+    task_deadline_at: datetime.datetime
+    result_summary: str | None
+    case_status: str | None
+
+
+class AssignmentsDto(_Dto):
+    items: tuple[AssignmentCardDto, ...]
+    next_cursor: str | None
+
+
+class AssignmentDetailDto(AssignmentCardDto):
+    category_name: str | None
+    category_icon: str | None
+    task_kind: str | None
+    time_size: str | None
+    description: str
+    performer_instructions: str
+    completion_criteria: str
+    reward_per_performer: int
+    format: str
+    city: str | None
+    minimum_level: int
+    performer_slots: int
 
 
 class LeaderboardItemDto(_Dto):
@@ -364,6 +404,45 @@ def create_web_app(*, settings: Settings, database: Database) -> FastAPI:
             )
         )
 
+    @app.get("/api/v1/assignments", response_model=AssignmentsDto)
+    async def active_assignments(
+        actor: ActorContext = Depends(current_actor),
+        status: Literal["active"] = "active",
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+        cursor: str | None = None,
+    ) -> JSONResponse:
+        del status
+        try:
+            page = await assignments.active_cards(
+                actor=actor,
+                limit=limit,
+                cursor=_parse_assignment_cursor(cursor),
+            )
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        except PermissionError:
+            return _error_response(403, "assignment_unavailable")
+        return _json_response(
+            AssignmentsDto(
+                items=tuple(_assignment_card_dto(item) for item in page.items),
+                next_cursor=None
+                if page.next_cursor is None
+                else _assignment_cursor(page.next_cursor),
+            )
+        )
+
+    @app.get("/api/v1/assignments/{assignment_id}", response_model=AssignmentDetailDto)
+    async def assignment_detail(
+        assignment_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> JSONResponse:
+        try:
+            card = await assignments.active_card(actor=actor, assignment_id=assignment_id)
+        except PermissionError:
+            return _error_response(403, "assignment_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_assignment_detail_dto(card))
+
     @app.post(
         "/api/v1/tasks/{task_id}/assignments",
         response_model=AssignmentDto,
@@ -562,6 +641,35 @@ def _accept_update_id(member_id: UUID, task_id: UUID, operation_key: str) -> int
     return resolved or 1
 
 
+def _assignment_cursor(cursor: tuple[datetime.datetime, UUID]) -> str:
+    accepted_at, assignment_id = cursor
+    timestamp = accepted_at.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+    raw = f"{timestamp}|{assignment_id}".encode("ascii")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _parse_assignment_cursor(value: str | None) -> tuple[datetime.datetime, UUID] | None:
+    if value is None:
+        return None
+    if not value.isascii() or not value or len(value) > 128 or "=" in value:
+        raise ValueError("Invalid assignment cursor.")
+    try:
+        raw = base64.b64decode(
+            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
+        ).decode("ascii")
+        timestamp, raw_id = raw.split("|", 1)
+        accepted_at = datetime.datetime.fromisoformat(timestamp)
+        assignment_id = UUID(raw_id)
+    except (binascii.Error, UnicodeDecodeError, ValueError) as error:
+        raise ValueError("Invalid assignment cursor.") from error
+    if accepted_at.utcoffset() != datetime.timedelta(0) or str(assignment_id) != raw_id:
+        raise ValueError("Invalid assignment cursor.")
+    parsed = (accepted_at.astimezone(datetime.UTC), assignment_id)
+    if _assignment_cursor(parsed) != value:
+        raise ValueError("Invalid assignment cursor.")
+    return parsed
+
+
 def _session_digest(token: str | None) -> bytes | None:
     if token is None or len(token) != 43:
         return None
@@ -639,6 +747,45 @@ def _task_dto(task: PublishedTask) -> TaskDto:
             for key in task.public_input_keys
             if key in task.input_payload
         },
+    )
+
+
+def _assignment_card_dto(card: AssignmentCard) -> AssignmentCardDto:
+    assignment = card.assignment
+    return AssignmentCardDto(
+        id=assignment.id,
+        task_id=assignment.task_id,
+        task_title=card.task_title,
+        task_origin=card.task_origin,
+        assignment_status=assignment.status.value,
+        accepted_at=assignment.accepted_at,
+        submitted_at=assignment.submitted_at,
+        review_deadline_at=assignment.review_deadline_at,
+        reject_dispute_deadline_at=assignment.reject_dispute_deadline_at,
+        reviewed_at=assignment.reviewed_at,
+        task_deadline_at=card.task.deadline_at,
+        result_summary=card.result_summary,
+        case_status=card.case_status,
+    )
+
+
+def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
+    common = _assignment_card_dto(card).model_dump()
+    task = card.task
+    return AssignmentDetailDto(
+        **common,
+        category_name=task.category_name,
+        category_icon=task.category_icon,
+        task_kind=None if task.task_kind is None else task.task_kind.value,
+        time_size=None if task.time_size is None else task.time_size.value,
+        description=task.description,
+        performer_instructions=task.performer_instructions,
+        completion_criteria=task.completion_criteria,
+        reward_per_performer=task.credit_reward_per_performer,
+        format=task.format.value,
+        city=task.city,
+        minimum_level=task.minimum_level,
+        performer_slots=task.performer_slots,
     )
 
 

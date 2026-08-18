@@ -23,15 +23,20 @@ from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
+    AssignmentDisputeModel,
     AssignmentModel,
+    AssignmentResultVersionModel,
     AuditEventModel,
+    DisputeEvidenceModel,
     MemberModel,
+    ModerationCaseModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
     ReliabilityEventModel,
     TaskModel,
     WebSessionModel,
 )
+from community_bot.infrastructure.db.models import TestRunModel as DbTestRunModel
 from community_bot.transport.web import _accept_update_id, create_web_app
 from tests.integration.test_assignments import _published_task
 from tests.integration.test_task_creation import prepare_member
@@ -387,6 +392,259 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
         )
         assert await session.get(ProcessedTelegramUpdateModel, first_update_id) is not None
         assert await session.get(ProcessedTelegramUpdateModel, second_update_id) is None
+    await database.dispose()
+
+
+async def test_active_assignment_api_paginates_privately_without_effects(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    _author, source_task = await _published_task(database, update_base=53_500)
+    performer = await prepare_member(database, telegram_user_id=53_600)
+    foreign = await prepare_member(database, telegram_user_id=53_601)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    accepted_at = datetime.datetime(2026, 8, 17, 20, 0, tzinfo=datetime.UTC)
+    active_ids: list[UUID] = []
+
+    async with sessions.begin() as session:
+        source = await session.get(TaskModel, source_task.id)
+        assert source is not None
+
+        def task_row(title: str, *, test_run_id: UUID | None = None) -> TaskModel:
+            return TaskModel(
+                origin=source.origin,
+                test_run_id=test_run_id,
+                template_id=source.template_id,
+                template_version=source.template_version,
+                creator_id=source.creator_id,
+                author_display_name=source.author_display_name,
+                category_id=source.category_id,
+                time_size=source.time_size,
+                title=title,
+                description="Visible description",
+                completion_criteria="Visible completion criteria",
+                materials_json={"text": "Visible material", "private": "PRIVATE_MATERIAL"},
+                input_payload_json={"private": "PRIVATE_INPUT"},
+                credit_reward_per_performer=source.credit_reward_per_performer,
+                performer_slots=1,
+                reserved_credit_total=source.reserved_credit_total,
+                estimated_minutes=source.estimated_minutes,
+                minimum_level=source.minimum_level,
+                format=source.format,
+                city=source.city,
+                deadline_at=source.deadline_at,
+                status="published",
+                safety_snapshot_json=source.safety_snapshot_json,
+                publish_command_id=uuid4(),
+                published_at=source.published_at,
+            )
+
+        first_assignment: AssignmentModel | None = None
+        for index in range(52):
+            task = task_row(f"Active assignment {index:02d}")
+            session.add(task)
+            await session.flush()
+            assignment = AssignmentModel(
+                task_id=task.id,
+                performer_id=performer.id,
+                slot_number=1,
+                status="disputed" if index == 0 else "accepted",
+                accepted_at=accepted_at,
+                submitted_at=accepted_at if index == 0 else None,
+                review_deadline_at=(
+                    accepted_at + datetime.timedelta(days=3) if index == 0 else None
+                ),
+            )
+            session.add(assignment)
+            await session.flush()
+            active_ids.append(assignment.id)
+            if index == 0:
+                first_assignment = assignment
+
+        assert first_assignment is not None
+        result = AssignmentResultVersionModel(
+            assignment_id=first_assignment.id,
+            version=1,
+            payload_json={"summary": "Visible result", "private": "PRIVATE_RESULT"},
+            submit_command_id=uuid4(),
+        )
+        dispute = AssignmentDisputeModel(
+            assignment_id=first_assignment.id,
+            performer_id=performer.id,
+            comment="PRIVATE_DISPUTE",
+            open_command_id=uuid4(),
+        )
+        session.add_all((result, dispute))
+        await session.flush()
+        case = ModerationCaseModel(
+            assignment_id=first_assignment.id,
+            dispute_id=dispute.id,
+            case_type="dispute",
+            status="open",
+            opened_by_member_id=performer.id,
+            open_command_id=uuid4(),
+            open_payload_hash="private-hash",
+            reason="PRIVATE_CASE_REASON",
+        )
+        session.add(case)
+        await session.flush()
+        session.add(
+            DisputeEvidenceModel(
+                case_id=case.id,
+                author_member_id=performer.id,
+                evidence_type="link",
+                reference="PRIVATE_EVIDENCE",
+            )
+        )
+
+        terminal_task = task_row("Terminal assignment")
+        foreign_task = task_row("Foreign assignment")
+        test_run = DbTestRunModel(marker="TEST-CB54-HIDDEN", started_by_member_id=performer.id)
+        session.add_all((terminal_task, foreign_task, test_run))
+        await session.flush()
+        invisible_task = task_row("Invisible assignment", test_run_id=test_run.id)
+        session.add(invisible_task)
+        await session.flush()
+        terminal = AssignmentModel(
+            task_id=terminal_task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="approved",
+            accepted_at=accepted_at,
+            reviewed_at=accepted_at,
+            slot_ever_paid=True,
+        )
+        foreign_assignment = AssignmentModel(
+            task_id=foreign_task.id,
+            performer_id=foreign.id,
+            slot_number=1,
+            status="accepted",
+            accepted_at=accepted_at,
+        )
+        invisible = AssignmentModel(
+            task_id=invisible_task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="accepted",
+            accepted_at=accepted_at,
+        )
+        session.add_all((terminal, foreign_assignment, invisible))
+        await session.flush()
+        hidden_ids = (terminal.id, foreign_assignment.id, invisible.id, uuid4())
+
+    settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url)
+    app = create_web_app(settings=settings, database=database)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(performer.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        before_schema = await schema_snapshot(database.engine)
+        async with sessions() as session:
+            before_state = tuple(
+                (row.id, row.status, row.reviewed_at)
+                for row in (
+                    await session.scalars(select(AssignmentModel).order_by(AssignmentModel.id))
+                ).all()
+            )
+
+        first = await client.get("/api/v1/assignments", params={"status": "active", "limit": 50})
+        assert first.status_code == 200, first.text
+        assert first.json()["next_cursor"] is not None
+        second = await client.get(
+            "/api/v1/assignments",
+            params={
+                "status": "active",
+                "limit": 50,
+                "cursor": first.json()["next_cursor"],
+            },
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["next_cursor"] is None
+        ids = [UUID(item["id"]) for page in (first, second) for item in page.json()["items"]]
+        assert ids == sorted(active_ids, reverse=True)
+        assert len(ids) == len(set(ids)) == 52
+
+        list_keys = {
+            "id",
+            "task_id",
+            "task_title",
+            "task_origin",
+            "assignment_status",
+            "accepted_at",
+            "submitted_at",
+            "review_deadline_at",
+            "reject_dispute_deadline_at",
+            "reviewed_at",
+            "task_deadline_at",
+            "result_summary",
+            "case_status",
+        }
+        assert all(set(item) == list_keys for item in first.json()["items"])
+        detail = await client.get(f"/api/v1/assignments/{first_assignment.id}")
+        assert detail.status_code == 200, detail.text
+        assert set(detail.json()) == list_keys | {
+            "category_name",
+            "category_icon",
+            "task_kind",
+            "time_size",
+            "description",
+            "performer_instructions",
+            "completion_criteria",
+            "reward_per_performer",
+            "format",
+            "city",
+            "minimum_level",
+            "performer_slots",
+        }
+        assert detail.json()["result_summary"] == "Visible result"
+        assert detail.json()["case_status"] == "open"
+        assert not any(
+            marker in first.text + second.text + detail.text
+            for marker in (
+                "PRIVATE_MATERIAL",
+                "PRIVATE_INPUT",
+                "PRIVATE_RESULT",
+                "PRIVATE_DISPUTE",
+                "PRIVATE_CASE_REASON",
+                "PRIVATE_EVIDENCE",
+            )
+        )
+        hidden = [await client.get(f"/api/v1/assignments/{item}") for item in hidden_ids]
+        assert {(response.status_code, response.text) for response in hidden} == {
+            (404, '{"code":"not_found"}')
+        }
+        invalid_status = await client.get("/api/v1/assignments", params={"status": "all"})
+        invalid_cursor = await client.get("/api/v1/assignments", params={"cursor": "invalid"})
+        assert invalid_status.status_code == 422
+        assert invalid_cursor.status_code == 422
+
+        after_schema = await schema_snapshot(database.engine)
+        async with sessions() as session:
+            after_state = tuple(
+                (row.id, row.status, row.reviewed_at)
+                for row in (
+                    await session.scalars(select(AssignmentModel).order_by(AssignmentModel.id))
+                ).all()
+            )
+        assert after_schema == before_schema
+        assert after_state == before_state
+
+        async with sessions.begin() as session:
+            stored = await session.get(MemberModel, performer.id)
+            assert stored is not None
+            stored.status = MemberStatus.BANNED.value
+        denied_before = await schema_snapshot(database.engine)
+        denied_list = await client.get("/api/v1/assignments")
+        denied_detail = await client.get(f"/api/v1/assignments/{first_assignment.id}")
+        assert [(item.status_code, item.json()) for item in (denied_list, denied_detail)] == [
+            (403, {"code": "assignment_unavailable"}),
+            (403, {"code": "assignment_unavailable"}),
+        ]
+        assert await schema_snapshot(database.engine) == denied_before
+
     await database.dispose()
 
 

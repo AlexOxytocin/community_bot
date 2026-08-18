@@ -43,8 +43,11 @@ h2 { margin: 0; font-size: 22px; }
 h3 { margin: 0; font-size: 17px; }
 .lead, .muted { color: var(--app-text-muted); }
 .lead { margin: 10px 0 0; }
+.tabs { display: flex; gap: 8px; margin-top: 20px; }
+.tabs button { min-height: 44px; border: 1px solid var(--app-border); border-radius: 12px; padding: 8px 14px; background: transparent; color: var(--app-text); cursor: pointer; }
+.tabs button[aria-pressed="true"] { border-color: var(--app-accent); color: var(--app-accent); }
 .screen-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-.list { display: grid; gap: 12px; }
+.list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
 .card { display: grid; gap: 12px; width: 100%; padding: 16px; border: 1px solid var(--app-border); border-radius: 16px; background: var(--app-surface); color: var(--app-text); text-align: left; box-shadow: 0 12px 32px rgba(0, 0, 0, .2); }
 button.card { cursor: pointer; }
 button.card:hover { background: var(--app-surface-raised); }
