@@ -3,7 +3,7 @@
 ## Результат восстановления
 
 После owner resolution второго final-review finding implementation/test diff
-составляет 7 файлов, 550 добавлений и 32 удаления. Абсолютный owner stop `<=550`
+составляет 8 файлов, 553 добавления и 32 удаления. Абсолютный owner stop `<=560`
 соблюдён.
 
 Предыдущие 448 добавлений не были честным minimum slice: ради исходного
@@ -44,4 +44,12 @@
   существующий vanilla shell и native `confirm`.
 - Дальнейшее сокращение затрагивает критерии приёмки, читаемость тестов или
   accessibility/error/focus/privacy/exact-replay contract. Итоговый amendment —
-  7 файлов и 550 additions; это absolute stop, не target.
+  8 файлов и 553 additions; это absolute stop, не target.
+
+## Exact route-contract amendment
+
+GitHub CI PR #81 обнаружил единственный пропущенный authoritative oracle:
+`test_web_config_and_route_set_are_closed` сравнивает точное множество route.
+Исправление добавляет ровно три уже одобренных creator-review endpoint tuple в
+существующий set. Runtime diff и его hash не изменены; wildcard, новый helper,
+новый test file и ослабление assertion не добавлены.

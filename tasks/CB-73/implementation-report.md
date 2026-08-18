@@ -40,7 +40,7 @@ slice проверки free-form результата создателем за�
 
 ## Diff и архитектурные gates
 
-- implementation/test: 7 файлов, `+550/-32`;
+- implementation/test: 8 файлов, `+553/-32`;
 - approved amendment: `tasks/CB-73/ceiling-amendment-review.md`;
 - 0 schema, migrations, models, repositories, services, frameworks,
   dependencies и domain-rule changes;
@@ -60,6 +60,10 @@ slice проверки free-form результата создателем за�
 - `uv run pytest --no-cov -q tests/browser/test_mini_app.py` — 7 passed;
 - `git diff --check origin/main` — green;
 - high-confidence secret-like scan exact added runtime/test diff — clean;
-- exact diff ceiling — `+550/-32`, 7 implementation/test файлов.
+- exact diff ceiling — `+553/-32`, 8 implementation/test файлов;
+- exact CI node `test_web_config_and_route_set_are_closed` — 1 passed;
+- Quality-equivalent: ruff format/check, ty, 421 non-integration/browser tests
+  и 7 browser tests — green.
 
-Remote/PR/CI/release/deploy gates выполняются только после approved final review.
+PR #81 открыт; повторный CI/merge/release/deploy выполняются после focused
+independent re-review exact route-contract amendment.

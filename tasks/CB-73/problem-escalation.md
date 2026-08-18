@@ -2,7 +2,7 @@
 
 ## Статус
 
-`Status: blocked`
+`Status: resolved`
 
 Owner amendment разрешил ровно один седьмой файл — существующий authoritative
 UoW forwarder `infrastructure/db/database.py` — и absolute ceiling 550 строк.
@@ -67,3 +67,12 @@ Owner ceiling разрешает максимум семь implementation/test �
 запрещает дальнейший scope expansion. Поэтому runtime/test diff после CI не
 изменён. PR #81 остаётся open с failed `Quality`; merge/release/deploy/Jira Done
 fail-closed до отдельного owner amendment на существующий route-contract файл.
+
+## Resolution нового CI blocker
+
+Owner разрешил ровно восьмой файл `tests/unit/test_web_auth.py` и только три
+exact route tuple, с absolute stop 560 additions. Исправление выполнено тремя
+строками: runtime diff неизменён, wildcard/helper/abstraction не добавлены,
+privacy/HTTP/browser oracles сохранены. Exact failing node и локальный
+Quality-equivalent gate зелёные; требуется focused independent re-review и
+повторный CI PR #81.

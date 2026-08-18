@@ -15,6 +15,24 @@ implementation/test diff.
 Критических, существенных и обязательных незначительных замечаний нет. Оба
 findings предыдущего final review закрыты.
 
+## Focused amendment после CI route-contract blocker
+
+Предыдущее approval остаётся валидным для того же runtime hash. Git blob hashes
+пяти runtime файлов и двух ранее reviewed integration/browser файлов в текущем
+worktree точно совпадают одновременно с `a5b986c` и `327ab27`; сравнение
+текущего `src` с `a5b986c` не содержит изменений.
+
+Единственный новый implementation/test delta после `a5b986c` — три строки в
+`tests/unit/test_web_auth.py`: exact tuples для GET list, GET detail и POST
+decision. Они добавлены в существующий literal route set. Wildcard, helper,
+новая abstraction, новый test file и ослабление `assert routes == {...}` не
+появились.
+
+Exact ранее failing node независимо проходит: `1 passed`. Полный эквивалент
+job `Quality` также зелёный: format/lint/type, `421 passed` non-integration/
+browser и `7 passed` browser. Поэтому amendment закрывает только authoritative
+route oracle и не меняет прежний runtime/privacy/replay verdict.
+
 ## Закрытие предыдущих findings
 
 ### Pre-limit ownership и exact detail
@@ -66,10 +84,10 @@ resubmission. Literal render, `aria-live`, disabled mutation, network retry с
 - UI: error/retry/loading/accessibility, Back→focus, exact confirm и
   authoritative post-mutation refresh подтверждены browser test.
 
-## Второй owner amendment и Ponytail
+## Актуальные owner amendments и Ponytail
 
 Фактический implementation/test diff относительно exact baseline содержит
-ровно 7 файлов, `+550/-32`:
+ровно 8 файлов, `+553/-32`:
 
 - `application/assignments.py`: `+73/-15`;
 - DB `assignments.py`: `+24/-8`;
@@ -77,13 +95,16 @@ resubmission. Literal render, `aria-live`, disabled mutation, network retry с
 - `static/app.js`: `+119/-2`;
 - `web.py`: `+95/-3`;
 - browser test: `+51/-1`;
-- integration test: `+175/-1`.
+- integration test: `+175/-1`;
+- exact route-contract unit test: `+3/-0`.
 
-Owner absolute ceiling `550` соблюдён. Превышение прежнего 500-line stop
-ограничено исправлением pre-limit/exact-detail contract и недостающими
+Текущий owner absolute ceiling `560` соблюдён при фактических 553 additions.
+Превышение прежнего 500-line stop ограничено исправлением
+pre-limit/exact-detail contract и недостающими
 displacement/foreign/inactive/Back-focus/dialog oracles. Седьмой файл — только
 существующий UoW forwarder, необходимый для передачи strict query parameters
-текущему DB owner.
+текущему DB owner. Восьмой файл содержит только три exact route tuples,
+потребованные закрытым CI assertion.
 
 Новых table, schema, migration, model, repository abstraction, service,
 framework, dependency или domain rule нет. Дублирующего ownership, payout,
@@ -101,6 +122,9 @@ Ponytail review: `Lean already. Ship.` Reuse/delete-first исчерпан; да
 - targeted PostgreSQL/API + coverage — `24 passed`;
   `assignments.py` 73%, DB `assignments.py` 69%, `web.py` 82%;
 - `uv run pytest --no-cov -q tests/browser/test_mini_app.py` — `7 passed`;
+- exact node `test_web_config_and_route_set_are_closed` — `1 passed`;
+- Quality-equivalent non-integration/browser suite — `421 passed`, 158
+  deselected; полный browser suite — `7 passed`;
 - `git diff --check d1733cb49ff59a74e893320c19c15d58102b2045` — green;
 - high-confidence secret-like scan добавленных runtime/test строк — `0`
   совпадений;
@@ -112,7 +136,7 @@ Ponytail review: `Lean already. Ship.` Reuse/delete-first исчерпан; да
 runtime changes не обнаружено. Смысловые task-артефакты на русском; branch и
 baseline корректны.
 
-Этот verdict подтверждает локальную готовность к PR. PR/CI/merge ещё не
-проверялись. После merge runtime-задача обязана пройти новый exact immutable
-release, production activation и public smoke по ADR-0019; Jira `Done` до
-green public smoke запрещён.
+Этот focused verdict подтверждает локальную готовность amendment к повторному
+CI PR #81; remote rerun/merge ещё не проверялись. После merge runtime-задача
+обязана пройти новый exact immutable release, production activation и public
+smoke по ADR-0019; Jira `Done` до green public smoke запрещён.

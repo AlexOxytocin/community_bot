@@ -82,9 +82,10 @@ Owner/Jira correction от 2026-08-18 сняла исходный контрак
 
 ## Числовой diff ceiling
 
-- approved owner amendment: не более 7 implementation/test файлов;
-- не более 550 добавленных строк без учёта task-артефактов; owner absolute
-  stop — 550 добавлений;
+- approved owner amendment: ровно существующие 7 implementation/test файлов
+  плюс `tests/unit/test_web_auth.py` для exact route-contract;
+- не более 560 добавленных строк без учёта task-артефактов; фактический
+  amendment — 553 добавления, owner absolute stop — 560;
 - 0 новых tables, migrations, models, repositories, services, frameworks и
   dependencies;
 - 0 изменений доменных reward/status/permission/test-run правил.
