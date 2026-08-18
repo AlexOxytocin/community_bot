@@ -432,9 +432,20 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), performer_id, assignment_id
         )
 
-    async def list_review_cards(self, actor_id: UUID):  # noqa: ANN201
+    async def list_review_cards(
+        self,
+        actor_id: UUID,
+        *,
+        member_owned: bool = False,
+        assignment_id: UUID | None = None,
+    ) -> tuple[AssignmentCard, ...]:
         """List reviewable assignment cards for one actor."""
-        return await assignment_store.list_review_cards(self._require_session(), actor_id)
+        return await assignment_store.list_review_cards(
+            self._require_session(),
+            actor_id,
+            member_owned=member_owned,
+            assignment_id=assignment_id,
+        )
 
     async def list_task_assignments(
         self, task_id: UUID, *, for_update: bool = False

@@ -167,18 +167,32 @@ async def get_assignment_card(
 
 
 async def list_review_cards(
-    session: AsyncSession, actor_id: uuid.UUID
+    session: AsyncSession,
+    actor_id: uuid.UUID,
+    *,
+    member_owned: bool = False,
+    assignment_id: uuid.UUID | None = None,
 ) -> tuple[AssignmentCard, ...]:
     """List assignments owned by this member-author or community reviewer."""
-    return await _cards(
-        session,
-        or_(
+    predicate = (
+        (TaskModel.creator_id == actor_id) & TaskModel.template_id.is_(None)
+        if member_owned
+        else or_(
             TaskModel.creator_id == actor_id,
             TaskModel.created_by_admin_id == actor_id,
             TaskModel.reviewer_admin_id == actor_id,
-        ),
+        )
+    )
+    return await _cards(
+        session,
+        predicate,
         scope_member_id=actor_id,
-        statuses=(AssignmentStatus.SUBMITTED.value, AssignmentStatus.REVIEWER_REQUIRED.value),
+        statuses=(
+            (AssignmentStatus.SUBMITTED.value,)
+            if member_owned
+            else (AssignmentStatus.SUBMITTED.value, AssignmentStatus.REVIEWER_REQUIRED.value)
+        ),
+        assignment_id=assignment_id,
     )
 
 
@@ -239,8 +253,10 @@ async def _cards(
     cards = []
     for assignment, task, display_name, case_id, case_status, case_revision, payload in rows:
         summary = None
-        if isinstance(payload, dict) and isinstance(payload.get("summary"), str):
-            summary = str(payload["summary"])
+        if isinstance(payload, dict):
+            value = payload.get("result", payload.get("summary"))
+            if isinstance(value, str):
+                summary = value
         cards.append(
             AssignmentCard(
                 assignment=_assignment(assignment),

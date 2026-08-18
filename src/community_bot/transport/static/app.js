@@ -15,6 +15,7 @@ let assignments = [];
 let pendingKey = null;
 let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
+let returnFocusReviewId = null;
 let returnFocusModeration = false;
 let returnFocusProfile = false;
 let screenRevision = 0;
@@ -103,6 +104,10 @@ const assignmentStatus = (value) => ({
   disputed: "Открыт спор",
   reviewer_required: "Нужен проверяющий",
 }[value] || value);
+
+const createdAssignmentsButton = element("button", "Созданные мной");
+createdAssignmentsButton.type = "button";
+createdAssignmentsButton.addEventListener("click", () => loadCreatedReviews());
 
 const newOperationKey = () => {
   const words = new Uint32Array(2);
@@ -431,7 +436,10 @@ function renderAssignments(revision = ++screenRevision) {
   title.textContent = "Взятые мной";
   back.classList.add("hidden");
   if (!assignments.length) {
-    replaceContent(element("p", "Активных назначений пока нет.", "status muted"));
+    replaceContent(
+      createdAssignmentsButton,
+      element("p", "Активных назначений пока нет.", "status muted"),
+    );
     restoreModerationFocus();
     return;
   }
@@ -457,7 +465,7 @@ function renderAssignments(revision = ++screenRevision) {
     item.append(button);
     list.append(item);
   }
-  replaceContent(intro, list);
+  replaceContent(createdAssignmentsButton, intro, list);
   focusTarget?.focus();
   returnFocusAssignmentId = null;
   restoreModerationFocus();
@@ -486,6 +494,111 @@ async function loadAssignments(push = true) {
     retry.type = "button";
     retry.addEventListener("click", () => loadAssignments(false));
     replaceContent(...assignmentError(error.message, retry));
+  }
+}
+
+const decisionLabels = {
+  full: "Принять полностью",
+  partial: "Принять частично",
+  reject: "Отклонить",
+};
+
+async function loadCreatedReviews(push = true) {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "created-assignments" }, "", "#created-assignments");
+  setNavigation("assignments");
+  title.textContent = "Созданные мной";
+  back.classList.add("hidden");
+  replaceContent(element("p", "Загружаем результаты…", "status muted"));
+  try {
+    const reviews = (await getJson("/api/v1/assignment-reviews")).items;
+    if (revision !== screenRevision) return;
+    if (!reviews.length) {
+      replaceContent(element("p", "Результатов, ожидающих решения, пока нет.", "status muted"));
+      return;
+    }
+    const list = element("ul", undefined, "list");
+    for (const review of reviews) {
+      const button = element("button", undefined, "card");
+      button.type = "button";
+      button.append(
+        element("h3", review.task_title),
+        element("p", "Исполнитель: " + review.performer_display_name, "muted"),
+        element("p", review.result, "muted"),
+      );
+      button.addEventListener("click", () => showCreatedReview(review.id));
+      if (review.id === returnFocusReviewId) queueMicrotask(() => button.focus());
+      const item = element("li");
+      item.append(button);
+      list.append(item);
+    }
+    returnFocusReviewId = null;
+    replaceContent(list);
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    const retry = element("button", "Повторить", "primary");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadCreatedReviews(false));
+    replaceContent(...assignmentError(error.message, retry));
+  }
+}
+
+async function showCreatedReview(assignmentId, push = true) {
+  const revision = ++screenRevision;
+  returnFocusReviewId = assignmentId;
+  if (push) history.pushState({ screen: "assignment-review", assignmentId }, "", "#assignment-review/" + assignmentId);
+  setNavigation("");
+  title.textContent = "Решение по результату";
+  back.classList.remove("hidden");
+  replaceContent(element("p", "Загружаем результат…", "status muted"));
+  try {
+    const review = await getJson("/api/v1/assignment-reviews/" + encodeURIComponent(assignmentId));
+    if (revision !== screenRevision) return;
+    const detail = element("article", undefined, "card detail");
+    const status = element("p", "", "status hidden");
+    status.setAttribute("aria-live", "polite");
+    detail.append(
+      element("h3", review.task_title),
+      section("Исполнитель", review.performer_display_name),
+      section("Результат", review.result),
+    );
+    if (review.review_deadline_at) {
+      detail.append(dateSection("Срок решения", review.review_deadline_at));
+    }
+    for (const decision of review.available_decisions) {
+      const button = element("button", decisionLabels[decision], "primary");
+      button.type = "button";
+      let operationKey = null;
+      button.addEventListener("click", async () => {
+        if (decision === "reject" && !globalThis.confirm(
+          "Отклонить результат? Выплата и резерв останутся заморожены на 24 часа для возможного спора. Повторная отправка результата не откроется.",
+        )) return;
+        button.disabled = true;
+        status.className = "status";
+        status.textContent = "Сохраняем решение…";
+        operationKey ||= newOperationKey();
+        try {
+          await submissionRequest(
+            "/api/v1/assignment-reviews/" + encodeURIComponent(assignmentId) + "/decision",
+            "POST",
+            operationKey,
+            { decision },
+          );
+          history.replaceState({ screen: "created-assignments" }, "", "#created-assignments");
+          await loadCreatedReviews(false);
+        } catch (error) {
+          status.textContent = "Не удалось сохранить решение. Повторите запрос — ключ останется тем же.";
+          if (!retryableSubmissionError(error)) operationKey = null;
+          button.disabled = false;
+        }
+      });
+      detail.append(button);
+    }
+    detail.append(status);
+    replaceContent(detail);
+    back.focus();
+  } catch (error) {
+    if (revision === screenRevision) replaceContent(...assignmentError(error.message));
   }
 }
 
@@ -821,6 +934,10 @@ globalThis.addEventListener("popstate", (event) => {
     if (task) showTaskDetail(task, false);
   } else if (event.state?.screen === "assignments") {
     renderAssignments();
+  } else if (event.state?.screen === "created-assignments") {
+    loadCreatedReviews(false);
+  } else if (event.state?.screen === "assignment-review") {
+    showCreatedReview(event.state.assignmentId, false);
   } else if (event.state?.screen === "assignment") {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
