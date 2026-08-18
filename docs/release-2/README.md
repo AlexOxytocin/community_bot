@@ -47,3 +47,22 @@ internal web readiness текущей схемы.
 - internal readiness не считается production deployment или live acceptance;
 - будущий deployment не объявляется готовым без PostgreSQL, migration, immutable
   image↔host-package provenance и restore доказательств.
+
+## Manual-first release contract
+
+Принятый [ADR-0018](../adr/0018-reviewed-image-and-host-package-tuple.md)
+ограничивает CB-65 публикацией immutable image и одного release bundle из
+проверенного merge tree. Workflow не имеет production environment, SSH,
+deploy key, forced command и server authority.
+
+В CB-57 владелец отдельно выбирает exact green release run, вручную переносит
+его единственный artifact и после host preflight запускает установленный
+verifier/activator как root. Host проверяет внутреннюю согласованность
+commit↔image↔package и root-owned bytes; cryptographic external authorship
+artifact этим pilot contract не доказывается.
+
+Routine activation допускает только уже совместимую схему: target, current и
+live DB migration heads должны совпасть. Initial migration и любой
+schema-changing rollout требуют отдельного owner-authorized gate. При
+`pending` backup/restore блокируются; восстановление — exact rerun либо один
+явный rollback на единственную previous tuple, без automatic recovery.

@@ -32,3 +32,4 @@ ADR фиксируют значимые структурные и сквозны
 - [ADR-0015 — Бюджетная многопоточная оркестрация агентов](0015-cost-aware-multi-agent-orchestration.md)
 - [ADR-0016 — Mini App как единственный пользовательский интерфейс](0016-mini-app-only-runtime.md)
 - [ADR-0017 — Минимальное ядро Community Mini App](0017-lean-community-mini-app-core.md)
+- [ADR-0018 — Проверяемая пара image и host package](0018-reviewed-image-and-host-package-tuple.md)

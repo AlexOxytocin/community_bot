@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,6 +12,7 @@ from ops import restore_drill
 from ops._runtime import OpsError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 EXPECTED_HEAD = "0020"
@@ -339,22 +341,21 @@ def prepare_restore(
     cleanups: list[str] = []
 
     monkeypatch.setattr(restore_drill, "default_root_dir", lambda: tmp_path)
-    monkeypatch.setattr(restore_drill, "validate_environment_file", lambda _path: None)
-    monkeypatch.setattr(restore_drill, "read_current_image", lambda _root: IMAGE)
+    release = (tmp_path / "release", tmp_path / ".env", IMAGE, "a" * 40)
+
+    @contextmanager
+    def selected(_root: Path) -> Iterator[tuple[Path, Path, str, str]]:
+        events.append("lock")
+        try:
+            yield release
+        finally:
+            events.append("unlock")
+
+    monkeypatch.setattr(restore_drill, "selected_release", selected)
     monkeypatch.setattr(
         restore_drill,
         "read_dotenv",
         lambda _path: {"POSTGRES_USER": "operator", "POSTGRES_DB": "production"},
-    )
-    monkeypatch.setattr(
-        restore_drill,
-        "operations_environment",
-        lambda _path, _image: {"SAFE": "1"},
-    )
-    monkeypatch.setattr(
-        restore_drill,
-        "compose_command",
-        lambda _root, _path: ["compose"],
     )
     monkeypatch.setattr(restore_drill, "read_image_migration_head", lambda _image: EXPECTED_HEAD)
 
@@ -410,8 +411,8 @@ def test_missing_or_empty_backup_stops_before_environment_and_db_operations(
     calls: list[str] = []
     monkeypatch.setattr(
         restore_drill,
-        "validate_environment_file",
-        lambda _path: calls.append("environment"),
+        "selected_release",
+        lambda _root: calls.append("selection"),
     )
 
     with pytest.raises(OpsError, match="Backup or environment file is missing"):
@@ -458,6 +459,7 @@ def test_restore_drill_success_obeys_order_and_cleans_twice(
 
     assert restore_drill.restore_drill(backup_path(tmp_path)) == 0
     assert events == [
+        "lock",
         "cleanup",
         "revision:production",
         "createdb",
@@ -465,6 +467,7 @@ def test_restore_drill_success_obeys_order_and_cleans_twice(
         f"revision:{restore_drill.DRILL_DATABASE}",
         "ledger",
         "cleanup",
+        "unlock",
     ]
     assert cleanups == ["production", "production"]
     output = capsys.readouterr().out
@@ -503,7 +506,7 @@ def test_production_revision_failure_stops_before_create(
 
     with pytest.raises(OpsError, match="production database"):
         restore_drill.restore_drill(backup_path(tmp_path))
-    assert events == ["cleanup", "revision:production"]
+    assert events == ["lock", "cleanup", "revision:production", "unlock"]
     assert cleanups == ["production"]
 
 
@@ -523,7 +526,7 @@ def test_production_revision_query_failure_stops_before_create(
 
     with pytest.raises(OpsError, match="read Alembic revisions"):
         restore_drill.restore_drill(backup_path(tmp_path))
-    assert events == ["cleanup", "revision:production"]
+    assert events == ["lock", "cleanup", "revision:production", "unlock"]
     assert cleanups == ["production"]
 
 
@@ -588,12 +591,14 @@ def test_restored_revision_query_failure_returns_nonzero_and_cleans(
 
     assert restore_drill.restore_drill(backup_path(tmp_path)) == 1
     assert events == [
+        "lock",
         "cleanup",
         "revision:production",
         "createdb",
         "pg_restore",
         f"revision:{restore_drill.DRILL_DATABASE}",
         "cleanup",
+        "unlock",
     ]
     assert cleanups == ["production", "production"]
 
@@ -644,7 +649,7 @@ def test_pre_cleanup_failure_aborts_before_head_and_restore(
 
     with pytest.raises(OpsError, match="cleanup"):
         restore_drill.restore_drill(backup_path(tmp_path))
-    assert events == []
+    assert events == ["lock", "unlock"]
 
 
 def test_final_cleanup_failure_turns_success_into_failure(
@@ -719,7 +724,7 @@ def test_image_head_failure_occurs_after_verified_pre_cleanup(
 
     with pytest.raises(OpsError, match="exactly one"):
         restore_drill.restore_drill(backup_path(tmp_path))
-    assert events == ["cleanup"]
+    assert events == ["lock", "cleanup", "unlock"]
     assert cleanups == ["production"]
 
 

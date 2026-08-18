@@ -1,6 +1,5 @@
 # Privileged release surfaces remain visibly owned even in the single-owner pilot.
 /.github/workflows/ @AlexOxytocin
-/ops/deploy_self_hosted.sh @AlexOxytocin
-/ops/github_deploy_entrypoint.sh @AlexOxytocin
-/ops/verify_release_provenance.py @AlexOxytocin
+/ops/ @AlexOxytocin
+/Dockerfile @AlexOxytocin
 /compose.production.yaml @AlexOxytocin
