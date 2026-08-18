@@ -35,9 +35,11 @@ worker/outbound остаются остановленными. Это одина
   serialized monotonic supersession, migration owner gate, один compatible
   rollback, public smoke/Jira evidence и запрет `Done` до smoke или waiver.
 - Data cutover и edge остаются manual-first stop-on-failure планом поверх
-  ADR-0018/`ops/release_contract.py`; immutable Compose, release activator,
-  migration и dependencies не изменены. Release 71 везде отделён как baseline,
-  а не deploy candidate.
+  ADR-0018/`ops/release_contract.py`. Production preflight выявил blocking defect
+  standalone activator: `psql` не выбирал настроенные role/database. Одобренный
+  fix передаёт существующие container env как quoted `--username`/`--dbname`,
+  сохраняя fail-closed execution; immutable Compose, migration, dependencies и
+  уже опубликованный пакет не подменялись.
 - Jira CB-57 прочитана без изменений: задача остаётся `В работе`, dependencies
   CB-54/55/56/65 — `Готово`, production gates честно не объявлены выполненными.
 - Scope не заявляет full backend parity; server IP, credentials, private key,
@@ -51,6 +53,8 @@ worker/outbound остаются остановленными. Это одина
 - `uv run pytest -m integration --no-cov -p no:cacheprovider -q` — `145 passed, 421 deselected`.
 - `uv run ruff format --check .`, `uv run ruff check .`,
   `uv run ty check src tests ops`, `git diff --check` — green.
+- Blocking activator fix: `30 passed` в `tests/unit/test_release_contract.py`;
+  independent re-review — `Status: approved`.
 - Official script URL без query и актуальный documented URL с `?63` на момент
   проверки возвращали одинаковые bytes; unversioned official URL реализации
   не является найденным дефектом.

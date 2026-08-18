@@ -69,3 +69,13 @@ green release artifact и server/public gates из `test-plan.md`.
 Получить independent final review `Status: approved`, затем пройти
 commit/push/PR/CI/merge, дождаться нового exact green release и выполнить
 owner-authorized stop-on-failure deployment gates.
+
+## Production preflight follow-up
+
+Первый exact artifact дошёл до встроенного activator preflight и fail-closed
+остановился до запуска worker/web: `psql` по умолчанию выбирал OS role `root`, а
+не настроенные `POSTGRES_USER`/`POSTGRES_DB`. Минимальный fix использует эти уже
+существующие переменные внутри PostgreSQL container с quoted arguments; Compose,
+схема, dependencies и server package не подменяются. Targeted oracle — `30
+passed`; independent security/data-risk re-review — `Status: approved`. Нужен
+новый exact green release artifact перед продолжением activation.
