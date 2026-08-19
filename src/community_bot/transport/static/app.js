@@ -1253,7 +1253,7 @@ async function showAssignmentDetail(assignmentId, push = true) {
   replaceContent(element("p", "Загружаем назначение…", "status muted"));
   try {
     const response = await fetch(
-      "/api/v1/assignments/" + assignmentId,
+      "/api/v1/assignments/" + encodeURIComponent(assignmentId),
       { credentials: "same-origin" },
     );
     if (!response.ok) throw new Error(requestError(response));
@@ -1548,10 +1548,39 @@ async function bootstrap(authAttempted = false) {
       + ", выберите понятное задание и помогите сообществу.";
     tasks = page.items;
     const initialScreen = location.hash;
+    const initialState = history.state;
     history.replaceState({ screen: "catalog" }, "", "#catalog");
     renderCatalog();
-    if (initialScreen === "#profile") loadProfile();
-    if (initialScreen === "#moderation") loadModeration();
+    const route = initialScreen.split("/");
+    let entityId = null;
+    try {
+      if (route.length === 2 && route[1]) entityId = decodeURIComponent(route[1]);
+    } catch { /* malformed route stays in the safe catalog */ }
+    const savedId = (screen, name) => route.length === 1 && initialState?.screen === screen
+      ? initialState[name]
+      : null;
+    if (route.length === 1 && initialScreen === "#profile") loadProfile();
+    else if (route.length === 1 && initialScreen === "#moderation") loadModeration();
+    else if (route.length === 1 && initialScreen === "#assignments") loadAssignments();
+    else if (route.length === 1 && initialScreen === "#created-assignments") loadCreatedReviews();
+    else if (route.length === 1 && initialScreen === "#task-creation") openTaskCreation(false);
+    else if (route[0] === "#assignment") {
+      const id = entityId || savedId("assignment", "assignmentId");
+      if (id) showAssignmentDetail(id);
+    } else if (route[0] === "#assignment-review") {
+      const id = entityId || savedId("assignment-review", "assignmentId");
+      if (id) showCreatedReview(id);
+    } else if (route[0] === "#moderation-case") {
+      const id = entityId || savedId("moderation-case", "caseId");
+      if (id) showModerationCase(id);
+    } else if (route[0] === "#member-profile") {
+      const id = entityId || savedId("member-profile", "memberId");
+      if (id) showMemberProfile(id);
+    } else if (route[0] === "#task") {
+      const id = entityId || savedId("task", "taskId");
+      const task = tasks.find((item) => item.id === id);
+      if (task) showTaskDetail(task);
+    }
   } catch {
     replaceContent(
       element(
