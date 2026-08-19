@@ -1719,7 +1719,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
             return
         if body["action"] == "save" and not rejected_save:
             rejected_save = True
-            route.fulfill(status=409, json={"code": "draft_unavailable"})
+            route.fulfill(status=422, json={"detail": "raw validation payload"})
             return
         if body["action"] == "save":
             saved_count += 1
@@ -1754,6 +1754,9 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_label("Число исполнителей").fill("2")
         page.get_by_label("Материалы").fill("Описание материала")
         page.get_by_role("button", name="Предпросмотр").click()
+        page.get_by_text("Не удалось сохранить задание").wait_for()  # noqa: RUF001
+        assert page.get_by_role("button", name="Опубликовать").count() == 0
+        assert page.get_by_text("raw validation payload").count() == 0
         page.get_by_role("button", name="Предпросмотр").click()
         page.get_by_text("Предпросмотр устарел").wait_for()
         page.get_by_role("button", name="Предпросмотр").click()
@@ -1766,6 +1769,23 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert commands[0][1:] == commands[1][1:]
         assert commands[2][2] == commands[3][2]
         assert commands[2][1] != commands[3][1]
+        saved_form = commands[2][2]["form"]
+        assert isinstance(saved_form, dict)
+        assert set(saved_form) == {
+            "category_id",
+            "city",
+            "completion_criteria",
+            "credit_reward_per_performer",
+            "deadline_at",
+            "description",
+            "format",
+            "materials",
+            "performer_slots",
+            "task_kind",
+            "time_size",
+            "title",
+        }
+        assert saved_form["materials"] == {"text": "Описание материала"}
         assert len({key for _action, key, _body in commands[1:]}) == 5
         browser.close()
 
