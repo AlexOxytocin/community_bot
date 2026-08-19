@@ -341,6 +341,8 @@ class AssignmentDetailDto(AssignmentCardDto):
     minimum_level: int
     performer_slots: int
     submission_contract: Literal["freeform_result_v1"] | None
+    can_submit: bool
+    can_cancel: bool
     can_dispute: bool
 
 
@@ -1676,6 +1678,8 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
         minimum_level=task.minimum_level,
         performer_slots=task.performer_slots,
         submission_contract=cast('Literal["freeform_result_v1"] | None', card.submission_contract),
+        can_submit=card.can_submit,
+        can_cancel=card.can_cancel,
         can_dispute=card.can_dispute,
     )
 

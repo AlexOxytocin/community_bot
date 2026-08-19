@@ -59,6 +59,13 @@ def _new_page(browser: Any, *, bridge: str = "") -> Any:  # noqa: ANN401
     return page
 
 
+def test_assignment_action_eligibility_is_server_projected() -> None:
+    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'assignment.assignment_status === "accepted"' not in source
+    assert "if (assignment.can_submit)" in source
+    assert "if (assignment.can_cancel)" in source
+
+
 def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
@@ -192,12 +199,16 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
     malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
     javascript_url = "javascript:globalThis.pwned=true"
     task_id = "00000000-0000-0000-0000-000000000053"
+    other_task_id = "00000000-0000-0000-0000-000000000055"
     assignment_id = "00000000-0000-0000-0000-000000000054"
+    other_assignment_id = "00000000-0000-0000-0000-000000000056"
     assignment_title = "Помочь с планом"  # noqa: RUF001
+    other_assignment_title = "Проверить другой план"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
         requests: list[str] = []
+        accept_keys: list[str] = []
         page.on("request", lambda request: requests.append(request.url))
         page.add_init_script(
             """
@@ -231,22 +242,44 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                             "public_input": {malicious: javascript_url},
                             "credit_reward_per_performer": 3,
                             "minimum_level": 1,
-                        }
+                        },
+                        {
+                            "id": other_task_id,
+                            "title": other_assignment_title,
+                            "description": "Вторая карточка",
+                            "completion_criteria": "План проверен",
+                            "performer_instructions": "Сверить шаги",
+                            "materials": {},
+                            "public_input": {},
+                            "credit_reward_per_performer": 2,
+                            "minimum_level": 1,
+                        },
                     ],
                     "next_cursor": None,
                 }
             ),
         )
 
+        accepted_tasks: list[str] = []
+
         def accept(route: Route) -> None:
+            accepted_task_id = route.request.url.split("/")[-2]
             operation_key = route.request.headers.get("idempotency-key", "")
+            accepted_tasks.append(accepted_task_id)
+            accept_keys.append(operation_key)
             assert re.fullmatch(r"[1-9][0-9]{0,18}", operation_key)
             assert int(operation_key) <= 2**63 - 1
+            if accepted_task_id == task_id and accepted_tasks.count(task_id) == 1:
+                route.fulfill(status=503, json={"code": "request_failed"})
+                return
+            accepted_assignment_id = (
+                assignment_id if accepted_task_id == task_id else other_assignment_id
+            )
             route.fulfill(
                 status=201,
                 json={
-                    "id": "00000000-0000-0000-0000-000000000054",
-                    "task_id": task_id,
+                    "id": accepted_assignment_id,
+                    "task_id": accepted_task_id,
                     "slot_number": 1,
                     "status": "accepted",
                     "accepted_at": "2026-08-17T20:00:00Z",
@@ -273,10 +306,21 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
             "**/api/v1/assignments?*",
             lambda route: route.fulfill(json={"items": [assignment], "next_cursor": None}),
         )
-        page.route(
-            f"**/api/v1/assignments/{assignment_id}",
-            lambda route: route.fulfill(
-                json=assignment
+
+        def assignment_detail(route: Route) -> None:
+            requested_id = route.request.url.rsplit("/", maxsplit=1)[-1]
+            is_other = requested_id == other_assignment_id
+            route.fulfill(
+                json=(
+                    assignment
+                    if not is_other
+                    else assignment
+                    | {
+                        "id": other_assignment_id,
+                        "task_id": other_task_id,
+                        "task_title": other_assignment_title,
+                    }
+                )
                 | {
                     "category_name": "Практическая помощь",
                     "category_icon": None,
@@ -290,9 +334,14 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                     "city": None,
                     "minimum_level": 1,
                     "performer_slots": 1,
-                }
-            ),
-        )
+                    "submission_contract": None,
+                    "can_submit": False,
+                    "can_cancel": False,
+                    "can_dispute": False,
+                },
+            )
+
+        page.route("**/api/v1/assignments/*", assignment_detail)
 
         page.goto(mini_app_url)
         page.get_by_role("button", name=malicious).click()
@@ -310,7 +359,18 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         )
 
         page.get_by_role("button", name="Принять задание").click()
-        page.get_by_text("Задание принято. Можно переходить к выполнению.").wait_for()
+        page.get_by_text("Задание сейчас недоступно.").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("button", name=other_assignment_title).click()
+        page.get_by_role("button", name="Принять задание").click()
+        page.get_by_role("heading", name=other_assignment_title).wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("button", name=malicious).click()
+        page.get_by_role("button", name="Принять задание").click()
+        page.get_by_role("heading", name=assignment_title).wait_for()
+        assert accepted_tasks == [task_id, other_task_id, task_id]
+        assert accept_keys[0] == accept_keys[2]
+        assert accept_keys[1] != accept_keys[0]
         assert page.get_by_role("button", name="Принять задание").count() == 0
         assert not any(url.startswith("javascript:") for url in requests)
 
@@ -962,6 +1022,8 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         "minimum_level": 1,
         "performer_slots": 1,
         "submission_contract": None,
+        "can_submit": False,
+        "can_cancel": False,
         "can_dispute": False,
     }
     list_mode: dict[str, Any] = {"status": 200, "items": []}
@@ -1120,14 +1182,25 @@ def _freeform_submission_rows() -> tuple[str, str, dict[str, object], dict[str, 
         "minimum_level": 1,
         "performer_slots": 1,
         "submission_contract": "freeform_result_v1",
+        "can_submit": True,
+        "can_cancel": True,
+        "can_dispute": False,
     }
-    submitted = detail | {"assignment_status": "submitted", "result_summary": "Результат отправлен"}
+    submitted = detail | {
+        "assignment_status": "submitted",
+        "result_summary": "Результат отправлен",
+        "can_cancel": False,
+    }
     return assignment_id, draft_id, assignment, submitted
 
 
 def test_assignment_cancellation_returns_to_active_list(mini_app_url: str) -> None:
     assignment_id, _draft_id, assignment, submitted = _freeform_submission_rows()
-    detail = submitted | {"assignment_status": "accepted", "result_summary": None}
+    detail = submitted | {
+        "assignment_status": "accepted",
+        "result_summary": None,
+        "can_cancel": True,
+    }
     items = [assignment]
     operation_keys: list[str] = []
 
@@ -1304,7 +1377,7 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         assert page.get_by_role("heading", name="Взятые мной").count() == 1
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.get_by_text("Результат отправлен").first.wait_for()
-        assert page.get_by_role("button", name="Начать отправку").count() == 0
+        assert page.get_by_role("button", name="Начать отправку").count() == 1
         page.get_by_role("button", name="Мои задания").click()
         page.get_by_role("button", name="Созданные мной").click()
         page.get_by_role("heading", name="Мои опубликованные задания").wait_for()
@@ -1333,8 +1406,13 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
     task_id = "00000000-0000-0000-0000-000000000071"
     state: dict[str, Any] = {"stage": "draft", "values": {}}
     actions: list[str] = []
+    commands: list[tuple[str, str, dict[str, object]]] = []
+    failed_start = False
+    rejected_save = False
+    saved_count = 0
 
     def creation(route: Route) -> None:
+        nonlocal failed_start, rejected_save, saved_count
         if route.request.method == "GET":
             values = state["values"]
             preview = None
@@ -1370,10 +1448,21 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         body = route.request.post_data_json
         assert body is not None
         actions.append(body["action"])
-        assert route.request.headers["idempotency-key"].isdecimal()
+        operation_key = route.request.headers["idempotency-key"]
+        assert operation_key.isdecimal()
+        commands.append((body["action"], operation_key, body))
+        if body["action"] == "start" and not failed_start:
+            failed_start = True
+            route.fulfill(status=503, json={"code": "request_failed"})
+            return
+        if body["action"] == "save" and not rejected_save:
+            rejected_save = True
+            route.fulfill(status=409, json={"code": "draft_unavailable"})
+            return
         if body["action"] == "save":
+            saved_count += 1
             state["values"] = body["form"]
-            state["stage"] = "expired" if actions.count("save") == 1 else "preview"
+            state["stage"] = "expired" if saved_count == 1 else "preview"
         if body["action"] == "publish":
             route.fulfill(json={"task_id": task_id})
         else:
@@ -1389,6 +1478,9 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.route("**/api/v1/task-creation", creation)
         page.goto(mini_app_url)
         page.get_by_role("button", name="Создать задание").click()
+        page.get_by_text("Не удалось открыть создание задания.").wait_for()  # noqa: RUF001
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("button", name="Создать задание").click()
         page.get_by_label("Тип").select_option("group")
         page.get_by_label("Категория").select_option(task_id)
         page.get_by_label("Размер").select_option("s")
@@ -1400,6 +1492,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_label("Число исполнителей").fill("2")
         page.get_by_label("Материалы").fill("Описание материала")
         page.get_by_role("button", name="Предпросмотр").click()
+        page.get_by_role("button", name="Предпросмотр").click()
         page.get_by_text("Предпросмотр устарел").wait_for()
         page.get_by_role("button", name="Предпросмотр").click()
         page.get_by_role("button", name="Опубликовать").click()
@@ -1407,5 +1500,9 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert page.evaluate("globalThis.pwned") is None
         page.go_back()
         page.get_by_role("button", name="Создать задание").wait_for()
-        assert actions == ["start", "save", "save", "publish"]
+        assert actions == ["start", "start", "save", "save", "save", "publish"]
+        assert commands[0][1:] == commands[1][1:]
+        assert commands[2][2] == commands[3][2]
+        assert commands[2][1] != commands[3][1]
+        assert len({key for _action, key, _body in commands[1:]}) == 5
         browser.close()
