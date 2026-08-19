@@ -306,9 +306,12 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
     other_assignment_id = "00000000-0000-0000-0000-000000000056"
     assignment_title = "Помочь с планом"  # noqa: RUF001
     other_assignment_title = "Проверить другой план"
+    deadline = "2026-08-21T20:00:00Z"
+    private_value = "PRIVATE-REVIEWER-42"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
+        page.set_viewport_size({"width": 375, "height": 812})
         requests: list[str] = []
         accept_keys: list[str] = []
         page.on("request", lambda request: requests.append(request.url))
@@ -336,6 +339,12 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                     "items": [
                         {
                             "id": task_id,
+                            "origin": "member",
+                            "author_display_name": "Мария",
+                            "category_name": "Практическая помощь",
+                            "category_icon": "⭐",
+                            "task_kind": "group",
+                            "time_size": "m",
                             "title": malicious,
                             "description": malicious,
                             "completion_criteria": malicious,
@@ -343,10 +352,23 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                             "materials": {"url": javascript_url, "text": malicious},
                             "public_input": {malicious: javascript_url},
                             "credit_reward_per_performer": 3,
+                            "performer_slots": 4,
                             "minimum_level": 1,
+                            "format": "offline",
+                            "city": "Буэнос-Айрес",
+                            "deadline_at": deadline,
+                            "status": "published",
+                            "creator_id": "00000000-0000-0000-0000-000000000099",
+                            "private_notes": private_value,
                         },
                         {
                             "id": other_task_id,
+                            "origin": "community",
+                            "author_display_name": "Сообщество",
+                            "category_name": None,
+                            "category_icon": None,
+                            "task_kind": None,
+                            "time_size": None,
                             "title": other_assignment_title,
                             "description": "Вторая карточка",
                             "completion_criteria": "План проверен",
@@ -354,7 +376,12 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                             "materials": {},
                             "public_input": {},
                             "credit_reward_per_performer": 2,
+                            "performer_slots": 1,
                             "minimum_level": 1,
+                            "format": "online",
+                            "city": None,
+                            "deadline_at": deadline,
+                            "status": "published",
                         },
                     ],
                     "next_cursor": None,
@@ -447,6 +474,32 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
 
         page.goto(mini_app_url)
         page.get_by_role("button", name=malicious).click()
+        detail = page.locator("article.detail")
+        assert detail.get_by_text("Мария", exact=True).count() == 1
+        assert detail.get_by_text("Практическая помощь", exact=True).count() == 1
+        assert detail.get_by_text("Групповое", exact=True).count() == 1
+        assert detail.get_by_text("3 кредитов", exact=True).count() == 1
+        assert detail.get_by_text("4", exact=True).count() == 1
+        assert detail.get_by_text("Офлайн", exact=True).count() == 1
+        assert detail.get_by_text("Буэнос-Айрес", exact=True).count() == 1
+        assert (
+            detail.get_by_role("heading", name="Срок")
+            .locator("..")
+            .locator("time")
+            .get_attribute("datetime")
+            == deadline
+        )
+        assert detail.get_by_role("heading", name="Автор").evaluate(
+            "node => Boolean(node.compareDocumentPosition("
+            "document.querySelector('button.primary')) & Node.DOCUMENT_POSITION_FOLLOWING)"
+        )
+        assert private_value not in detail.inner_text()
+        assert "00000000-0000-0000-0000-000000000099" not in detail.inner_text()
+        assert "undefined" not in detail.inner_text()
+        assert "null" not in detail.inner_text()
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
         assert page.locator("body").inner_text().count(malicious) >= 4
         assert javascript_url in page.locator("body").inner_text()
         assert page.locator("img, a, [onerror], [onclick], [href^='javascript:']").count() == 0
@@ -464,6 +517,14 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         page.get_by_text("Задание сейчас недоступно.").wait_for()
         page.get_by_role("button", name="Назад").click()
         page.get_by_role("button", name=other_assignment_title).click()
+        other_detail = page.locator("article.detail")
+        assert other_detail.get_by_text("Сообщество", exact=True).count() == 1
+        assert other_detail.get_by_text("Онлайн", exact=True).count() == 1
+        assert other_detail.get_by_role("heading", name="Категория").count() == 0
+        assert other_detail.get_by_role("heading", name="Тип").count() == 0
+        assert other_detail.get_by_role("heading", name="Город").count() == 0
+        assert "undefined" not in other_detail.inner_text()
+        assert "null" not in other_detail.inner_text()
         page.get_by_role("button", name="Принять задание").click()
         page.get_by_role("heading", name=other_assignment_title).wait_for()
         page.get_by_role("button", name="Назад").click()

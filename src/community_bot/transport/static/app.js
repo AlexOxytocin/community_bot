@@ -711,7 +711,19 @@ function showTaskDetail(task, push = true) {
   back.classList.remove("hidden");
   if (push) history.pushState({ screen: "task", taskId: task.id }, "", "#task");
   const detail = element("article", undefined, "card detail");
-  detail.append(element("h3", task.title), section("Описание", task.description));
+  detail.append(element("h3", task.title), section("Автор", task.author_display_name));
+  if (task.category_name) detail.append(section("Категория", task.category_name));
+  if (task.task_kind) {
+    detail.append(section("Тип", ({ solo: "Личное", group: "Групповое" })[task.task_kind]));
+  }
+  detail.append(
+    dateSection("Срок", task.deadline_at),
+    section("Награда", String(task.credit_reward_per_performer) + " кредитов"),
+    section("Мест", String(task.performer_slots)),
+    section("Формат", ({ online: "Онлайн", offline: "Офлайн", any: "Любой" })[task.format]),
+  );
+  if (task.city) detail.append(section("Город", task.city));
+  detail.append(section("Описание", task.description));
   detail.append(section("Критерии выполнения", task.completion_criteria));
   detail.append(section("Как выполнять", task.performer_instructions));
   for (const [key, value] of Object.entries(task.public_input)) {
