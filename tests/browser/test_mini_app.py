@@ -66,6 +66,105 @@ def test_assignment_action_eligibility_is_server_projected() -> None:
     assert "if (assignment.can_cancel)" in source
 
 
+def test_core_hash_routes_restore_authoritatively_and_fail_closed(
+    mini_app_url: str,
+) -> None:
+    task_id = "00000000-0000-0000-0000-000000000090"
+    assignment_id = "00000000-0000-0000-0000-000000000091"
+    forbidden_id = "00000000-0000-0000-0000-000000000092"
+    task = {
+        "id": task_id,
+        "title": "Восстановить экран",
+        "author_display_name": "Мария",
+        "category_name": None,
+        "task_kind": "solo",
+        "deadline_at": "2026-08-21T20:00:00Z",
+        "credit_reward_per_performer": 2,
+        "performer_slots": 1,
+        "format": "online",
+        "city": None,
+        "description": "Проверить reload",
+        "completion_criteria": "Экран восстановлен",
+        "performer_instructions": "Обновить страницу",
+        "public_input": {},
+        "materials": {},
+    }
+    detail = {
+        "task_title": "Авторитетное назначение",
+        "assignment_status": "accepted",
+        "task_deadline_at": "2026-08-21T20:00:00Z",
+        "description": "SERVER-PROJECTION",
+        "completion_criteria": "Экран восстановлен",
+        "performer_instructions": "Обновить страницу",
+        "result_summary": None,
+        "review_deadline_at": None,
+        "reject_dispute_deadline_at": None,
+        "case_status": None,
+        "can_dispute": False,
+        "can_submit": False,
+        "can_cancel": False,
+    }
+    task_fetches: list[str] = []
+    detail_fetches: list[str] = []
+
+    def tasks_route(route: Route) -> None:
+        task_fetches.append(route.request.url)
+        route.fulfill(json={"items": [task], "next_cursor": None})
+
+    def detail_route(route: Route) -> None:
+        requested_id = route.request.url.rsplit("/", maxsplit=1)[-1]
+        detail_fetches.append(requested_id)
+        if requested_id == forbidden_id:
+            route.fulfill(status=403, json={"code": "PRIVATE-DENIAL"})
+        else:
+            route.fulfill(
+                status=200 if requested_id == assignment_id else 404,
+                json=detail if requested_id == assignment_id else {"code": "not_found"},
+            )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 375, "height": 812})
+        page.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(json={"display_name": "Алекс", "member_id": "me"}),
+        )
+        page.route("**/api/v1/tasks", tasks_route)
+        page.route(
+            "**/api/v1/assignments?*",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route("**/api/v1/assignments/*", detail_route)
+
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="Восстановить экран").click()
+        page.reload()
+        page.get_by_role("heading", name="Восстановить экран").wait_for()
+        assert len(task_fetches) == 2
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+
+        page.get_by_role("button", name="Мои задания").click()
+        page.reload()
+        page.get_by_role("heading", name="Взятые мной").wait_for()
+        page.get_by_role("button", name="Каталог").click()
+        page.goto(mini_app_url + "?case=detail#assignment/" + assignment_id)
+        page.get_by_text("SERVER-PROJECTION").wait_for()
+        assert detail_fetches == [assignment_id]
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Каталог").wait_for()
+
+        page.goto(mini_app_url + "?case=forbidden#assignment/" + forbidden_id)
+        page.get_by_text("Назначения недоступны для этого аккаунта.").wait_for()
+        assert "PRIVATE-DENIAL" not in page.locator("body").inner_text()
+        page.goto(mini_app_url + "?case=malformed#assignment/..%2Fmembers%2FPRIVATE-ID")
+        page.get_by_text("Назначение больше не входит в активные.").wait_for()
+        assert detail_fetches == [assignment_id, forbidden_id, "..%2Fmembers%2FPRIVATE-ID"]
+        assert page.evaluate("document.documentElement.scrollWidth") <= 375
+        browser.close()
+
+
 def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
