@@ -1341,6 +1341,82 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
     await database.dispose()
 
 
+async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: str) -> None:
+    database = Database(database_url)
+    author, owned = await _published_task(database, update_base=52_610)
+    foreign_author, foreign = await _published_task(database, update_base=52_620)
+    performer = await prepare_member(database, telegram_user_id=52_630)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        author_model = await session.get(MemberModel, author.id)
+        foreign_author_model = await session.get(MemberModel, foreign_author.id)
+        source = await session.get(TaskModel, foreign.id)
+        assert author_model is not None
+        assert foreign_author_model is not None
+        assert source is not None
+        author_model.role = MemberRole.ADMINISTRATOR.value
+        foreign_author_model.role = MemberRole.ADMINISTRATOR.value
+        values = {
+            column.key: getattr(source, column.key)
+            for column in inspect(TaskModel).mapper.column_attrs
+            if column.key not in {"id", "created_at", "updated_at"}
+        }
+        session.add(
+            TaskModel(
+                **(
+                    values
+                    | {
+                        "origin": "community",
+                        "creator_id": None,
+                        "created_by_admin_id": foreign_author.id,
+                        "reviewer_admin_id": author.id,
+                        "community_approved_by_admin_id": foreign_author.id,
+                        "reserved_credit_total": 0,
+                        "publish_command_id": uuid4(),
+                    }
+                )
+            )
+        )
+        session.add(
+            AssignmentModel(
+                task_id=owned.id,
+                performer_id=performer.id,
+                slot_number=1,
+                status="accepted",
+                accepted_at=datetime.datetime.now(datetime.UTC),
+            )
+        )
+
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(author.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+
+        response = await client.get("/api/v1/owned-tasks", params={"member_id": str(performer.id)})
+        assert response.status_code == 200, response.text
+        assert response.json()["items"] == [
+            {
+                "id": str(owned.id),
+                "title": owned.title,
+                "status": "published",
+                "performer_slots": 1,
+                "deadline_at": owned.deadline_at.isoformat().replace("+00:00", "Z"),
+                "assignees": [{"display_name": performer.display_name, "status": "accepted"}],
+                "cancellation_status": None,
+            }
+        ]
+
+    await database.dispose()
+
+
 async def test_web_submission_draft_is_bounded_exact_and_template_closed(database_url: str) -> None:
     database = Database(database_url)
     _author, freeform_task = await _freeform_task(database, update_base=52_750)

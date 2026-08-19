@@ -56,6 +56,7 @@ from community_bot.application.reputation import (
     ReputationError as ReputationApplicationError,
 )
 from community_bot.application.tasks import (
+    OwnedTaskCard,
     PublishedTask,
     PublishTaskCommand,
     SaveWebTaskDraftCommand,
@@ -212,6 +213,25 @@ class TaskDto(_Dto):
 class TasksDto(_Dto):
     items: tuple[TaskDto, ...]
     next_cursor: UUID | None
+
+
+class OwnedTaskAssigneeDto(_Dto):
+    display_name: str
+    status: str
+
+
+class OwnedTaskDto(_Dto):
+    id: UUID
+    title: str
+    status: str
+    performer_slots: int
+    deadline_at: datetime.datetime
+    assignees: tuple[OwnedTaskAssigneeDto, ...]
+    cancellation_status: str | None
+
+
+class OwnedTasksDto(_Dto):
+    items: tuple[OwnedTaskDto, ...]
 
 
 class AssignmentDto(_Dto):
@@ -790,6 +810,14 @@ def create_web_app(
         except (TaskError, LookupError, PermissionError):
             return _error_response(409, "task_catalog_unavailable")
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/owned-tasks", response_model=OwnedTasksDto)
+    async def owned_tasks(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
+        try:
+            cards = await tasks.list_owned_cards(actor=actor, creator_only=True)
+        except PermissionError:
+            return _error_response(403, "task_catalog_unavailable")
+        return _json_response(OwnedTasksDto(items=tuple(_owned_task_dto(card) for card in cards)))
 
     @app.get("/api/v1/leaderboard", response_model=LeaderboardDto)
     async def leaderboard(
@@ -1551,6 +1579,21 @@ def _task_dto(task: PublishedTask) -> TaskDto:
             for key in task.public_input_keys
             if key in task.input_payload
         },
+    )
+
+
+def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
+    return OwnedTaskDto(
+        id=card.task.id,
+        title=card.task.title,
+        status=card.task.status.value,
+        performer_slots=card.task.performer_slots,
+        deadline_at=card.task.deadline_at,
+        assignees=tuple(
+            OwnedTaskAssigneeDto(display_name=item.display_name, status=item.status)
+            for item in card.assignees
+        ),
+        cancellation_status=card.cancellation_status,
     )
 
 

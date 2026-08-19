@@ -1285,7 +1285,8 @@ class TaskService:
     async def list_owned_cards(  # noqa: PLR0913
         self,
         *,
-        actor_telegram_user_id: int,
+        actor_telegram_user_id: int | None = None,
+        actor: ActorContext | None = None,
         limit: int = 20,
         status: TaskStatus | None = None,
         cursor: tuple[datetime.datetime, UUID] | None = None,
@@ -1295,10 +1296,16 @@ class TaskService:
         """Return compact-card context for tasks visible to one owner or reviewer."""
         if not 1 <= limit <= _MAX_OWNED_TASKS:
             raise TaskError("Owned task page size must be between 1 and 20.")
+        if (actor_telegram_user_id is None) == (actor is None):
+            raise TaskError("Exactly one task actor identity is required.")
         async with self._unit_of_work_factory() as uow:
-            actor = await _active_actor(uow, actor_telegram_user_id)
+            member = (
+                await _active_context_actor(uow, actor)
+                if actor is not None
+                else await _active_actor(uow, cast("int", actor_telegram_user_id))
+            )
             return await uow.list_owned_task_cards(
-                creator_id=actor.id,
+                creator_id=member.id,
                 limit=limit,
                 status=status,
                 before_created_at=None if cursor is None else cursor[0],
