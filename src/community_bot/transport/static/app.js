@@ -108,7 +108,7 @@ const assignmentStatus = (value) => ({
   reviewer_required: "Нужен проверяющий",
 }[value] || value);
 
-const createdAssignmentsButton = element("button", "Созданные мной");
+const createdAssignmentsButton = element("button", "Созданные мной", "back");
 createdAssignmentsButton.type = "button";
 createdAssignmentsButton.addEventListener("click", () => loadCreatedReviews());
 
@@ -213,12 +213,28 @@ function renderTaskCreation(state) {
   for (const name of ["title", "description", "completion_criteria", "city"]) form[name].value = values[name] || "";
   form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
   form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
+  const deadlineMin = new Date(Date.now() + 60_000);
+  deadlineMin.setSeconds(0, 0);
+  form.deadline_at.min = new Date(deadlineMin - deadlineMin.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   form.performer_slots.value = values.performer_slots || 1;
   form.material_text.value = values.materials?.text || "";
   form.material_url.value = values.materials?.url || "";
   const submit = element("button", "Предпросмотр", "primary");
   submit.type = "submit";
+  const deadlineStatus = element("p", "Выберите будущий срок.", "status hidden");
+  deadlineStatus.id = "deadline-status";
+  deadlineStatus.setAttribute("aria-live", "polite");
+  form.deadline_at.setAttribute("aria-describedby", deadlineStatus.id);
+  const updateDeadlineValidity = () => {
+    const expired = form.deadline_at.validity.rangeUnderflow;
+    form.deadline_at.setAttribute("aria-invalid", String(expired));
+    deadlineStatus.classList.toggle("hidden", !expired);
+    submit.disabled = expired;
+  };
+  form.deadline_at.addEventListener("input", updateDeadlineValidity);
+  form.deadline_at.parentElement.append(deadlineStatus);
   form.append(submit);
+  updateDeadlineValidity();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;

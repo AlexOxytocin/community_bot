@@ -1608,3 +1608,101 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert commands[2][1] != commands[3][1]
         assert len({key for _action, key, _body in commands[1:]}) == 5
         browser.close()
+
+
+def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(
+    mini_app_url: str,
+) -> None:
+    draft_id = "00000000-0000-0000-0000-000000000088"
+    category_id = "00000000-0000-0000-0000-000000000089"
+
+    def creation(route: Route) -> None:
+        if route.request.method == "POST":
+            route.fulfill(status=204)
+            return
+        route.fulfill(
+            json={
+                "categories": [{"id": category_id, "name": "Практическая помощь", "icon": "⭐"}],
+                "time_sizes": [
+                    {
+                        "value": "s",
+                        "label": "15-40 минут",
+                        "reward_options": [2, 3, 4],
+                        "minimum_reward": 2,
+                    }
+                ],
+                "draft": {
+                    "id": draft_id,
+                    "revision": 1,
+                    "values": {"deadline_at": "2000-01-01T00:00:00Z"},
+                },
+                "preview": None,
+                "needs_edit": False,
+            }
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        for color_scheme in ("dark", "light"):
+            page = _new_page(
+                browser,
+                bridge=(
+                    "globalThis.Telegram={WebApp:{colorScheme:'"
+                    + color_scheme
+                    + "',ready(){},expand(){}}};"
+                ),
+            )
+            page.set_viewport_size({"width": 375, "height": 812})
+            page.route(
+                "**/api/v1/me",
+                lambda route: route.fulfill(json={"display_name": "Алекс"}),
+            )
+            page.route(
+                "**/api/v1/tasks",
+                lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+            )
+            page.route(
+                "**/api/v1/assignments?*",
+                lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+            )
+            page.route("**/api/v1/task-creation", creation)
+            page.goto(mini_app_url)
+
+            page.get_by_role("button", name="Создать задание").click()
+            deadline = page.get_by_label("Срок")
+            preview = page.get_by_role("button", name="Предпросмотр")
+            assert deadline.get_attribute("min") > "2000-01-01T00:00"
+            assert deadline.get_attribute("aria-invalid") == "true"
+            page.get_by_text("Выберите будущий срок.").wait_for()
+            assert preview.is_disabled()
+
+            deadline.fill("2099-01-01T00:00")
+            assert deadline.get_attribute("aria-invalid") == "false"
+            assert page.get_by_text("Выберите будущий срок.").is_hidden()
+            assert not preview.is_disabled()
+            assert page.evaluate("document.documentElement.scrollWidth") <= 375
+
+            page.get_by_role("button", name="Мои задания").click()
+            secondary = page.get_by_role("button", name="Созданные мной")
+            styles = secondary.evaluate(
+                """node => {
+                  const style = getComputedStyle(node);
+                  return {className: node.className, height: node.getBoundingClientRect().height,
+                    radius: style.borderRadius, color: style.color, cursor: style.cursor};
+                }"""
+            )
+            assert styles == {
+                "className": "back",
+                "height": styles["height"],
+                "radius": "12px",
+                "color": "rgb(246, 248, 252)",
+                "cursor": "pointer",
+            }
+            assert styles["height"] >= 44
+            page.keyboard.press("Tab")
+            page.keyboard.press("Tab")
+            assert secondary.evaluate("node => node === document.activeElement")
+            assert secondary.evaluate("node => getComputedStyle(node).outlineWidth") == "3px"
+            assert page.evaluate("document.documentElement.scrollWidth") <= 375
+            page.close()
+        browser.close()
