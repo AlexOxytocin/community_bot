@@ -772,19 +772,42 @@ class AssignmentService:
             await uow.commit()
             return result
 
-    async def cancel(
-        self, *, update_id: int, actor_telegram_user_id: int, assignment_id: UUID, reason: str
+    async def cancel(  # noqa: PLR0913 - legacy and actor-native identities share one use case.
+        self,
+        *,
+        update_id: int,
+        actor_telegram_user_id: int | None,
+        assignment_id: UUID,
+        reason: str,
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> Assignment:
         """Cancel one accepted assignment and free its slot."""
         normalized = reason.strip()
         if not normalized:
             raise AssignmentError("Assignment cancellation reason is required.")
+        if actor_member_id is not None and replay_fingerprint is None:
+            raise AssignmentError("Web cancellation fingerprint is required.")
         async with self._unit_of_work_factory() as uow:
             replay = await _begin(uow, update_id)
+            actor = (
+                await _context_member(uow, actor_member_id) if actor_member_id is not None else None
+            )
             if replay is not None:
+                if actor is not None:
+                    return await _web_cancellation_replay(
+                        uow,
+                        replay,
+                        actor_id=actor.id,
+                        assignment_id=assignment_id,
+                        replay_fingerprint=cast("str", replay_fingerprint),
+                    )
                 return await _assignment_replay(uow, replay)
-            await uow.acquire_task_identity_gate(actor_telegram_user_id)
-            actor = await _actor(uow, actor_telegram_user_id)
+            if actor is None:
+                if actor_telegram_user_id is None:
+                    raise PermissionError("Assignment actor identity is missing.")
+                actor = await _actor(uow, actor_telegram_user_id)
+            await uow.acquire_task_identity_gate(actor.telegram_user_id)
             preliminary = await uow.get_assignment(assignment_id)
             if preliminary is None:
                 raise LookupError("Assignment does not exist.")
@@ -793,6 +816,8 @@ class AssignmentService:
             assignment = await uow.lock_assignment(assignment_id)
             if task is None or assignment is None:
                 raise LookupError("Assignment task does not exist.")
+            if actor_member_id is not None:
+                await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
             if assignment.performer_id != actor.id:
                 raise PermissionError("Assignment is not owned by this member.")
             if assignment.status is not AssignmentStatus.ACCEPTED:
@@ -838,7 +863,17 @@ class AssignmentService:
                         entity_id=str(task.id),
                         reason="assignment_cancelled",
                     )
-            await _finish(uow, update_id, actor.id, assignment)
+            await _finish(
+                uow,
+                update_id,
+                actor.id,
+                assignment,
+                outcome_code=(
+                    f"web_cancellation:{actor.id}:{assignment.id}:{replay_fingerprint}"
+                    if actor_member_id is not None
+                    else None
+                ),
+            )
             return assignment
 
     async def submit(self, command: SubmitResultCommand) -> ResultVersion:
@@ -1342,6 +1377,13 @@ async def _context_actor(uow: AssignmentUnitOfWork, context: ActorContext) -> Me
     return actor
 
 
+async def _context_member(uow: AssignmentUnitOfWork, member_id: UUID) -> Member:
+    actor = await uow.get_member(member_id)
+    if actor is None or actor.status is not MemberStatus.ACTIVE:
+        raise PermissionError("Only an active member can use assignment workflows.")
+    return actor
+
+
 async def _command_actor(
     uow: AssignmentUnitOfWork,
     command: (
@@ -1390,6 +1432,34 @@ async def _assignment_replay(uow: AssignmentUnitOfWork, outcome: str) -> Assignm
     assignment = await uow.get_assignment(UUID(raw_id))
     if assignment is None:
         raise LookupError("Stored assignment outcome does not exist.")
+    return assignment
+
+
+async def _web_cancellation_replay(
+    uow: AssignmentUnitOfWork,
+    outcome: str,
+    *,
+    actor_id: UUID,
+    assignment_id: UUID,
+    replay_fingerprint: str,
+) -> Assignment:
+    try:
+        marker, raw_actor_id, raw_assignment_id, stored_fingerprint = outcome.split(":", 3)
+        stored_actor_id = UUID(raw_actor_id)
+        stored_assignment_id = UUID(raw_assignment_id)
+    except ValueError as error:
+        raise AssignmentError("Stored cancellation outcome does not match command.") from error
+    if (
+        marker != "web_cancellation"
+        or stored_actor_id != actor_id
+        or stored_assignment_id != assignment_id
+        or stored_fingerprint != replay_fingerprint
+    ):
+        raise AssignmentError("Stored cancellation outcome does not match command.")
+    assignment = await uow.get_assignment(assignment_id)
+    if assignment is None or assignment.performer_id != actor_id:
+        raise PermissionError("Assignment is not owned by this member.")
+    await uow.ensure_task_test_access(task_id=assignment.task_id, member_id=actor_id)
     return assignment
 
 

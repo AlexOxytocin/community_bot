@@ -286,6 +286,11 @@ class AssignmentDisputeRequest(_Dto):
     comment: str = Field(min_length=1)
 
 
+class AssignmentCancellationRequest(_Dto):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class ModerationCaseDto(_Dto):
     id: UUID
     assignment_id: UUID
@@ -884,6 +889,41 @@ def create_web_app(
             return _error_response(404, "not_found")
         return _json_response(_assignment_detail_dto(card))
 
+    @app.post("/api/v1/assignments/{assignment_id}/cancellation", status_code=204)
+    async def cancel_assignment(assignment_id: str, request: Request) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        parsed_assignment_id = _canonical_uuid(assignment_id)
+        if parsed_assignment_id is None:
+            return _error_response(422, "invalid_request")
+        payload = cast(
+            "AssignmentCancellationRequest | None",
+            await _submission_request(request, AssignmentCancellationRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        fingerprint = _submission_fingerprint("cancel", payload={"reason": payload.reason})
+        update_id = _submission_update_id(
+            actor.member_id,
+            parsed_assignment_id,
+            "cancel",
+            operation_key,
+            namespace=b"assignment-cancellation-v1",
+        )
+        try:
+            await assignments.cancel(
+                update_id=update_id,
+                actor_telegram_user_id=None,
+                assignment_id=parsed_assignment_id,
+                reason=payload.reason,
+                actor_member_id=actor.member_id,
+                replay_fingerprint=fingerprint,
+            )
+        except (AssignmentError, LookupError, PermissionError, TaskError):
+            return _error_response(409, "assignment_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.post("/api/v1/assignments/{assignment_id}/disputes", status_code=204)
     async def open_assignment_dispute(assignment_id: str, request: Request) -> Response:
         _require_origin(request, origin)
@@ -1413,6 +1453,7 @@ async def _submission_request(
         | ConfirmSubmissionDraftRequest
         | AssignmentDecisionRequest
         | AssignmentDisputeRequest
+        | AssignmentCancellationRequest
         | ModerationResolutionRequest
     ],
 ) -> (
@@ -1420,6 +1461,7 @@ async def _submission_request(
     | ConfirmSubmissionDraftRequest
     | AssignmentDecisionRequest
     | AssignmentDisputeRequest
+    | AssignmentCancellationRequest
     | ModerationResolutionRequest
     | None
 ):

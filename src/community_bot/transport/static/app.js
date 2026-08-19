@@ -1152,6 +1152,52 @@ function renderDispute(assignment) {
   return form;
 }
 
+function renderCancellation(assignment) {
+  const form = element("form", undefined, "submission-form");
+  const heading = element("h3", "Отказаться от задания");
+  const label = element("label", "Причина отказа", "section");
+  const reason = document.createElement("textarea");
+  reason.id = "assignment-cancellation-reason";
+  reason.name = "reason";
+  reason.required = true;
+  reason.maxLength = 1000;
+  reason.rows = 4;
+  label.htmlFor = reason.id;
+  label.append(reason);
+  const submit = element("button", "Подтвердить отказ", "primary");
+  submit.type = "submit";
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+  let operationKey = null;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const normalized = reason.value.trim();
+    if (!normalized || !globalThis.confirm("Отказаться от задания и освободить слот?")) return;
+    submit.disabled = true;
+    status.className = "status";
+    status.textContent = "Отказываемся от задания…";
+    operationKey ||= newOperationKey();
+    try {
+      await submissionRequest(
+        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/cancellation",
+        "POST",
+        operationKey,
+        { reason: normalized },
+      );
+      history.replaceState({ screen: "assignments" }, "", "#assignments");
+      await loadAssignments(false);
+    } catch (error) {
+      status.textContent = error instanceof TypeError
+        ? "Сеть недоступна. Повторите запрос — он останется тем же."
+        : "Не удалось отказаться. Проверьте состояние назначения и повторите.";
+      if (!retryableSubmissionError(error)) operationKey = null;
+      submit.disabled = false;
+    }
+  });
+  form.append(heading, label, submit, status);
+  return form;
+}
+
 async function showAssignmentDetail(assignmentId, push = true) {
   const revision = ++screenRevision;
   returnFocusAssignmentId = assignmentId;
@@ -1206,6 +1252,9 @@ async function showAssignmentDetail(assignmentId, push = true) {
     if (assignment.assignment_status === "accepted"
       && assignment.submission_contract === "freeform_result_v1") {
       detail.append(renderSubmission(assignment, null));
+    }
+    if (assignment.assignment_status === "accepted") {
+      detail.append(renderCancellation(assignment));
     }
     replaceContent(detail);
     back.focus();
