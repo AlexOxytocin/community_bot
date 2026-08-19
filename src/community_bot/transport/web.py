@@ -45,10 +45,15 @@ from community_bot.application.moderation import (
 )
 from community_bot.application.registration import ProfileSnapshot, RegistrationService
 from community_bot.application.reputation import (
+    KarmaDraft,
+    KarmaVoteResult,
     ProfileUnavailableError,
     ReputationService,
     SafeProfile,
     normalize_member_search_query,
+)
+from community_bot.application.reputation import (
+    ReputationError as ReputationApplicationError,
 )
 from community_bot.application.tasks import (
     PublishedTask,
@@ -67,6 +72,7 @@ from community_bot.domain.registration import (
     RegistrationError,
     StaleRegistrationStepError,
 )
+from community_bot.domain.reputation import ReputationError as ReputationDomainError
 from community_bot.domain.tasks import (
     TASK_TIME_SIZE_SPECS,
     TaskError,
@@ -92,6 +98,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "invalid_idempotency_key",
         "invalid_origin",
         "invalid_request",
+        "karma_vote_unavailable",
         "not_found",
         "profile_unavailable",
         "assignment_unavailable",
@@ -158,6 +165,21 @@ class MemberDto(_Dto):
     level_number: int
     karma: KarmaDto
     reliability: ReliabilityDto
+
+
+class KarmaActionRequest(_Dto):
+    action: Literal["begin", "save_value", "save_comment", "confirm"]
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
+    value: int | None = Field(default=None, ge=-1, le=1, strict=True)
+    comment: str | None = Field(default=None, max_length=300)
+
+
+class KarmaActionDto(_Dto):
+    action: Literal["begin", "save_value", "save_comment", "confirm"]
+    target_id: UUID
+    step: Literal["value", "comment", "preview", "confirmed"]
+    revision: int
+    aggregate: KarmaDto | None = None
 
 
 class MembersDto(_Dto):
@@ -567,6 +589,94 @@ def create_web_app(
         except (PermissionError, ProfileUnavailableError) as error:
             raise HTTPException(status_code=404, detail="not_found") from error
         dto = _member_dto(profile)
+        return _json_response(dto)
+
+    @app.post(
+        "/api/v1/members/{member_id}/karma-vote",
+        response_model=KarmaActionDto,
+    )
+    async def change_karma_vote(member_id: UUID, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        if request.headers.get("content-type", "").lower() != "application/json":
+            return _error_response(422, "invalid_request")
+        try:
+            body = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
+            command = KarmaActionRequest.model_validate_json(body)
+            expected = {
+                "begin": {"action"},
+                "save_value": {"action", "expected_revision", "value"},
+                "save_comment": {"action", "expected_revision", "comment"},
+                "confirm": {"action", "expected_revision"},
+            }[command.action]
+        except (OverflowError, ValueError, ValidationError):
+            return _error_response(422, "invalid_request")
+        if command.model_fields_set != expected or any(
+            getattr(command, field) is None for field in expected
+        ):
+            return _error_response(422, "invalid_request")
+        payload: dict[str, object] = {"target_id": str(member_id)}
+        if command.value is not None:
+            payload["value"] = command.value
+        if command.comment is not None:
+            payload["comment"] = command.comment
+        fingerprint = _submission_fingerprint(
+            command.action,
+            command.expected_revision,
+            payload=payload,
+        )
+        update_id = _submission_update_id(
+            actor.member_id,
+            actor.member_id,
+            "karma-vote",
+            operation_key,
+            namespace=b"karma-vote-v1",
+        )
+        try:
+            if command.action == "begin":
+                result = await reputation.begin_vote(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    target_id=member_id,
+                    replay_fingerprint=fingerprint,
+                )
+                dto = _karma_draft_dto(command.action, result)
+            elif command.action == "save_value":
+                result = await reputation.save_value(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    target_id=member_id,
+                    replay_fingerprint=fingerprint,
+                    expected_revision=cast("int", command.expected_revision),
+                    value=cast("int", command.value),
+                )
+                dto = _karma_draft_dto(command.action, result)
+            elif command.action == "save_comment":
+                result = await reputation.save_comment(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    target_id=member_id,
+                    replay_fingerprint=fingerprint,
+                    expected_revision=cast("int", command.expected_revision),
+                    comment=cast("str", command.comment),
+                )
+                dto = _karma_draft_dto(command.action, result)
+            else:
+                confirmed = await reputation.confirm_vote(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    target_id=member_id,
+                    replay_fingerprint=fingerprint,
+                    expected_revision=cast("int", command.expected_revision),
+                )
+                dto = _karma_confirm_dto(member_id, confirmed)
+        except ReputationDomainError:
+            return _error_response(422, "invalid_request")
+        except (LookupError, PermissionError, ProfileUnavailableError):
+            return _error_response(404, "not_found")
+        except (ReputationApplicationError, ValueError):
+            return _error_response(409, "karma_vote_unavailable")
         return _json_response(dto)
 
     @app.get("/api/v1/tasks", response_model=TasksDto)
@@ -1345,6 +1455,27 @@ def _member_query(query: str | None) -> str | None:
     if normalized is None or len(normalized) > 80:
         raise HTTPException(status_code=422, detail="invalid_member_query")
     return normalized
+
+
+def _karma_draft_dto(
+    action: Literal["begin", "save_value", "save_comment"], draft: KarmaDraft
+) -> KarmaActionDto:
+    return KarmaActionDto(
+        action=action,
+        target_id=draft.target_id,
+        step=draft.step.value,
+        revision=draft.revision,
+    )
+
+
+def _karma_confirm_dto(target_id: UUID, result: KarmaVoteResult) -> KarmaActionDto:
+    return KarmaActionDto(
+        action="confirm",
+        target_id=target_id,
+        step="confirmed",
+        revision=result.revision,
+        aggregate=KarmaDto(score=result.aggregate_score, count=result.aggregate_count),
+    )
 
 
 def _member_dto(profile: SafeProfile) -> MemberDto:

@@ -119,11 +119,10 @@ async def begin_draft(session: AsyncSession, member_id: UUID, target_id: UUID) -
         .where(ConversationStateModel.member_id == member_id)
         .with_for_update()
     )
-    if (
-        state is None
-        or state.flow_type != "karma"
-        or str(state.payload_json.get("target_id")) != str(target_id)
-    ):
+    if state is not None and state.flow_type != "karma":
+        message = "Finish or cancel the current conversation first."
+        raise ValueError(message)
+    if state is None or str(state.payload_json.get("target_id")) != str(target_id):
         await conversation_store.claim_text_flow(
             session,
             member_id=member_id,

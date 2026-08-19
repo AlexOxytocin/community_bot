@@ -34,7 +34,10 @@ from community_bot.infrastructure.db.models import (
     ConversationStateModel,
     DisputeEvidenceModel,
     DisputeResolutionModel,
+    KarmaVoteHistoryModel,
+    KarmaVoteModel,
     MemberModel,
+    MemberSanctionModel,
     ModerationCaseModel,
     NotificationModel,
     OutboxEventModel,
@@ -54,7 +57,7 @@ from community_bot.infrastructure.outbox.postgres import PostgresNotificationQue
 from community_bot.transport.web import _accept_update_id, _submission_update_id, create_web_app
 from tests.integration.test_assignments import _community_task, _freeform_task, _published_task
 from tests.integration.test_moderation import _open_dispute_fixture
-from tests.integration.test_reputation import add_member, prepare_config
+from tests.integration.test_reputation import add_member, add_paid_interaction, prepare_config
 from tests.integration.test_task_creation import prepare_member
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -240,6 +243,235 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
             )
         )
         assert profile_audits == web_receipts == 3
+    await database.dispose()
+
+
+async def test_karma_vote_api_is_actor_scoped_exact_and_authoritative(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    actor = await add_member(database, 52_091, display_name="Karma Actor")
+    target = await add_member(database, 52_092, display_name="Karma Target")
+    await prepare_config(database, actor.id)
+    await add_paid_interaction(database, actor, target)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(actor.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+
+        async def action(
+            key: str,
+            body: dict[str, object],
+            *,
+            target_id: UUID = target.id,
+        ) -> Response:
+            return await client.post(
+                f"/api/v1/members/{target_id}/karma-vote",
+                headers={"origin": ORIGIN, "idempotency-key": key},
+                json=body,
+            )
+
+        invalid_actor = await action("8201", {"action": "begin", "actor_member_id": str(actor.id)})
+        assert invalid_actor.json() == {"code": "invalid_request"}
+        begun = await action("8201", {"action": "begin"})
+        assert (begun.status_code, begun.json()) == (
+            200,
+            {
+                "action": "begin",
+                "target_id": str(target.id),
+                "step": "value",
+                "revision": 0,
+                "aggregate": None,
+            },
+        )
+        valued = await action("8202", {"action": "save_value", "expected_revision": 0, "value": 1})
+        assert (valued.status_code, valued.json()["revision"], valued.json()["step"]) == (
+            200,
+            1,
+            "comment",
+        )
+        assert (await action("8201", {"action": "begin"})).json() == begun.json()
+        for response in (
+            await action("8201", {"action": "save_value", "expected_revision": 0, "value": 1}),
+            await action("8201", {"action": "begin"}, target_id=uuid4()),
+            await action("8202", {"action": "save_value", "expected_revision": 0, "value": -1}),
+            await action("8202", {"action": "save_value", "expected_revision": 1, "value": 1}),
+        ):
+            assert (response.status_code, response.json()) == (
+                409,
+                {"code": "karma_vote_unavailable"},
+            )
+        commented = await action(
+            "8203",
+            {
+                "action": "save_comment",
+                "expected_revision": 1,
+                "comment": "Надёжная помощь в общем задании.",
+            },
+        )
+        assert (commented.status_code, commented.json()["revision"]) == (200, 2)
+        foreign_target = await action(
+            "8206",
+            {
+                "action": "save_comment",
+                "expected_revision": 2,
+                "comment": "Надёжная помощь в общем задании.",
+            },
+            target_id=uuid4(),
+        )
+        assert (foreign_target.status_code, foreign_target.json()) == (
+            409,
+            {"code": "karma_vote_unavailable"},
+        )
+        confirms = await asyncio.gather(
+            action("8204", {"action": "confirm", "expected_revision": 2}),
+            action("8205", {"action": "confirm", "expected_revision": 2}),
+        )
+        assert sorted(item.status_code for item in confirms) == [200, 409]
+        confirmed = next(item for item in confirms if item.status_code == 200)
+        confirmed_key = "8204" if confirms[0].status_code == 200 else "8205"
+        assert confirmed.json()["aggregate"] == {"score": 1, "count": 1}
+        delayed_value = await action(
+            "8202", {"action": "save_value", "expected_revision": 0, "value": 1}
+        )
+        assert delayed_value.json() == valued.json()
+        assert (
+            await action(
+                "8203",
+                {
+                    "action": "save_comment",
+                    "expected_revision": 1,
+                    "comment": "Надёжная помощь в общем задании.",
+                },
+            )
+        ).json() == commented.json()
+        replay = await action(confirmed_key, {"action": "confirm", "expected_revision": 2})
+        assert replay.json() == confirmed.json()
+        profile = await client.get(f"/api/v1/members/{target.id}")
+        assert profile.status_code == 200
+        assert profile.json()["karma"] == {"score": 1, "count": 1}
+        assert not {"comment", "rater_id", "history", "telegram_user_id"}.intersection(
+            profile.json()
+        )
+
+    async with sessions() as session:
+        assert await session.scalar(select(func.count(KarmaVoteModel.id))) == 1
+        assert await session.scalar(select(func.count(KarmaVoteHistoryModel.id))) == 1
+        assert (
+            await session.scalar(
+                select(func.count(AuditEventModel.id)).where(
+                    AuditEventModel.action == "karma_vote_saved"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(ProcessedTelegramUpdateModel.update_id)).where(
+                    ProcessedTelegramUpdateModel.update_type == "karma_web"
+                )
+            )
+            == 4
+        )
+    await database.dispose()
+
+
+async def test_karma_vote_api_hides_targets_and_reauthorizes_confirm(database_url: str) -> None:
+    database = Database(database_url)
+    actor = await add_member(database, 52_093)
+    target = await add_member(database, 52_094)
+    hidden = await add_member(database, 52_095, status=MemberStatus.PAUSED)
+    await prepare_config(database, actor.id)
+    await add_paid_interaction(database, actor, target)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(actor.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+
+        async def post(target_id: UUID, key: str, body: dict[str, object]) -> Response:
+            return await client.post(
+                f"/api/v1/members/{target_id}/karma-vote",
+                headers={"origin": ORIGIN, "idempotency-key": key},
+                json=body,
+            )
+
+        absent = await post(uuid4(), "8210", {"action": "begin"})
+        hidden_response = await post(hidden.id, "8211", {"action": "begin"})
+        assert [(item.status_code, item.json()) for item in (absent, hidden_response)] == [
+            (404, {"code": "not_found"}),
+            (404, {"code": "not_found"}),
+        ]
+        draft = (await post(target.id, "8212", {"action": "begin"})).json()
+        draft = (
+            await post(
+                target.id,
+                "8213",
+                {"action": "save_value", "expected_revision": draft["revision"], "value": 1},
+            )
+        ).json()
+        draft = (
+            await post(
+                target.id,
+                "8214",
+                {
+                    "action": "save_comment",
+                    "expected_revision": draft["revision"],
+                    "comment": "Ограничение после заполнения черновика.",
+                },
+            )
+        ).json()
+        async with sessions.begin() as session:
+            session.add(
+                MemberSanctionModel(
+                    target_member_id=actor.id,
+                    author_member_id=target.id,
+                    sanction_type="restriction",
+                    restricted_actions_json=["karma_vote"],
+                    reason="Integration authorization recheck.",
+                    starts_at=datetime.datetime.now(datetime.UTC),
+                    ends_at=None,
+                    previous_status=MemberStatus.ACTIVE.value,
+                    applied_status=MemberStatus.ACTIVE.value,
+                    state="active",
+                    command_id=uuid4(),
+                )
+            )
+        denied = await post(
+            target.id,
+            "8215",
+            {"action": "confirm", "expected_revision": draft["revision"]},
+        )
+        assert (denied.status_code, denied.json()) == (404, {"code": "not_found"})
+    async with sessions() as session:
+        stored = await session.get(ConversationStateModel, actor.id)
+        assert stored is not None
+        assert stored.flow_type == "karma"
+        assert stored.revision == 2
+        assert await session.scalar(select(func.count(KarmaVoteModel.id))) == 0
+        assert (
+            await session.scalar(
+                select(func.count(ProcessedTelegramUpdateModel.update_id)).where(
+                    ProcessedTelegramUpdateModel.update_type == "karma_web"
+                )
+            )
+            == 3
+        )
     await database.dispose()
 
 
