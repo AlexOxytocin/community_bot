@@ -152,6 +152,30 @@ class AssignmentCard:
             return False
         return True
 
+    @property
+    def can_submit(self) -> bool:
+        """Project the existing submission validation for the Mini App."""
+        if self.submission_contract is None:
+            return False
+        try:
+            require_submit_allowed(
+                self.assignment,
+                task_deadline=self.task.deadline_at,
+                now=datetime.datetime.now(datetime.UTC),
+            )
+        except AssignmentError:
+            return False
+        return True
+
+    @property
+    def can_cancel(self) -> bool:
+        """Project the existing performer cancellation validation."""
+        try:
+            _require_cancel_allowed(self.assignment)
+        except AssignmentError:
+            return False
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class AssignmentCardPage:
@@ -820,8 +844,7 @@ class AssignmentService:
                 await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
             if assignment.performer_id != actor.id:
                 raise PermissionError("Assignment is not owned by this member.")
-            if assignment.status is not AssignmentStatus.ACCEPTED:
-                raise AssignmentError("Only an accepted assignment can be cancelled.")
+            _require_cancel_allowed(assignment)
             now = datetime.datetime.now(datetime.UTC)
             await uow.obsolete_pending_task_cancellation(
                 assignment.task_id, "assignment_cancelled", now
@@ -1586,6 +1609,11 @@ async def _ensure_submission_replay_access(
     if assignment is None or assignment.performer_id != actor.id:
         raise PermissionError("Submission is not owned by this member.")
     await uow.ensure_task_test_access(task_id=assignment.task_id, member_id=actor.id)
+
+
+def _require_cancel_allowed(assignment: Assignment) -> None:
+    if assignment.status is not AssignmentStatus.ACCEPTED:
+        raise AssignmentError("Only an accepted assignment can be cancelled.")
 
 
 def _require_freeform_submission(task: PublishedTask) -> None:

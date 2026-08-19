@@ -12,7 +12,8 @@ const assignmentsNav = document.getElementById("assignments-nav");
 const moderationNav = document.getElementById("moderation-nav");
 let tasks = [];
 let assignments = [];
-let pendingKey = null;
+const pendingAcceptKeys = new Map();
+let pendingTaskCreation = null;
 let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
 let returnFocusReviewId = null;
@@ -120,7 +121,6 @@ const newOperationKey = () => {
 
 function renderCatalog() {
   screenRevision += 1;
-  pendingKey = null;
   setNavigation("catalog");
   title.textContent = "Каталог";
   back.classList.add("hidden");
@@ -161,13 +161,24 @@ function renderCatalog() {
 }
 
 async function taskCreationCommand(body) {
+  pendingTaskCreation ||= { key: newOperationKey(), body: JSON.stringify(body) };
   const response = await fetch("/api/v1/task-creation", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Idempotency-Key": newOperationKey() },
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": pendingTaskCreation.key,
+    },
     credentials: "same-origin",
-    body: JSON.stringify(body),
+    body: pendingTaskCreation.body,
   });
-  return submissionResponse(response);
+  try {
+    const result = await submissionResponse(response);
+    pendingTaskCreation = null;
+    return result;
+  } catch (error) {
+    if (!retryableSubmissionError(error)) pendingTaskCreation = null;
+    throw error;
+  }
 }
 
 function renderTaskCreation(state) {
@@ -707,28 +718,25 @@ async function acceptTask(task, button, status) {
   button.disabled = true;
   status.className = "status";
   status.textContent = "Принимаем задание…";
-  pendingKey ||= newOperationKey();
+  const operationKey = pendingAcceptKeys.get(task.id) || newOperationKey();
+  pendingAcceptKeys.set(task.id, operationKey);
   try {
     const response = await fetch(
       "/api/v1/tasks/" + task.id + "/assignments",
       {
         method: "POST",
-        headers: { "Idempotency-Key": pendingKey },
+        headers: { "Idempotency-Key": operationKey },
         credentials: "same-origin",
       },
     );
-    const payload = await response.json();
-    if (!response.ok) {
-      pendingKey = null;
-      throw new Error(payload.code || "request_failed");
-    }
-    status.className = "status success";
-    status.textContent = "Задание принято. Можно переходить к выполнению.";
-    button.remove();
+    const payload = await submissionResponse(response);
+    pendingAcceptKeys.delete(task.id);
+    await showAssignmentDetail(payload.id, false);
   } catch (error) {
     status.textContent = error instanceof TypeError
       ? "Сеть недоступна. Повторите попытку — запрос останется тем же."
       : "Задание сейчас недоступно. Вернитесь в каталог и попробуйте другое.";
+    if (!retryableSubmissionError(error)) pendingAcceptKeys.delete(task.id);
     button.disabled = false;
   }
 }
@@ -950,7 +958,10 @@ const submissionMessage = (error) => error instanceof TypeError
   ? "Сеть недоступна. Повторите запрос — он останется тем же."
   : "Не удалось сохранить результат. Проверьте назначение и повторите.";
 
-const retryableSubmissionError = (error) => error instanceof TypeError || error?.status >= 500;
+const retryableSubmissionError = (error) => error instanceof TypeError
+  || !error?.status
+  || error.status >= 500
+  || error.status < 400;
 
 async function submissionResponse(response) {
   let payload = null;
@@ -1249,11 +1260,10 @@ async function showAssignmentDetail(assignmentId, push = true) {
       ));
     }
     if (assignment.can_dispute) detail.append(renderDispute(assignment));
-    if (assignment.assignment_status === "accepted"
-      && assignment.submission_contract === "freeform_result_v1") {
+    if (assignment.can_submit) {
       detail.append(renderSubmission(assignment, null));
     }
-    if (assignment.assignment_status === "accepted") {
+    if (assignment.can_cancel) {
       detail.append(renderCancellation(assignment));
     }
     replaceContent(detail);

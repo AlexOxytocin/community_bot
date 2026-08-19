@@ -1580,6 +1580,44 @@ async def test_web_submission_draft_is_bounded_exact_and_template_closed(databas
         assignment_id = accepted.json()["id"]
         detail = await client.get(f"/api/v1/assignments/{assignment_id}")
         assert detail.json()["submission_contract"] == "freeform_result_v1"
+        assert detail.json()["can_submit"] is True
+        assert detail.json()["can_cancel"] is True
+        async with sessions.begin() as session:
+            stored_task = await session.get(TaskModel, freeform_task.id)
+            assert stored_task is not None
+            values = {
+                column.key: getattr(stored_task, column.key)
+                for column in inspect(TaskModel).mapper.column_attrs
+                if column.key not in {"id", "created_at", "updated_at"}
+            }
+            late_task = TaskModel(
+                **(
+                    values
+                    | {
+                        "title": "Accepted after deadline",
+                        "deadline_at": datetime.datetime.now(datetime.UTC)
+                        + datetime.timedelta(milliseconds=100),
+                        "publish_command_id": uuid4(),
+                    }
+                )
+            )
+            session.add(late_task)
+            await session.flush()
+            late_assignment = AssignmentModel(
+                task_id=late_task.id,
+                performer_id=performer.id,
+                slot_number=1,
+                status="accepted",
+                accepted_at=datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=1),
+            )
+            session.add(late_assignment)
+            await session.flush()
+            late_assignment_id = late_assignment.id
+        await asyncio.sleep(0.2)
+        late_detail = await client.get(f"/api/v1/assignments/{late_assignment_id}")
+        assert late_detail.json()["assignment_status"] == "accepted"
+        assert late_detail.json()["can_submit"] is False
+        assert late_detail.json()["can_cancel"] is True
 
         template_accepted = await client.post(
             f"/api/v1/tasks/{template_task.id}/assignments",
@@ -1953,6 +1991,8 @@ async def test_active_assignment_api_paginates_privately_without_effects(
             "minimum_level",
             "performer_slots",
             "submission_contract",
+            "can_submit",
+            "can_cancel",
             "can_dispute",
         }
         assert detail.json()["result_summary"] == "Visible result"
