@@ -12,7 +12,7 @@ from uuid import UUID
 
 from community_bot.application.economy import EconomyUnitOfWork
 from community_bot.domain.economy import ResolvedLevel, starting_grant
-from community_bot.domain.members import MemberStatus
+from community_bot.domain.members import Member, MemberStatus
 from community_bot.domain.registration import (
     InvitationError,
     ModerationDecision,
@@ -20,6 +20,7 @@ from community_bot.domain.registration import (
     RegistrationApplicationStatus,
     RegistrationError,
     RegistrationStep,
+    StaleRegistrationStepError,
     normalize_profile_value,
     normalize_registration_answer,
     require_invitation_manager,
@@ -277,6 +278,10 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         """Return the active member profile before level resolution."""
         ...
 
+    async def get_member(self, member_id: UUID) -> Member | None:
+        """Return one member by its server-side identity."""
+        ...
+
     async def get_conversation_expectation(self, telegram_user_id: int) -> tuple[str, str] | None:
         """Return the flow and step expected from the next text update."""
         ...
@@ -293,6 +298,16 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         value: object,
     ) -> None:
         """Save one owned profile field if the locked edit state matches."""
+        ...
+
+    async def update_profile_field(
+        self,
+        *,
+        member_id: UUID,
+        field: ProfileField,
+        value: object,
+    ) -> None:
+        """Set one locked member profile field without a conversation flow."""
         ...
 
 
@@ -798,6 +813,57 @@ class RegistrationService:
                 level=level,
             )
 
+    async def update_own_profile_field(
+        self,
+        *,
+        update_id: int,
+        actor_member_id: UUID,
+        field: ProfileField,
+        raw_value: str,
+        replay_fingerprint: str,
+    ) -> str:
+        """Update one server-authenticated profile field without conversation state."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            await unit_of_work.acquire_update_gate(update_id)
+            stored = await unit_of_work.get_receipt_outcome(update_id)
+            if stored is not None:
+                _require_web_profile_replay(
+                    stored,
+                    actor_member_id=actor_member_id,
+                    field=field,
+                    replay_fingerprint=replay_fingerprint,
+                )
+                return stored
+            actor = await unit_of_work.get_member(actor_member_id)
+            if actor is None:
+                message = "Profile actor is not a registered member."
+                raise PermissionError(message)
+            await unit_of_work.acquire_registration_identity_gate(actor.telegram_user_id)
+            actor = (await unit_of_work.lock_members((actor.id,)))[actor.id]
+            require_profile_owner(actor, actor_member_id)
+            value = normalize_profile_value(field, raw_value)
+            await unit_of_work.update_profile_field(
+                member_id=actor.id,
+                field=field,
+                value=value,
+            )
+            outcome = f"web_profile_update:{actor.id}:{field.value}:{replay_fingerprint}"
+            await unit_of_work.append_audit_event(
+                actor_member_id=actor.id,
+                action="profile_updated",
+                entity_type="member",
+                entity_id=str(actor.id),
+                reason=field.value,
+            )
+            await unit_of_work.add_registration_receipt(
+                update_id=update_id,
+                update_type="profile_web_update",
+                actor_id=actor.id,
+                outcome_code=outcome,
+            )
+            await unit_of_work.commit()
+            return outcome
+
     def _require_token_codec(self) -> InviteTokenCodec:
         if self._token_codec is None:
             message = "Invitation token codec is unavailable in this process."
@@ -893,6 +959,28 @@ def _registration_outcome(context: RegistrationContext) -> str:
     if context.application_status is RegistrationApplicationStatus.REJECTED:
         return "registration_rejected"
     return f"registration_step:{context.current_step.value}"
+
+
+def _require_web_profile_replay(
+    outcome: str,
+    *,
+    actor_member_id: UUID,
+    field: ProfileField,
+    replay_fingerprint: str,
+) -> None:
+    message = "Stored profile outcome does not match command."
+    try:
+        marker, raw_actor_id, stored_field, stored_fingerprint = outcome.split(":", 3)
+        stored_actor_id = UUID(raw_actor_id)
+    except ValueError as error:
+        raise StaleRegistrationStepError(message) from error
+    if (
+        marker != "web_profile_update"
+        or stored_actor_id != actor_member_id
+        or stored_field != field.value
+        or stored_fingerprint != replay_fingerprint
+    ):
+        raise StaleRegistrationStepError(message)
 
 
 def _validated_invitation(

@@ -43,7 +43,7 @@ from community_bot.application.moderation import (
     ModerationService,
     ResolveCaseCommand,
 )
-from community_bot.application.registration import RegistrationService
+from community_bot.application.registration import ProfileSnapshot, RegistrationService
 from community_bot.application.reputation import (
     ProfileUnavailableError,
     ReputationService,
@@ -62,6 +62,11 @@ from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import AssignmentDecision, AssignmentError, SubmissionDraft
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.moderation import ModerationError, ResolutionCode
+from community_bot.domain.registration import (
+    ProfileField,
+    RegistrationError,
+    StaleRegistrationStepError,
+)
 from community_bot.domain.tasks import (
     TASK_TIME_SIZE_SPECS,
     TaskError,
@@ -118,6 +123,13 @@ class MeDto(_Dto):
     credit_balance: int
     experience_total: int
     level: LevelDto
+
+
+class ProfileUpdateRequest(_Dto):
+    model_config = ConfigDict(extra="forbid")
+
+    field: ProfileField
+    value: str
 
 
 class KarmaDto(_Dto):
@@ -493,24 +505,45 @@ def create_web_app(
             profile = await registration.own_profile(actor)
         except PermissionError as error:
             raise HTTPException(status_code=403, detail="profile_unavailable") from error
-        dto = MeDto(
-            member_id=profile.member_id,
-            display_name=profile.display_name,
-            city=profile.city,
-            timezone=profile.timezone,
-            short_bio=profile.short_bio,
-            current_goal=profile.current_goal,
-            help_categories=profile.help_categories,
-            skill_tags=profile.skill_tags,
-            availability=profile.availability,
-            credit_balance=profile.credit_balance,
-            experience_total=profile.experience_total,
-            level=LevelDto(
-                number=profile.level.level_number,
-                display_name=profile.level.display_name,
-            ),
+        return _json_response(_me_dto(profile))
+
+    @app.put("/api/v1/me/profile", response_model=MeDto)
+    async def update_me(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        if request.headers.get("content-type", "").lower() != "application/json":
+            return _error_response(422, "invalid_request")
+        try:
+            body = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
+            command = ProfileUpdateRequest.model_validate_json(body)
+        except (OverflowError, ValueError, ValidationError):
+            return _error_response(422, "invalid_request")
+        payload = command.model_dump(mode="json")
+        fingerprint = _submission_fingerprint("update", payload=payload)
+        update_id = _submission_update_id(
+            actor.member_id,
+            actor.member_id,
+            "update",
+            operation_key,
+            namespace=b"profile-update-v1",
         )
-        return _json_response(dto)
+        try:
+            await registration.update_own_profile_field(
+                update_id=update_id,
+                actor_member_id=actor.member_id,
+                field=command.field,
+                raw_value=command.value,
+                replay_fingerprint=fingerprint,
+            )
+            profile = await registration.own_profile(actor)
+        except StaleRegistrationStepError:
+            return _error_response(409, "profile_unavailable")
+        except RegistrationError:
+            return _error_response(422, "invalid_request")
+        except PermissionError:
+            return _error_response(403, "profile_unavailable")
+        return _json_response(_me_dto(profile))
 
     @app.get("/api/v1/members", response_model=MembersDto)
     async def members(
@@ -1333,6 +1366,26 @@ def _member_dto(profile: SafeProfile) -> MemberDto:
             approved_weight=profile.reliability.approved_weight,
             no_show=profile.reliability.no_show,
             rate=profile.reliability.rate,
+        ),
+    )
+
+
+def _me_dto(profile: ProfileSnapshot) -> MeDto:
+    return MeDto(
+        member_id=profile.member_id,
+        display_name=profile.display_name,
+        city=profile.city,
+        timezone=profile.timezone,
+        short_bio=profile.short_bio,
+        current_goal=profile.current_goal,
+        help_categories=profile.help_categories,
+        skill_tags=profile.skill_tags,
+        availability=profile.availability,
+        credit_balance=profile.credit_balance,
+        experience_total=profile.experience_total,
+        level=LevelDto(
+            number=profile.level.level_number,
+            display_name=profile.level.display_name,
         ),
     )
 

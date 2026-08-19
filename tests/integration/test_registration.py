@@ -612,17 +612,21 @@ async def test_reject_resubmit_approve_and_edit_own_profile(database_url: str) -
         ProfileField.AVAILABILITY: "Три часа в неделю",
     }
     for index, (field, raw_value) in enumerate(edits.items()):
-        await registration.begin_profile_field_edit(
+        begin_outcome = await registration.begin_profile_field_edit(
             update_id=6_204 + index * 2,
             telegram_user_id=601,
             field=field,
         )
-        await registration.save_profile_field(
+        assert begin_outcome == f"profile_edit:{field.value}"
+        assert await registration.expected_input(601) == ("profile_edit", field.value)
+        save_outcome = await registration.save_profile_field(
             update_id=6_205 + index * 2,
             telegram_user_id=601,
             expected_field=field,
             raw_value=raw_value,
         )
+        assert save_outcome == "profile_updated"
+        assert await registration.expected_input(601) is None
     profile = await registration.own_profile(actor(target_id))
 
     assert profile.member_id == target_id

@@ -605,6 +605,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
     modes = {"member": "pending", "leaderboard": "pending"}
     pending: list[Route] = []
     requests: list[tuple[str, str]] = []
+    profile_update_keys: list[str] = []
     capture_requests = False
 
     def me_route(route: Route) -> None:
@@ -625,6 +626,24 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         payload = {"items": []} if modes["leaderboard"] == "empty" else leaderboard
         fulfill_by_mode(route, modes["leaderboard"], payload)
 
+    def profile_update_route(route: Route) -> None:
+        profile_update_keys.append(route.request.headers["idempotency-key"])
+        body = route.request.post_data_json
+        assert body is not None
+        if len(profile_update_keys) == 1:
+            assert body == {"field": "city", "value": "Rosario"}
+            route.abort()
+        elif len(profile_update_keys) == 2:
+            assert body == {"field": "city", "value": "Rosario"}
+            route.fulfill(status=502, body="upstream unavailable")
+        elif len(profile_update_keys) == 3:
+            assert body == {"field": "city", "value": "Rosario"}
+            me["city"] = "Rosario"
+            route.fulfill(json=me)
+        else:
+            assert body == {"field": "city", "value": "x"}
+            route.fulfill(status=422, json={"code": "invalid_request"})
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
@@ -638,6 +657,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             ),
         )
         page.route("**/api/v1/me", me_route)
+        page.route("**/api/v1/me/profile", profile_update_route)
         page.route(f"**/api/v1/members/{member_id}", member_route)
         page.route("**/api/v1/leaderboard?*", leaderboard_route)
         page.route(
@@ -654,12 +674,9 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_text("Загружаем таблицу вклада…").wait_for()
         page.wait_for_timeout(50)
         assert len(pending) == 2
-        for route in pending[:]:
-            if "/members/" in route.request.url:
-                route.fulfill(json=member)
-            else:
-                route.fulfill(json=leaderboard)
-            pending.remove(route)
+        member_pending = next(route for route in pending if "/members/" in route.request.url)
+        member_pending.fulfill(json=member)
+        pending.remove(member_pending)
 
         page.locator("h3", has_text=malicious).wait_for()
         for value in (
@@ -676,8 +693,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "3 · оценок: 4",
             "3.5",
             "Недостаточно данных",
-            "Получатели помощи: 3",
-            "Неявки: 1",
         ):
             assert page.get_by_text(value, exact=True).count() >= 1
         body = page.locator("body").inner_text()
@@ -686,6 +701,38 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.locator("img, [onerror], [onclick]").count() == 0
         assert page.locator("script").count() == 2
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+        page.get_by_label("Поле профиля").select_option("city")
+        page.get_by_label("Новое значение").fill("Rosario")
+        page.get_by_role("button", name="Сохранить поле").click()
+        page.get_by_text(
+            "Не удалось сохранить. Повторите попытку — запрос останется тем же."  # noqa: RUF001
+        ).wait_for()
+        leaderboard_pending = next(
+            route for route in pending if "/leaderboard" in route.request.url
+        )
+        leaderboard_pending.fulfill(json=leaderboard)
+        pending.remove(leaderboard_pending)
+        page.get_by_text("Получатели помощи: 3").wait_for()
+        page.get_by_text("Неявки: 1").wait_for()
+        assert page.get_by_label("Новое значение").input_value() == "Rosario"
+        page.get_by_role("button", name="Сохранить поле").click()
+        page.get_by_text(
+            "Не удалось сохранить. Повторите попытку — запрос останется тем же."  # noqa: RUF001
+        ).wait_for()
+        modes["member"] = "error"
+        page.get_by_role("button", name="Сохранить поле").click()
+        page.get_by_text("Rosario", exact=True).wait_for()
+        page.wait_for_timeout(50)
+        assert profile_update_keys[0] == profile_update_keys[1] == profile_update_keys[2]
+        assert page.get_by_text("Не удалось сохранить.", exact=False).count() == 0  # noqa: RUF001
+
+        modes["member"] = "success"
+        page.get_by_label("Поле профиля").select_option("city")
+        page.get_by_label("Новое значение").fill("x")
+        page.get_by_role("button", name="Сохранить поле").click()
+        page.get_by_text("Проверьте значение поля.").wait_for()
+        assert profile_update_keys[3] != profile_update_keys[2]
 
         modes.update(member="success", leaderboard="success")
         me.update(help_categories=[], skill_tags=[])
@@ -729,11 +776,17 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.get_by_role("heading", name="Профиль").count() == 0
         assert profile_nav.evaluate("node => node === document.activeElement")
         assert requests
-        assert all(method == "GET" for method, _path in requests)
+        assert {
+            ("PUT", "/api/v1/me/profile"),
+            ("GET", "/api/v1/me"),
+            ("GET", f"/api/v1/members/{member_id}"),
+            ("GET", "/api/v1/leaderboard"),
+        } == set(requests)
         assert {
             "/api/v1/me",
             f"/api/v1/members/{member_id}",
             "/api/v1/leaderboard",
+            "/api/v1/me/profile",
         } == {path for _method, path in requests}
         browser.close()
 

@@ -103,6 +103,146 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
     return member
 
 
+async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await active_member(database, 52_081)
+    conversation_payload = {"reference_id": str(uuid4()), "draft": "keep-exactly"}
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add(
+            ConversationStateModel(
+                member_id=member.id,
+                flow_type="task",
+                current_step="text",
+                payload_json=conversation_payload,
+                revision=7,
+            )
+        )
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    headers = {"origin": ORIGIN, "idempotency-key": "8101"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(member.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+
+        saved = await client.put(
+            "/api/v1/me/profile", json={"field": "city", "value": " Rosario "}, headers=headers
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["city"] == "Rosario"
+        assert saved.json()["display_name"] == "Web Member"
+
+        replay = await client.put(
+            "/api/v1/me/profile", json={"field": "city", "value": " Rosario "}, headers=headers
+        )
+        assert replay.status_code == 200
+        conflict = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "current_goal", "value": "Другой command"},
+            headers=headers,
+        )
+        assert conflict.status_code == 409
+        assert conflict.json() == {"code": "profile_unavailable"}
+
+        invalid = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "x"},
+            headers={"origin": ORIGIN, "idempotency-key": "8102"},
+        )
+        assert invalid.status_code == 422
+        extra_identity = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "Córdoba", "member_id": str(member.id)},
+            headers={"origin": ORIGIN, "idempotency-key": "8103"},
+        )
+        assert extra_identity.status_code == 422
+
+        foreign_key = "8104"
+        foreign_update_id = _submission_update_id(
+            member.id,
+            member.id,
+            "update",
+            foreign_key,
+            namespace=b"profile-update-v1",
+        )
+        async with sessions.begin() as session:
+            session.add(
+                ProcessedTelegramUpdateModel(
+                    update_id=foreign_update_id,
+                    update_type="profile_edit_save",
+                    actor_member_id=member.id,
+                    outcome_code="profile_updated",
+                )
+            )
+        foreign = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "Córdoba"},
+            headers={"origin": ORIGIN, "idempotency-key": foreign_key},
+        )
+        assert foreign.status_code == 409
+
+        city, goal = await asyncio.gather(
+            client.put(
+                "/api/v1/me/profile",
+                json={"field": "city", "value": "Córdoba"},
+                headers={"origin": ORIGIN, "idempotency-key": "8105"},
+            ),
+            client.put(
+                "/api/v1/me/profile",
+                json={"field": "current_goal", "value": "Запустить пилот"},
+                headers={"origin": ORIGIN, "idempotency-key": "8106"},
+            ),
+        )
+        assert city.status_code == goal.status_code == 200
+        authoritative = (await client.get("/api/v1/me")).json()
+        assert authoritative["city"] == "Córdoba"
+        assert authoritative["current_goal"] == "Запустить пилот"
+
+        async with sessions.begin() as session:
+            stored_member = await session.get(MemberModel, member.id)
+            assert stored_member is not None
+            stored_member.status = MemberStatus.PAUSED.value
+        denied = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "Mendoza"},
+            headers={"origin": ORIGIN, "idempotency-key": "8107"},
+        )
+        assert denied.status_code == 403
+
+    async with sessions() as session:
+        conversation = await session.get(ConversationStateModel, member.id)
+        assert conversation is not None
+        assert (
+            conversation.flow_type,
+            conversation.current_step,
+            conversation.payload_json,
+            conversation.revision,
+        ) == ("task", "text", conversation_payload, 7)
+        profile_audits = await session.scalar(
+            select(func.count(AuditEventModel.id)).where(
+                AuditEventModel.actor_member_id == member.id,
+                AuditEventModel.action == "profile_updated",
+            )
+        )
+        web_receipts = await session.scalar(
+            select(func.count(ProcessedTelegramUpdateModel.update_id)).where(
+                ProcessedTelegramUpdateModel.actor_member_id == member.id,
+                ProcessedTelegramUpdateModel.update_type == "profile_web_update",
+            )
+        )
+        assert profile_audits == web_receipts == 3
+    await database.dispose()
+
+
 async def test_task_creation_resource_recovers_and_publishes_exactly_once(
     database_url: str,
     monkeypatch: pytest.MonkeyPatch,

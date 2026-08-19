@@ -249,7 +249,102 @@ const valueSection = (heading, value) => {
 
 const reliabilityText = (value) => value == null ? "Недостаточно данных" : String(value);
 
-function profileDetails(me, member) {
+const editableProfileFields = [
+  ["display_name", "Имя"],
+  ["city", "Город"],
+  ["timezone", "Часовой пояс"],
+  ["short_bio", "О себе"],
+  ["current_goal", "Текущая цель"],
+  ["help_categories", "Категории помощи"],
+  ["skill_tags", "Навыки"],
+  ["availability", "Доступность"],
+];
+
+function profileEditor(me, state, revision) {
+  const form = element("form", undefined, "task-form");
+  const fieldLabel = element("label", "Поле профиля");
+  const field = element("select");
+  for (const [value, label] of editableProfileFields) {
+    const option = element("option", label);
+    option.value = value;
+    field.append(option);
+  }
+  fieldLabel.append(field);
+  const valueLabel = element("label", "Новое значение");
+  const input = element("textarea");
+  const profileValue = (name) => Array.isArray(me[name])
+    ? me[name].join(", ")
+    : (me[name] ?? "");
+  const draft = state.profileEdit ||= {
+    field: field.value,
+    value: profileValue(field.value),
+    operationKey: null,
+    message: "",
+  };
+  field.value = draft.field;
+  input.value = draft.value;
+  valueLabel.append(input);
+  const save = element("button", "Сохранить поле", "primary");
+  save.type = "submit";
+  const status = element("p", draft.message, draft.message ? "status" : "status hidden");
+  status.setAttribute("aria-live", "polite");
+  field.addEventListener("change", () => {
+    draft.field = field.value;
+    draft.value = profileValue(field.value);
+    draft.operationKey = null;
+    draft.message = "";
+    input.value = draft.value;
+  });
+  input.addEventListener("input", () => {
+    draft.value = input.value;
+    draft.operationKey = null;
+    draft.message = "";
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    status.className = "status";
+    status.textContent = "Сохраняем профиль…";
+    draft.message = status.textContent;
+    draft.operationKey ||= newOperationKey();
+    try {
+      const updated = await submissionRequest(
+        "/api/v1/me/profile",
+        "PUT",
+        draft.operationKey,
+        { field: draft.field, value: draft.value },
+      );
+      if (revision !== screenRevision) return;
+      state.profile = { me: updated, member: state.profile.member };
+      state.profileEdit = null;
+      renderProfile(state, revision);
+      try {
+        const member = await getJson(
+          "/api/v1/members/" + encodeURIComponent(updated.member_id),
+        );
+        if (revision !== screenRevision) return;
+        state.profile = { me: updated, member };
+        renderProfile(state, revision);
+      } catch {
+        // The authoritative profile mutation already succeeded; keep its response.
+      }
+    } catch (error) {
+      if (revision !== screenRevision) return;
+      if (!retryableSubmissionError(error)) draft.operationKey = null;
+      draft.message = error?.status === 422
+        ? "Проверьте значение поля."
+        : error?.status === 409
+          ? "Запрос изменился. Повторите сохранение."
+          : "Не удалось сохранить. Повторите попытку — запрос останется тем же.";
+      status.textContent = draft.message;
+      save.disabled = false;
+    }
+  });
+  form.append(fieldLabel, valueLabel, status, save);
+  return form;
+}
+
+function profileDetails(me, member, state, revision) {
   const card = element("article", undefined, "card detail");
   const fields = [
     ["Город", me.city],
@@ -277,6 +372,7 @@ function profileDetails(me, member) {
     const item = valueSection(heading, value);
     if (item) card.append(item);
   }
+  card.append(profileEditor(me, state, revision));
   return card;
 }
 
@@ -306,7 +402,7 @@ function leaderboardDetails(items) {
 function renderProfile(state, revision) {
   if (revision !== screenRevision) return;
   const profileBoundary = state.profile
-    ? profileDetails(state.profile.me, state.profile.member)
+    ? profileDetails(state.profile.me, state.profile.member, state, revision)
     : state.profileError
       ? boundaryError("Мои показатели", "Не удалось загрузить профиль.", state.profileRetry)
       : element("p", "Загружаем профиль…", "status muted");
