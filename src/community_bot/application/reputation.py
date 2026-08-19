@@ -268,38 +268,69 @@ class ReputationService:
         self._unit_of_work_factory = unit_of_work_factory
 
     async def begin_vote(
-        self, *, update_id: int, telegram_user_id: int, target_id: UUID
+        self,
+        *,
+        update_id: int,
+        telegram_user_id: int | None = None,
+        target_id: UUID,
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> KarmaDraft:
         """Create or resume a karma draft without overwriting another flow."""
         async with self._unit_of_work_factory() as uow:
             await uow.acquire_update_gate(update_id)
-            await uow.acquire_registration_identity_gate(telegram_user_id)
-            actor = await self._active_actor(uow, telegram_user_id)
+            actor = await self._locked_active_actor(
+                uow,
+                telegram_user_id=telegram_user_id,
+                actor_member_id=actor_member_id,
+            )
+            await uow.acquire_reputation_pair_gate(actor.id, target_id)
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.KARMA_VOTE)
-            if await uow.get_receipt(update_id) is not None:
+            receipt = await uow.get_receipt(update_id)
+            if receipt is not None:
+                if actor_member_id is not None:
+                    return _web_draft_replay(
+                        receipt.outcome_code,
+                        action="begin",
+                        actor_id=actor.id,
+                        target_id=target_id,
+                        fingerprint=_required_web_fingerprint(replay_fingerprint),
+                    )
                 draft = await uow.get_karma_draft(actor.id, for_update=False)
                 if draft is None:
                     message = "Stored karma draft is no longer current."
                     raise ReputationError(message)
                 return draft
-            await uow.acquire_reputation_pair_gate(actor.id, target_id)
             members = await uow.lock_members((actor.id, target_id))
             actor, target = members[actor.id], members[target_id]
             require_karma_actor(
                 actor, target, eligible=await uow.karma_eligible(actor.id, target.id)
             )
             draft = await uow.begin_karma_draft(actor.id, target.id)
+            outcome = (
+                _web_draft_outcome("begin", actor.id, draft, replay_fingerprint)
+                if actor_member_id is not None
+                else f"karma_draft:{draft.target_id}:{draft.revision}"
+            )
             await uow.add_receipt(
                 update_id=update_id,
-                update_type="karma_begin",
+                update_type="karma_web" if actor_member_id is not None else "karma_begin",
                 actor_id=actor.id,
-                outcome_code=f"karma_draft:{draft.target_id}:{draft.revision}",
+                outcome_code=outcome,
             )
             await uow.commit()
             return draft
 
-    async def save_value(
-        self, *, update_id: int, telegram_user_id: int, expected_revision: int, value: int
+    async def save_value(  # noqa: PLR0913 - legacy and actor-native identities share one use case.
+        self,
+        *,
+        update_id: int,
+        telegram_user_id: int | None = None,
+        expected_revision: int,
+        value: int,
+        target_id: UUID | None = None,
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> KarmaDraft:
         """Persist a draft value through the exact state revision."""
         if value not in {-1, 0, 1}:
@@ -311,15 +342,22 @@ class ReputationService:
             value=value,
             comment=None,
             step=KarmaStep.COMMENT,
+            target_id=target_id,
+            actor_member_id=actor_member_id,
+            replay_fingerprint=replay_fingerprint,
+            action="save_value",
         )
 
-    async def save_comment(
+    async def save_comment(  # noqa: PLR0913 - legacy and actor-native identities share one use case.
         self,
         *,
         update_id: int,
-        telegram_user_id: int,
+        telegram_user_id: int | None = None,
         expected_revision: int,
         comment: str,
+        target_id: UUID | None = None,
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> KarmaDraft:
         """Persist a normalized draft comment and advance to preview."""
         _, normalized = normalize_karma_vote(0, comment)
@@ -330,29 +368,48 @@ class ReputationService:
             value=None,
             comment=normalized,
             step=KarmaStep.PREVIEW,
+            target_id=target_id,
+            actor_member_id=actor_member_id,
+            replay_fingerprint=replay_fingerprint,
+            action="save_comment",
         )
 
-    async def confirm_vote(
+    async def confirm_vote(  # noqa: PLR0913 - exact Web replay extends the legacy command.
         self,
         *,
         update_id: int,
-        telegram_user_id: int,
+        telegram_user_id: int | None = None,
         expected_revision: int,
         command_id: UUID | None = None,
+        target_id: UUID | None = None,
+        actor_member_id: UUID | None = None,
+        replay_fingerprint: str | None = None,
     ) -> KarmaVoteResult:
         """Atomically apply one complete draft and delete its conversation state."""
         command_id = command_id or uuid5(NAMESPACE_URL, f"karma:{update_id}")
         async with self._unit_of_work_factory() as uow:
             await uow.acquire_update_gate(update_id)
+            if actor_member_id is None:
+                receipt = await uow.get_receipt(update_id)
+                if receipt is not None:
+                    stored = await uow.karma_vote_by_command(command_id)
+                    if stored is None:
+                        message = "Stored karma receipt does not match the command."
+                        raise ReputationError(message)
+                    return replace(stored, replayed=True)
+            actor = await self._locked_active_actor(
+                uow,
+                telegram_user_id=telegram_user_id,
+                actor_member_id=actor_member_id,
+            )
             receipt = await uow.get_receipt(update_id)
             if receipt is not None:
-                stored = await uow.karma_vote_by_command(command_id)
-                if stored is None:
-                    message = "Stored karma receipt does not match the command."
-                    raise ReputationError(message)
-                return replace(stored, replayed=True)
-            await uow.acquire_registration_identity_gate(telegram_user_id)
-            actor = await self._active_actor(uow, telegram_user_id)
+                return _web_vote_replay(
+                    receipt.outcome_code,
+                    actor_id=actor.id,
+                    target_id=_required_web_target(target_id),
+                    fingerprint=_required_web_fingerprint(replay_fingerprint),
+                )
             draft = await uow.get_karma_draft(actor.id, for_update=True)
             if (
                 draft is None
@@ -360,10 +417,13 @@ class ReputationService:
                 or draft.revision != expected_revision
                 or draft.value is None
                 or draft.comment is None
+                or (target_id is not None and draft.target_id != target_id)
             ):
                 message = "Karma draft is stale or incomplete."
                 raise ReputationError(message)
             await uow.acquire_reputation_pair_gate(actor.id, draft.target_id)
+            if actor_member_id is not None:
+                await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.KARMA_VOTE)
             members = await uow.lock_members((actor.id, draft.target_id))
             actor, target = members[actor.id], members[draft.target_id]
             require_karma_actor(
@@ -388,9 +448,13 @@ class ReputationService:
             )
             await uow.add_receipt(
                 update_id=update_id,
-                update_type="karma_confirm",
+                update_type="karma_web" if actor_member_id is not None else "karma_confirm",
                 actor_id=actor.id,
-                outcome_code=f"karma_vote:{command_id}",
+                outcome_code=(
+                    _web_vote_outcome(actor.id, target.id, result, replay_fingerprint)
+                    if actor_member_id is not None
+                    else f"karma_vote:{command_id}"
+                ),
             )
             await uow.commit()
             return result
@@ -525,24 +589,40 @@ class ReputationService:
         self,
         *,
         update_id: int,
-        telegram_user_id: int,
+        telegram_user_id: int | None,
         expected_revision: int,
         value: int | None,
         comment: str | None,
         step: KarmaStep,
+        target_id: UUID | None,
+        actor_member_id: UUID | None,
+        replay_fingerprint: str | None,
+        action: str,
     ) -> KarmaDraft:
         async with self._unit_of_work_factory() as uow:
             await uow.acquire_update_gate(update_id)
-            await uow.acquire_registration_identity_gate(telegram_user_id)
-            actor = await self._active_actor(uow, telegram_user_id)
-            if await uow.get_receipt(update_id) is not None:
+            actor = await self._locked_active_actor(
+                uow,
+                telegram_user_id=telegram_user_id,
+                actor_member_id=actor_member_id,
+            )
+            receipt = await uow.get_receipt(update_id)
+            if receipt is not None:
+                if actor_member_id is not None:
+                    return _web_draft_replay(
+                        receipt.outcome_code,
+                        action=action,
+                        actor_id=actor.id,
+                        target_id=_required_web_target(target_id),
+                        fingerprint=_required_web_fingerprint(replay_fingerprint),
+                    )
                 draft = await uow.get_karma_draft(actor.id, for_update=False)
                 if draft is None:
                     message = "Stored karma draft is no longer current."
                     raise ReputationError(message)
                 return draft
             draft = await uow.get_karma_draft(actor.id, for_update=True)
-            if draft is None:
+            if draft is None or (target_id is not None and draft.target_id != target_id):
                 message = "Karma draft does not exist."
                 raise ReputationError(message)
             saved = await uow.save_karma_draft(
@@ -554,9 +634,13 @@ class ReputationService:
             )
             await uow.add_receipt(
                 update_id=update_id,
-                update_type="karma_draft",
+                update_type="karma_web" if actor_member_id is not None else "karma_draft",
                 actor_id=actor.id,
-                outcome_code=f"karma_draft:{saved.target_id}:{saved.revision}",
+                outcome_code=(
+                    _web_draft_outcome(action, actor.id, saved, replay_fingerprint)
+                    if actor_member_id is not None
+                    else f"karma_draft:{saved.target_id}:{saved.revision}"
+                ),
             )
             await uow.commit()
             return saved
@@ -572,6 +656,32 @@ class ReputationService:
         if actor.status is not MemberStatus.ACTIVE:
             raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
         return actor
+
+    async def _locked_active_actor(
+        self,
+        uow: ReputationUnitOfWork,
+        *,
+        telegram_user_id: int | None,
+        actor_member_id: UUID | None,
+    ) -> Member:
+        """Resolve one legacy or Web actor under the shared identity gate."""
+        if actor_member_id is not None:
+            if telegram_user_id is not None:
+                message = "Karma actor identity is ambiguous."
+                raise PermissionError(message)
+            actor = await uow.get_member(actor_member_id)
+            if actor is None:
+                raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
+            await uow.acquire_registration_identity_gate(actor.telegram_user_id)
+            actor = await uow.get_member(actor_member_id)
+            if actor is None or actor.status is not MemberStatus.ACTIVE:
+                raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
+            return actor
+        if telegram_user_id is None:
+            message = "Karma actor identity is missing."
+            raise PermissionError(message)
+        await uow.acquire_registration_identity_gate(telegram_user_id)
+        return await self._active_actor(uow, telegram_user_id)
 
     async def _context_actor(self, uow: ReputationUnitOfWork, context: ActorContext) -> Member:
         actor = await uow.get_member(context.member_id)
@@ -590,6 +700,136 @@ class ReputationService:
 
 class ReputationError(ValueError):
     """Application-level malformed or stale reputation command."""
+
+
+def _required_web_target(target_id: UUID | None) -> UUID:
+    if target_id is None:
+        message = "Web karma target is missing."
+        raise ReputationError(message)
+    return target_id
+
+
+def _required_web_fingerprint(fingerprint: str | None) -> str:
+    if fingerprint is None or ":" in fingerprint:
+        message = "Web karma fingerprint is invalid."
+        raise ReputationError(message)
+    return fingerprint
+
+
+def _web_draft_outcome(
+    action: str,
+    actor_id: UUID,
+    draft: KarmaDraft,
+    fingerprint: str | None,
+) -> str:
+    return ":".join(
+        (
+            "karma_web_v1",
+            "draft",
+            action,
+            str(actor_id),
+            str(draft.target_id),
+            draft.step.value,
+            str(draft.revision),
+            _required_web_fingerprint(fingerprint),
+        )
+    )
+
+
+def _web_draft_replay(
+    outcome: str,
+    *,
+    action: str,
+    actor_id: UUID,
+    target_id: UUID,
+    fingerprint: str,
+) -> KarmaDraft:
+    try:
+        marker, kind, stored_action, raw_actor, raw_target, raw_step, raw_revision, stored = (
+            outcome.split(":", 7)
+        )
+        stored_actor = UUID(raw_actor)
+        stored_target = UUID(raw_target)
+        step = KarmaStep(raw_step)
+        revision = int(raw_revision)
+    except (TypeError, ValueError) as error:
+        message = "Stored karma outcome does not match command."
+        raise ReputationError(message) from error
+    if (
+        marker != "karma_web_v1"
+        or kind != "draft"
+        or stored_action != action
+        or stored_actor != actor_id
+        or stored_target != target_id
+        or stored != fingerprint
+    ):
+        message = "Stored karma outcome does not match command."
+        raise ReputationError(message)
+    return KarmaDraft(actor_id, target_id, None, None, step, revision)
+
+
+def _web_vote_outcome(
+    actor_id: UUID,
+    target_id: UUID,
+    result: KarmaVoteResult,
+    fingerprint: str | None,
+) -> str:
+    return ":".join(
+        (
+            "karma_web_v1",
+            "confirm",
+            str(actor_id),
+            str(target_id),
+            str(result.vote_id),
+            str(result.revision),
+            str(result.aggregate_score),
+            str(result.aggregate_count),
+            _required_web_fingerprint(fingerprint),
+        )
+    )
+
+
+def _web_vote_replay(
+    outcome: str,
+    *,
+    actor_id: UUID,
+    target_id: UUID,
+    fingerprint: str,
+) -> KarmaVoteResult:
+    try:
+        (
+            marker,
+            kind,
+            raw_actor,
+            raw_target,
+            raw_vote,
+            raw_revision,
+            raw_score,
+            raw_count,
+            stored,
+        ) = outcome.split(":", 8)
+        parsed = (
+            UUID(raw_actor),
+            UUID(raw_target),
+            UUID(raw_vote),
+            int(raw_revision),
+            int(raw_score),
+            int(raw_count),
+        )
+    except (TypeError, ValueError) as error:
+        message = "Stored karma outcome does not match command."
+        raise ReputationError(message) from error
+    stored_actor, stored_target, vote_id, revision, score, count = parsed
+    if (
+        marker != "karma_web_v1"
+        or kind != "confirm"
+        or stored_actor != actor_id
+        or stored_target != target_id
+        or stored != fingerprint
+    ):
+        message = "Stored karma outcome does not match command."
+        raise ReputationError(message)
+    return KarmaVoteResult(vote_id, revision, score, count, replayed=True)
 
 
 def normalize_member_search_query(query: str | None) -> str | None:

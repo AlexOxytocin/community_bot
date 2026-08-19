@@ -791,6 +791,144 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         browser.close()
 
 
+def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    actor_id = "00000000-0000-0000-0000-000000000082"
+    target_id = "00000000-0000-0000-0000-000000000083"
+    private_comment = "Очень полезная совместная работа"
+    me = {"member_id": actor_id, "display_name": "Алекс"}
+    own_member = {
+        "member_id": actor_id,
+        "display_name": "Алекс",
+        "karma": {"score": 0, "count": 0},
+        "reliability": {"rate": None},
+    }
+    target_member = {
+        "member_id": target_id,
+        "display_name": "Мария",
+        "karma": {"score": 2, "count": 2},
+        "reliability": {"rate": "1.0"},
+    }
+    actions: list[tuple[str, str]] = []
+    target_reads = 0
+
+    def member_route(route: Route) -> None:
+        nonlocal target_reads
+        if route.request.url.endswith(actor_id):
+            route.fulfill(json=own_member)
+            return
+        target_reads += 1
+        if target_reads > 1:
+            target_member["karma"] = {"score": 3, "count": 3}
+        route.fulfill(json=target_member)
+
+    def karma_route(route: Route) -> None:
+        body = route.request.post_data_json
+        assert body is not None
+        action = body["action"]
+        key = route.request.headers["idempotency-key"]
+        actions.append((action, key))
+        if action == "begin":
+            route.fulfill(
+                json={
+                    "action": action,
+                    "target_id": target_id,
+                    "step": "value",
+                    "revision": 0,
+                    "aggregate": None,
+                }
+            )
+        elif action == "save_value" and sum(item[0] == action for item in actions) == 1:
+            route.abort()
+        elif action == "save_value":
+            route.fulfill(
+                json={
+                    "action": action,
+                    "target_id": target_id,
+                    "step": "comment",
+                    "revision": 1,
+                    "aggregate": None,
+                }
+            )
+        elif action == "save_comment":
+            assert body["comment"] == private_comment
+            route.fulfill(
+                json={
+                    "action": action,
+                    "target_id": target_id,
+                    "step": "confirm",
+                    "revision": 2,
+                    "aggregate": None,
+                }
+            )
+        else:
+            assert action == "confirm"
+            route.fulfill(
+                json={
+                    "action": action,
+                    "target_id": target_id,
+                    "step": "confirmed",
+                    "revision": 1,
+                    "aggregate": {"score": 3, "count": 3},
+                }
+            )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        console_messages: list[str] = []
+        page.on("console", lambda message: console_messages.append(message.text))
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/members/*/karma-vote", karma_route)
+        page.route("**/api/v1/members/*", member_route)
+        page.route(
+            "**/api/v1/leaderboard?*",
+            lambda route: route.fulfill(
+                json={
+                    "items": [
+                        {
+                            "rank": 1,
+                            "member_id": target_id,
+                            "display_name": "Мария",
+                            "experience": 10,
+                            "unique_recipients": 2,
+                            "reliability": "1.0",
+                            "no_show": 0,
+                        }
+                    ]
+                }
+            ),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="Профиль").click()
+        page.get_by_role("button", name=re.compile("1\\. Мария")).click()
+        page.get_by_role("heading", name="Оценить взаимодействие").wait_for()
+        page.get_by_label(re.compile("^Комментарий")).fill(private_comment)
+        page.get_by_role("button", name="Подтвердить оценку").click()
+        page.get_by_text("Оценка недоступна", exact=False).wait_for()
+        page.get_by_role("button", name="Подтвердить оценку").click()
+        page.get_by_text("3 · оценок: 3", exact=True).wait_for()
+
+        value_keys = [key for action, key in actions if action == "save_value"]
+        assert len(value_keys) == 2
+        assert value_keys[0] == value_keys[1]
+        assert [action for action, _key in actions] == [
+            "begin",
+            "save_value",
+            "save_value",
+            "save_comment",
+            "confirm",
+        ]
+        assert private_comment not in page.locator("body").inner_text()
+        assert all(private_comment not in message for message in console_messages)
+        browser.close()
+
+
 def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:

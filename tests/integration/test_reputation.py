@@ -433,7 +433,7 @@ async def test_raw_karma_requires_permission_cross_product_and_audits(database_u
     await database.dispose()
 
 
-async def test_concurrent_confirm_has_one_winner_and_other_flow_is_preserved(
+async def test_web_and_legacy_confirm_have_one_winner_and_preserve_other_flow(
     database_url: str,
 ) -> None:
     """Identity/state locks prevent duplicate confirms and cross-flow overwrite."""
@@ -493,7 +493,9 @@ async def test_concurrent_confirm_has_one_winner_and_other_flow_is_preserved(
         ),
         service.confirm_vote(
             update_id=83_515,
-            telegram_user_id=creator.telegram_user_id,
+            actor_member_id=creator.id,
+            target_id=performer.id,
+            replay_fingerprint="mixed-confirm",
             expected_revision=draft.revision,
         ),
         return_exceptions=True,
@@ -502,6 +504,139 @@ async def test_concurrent_confirm_has_one_winner_and_other_flow_is_preserved(
     async with sessions() as session:
         assert await session.scalar(select(func.count(KarmaVoteModel.id))) == 1
         assert await session.scalar(select(func.count(KarmaVoteHistoryModel.id))) == 1
+    await database.dispose()
+
+
+async def test_reciprocal_web_votes_share_pair_lock_without_deadlock(
+    database_url: str,
+) -> None:
+    """Reciprocal Web begin and confirm serialize before sanction/member row locks."""
+    database = Database(database_url)
+    first = await add_member(database, 8356)
+    second = await add_member(database, 8357)
+    await prepare_config(database, first.id)
+    await add_paid_interaction(database, first, second)
+    service = ReputationService(database.unit_of_work)
+
+    first_draft, second_draft = await asyncio.gather(
+        service.begin_vote(
+            update_id=83_560,
+            actor_member_id=first.id,
+            target_id=second.id,
+            replay_fingerprint="reciprocal-first-begin",
+        ),
+        service.begin_vote(
+            update_id=83_570,
+            actor_member_id=second.id,
+            target_id=first.id,
+            replay_fingerprint="reciprocal-second-begin",
+        ),
+    )
+
+    async def complete_draft(
+        *, actor_id: UUID, target_id: UUID, draft_revision: int, update_base: int
+    ) -> int:
+        valued = await service.save_value(
+            update_id=update_base,
+            actor_member_id=actor_id,
+            target_id=target_id,
+            replay_fingerprint=f"reciprocal-{update_base}-value",
+            expected_revision=draft_revision,
+            value=1,
+        )
+        commented = await service.save_comment(
+            update_id=update_base + 1,
+            actor_member_id=actor_id,
+            target_id=target_id,
+            replay_fingerprint=f"reciprocal-{update_base}-comment",
+            expected_revision=valued.revision,
+            comment="Взаимная проверка совместной оплаченной работы.",
+        )
+        return commented.revision
+
+    first_revision, second_revision = await asyncio.gather(
+        complete_draft(
+            actor_id=first.id,
+            target_id=second.id,
+            draft_revision=first_draft.revision,
+            update_base=83_561,
+        ),
+        complete_draft(
+            actor_id=second.id,
+            target_id=first.id,
+            draft_revision=second_draft.revision,
+            update_base=83_571,
+        ),
+    )
+    results = await asyncio.gather(
+        service.confirm_vote(
+            update_id=83_563,
+            actor_member_id=first.id,
+            target_id=second.id,
+            replay_fingerprint="reciprocal-first-confirm",
+            expected_revision=first_revision,
+        ),
+        service.confirm_vote(
+            update_id=83_573,
+            actor_member_id=second.id,
+            target_id=first.id,
+            replay_fingerprint="reciprocal-second-confirm",
+            expected_revision=second_revision,
+        ),
+    )
+    assert len(results) == 2
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count(KarmaVoteModel.id))) == 2
+        assert await session.scalar(select(func.count(KarmaVoteHistoryModel.id))) == 2
+        assert await session.scalar(select(func.count(ConversationStateModel.member_id))) == 0
+    await database.dispose()
+
+
+async def test_begin_vote_preserves_every_foreign_text_flow(database_url: str) -> None:
+    """Karma begin rejects every foreign owner without changing its exact state."""
+    database = Database(database_url)
+    target = await add_member(database, 8353)
+    await prepare_config(database, target.id)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    flows = ("task", "assignment_result", "assignment_dispute", "profile_edit")
+    for offset, flow_type in enumerate(flows, start=1):
+        actor = await add_member(database, 8353 + offset)
+        await add_paid_interaction(database, actor, target)
+        reference_id = uuid4()
+        payload = {"reference_id": str(reference_id), "private": f"keep-{flow_type}"}
+        async with sessions.begin() as session:
+            session.add(
+                ConversationStateModel(
+                    member_id=actor.id,
+                    flow_type=flow_type,
+                    current_step="text",
+                    payload_json=payload,
+                    revision=7,
+                )
+            )
+        with pytest.raises(ValueError, match="conversation"):
+            await ReputationService(database.unit_of_work).begin_vote(
+                update_id=83_520 + offset,
+                telegram_user_id=actor.telegram_user_id,
+                target_id=target.id,
+            )
+        async with sessions() as session:
+            stored = await session.get(ConversationStateModel, actor.id)
+            assert stored is not None
+            stored_state = (
+                stored.flow_type,
+                stored.current_step,
+                stored.payload_json,
+                stored.revision,
+            )
+            assert stored_state == (
+                flow_type,
+                "text",
+                payload,
+                7,
+            )
+            assert await session.get(ProcessedTelegramUpdateModel, 83_520 + offset) is None
     await database.dispose()
 
 

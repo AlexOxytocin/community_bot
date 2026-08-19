@@ -20,6 +20,7 @@ let returnFocusModeration = false;
 let returnFocusModerationCaseId = null;
 let returnFocusProfile = false;
 let screenRevision = 0;
+let currentMemberId = null;
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -385,18 +386,223 @@ function leaderboardDetails(items) {
   }
   const list = element("ol", undefined, "list leaderboard");
   for (const item of items) {
-    const row = element("li", undefined, "card");
-    row.append(
+    const row = element("li");
+    const button = element("button", undefined, "card");
+    button.type = "button";
+    button.append(
       element("h4", String(item.rank) + ". " + item.display_name),
       element("p", "Опыт: " + String(item.experience), "meta"),
       element("p", "Получатели помощи: " + String(item.unique_recipients), "meta"),
       element("p", "Надёжность: " + reliabilityText(item.reliability), "meta"),
       element("p", "Неявки: " + String(item.no_show), "meta"),
     );
+    button.addEventListener("click", () => showMemberProfile(item.member_id));
+    row.append(button);
     list.append(row);
   }
   boundary.append(list);
   return boundary;
+}
+
+function safeMemberDetails(member) {
+  const card = element("article", undefined, "card detail");
+  card.append(element("h3", member.display_name));
+  const fields = [
+    ["Telegram", member.telegram_username ? "@" + member.telegram_username : null],
+    ["Город", member.city],
+    ["О себе", member.short_bio],
+    ["Текущая цель", member.current_goal],
+    ["Категории помощи", member.help_categories],
+    ["Навыки", member.skill_tags],
+    ["Доступность", member.availability],
+    ["Опыт", member.experience_total],
+    ["Уровень", member.level_number],
+    ["Карма", String(member.karma.score) + " · оценок: " + String(member.karma.count)],
+    ["Надёжность", reliabilityText(member.reliability.rate)],
+  ];
+  for (const [heading, value] of fields) {
+    const item = valueSection(heading, value);
+    if (item) card.append(item);
+  }
+  return card;
+}
+
+async function karmaCommand(memberId, draft, action, body) {
+  draft.operationKey ||= newOperationKey();
+  const result = await submissionRequest(
+    "/api/v1/members/" + encodeURIComponent(memberId) + "/karma-vote",
+    "POST",
+    draft.operationKey,
+    { action, ...body },
+  );
+  draft.operationKey = null;
+  draft.revision = result.revision;
+  return result;
+}
+
+function karmaForm(state, revision) {
+  const draft = state.karma ||= {
+    stage: "begin",
+    revision: null,
+    operationKey: null,
+    value: "1",
+    comment: "",
+    confirmed: false,
+    refreshError: false,
+  };
+  const form = element("form", undefined, "task-form");
+  form.append(element("h3", "Оценить взаимодействие"));
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+  if (draft.confirmed) {
+    status.className = "status success";
+    status.textContent = draft.refreshError
+      ? "Оценка сохранена. Не удалось обновить показатели."
+      : "Оценка сохранена.";
+    form.append(status);
+    if (draft.refreshError) {
+      const retry = element("button", "Повторить обновление", "primary");
+      retry.type = "button";
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        try {
+          state.member = await getJson(
+            "/api/v1/members/" + encodeURIComponent(state.member.member_id),
+          );
+          if (revision !== screenRevision) return;
+          state.karma = null;
+          state.message = "Оценка сохранена.";
+          renderMemberProfile(state, revision);
+        } catch {
+          retry.disabled = false;
+        }
+      });
+      form.append(retry);
+    }
+    return form;
+  }
+  const valueLabel = element("label", "Оценка");
+  const value = element("select");
+  value.append(new Option("+1 · положительно", "1"));
+  value.append(new Option("0 · нейтрально", "0"));
+  value.append(new Option("−1 · отрицательно", "-1"));
+  value.value = draft.value;
+  valueLabel.append(value);
+  const commentLabel = element("label", "Комментарий (10–300 символов)");
+  const comment = element("textarea");
+  comment.required = true;
+  comment.minLength = 10;
+  comment.maxLength = 300;
+  comment.value = draft.comment;
+  commentLabel.append(comment);
+  const submit = element("button", "Подтвердить оценку", "primary");
+  submit.type = "submit";
+  const resetPendingAction = () => {
+    draft.stage = "begin";
+    draft.revision = null;
+    draft.operationKey = null;
+  };
+  value.addEventListener("change", () => {
+    draft.value = value.value;
+    resetPendingAction();
+  });
+  comment.addEventListener("input", () => {
+    draft.comment = comment.value;
+    resetPendingAction();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    value.disabled = true;
+    comment.disabled = true;
+    status.className = "status";
+    status.textContent = "Сохраняем оценку…";
+    try {
+      if (draft.stage === "begin") {
+        await karmaCommand(state.member.member_id, draft, "begin", {});
+        if (revision !== screenRevision) return;
+        draft.stage = "save_value";
+      }
+      if (draft.stage === "save_value") {
+        await karmaCommand(state.member.member_id, draft, "save_value", {
+          expected_revision: draft.revision,
+          value: Number(draft.value),
+        });
+        if (revision !== screenRevision) return;
+        draft.stage = "save_comment";
+      }
+      if (draft.stage === "save_comment") {
+        await karmaCommand(state.member.member_id, draft, "save_comment", {
+          expected_revision: draft.revision,
+          comment: draft.comment,
+        });
+        if (revision !== screenRevision) return;
+        draft.stage = "confirm";
+      }
+      await karmaCommand(state.member.member_id, draft, "confirm", {
+        expected_revision: draft.revision,
+      });
+      draft.comment = "";
+      comment.value = "";
+      draft.confirmed = true;
+      if (revision !== screenRevision) return;
+      try {
+        state.member = await getJson(
+          "/api/v1/members/" + encodeURIComponent(state.member.member_id),
+        );
+        if (revision !== screenRevision) return;
+        state.karma = null;
+        state.message = "Оценка сохранена.";
+      } catch {
+        draft.refreshError = true;
+      }
+      renderMemberProfile(state, revision);
+    } catch (error) {
+      if (revision !== screenRevision) return;
+      if (!retryableSubmissionError(error)) resetPendingAction();
+      status.textContent = error?.status === 422
+        ? "Комментарий должен содержать от 10 до 300 символов."
+        : error?.status === 409
+          ? "Черновик изменился. Повторите сохранение."
+          : "Оценка недоступна или не удалось сохранить. Повторите попытку.";
+      submit.disabled = false;
+      value.disabled = false;
+      comment.disabled = false;
+    }
+  });
+  form.append(valueLabel, commentLabel, status, submit);
+  return form;
+}
+
+function renderMemberProfile(state, revision) {
+  if (revision !== screenRevision) return;
+  if (state.error) {
+    return replaceContent(element("p", "Профиль участника недоступен.", "status"));
+  }
+  if (!state.member) {
+    return replaceContent(element("p", "Загружаем профиль…", "status muted"));
+  }
+  const nodes = [safeMemberDetails(state.member)];
+  if (state.message) nodes.push(element("p", state.message, "status success"));
+  if (state.member.member_id !== currentMemberId) nodes.push(karmaForm(state, revision));
+  replaceContent(...nodes);
+}
+
+async function showMemberProfile(memberId, push = true) {
+  const revision = ++screenRevision;
+  const state = { member: null, error: false, karma: null, message: "" };
+  if (push) history.pushState({ screen: "member-profile", memberId }, "", "#member-profile");
+  setNavigation("profile");
+  title.textContent = "Профиль участника";
+  back.classList.remove("hidden");
+  renderMemberProfile(state, revision);
+  back.focus();
+  try {
+    state.member = await getJson("/api/v1/members/" + encodeURIComponent(memberId));
+  } catch {
+    state.error = true;
+  }
+  renderMemberProfile(state, revision);
 }
 
 function renderProfile(state, revision) {
@@ -1209,6 +1415,7 @@ async function bootstrap(authAttempted = false) {
     const catalog = await fetch("/api/v1/tasks", { credentials: "same-origin" });
     if (!me.ok || !catalog.ok) throw new Error("bootstrap_failed");
     const [profile, page] = await Promise.all([me.json(), catalog.json()]);
+    currentMemberId = profile.member_id;
     welcome.textContent = profile.display_name
       + ", выберите понятное задание и помогите сообществу.";
     tasks = page.items;
@@ -1250,6 +1457,8 @@ globalThis.addEventListener("popstate", (event) => {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
     loadProfile(false);
+  } else if (event.state?.screen === "member-profile") {
+    showMemberProfile(event.state.memberId, false);
   } else if (event.state?.screen === "moderation") {
     loadModeration(false);
   } else if (event.state?.screen === "moderation-case") {
