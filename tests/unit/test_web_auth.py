@@ -267,6 +267,7 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/auth/telegram", ("POST",)),
         ("/api/v1/session", ("DELETE",)),
         ("/api/v1/me", ("GET",)),
+        ("/api/v1/me/profile", ("PUT",)),
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/tasks", ("GET",)),

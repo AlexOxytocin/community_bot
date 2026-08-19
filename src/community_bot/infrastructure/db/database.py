@@ -1158,6 +1158,21 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             value=value,
         )
 
+    async def update_profile_field(
+        self,
+        *,
+        member_id: UUID,
+        field: ProfileField,
+        value: object,
+    ) -> None:
+        """Set one authorized profile field without a staged conversation."""
+        await registration_store.update_profile_field(
+            self._require_session(),
+            member_id=member_id,
+            field=field,
+            value=value,
+        )
+
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None:
         """Resolve a member by the immutable Telegram identity."""
         model = await self._require_session().scalar(

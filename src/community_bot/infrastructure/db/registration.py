@@ -466,6 +466,22 @@ async def save_profile_edit(
     await session.flush()
 
 
+async def update_profile_field(
+    session: AsyncSession,
+    *,
+    member_id: UUID,
+    field: ProfileField,
+    value: object,
+) -> None:
+    """Set one already-authorized member field without touching conversation state."""
+    member = await session.get(MemberModel, member_id)
+    if member is None:
+        message = "Profile member does not exist."
+        raise LookupError(message)
+    _set_member_profile_field(member, field, value)
+    await session.flush()
+
+
 async def _context_by_member(
     session: AsyncSession,
     member: MemberModel,
