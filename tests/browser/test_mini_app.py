@@ -193,6 +193,108 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
         browser.close()
 
 
+def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str) -> None:
+    def contrast_ratio(foreground: str, background: str) -> float:
+        def luminance(color: str) -> float:
+            channels = [int(value) / 255 for value in re.findall(r"\d+", color)[:3]]
+            linear = [
+                value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+                for value in channels
+            ]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        light, dark = sorted((luminance(foreground), luminance(background)), reverse=True)
+        return (light + 0.05) / (dark + 0.05)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.emulate_media(color_scheme="light")
+        page.add_init_script(
+            """
+            globalThis.Telegram = {WebApp: {
+              colorScheme: "light",
+              themeParams: {
+                bg_color: "#f6f8fc", secondary_bg_color: "#ffffff",
+                text_color: "#171b26", hint_color: "#687187",
+                button_color: "#08766f", button_text_color: "#ffffff"
+              },
+              ready() { globalThis.readyCalls = (globalThis.readyCalls || 0) + 1; }, expand() {}
+            }};
+            """
+        )
+        page.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(json={"display_name": "Алекс"}),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+        page.locator("#content").evaluate(
+            r"""node => {
+              node.innerHTML = `<form class="task-form">
+                <input value="Видимое значение" placeholder="Видимая подсказка">
+                <select><option>Видимый вариант</option></select>
+                <textarea placeholder="Видимая подсказка"></textarea>
+              </form>`;
+            }"""
+        )
+
+        controls = page.locator("input, select, textarea")
+        for index in range(controls.count()):
+            styles = controls.nth(index).evaluate(
+                """node => {
+                  const style = getComputedStyle(node);
+                  return {
+                    background: style.backgroundColor,
+                    color: style.color,
+                    caret: style.caretColor,
+                    height: node.getBoundingClientRect().height,
+                  };
+                }"""
+            )
+            assert styles == {
+                "background": "rgb(23, 27, 38)",
+                "color": "rgb(246, 248, 252)",
+                "caret": "rgb(46, 230, 214)",
+                "height": styles["height"],
+            }
+            assert styles["height"] >= 44
+
+        controls.first.focus()
+        assert controls.first.evaluate("node => getComputedStyle(node).outlineColor") == (
+            "rgb(196, 181, 253)"
+        )
+        focused = controls.first.evaluate(
+            """node => {
+              const style = getComputedStyle(node);
+              return {background: style.backgroundColor, border: style.borderColor,
+                focus: style.outlineColor, text: style.color};
+            }"""
+        )
+        assert contrast_ratio(focused["text"], focused["background"]) >= 4.5
+        assert contrast_ratio(focused["border"], focused["background"]) >= 3
+        assert contrast_ratio(focused["focus"], focused["background"]) >= 3
+        assert (
+            controls.nth(2).evaluate("node => getComputedStyle(node, '::placeholder').color")
+            == "rgb(169, 177, 196)"
+        )
+        assert page.locator("option").evaluate("node => getComputedStyle(node).color") == (
+            "rgb(246, 248, 252)"
+        )
+        controls.nth(1).evaluate("node => { node.disabled = true; }")
+        assert controls.nth(1).evaluate("node => getComputedStyle(node).backgroundColor") == (
+            "rgb(12, 15, 23)"
+        )
+        assert page.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
+        assert page.evaluate("getComputedStyle(document.body).backgroundImage") != "none"
+        assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(5, 6, 10)"
+        assert page.evaluate("globalThis.readyCalls") == 1
+        browser.close()
+
+
 def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
@@ -355,7 +457,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                 "getComputedStyle(document.documentElement)"
                 ".getPropertyValue('--app-background').trim()"
             )
-            == "#f6f8fc"
+            == "#05060a"
         )
 
         page.get_by_role("button", name="Принять задание").click()
@@ -404,7 +506,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                 "getComputedStyle(document.documentElement)"
                 ".getPropertyValue('--app-background').trim()"
             )
-            == "#f6f8fc"
+            == "#05060a"
         )
         browser.close()
 

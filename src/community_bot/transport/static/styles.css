@@ -15,8 +15,13 @@
   --app-text-muted: #a9b1c4;
   --app-border: #252a38;
   --app-accent: #2ee6d6;
+  --app-accent-strong: #12bfb3;
   --app-accent-text: #05060a;
+  --app-brand-secondary: #a78bfa;
   --app-focus: #c4b5fd;
+  --app-danger: #fb7185;
+  --app-danger-pressed: #fda4af;
+  --app-danger-surface: #05060a;
   --app-success: #4ade80;
   font-family: "Manrope", "Segoe UI", sans-serif;
   background: var(--app-background);
@@ -24,7 +29,15 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; background: var(--app-background); }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 90% -10%, color-mix(in srgb, var(--app-brand-secondary) 24%, transparent), transparent 34rem),
+    radial-gradient(circle at -12% 34%, color-mix(in srgb, var(--app-accent) 13%, transparent), transparent 30rem),
+    var(--app-background);
+  background-attachment: fixed;
+}
 button { font: inherit; }
 .shell {
   width: min(100%, 48rem);
@@ -45,8 +58,8 @@ h3 { margin: 0; font-size: 17px; }
 .lead, .muted { color: var(--app-text-muted); }
 .lead { margin: 10px 0 0; }
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
-.tabs button { min-height: 44px; border: 1px solid var(--app-border); border-radius: 12px; padding: 8px 14px; background: transparent; color: var(--app-text); cursor: pointer; }
-.tabs button[aria-pressed="true"] { border-color: var(--app-accent); color: var(--app-accent); }
+.tabs button { min-height: 44px; border: 1px solid var(--app-text-muted); border-radius: 12px; padding: 8px 14px; background: color-mix(in srgb, var(--app-surface) 72%, transparent); color: var(--app-text); cursor: pointer; }
+.tabs button[aria-pressed="true"] { border-color: var(--app-accent); color: var(--app-accent); background: color-mix(in srgb, var(--app-accent) 8%, transparent); }
 .screen-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
 .card { display: grid; gap: 12px; width: 100%; padding: 16px; border: 1px solid var(--app-border); border-radius: 16px; background: var(--app-surface); color: var(--app-text); text-align: left; box-shadow: 0 12px 32px rgba(0, 0, 0, .2); }
@@ -55,24 +68,28 @@ button.card:hover { background: var(--app-surface-raised); }
 .meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--app-text-muted); font-size: 13px; }
 .detail { display: grid; gap: 16px; }
 .submission, .submission-form, .task-form { display: grid; gap: 12px; }
-.submission textarea, .task-form input, .task-form textarea, .task-form select { width: 100%; min-height: 44px; border: 1px solid var(--app-border); border-radius: 12px; padding: 12px; background: var(--app-surface-raised); color: var(--app-text); font: inherit; }
+form label { display: grid; gap: 8px; font-weight: 700; overflow-wrap: anywhere; }
+input, select, textarea { width: 100%; min-height: 44px; border: 1px solid var(--app-text-muted); border-radius: 12px; padding: 12px; background: var(--app-surface-raised); color: var(--app-text); caret-color: var(--app-accent); font: inherit; font-weight: 400; }
+input::placeholder, textarea::placeholder { color: var(--app-text-muted); opacity: 1; }
+select option { background: var(--app-surface-raised); color: var(--app-text); }
+input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; background: var(--app-surface); color: var(--app-text-muted); border-color: var(--app-text-muted); }
+input:user-valid, select:user-valid, textarea:user-valid { border-color: var(--app-accent); }
+input:user-invalid, select:user-invalid, textarea:user-invalid { border-width: 2px; border-color: var(--app-danger); box-shadow: inset 4px 0 var(--app-danger); }
 .submission textarea, .task-form textarea { min-height: 8rem; resize: vertical; }
 .submission-preview { padding: 12px; border: 1px solid var(--app-border); border-radius: 12px; }
 .profile-boundary { display: grid; gap: 12px; }
 .section { display: grid; gap: 6px; }
 .primary, .back { min-height: 44px; border-radius: 12px; cursor: pointer; }
-.primary { border: 0; padding: 10px 16px; background: var(--app-accent); color: var(--app-accent-text); font-weight: 700; }
-.primary:disabled { cursor: progress; opacity: .65; }
-.back { border: 1px solid var(--app-border); padding: 8px 12px; background: transparent; color: var(--app-text); }
+.primary { border: 1px solid var(--app-focus); padding: 10px 16px; background: linear-gradient(135deg, var(--app-accent), var(--app-accent-strong)); color: var(--app-accent-text); font-weight: 800; box-shadow: 0 8px 24px color-mix(in srgb, var(--app-accent) 16%, transparent); }
+.primary:active, .back:active, .tabs button:active { transform: translateY(1px); }
+.primary:disabled { cursor: progress; background: var(--app-border); color: var(--app-text-muted); box-shadow: none; }
+.back { border: 1px solid var(--app-text-muted); padding: 8px 12px; background: color-mix(in srgb, var(--app-surface) 72%, transparent); color: var(--app-text); }
+label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-danger-pressed); background: linear-gradient(135deg, var(--app-danger), var(--app-danger-pressed)); color: var(--app-danger-surface); box-shadow: 0 8px 24px color-mix(in srgb, var(--app-danger) 14%, transparent); }
 .status { padding: 12px; border: 1px solid var(--app-border); border-radius: 12px; }
 .success { color: var(--app-success); }
 .hidden { display: none; }
 :focus-visible { outline: 3px solid var(--app-focus); outline-offset: 3px; }
 
-@media (prefers-color-scheme: light) {
-  :root { color-scheme: light; --app-background: #f6f8fc; --app-surface: #ffffff; --app-surface-raised: #ffffff; --app-text: #171b26; --app-text-muted: #687187; --app-border: #e7eaf2; --app-accent: #08766f; --app-accent-text: #ffffff; --app-focus: #6d28d9; --app-success: #15803d; }
-}
-
 @media (prefers-reduced-motion: no-preference) {
-  .card, .primary { transition: background-color 120ms cubic-bezier(.2, .8, .2, 1), opacity 120ms cubic-bezier(.2, .8, .2, 1); }
+  .card, .primary, .back, .tabs button { transition: background-color 120ms cubic-bezier(.2, .8, .2, 1), box-shadow 120ms cubic-bezier(.2, .8, .2, 1), transform 80ms ease; }
 }
