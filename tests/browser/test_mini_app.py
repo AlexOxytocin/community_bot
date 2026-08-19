@@ -1125,6 +1125,50 @@ def _freeform_submission_rows() -> tuple[str, str, dict[str, object], dict[str, 
     return assignment_id, draft_id, assignment, submitted
 
 
+def test_assignment_cancellation_returns_to_active_list(mini_app_url: str) -> None:
+    assignment_id, _draft_id, assignment, submitted = _freeform_submission_rows()
+    detail = submitted | {"assignment_status": "accepted", "result_summary": None}
+    items = [assignment]
+    operation_keys: list[str] = []
+
+    def cancel(route: Route) -> None:
+        operation_keys.append(route.request.headers["idempotency-key"])
+        assert route.request.post_data_json == {"reason": "Cannot finish before deadline"}
+        items.clear()
+        route.fulfill(status=204)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route(
+            "**/api/v1/tasks", lambda route: route.fulfill(json={"items": [], "next_cursor": None})
+        )
+        page.route(
+            "**/api/v1/assignments?*",
+            lambda route: route.fulfill(json={"items": items, "next_cursor": None}),
+        )
+        page.route(
+            f"**/api/v1/assignments/{assignment_id}/cancellation",
+            cancel,
+        )
+        page.route(
+            f"**/api/v1/assignments/{assignment_id}", lambda route: route.fulfill(json=detail)
+        )
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.goto(mini_app_url)
+
+        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name=re.compile("Проверить форму")).click()
+        page.get_by_label("Причина отказа").fill(" Cannot finish before deadline ")
+        page.get_by_role("button", name="Подтвердить отказ").click()
+        page.get_by_text("Активных назначений пока нет.").wait_for()
+        assert len(operation_keys) == 1
+        assert page.url.endswith("/#assignments")
+        assert page.evaluate("history.state") == {"screen": "assignments"}
+        browser.close()
+
+
 def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:

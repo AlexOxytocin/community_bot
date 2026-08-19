@@ -1188,9 +1188,9 @@ async def test_session_restart_reads_privacy_authority_and_concurrent_logout(
     await database.dispose()
 
 
-async def test_catalog_detail_projection_and_accept_path(database_url: str) -> None:
+async def test_catalog_detail_projection_accept_and_cancel_path(database_url: str) -> None:
     database = Database(database_url)
-    _author, task = await _published_task(database, update_base=52_500)
+    author, task = await _published_task(database, update_base=52_500)
     performer = await prepare_member(database, telegram_user_id=52_600)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     projections: dict[UUID, dict[str, object]] = {}
@@ -1243,6 +1243,43 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
             projections[model.id] = (
                 {"public_value": "visible only with a valid allowlist"} if index == 3 else {}
             )
+        test_run = DbTestRunModel(marker="TEST-CB84-HIDDEN", started_by_member_id=performer.id)
+        session.add(test_run)
+        await session.flush()
+        hidden_values = {
+            column.key: getattr(source, column.key)
+            for column in inspect(TaskModel).mapper.column_attrs
+            if column.key not in {"id", "created_at", "updated_at"}
+        }
+        hidden_task = TaskModel(
+            **(
+                hidden_values
+                | {
+                    "test_run_id": test_run.id,
+                    "title": "Hidden accepted assignment",
+                    "publish_command_id": uuid4(),
+                }
+            )
+        )
+        session.add(hidden_task)
+        await session.flush()
+        hidden_assignment = AssignmentModel(
+            task_id=hidden_task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="accepted",
+            accepted_at=datetime.datetime.now(datetime.UTC),
+        )
+        session.add(hidden_assignment)
+        await session.flush()
+        hidden_assignment_id = hidden_assignment.id
+    hidden_update_id = _submission_update_id(
+        performer.id,
+        hidden_assignment_id,
+        "cancel",
+        "9006",
+        namespace=b"assignment-cancellation-v1",
+    )
 
     settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url)
     app = create_web_app(settings=settings, database=database)
@@ -1297,10 +1334,90 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
         assert unavailable.json() == {"code": "assignment_unavailable"}
         assert unavailable.headers["cache-control"] == "no-store"
 
+        hidden_path = f"/api/v1/assignments/{hidden_assignment_id}/cancellation"
+        assert (await client.get(f"/api/v1/assignments/{hidden_assignment_id}")).status_code == 404
+        hidden_cancel = await client.post(
+            hidden_path,
+            json={"reason": "Direct UUID must stay scoped"},
+            headers={"origin": ORIGIN, "idempotency-key": "9006"},
+        )
+        assert hidden_cancel.status_code == 409
+        async with sessions() as session:
+            hidden_stored = await session.get(AssignmentModel, hidden_assignment_id)
+            assert hidden_stored is not None
+            assert hidden_stored.status == "accepted"
+            assert await session.get(ProcessedTelegramUpdateModel, hidden_update_id) is None
+            assert (
+                await session.scalar(
+                    select(func.count(OutboxEventModel.id)).where(
+                        OutboxEventModel.business_key
+                        == f"assignment:{hidden_assignment_id}:cancelled"
+                    )
+                )
+                == 0
+            )
+        async with sessions.begin() as session:
+            session.add(DbTestRunParticipantModel(run_id=test_run.id, member_id=performer.id))
+        scoped_cancel = await client.post(
+            hidden_path,
+            json={"reason": "Direct UUID must stay scoped"},
+            headers={"origin": ORIGIN, "idempotency-key": "9006"},
+        )
+        assert scoped_cancel.status_code == 204
+        async with sessions.begin() as session:
+            participant = await session.get(DbTestRunParticipantModel, (test_run.id, performer.id))
+            assert participant is not None
+            participant.is_active = False
+        scoped_replay = await client.post(
+            hidden_path,
+            json={"reason": "Direct UUID must stay scoped"},
+            headers={"origin": ORIGIN, "idempotency-key": "9006"},
+        )
+        assert scoped_replay.status_code == 409
+
+        assignment_id = UUID(assignment["id"])
+        path = f"/api/v1/assignments/{assignment_id}/cancellation"
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as foreign:
+            assert (
+                await foreign.post(
+                    "/api/v1/auth/telegram",
+                    content=proof(author.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+                    headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+                )
+            ).status_code == 204
+            denied = await foreign.post(
+                path,
+                json={"reason": "Not my assignment"},
+                headers={"origin": ORIGIN, "idempotency-key": "9004"},
+            )
+            assert denied.status_code == 409
+        cancellation_headers = {"origin": ORIGIN, "idempotency-key": "9005"}
+        cancelled = await client.post(
+            path, json={"reason": "Cannot finish before deadline"}, headers=cancellation_headers
+        )
+        replay = await client.post(
+            path, json={"reason": "Cannot finish before deadline"}, headers=cancellation_headers
+        )
+        conflict = await client.post(
+            path, json={"reason": "Different reason"}, headers=cancellation_headers
+        )
+        assert cancelled.status_code == replay.status_code == 204
+        assert conflict.status_code == 409
+
     first_update_id = _accept_update_id(performer.id, task.id, "9001")
     second_update_id = _accept_update_id(performer.id, task.id, "9002")
+    cancellation_update_id = _submission_update_id(
+        performer.id,
+        assignment_id,
+        "cancel",
+        "9005",
+        namespace=b"assignment-cancellation-v1",
+    )
     async with sessions() as session:
-        assignment_id = UUID(assignment["id"])
+        stored_assignment = await session.get(AssignmentModel, assignment_id)
+        assert stored_assignment is not None
+        assert stored_assignment.status == "cancelled"
+        assert stored_assignment.cancellation_reason == "Cannot finish before deadline"
         assert (
             await session.scalar(
                 select(func.count(AssignmentModel.id)).where(
@@ -1314,10 +1431,10 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
             await session.scalar(
                 select(func.count(ReliabilityEventModel.id)).where(
                     ReliabilityEventModel.assignment_id == assignment_id,
-                    ReliabilityEventModel.event_type == "accepted",
+                    ReliabilityEventModel.event_type.in_(("accepted", "cancelled_performer")),
                 )
             )
-            == 1
+            == 2
         )
         assert (
             await session.scalar(
@@ -1338,6 +1455,27 @@ async def test_catalog_detail_projection_and_accept_path(database_url: str) -> N
         )
         assert await session.get(ProcessedTelegramUpdateModel, first_update_id) is not None
         assert await session.get(ProcessedTelegramUpdateModel, second_update_id) is None
+        assert await session.get(ProcessedTelegramUpdateModel, cancellation_update_id) is not None
+        hidden_stored = await session.get(AssignmentModel, hidden_assignment_id)
+        assert hidden_stored is not None
+        assert hidden_stored.status == "cancelled"
+        assert await session.get(ProcessedTelegramUpdateModel, hidden_update_id) is not None
+        assert (
+            await session.scalar(
+                select(func.count(OutboxEventModel.id)).where(
+                    OutboxEventModel.business_key == f"assignment:{hidden_assignment_id}:cancelled"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(OutboxEventModel.id)).where(
+                    OutboxEventModel.business_key == f"assignment:{assignment_id}:cancelled"
+                )
+            )
+            == 1
+        )
     await database.dispose()
 
 
