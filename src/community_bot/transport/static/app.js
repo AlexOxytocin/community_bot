@@ -233,17 +233,26 @@ function renderTaskCreation(state) {
   };
   form.deadline_at.addEventListener("input", updateDeadlineValidity);
   form.deadline_at.parentElement.append(deadlineStatus);
-  form.append(submit);
+  const saveStatus = element("p", "", "status hidden");
+  saveStatus.setAttribute("aria-live", "polite");
+  form.append(submit, saveStatus);
   updateDeadlineValidity();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
+    saveStatus.classList.add("hidden");
     const value = Object.fromEntries(new FormData(form));
     const materials = Object.fromEntries([["text", value.material_text], ["url", value.material_url]].filter(([, item]) => item));
+    delete value.material_text;
+    delete value.material_url;
     try {
       await taskCreationCommand({ action: "save", draft_id: draft.id, expected_revision: draft.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
       await openTaskCreation(false, false);
-    } catch { submit.disabled = false; }
+    } catch {
+      saveStatus.textContent = "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
+      saveStatus.classList.remove("hidden");
+      submit.disabled = false;
+    }
   });
   replaceContent(state.needs_edit ? element("p", "Предпросмотр устарел. Обновите данные.", "status") : form, form);
 }
