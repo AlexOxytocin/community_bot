@@ -1212,6 +1212,24 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
             ),
         )
         page.route(
+            "**/api/v1/owned-tasks",
+            lambda route: route.fulfill(
+                json={
+                    "items": [
+                        {
+                            "id": assignment["task_id"],
+                            "title": review["task_title"],
+                            "status": "published",
+                            "performer_slots": 2,
+                            "deadline_at": "2026-08-21T20:00:00Z",
+                            "assignees": [{"display_name": "Исполнитель", "status": "submitted"}],
+                            "cancellation_status": None,
+                        }
+                    ]
+                }
+            ),
+        )
+        page.route(
             f"**/api/v1/assignment-reviews/{assignment_id}",
             lambda route: route.fulfill(json=review),
         )
@@ -1245,6 +1263,9 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         assert page.get_by_role("button", name="Начать отправку").count() == 0
         page.get_by_role("button", name="Мои задания").click()
         page.get_by_role("button", name="Созданные мной").click()
+        page.get_by_role("heading", name="Мои опубликованные задания").wait_for()
+        page.get_by_text("Исполнители: 1/2").wait_for()
+        page.get_by_text("Исполнитель · Результат отправлен").wait_for()
         review_button = page.get_by_role("button", name=re.compile("Проверить форму"))
         review_button.click()
         assert page.evaluate("globalThis.pwned") is None

@@ -806,43 +806,84 @@ const decisionLabels = {
   reject: "Отклонить",
 };
 
+const createdTaskStatus = (value) => ({
+  published: "Опубликовано",
+  closed_for_new_performers: "Набор закрыт",
+  completed: "Завершено",
+  cancelled: "Отменено",
+}[value] || value);
+
 async function loadCreatedReviews(push = true) {
   const revision = ++screenRevision;
   if (push) history.pushState({ screen: "created-assignments" }, "", "#created-assignments");
   setNavigation("assignments");
   title.textContent = "Созданные мной";
   back.classList.add("hidden");
-  replaceContent(element("p", "Загружаем результаты…", "status muted"));
+  replaceContent(element("p", "Загружаем созданные задания…", "status muted"));
   try {
-    const reviews = (await getJson("/api/v1/assignment-reviews")).items;
+    const [owned, reviews] = await Promise.all([
+      getJson("/api/v1/owned-tasks"),
+      getJson("/api/v1/assignment-reviews"),
+    ]);
     if (revision !== screenRevision) return;
-    if (!reviews.length) {
-      replaceContent(element("p", "Результатов, ожидающих решения, пока нет.", "status muted"));
-      return;
+    const nodes = [element("h3", "Мои опубликованные задания")];
+    if (!owned.items.length) {
+      nodes.push(element("p", "Созданных заданий пока нет.", "status muted"));
+    } else {
+      const ownedList = element("ul", undefined, "list");
+      for (const task of owned.items) {
+        const card = element("article", undefined, "card");
+        card.append(
+          element("h3", task.title),
+          element("p", createdTaskStatus(task.status), "muted"),
+          element(
+            "p",
+            "Исполнители: " + String(task.assignees.length) + "/" + String(task.performer_slots),
+            "meta",
+          ),
+        );
+        for (const assignee of task.assignees) {
+          card.append(element(
+            "p",
+            assignee.display_name + " · " + assignmentStatus(assignee.status),
+            "muted",
+          ));
+        }
+        const item = element("li");
+        item.append(card);
+        ownedList.append(item);
+      }
+      nodes.push(ownedList);
     }
-    const list = element("ul", undefined, "list");
-    for (const review of reviews) {
-      const button = element("button", undefined, "card");
-      button.type = "button";
-      button.append(
-        element("h3", review.task_title),
-        element("p", "Исполнитель: " + review.performer_display_name, "muted"),
-        element("p", review.result, "muted"),
-      );
-      button.addEventListener("click", () => showCreatedReview(review.id));
-      if (review.id === returnFocusReviewId) queueMicrotask(() => button.focus());
-      const item = element("li");
-      item.append(button);
-      list.append(item);
+    nodes.push(element("h3", "Результаты на проверку"));
+    if (!reviews.items.length) {
+      nodes.push(element("p", "Результатов, ожидающих решения, пока нет.", "status muted"));
+    } else {
+      const reviewList = element("ul", undefined, "list");
+      for (const review of reviews.items) {
+        const button = element("button", undefined, "card");
+        button.type = "button";
+        button.append(
+          element("h3", review.task_title),
+          element("p", "Исполнитель: " + review.performer_display_name, "muted"),
+          element("p", review.result, "muted"),
+        );
+        button.addEventListener("click", () => showCreatedReview(review.id));
+        if (review.id === returnFocusReviewId) queueMicrotask(() => button.focus());
+        const item = element("li");
+        item.append(button);
+        reviewList.append(item);
+      }
+      nodes.push(reviewList);
     }
     returnFocusReviewId = null;
-    replaceContent(list);
+    replaceContent(...nodes);
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadCreatedReviews(false));
-    replaceContent(...assignmentError(error.message, retry));
+    replaceContent(element("p", "Не удалось загрузить созданные задания.", "status"), retry);
   }
 }
 
