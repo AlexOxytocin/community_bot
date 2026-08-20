@@ -18,6 +18,7 @@ from community_bot.application.reputation import (
     LeaderboardCursor,
     LeaderboardEntry,
     LeaderboardPage,
+    LeaderboardPeriod,
     MemberCatalogCursor,
     MemberCatalogPage,
     PersonalStatistics,
@@ -570,11 +571,21 @@ async def personal_statistics(session: AsyncSession, member_id: UUID) -> Persona
         categories=categories,
         no_show=reliability_view.no_show,
         reliability=reliability_view,
+        created=int(
+            await session.scalar(
+                select(func.count(TaskModel.id)).where(TaskModel.creator_id == member_id)
+            )
+            or 0
+        ),
     )
 
 
 async def leaderboard(
-    session: AsyncSession, *, limit: int, cursor: LeaderboardCursor | None
+    session: AsyncSession,
+    *,
+    limit: int,
+    cursor: LeaderboardCursor | None,
+    period: LeaderboardPeriod,
 ) -> LeaderboardPage:
     """Return a stable ledger-authoritative leaderboard page."""
     members = (
@@ -582,9 +593,14 @@ async def leaderboard(
             select(MemberModel).where(_effectively_active_clause()).order_by(MemberModel.id)
         )
     ).all()
+    cutoff = {
+        "week": dt.datetime.now(dt.UTC) - dt.timedelta(days=7),
+        "month": dt.datetime.now(dt.UTC) - dt.timedelta(days=30),
+        "all": None,
+    }[period]
     ranked: list[tuple[tuple[Any, ...], int, MemberModel, int, ReliabilityView, int, datetime]] = []
     for member in members:
-        experience, reached_at = await _experience_and_reached_at(session, member)
+        experience, reached_at = await _experience_and_reached_at(session, member, cutoff=cutoff)
         recipients = await _unique_recipients(session, member.id)
         reliability_view = await reliability(session, member.id)
         rate = reliability_view.rate or Decimal(0)
@@ -655,13 +671,16 @@ async def _experience_total(session: AsyncSession, member_id: UUID) -> int:
 
 
 async def _experience_and_reached_at(
-    session: AsyncSession, member: MemberModel
+    session: AsyncSession, member: MemberModel, *, cutoff: dt.datetime | None = None
 ) -> tuple[int, datetime]:
+    statement = select(AccountTransactionModel).where(
+        AccountTransactionModel.member_id == member.id
+    )
+    if cutoff is not None:
+        statement = statement.where(AccountTransactionModel.created_at >= cutoff)
     transactions = (
         await session.scalars(
-            select(AccountTransactionModel)
-            .where(AccountTransactionModel.member_id == member.id)
-            .order_by(AccountTransactionModel.created_at, AccountTransactionModel.id)
+            statement.order_by(AccountTransactionModel.created_at, AccountTransactionModel.id)
         )
     ).all()
     total = sum(item.experience_delta for item in transactions)

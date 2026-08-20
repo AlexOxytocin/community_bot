@@ -6,7 +6,7 @@ import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -996,7 +996,8 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.get_by_role("button", name="Назад").click()
         page.locator('[data-screen-id="S02"]').wait_for()
         assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s02")
-        page.get_by_role("button", name="Назад").click()
+        with page.expect_request("**/api/v1/moderation/cases?*"):
+            page.get_by_role("button", name="Назад").click()
         pending.pop().fulfill(
             json={
                 "items": [
@@ -1067,6 +1068,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         "credit_balance": 7,
         "experience_total": 12,
         "level": {"number": 2, "display_name": "Участник"},
+        "statistics": {"completed_tasks": 8, "created_tasks": 5},
         "private_top_level": private_marker,
     }
     member = {
@@ -1078,7 +1080,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "accepted": 4,
             "approved_weight": "3.5",
             "no_show": 1,
-            "rate": None,
+            "rate": "0.96",
             "private": private_marker,
         },
         "unknown": private_marker,
@@ -1144,7 +1146,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
-        page.set_viewport_size({"width": 375, "height": 800})
+        page.set_viewport_size({"width": 375, "height": 812})
         page.on(
             "request",
             lambda request: (
@@ -1169,13 +1171,12 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_role("heading", name="Каталог").wait_for()
 
         capture_requests = True
-        profile_nav = page.get_by_role("button", name="Профиль")
+        profile_nav = page.get_by_role("button", name="Профиль", exact=True)
         profile_nav.click()
         page.get_by_text("Загружаем профиль…").wait_for()
         page.wait_for_timeout(50)
         assert {urlsplit(route.request.url).path for route in pending} == {
-            f"/api/v1/members/{member_id}",
-            "/api/v1/leaderboard",
+            f"/api/v1/members/{member_id}"
         }
         member_pending = next(route for route in pending if "/members/" in route.request.url)
         member_pending.fulfill(json=member)
@@ -1186,9 +1187,23 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         for value in (
             "7",
             "12",
-            "3.5",
+            "3",
+            "8",
+            "5",
+            "96%",
         ):
             assert page.get_by_text(value, exact=True).count() >= 1
+        for label in (
+            "Кредиты",
+            "Опыт",
+            "Карма",
+            "Завершено заданий",
+            "Создано заданий",
+            "Надёжность",
+        ):
+            assert page.get_by_text(label, exact=True).count() == 1
+        for removed_label in ("Принято заданий", "Подтверждённый вес", "Неявки"):
+            assert page.get_by_text(removed_label, exact=True).count() == 0
         body = page.locator("body").inner_text()
         assert malicious in body
         assert private_marker not in body
@@ -1202,15 +1217,9 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "Найти партнёров для пилота.",
         ):
             assert page.get_by_text(hidden_value, exact=True).count() == 0
-        leaderboard_pending = next(
-            route for route in pending if "/leaderboard" in route.request.url
-        )
-        leaderboard_pending.fulfill(json=leaderboard)
-        pending.remove(leaderboard_pending)
-        page.get_by_text("1 · " + malicious, exact=True).wait_for()
-        assert private_marker not in page.locator("body").inner_text()
+        assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
 
-        page.get_by_role("button", name="Настройки профиля").click()
+        page.get_by_role("button", name="Редактировать профиль").click()
         page.get_by_label("Поле профиля").select_option("city")
         page.get_by_label("Новое значение").fill("Rosario")
         page.get_by_role("button", name="Сохранить поле").click()
@@ -1225,7 +1234,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         modes["member"] = "error"
         profile_updates_before = len(profile_update_keys)
         _connected_control(page, "PE-063", "authoritative_profile_success").click()
-        page.get_by_role("button", name="Настройки профиля").click()
+        page.get_by_role("button", name="Редактировать профиль").click()
         page.get_by_label("Поле профиля").select_option("city")
         assert page.get_by_label("Новое значение").input_value() == "Rosario"
         assert len(profile_update_keys) == profile_updates_before + 1
@@ -1247,7 +1256,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.locator("h2", has_text=malicious).wait_for()
         assert page.get_by_role("heading", name="Категории помощи").count() == 0
         assert page.get_by_role("heading", name="Навыки").count() == 0
-        page.get_by_text("1 · " + malicious, exact=True).wait_for()
+        assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
         assert private_marker not in page.locator("body").inner_text()
 
         modes.update(member="error", leaderboard="success")
@@ -1265,8 +1274,9 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_text("Не удалось загрузить данные.").wait_for()  # noqa: RUF001
         modes["leaderboard"] = "success"
         page.get_by_role("button", name="Повторить").click()
-        page.get_by_text("Получатели помощи: 3").wait_for()
-        page.get_by_text("Неявки: 1").wait_for()
+        page.get_by_text("12 XP").wait_for()
+        assert page.get_by_text("Получатели помощи: 3").count() == 0
+        assert page.get_by_text("Неявки: 1").count() == 0
 
         modes["leaderboard"] = "empty"
         assert page.locator("#primary-navigation").is_visible()
@@ -1284,18 +1294,12 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_text("Загружаем профиль…").wait_for()
         page.wait_for_timeout(50)
         assert {urlsplit(route.request.url).path for route in pending} == {
-            f"/api/v1/members/{member_id}",
-            "/api/v1/leaderboard",
+            f"/api/v1/members/{member_id}"
         }
         catalog_nav = page.get_by_role("button", name="Каталог")
         assert page.get_by_role("button", name="Назад").is_hidden()
         catalog_nav.click()
         page.get_by_role("heading", name="Каталог").wait_for()
-        late_leaderboard = next(route for route in pending if "/leaderboard" in route.request.url)
-        late_leaderboard.fulfill(json=leaderboard)
-        pending.remove(late_leaderboard)
-        page.get_by_role("heading", name="Каталог").wait_for()
-        assert private_marker not in page.locator("body").inner_text()
         late_member = next(route for route in pending if "/members/" in route.request.url)
         late_member.fulfill(json=member)
         pending.remove(late_member)
@@ -1317,6 +1321,242 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "/api/v1/leaderboard",
             "/api/v1/me/profile",
         } == {path for _method, path in requests}
+        browser.close()
+
+
+def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    member_ids = [f"00000000-0000-0000-0000-{index:012d}" for index in range(101, 107)]
+    names = [
+        "Мария Крылова",
+        "Илья Петров",
+        "Анна Соколова",
+        "Денис Волков",
+        "Елена Ли",
+        "Макс Орлов",
+    ]
+    members = [
+        {
+            "member_id": member_id,
+            "telegram_username": f"member{index}",
+            "display_name": name,
+            "city": "Buenos Aires" if index % 2 else "Córdoba",
+            "short_bio": None,
+            "current_goal": None,
+            "help_categories": [],
+            "skill_tags": ["Дизайн", "Исследования"],
+            "availability": "онлайн",
+            "experience_total": 20 - index,
+            "level_number": 7 - index,
+            "karma": {"score": 12 - index, "count": 4},
+            "reliability": {
+                "accepted": 5,
+                "approved_weight": "5",
+                "no_show": 0,
+                "rate": "0.98",
+            },
+        }
+        for index, (member_id, name) in enumerate(zip(member_ids, names, strict=True))
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        for width, height, minimum_visible in ((375, 812, 4), (430, 932, 5)):
+            page = _new_page(browser)
+            page.set_viewport_size({"width": width, "height": height})
+            period_requests: list[str] = []
+            pending_week: list[Route] = []
+            pending_all: list[Route] = []
+
+            page.route(
+                "**/api/v1/me",
+                lambda route: route.fulfill(
+                    json={
+                        "member_id": member_ids[0],
+                        "display_name": names[0],
+                        "credit_balance": None,
+                        "experience_total": None,
+                        "level": {"number": 7, "display_name": "Участник"},
+                        "statistics": {"completed_tasks": None, "created_tasks": None},
+                    }
+                ),
+            )
+            page.route(
+                "**/api/v1/members?*",
+                lambda route: route.fulfill(json={"items": members}),
+            )
+            page.route(
+                "**/api/v1/members/*",
+                lambda route: route.fulfill(
+                    json=next(
+                        item for item in members if route.request.url.endswith(item["member_id"])
+                    )
+                ),
+            )
+            page.route(
+                "**/api/v1/tasks",
+                lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+            )
+
+            def leaderboard_route(
+                route: Route,
+                *,
+                bound_requests: list[str] = period_requests,
+                bound_pending: list[Route] = pending_week,
+                bound_pending_all: list[Route] = pending_all,
+            ) -> None:
+                period = parse_qs(urlsplit(route.request.url).query)["period"][0]
+                bound_requests.append(period)
+                if period == "week" and not bound_pending:
+                    bound_pending.append(route)
+                    return
+                if period == "all" and not bound_pending_all:
+                    bound_pending_all.append(route)
+                    return
+                offset = {"week": 10, "month": 20, "all": 30}[period]
+                route.fulfill(
+                    json={
+                        "items": [
+                            {
+                                "rank": index,
+                                "member_id": member_id,
+                                "display_name": names[index - 1],
+                                "experience": offset - index + 1,
+                                "unique_recipients": 1,
+                                "reliability": "0.98",
+                                "no_show": 0,
+                            }
+                            for index, member_id in enumerate(member_ids, start=1)
+                        ]
+                    }
+                )
+
+            page.route("**/api/v1/leaderboard?*", leaderboard_route)
+            page.goto(mini_app_url)
+            page.get_by_role("button", name="Участники", exact=True).click()
+            page.locator(".member-row").nth(5).wait_for()
+
+            geometry = page.evaluate(
+                """() => {
+                  const screen = document.querySelector('.screen').getBoundingClientRect();
+                  const tabs = document.querySelector('.participants-tabs').getBoundingClientRect();
+                  const rows = [...document.querySelectorAll('.member-row')]
+                    .map((node) => node.getBoundingClientRect());
+                  const first = rows[0];
+                  return {
+                    visible: rows.filter((row) => (
+                      row.top >= screen.top && row.bottom <= screen.bottom
+                    )).length,
+                    firstVisible: first.top >= screen.top && first.bottom <= screen.bottom,
+                    scrollTop: document.querySelector('.screen').scrollTop,
+                    overflow: document.documentElement.scrollWidth > innerWidth,
+                    tabsOffset: tabs.top - screen.top,
+                  };
+                }"""
+            )
+            assert geometry["firstVisible"] is True
+            assert geometry["scrollTop"] == 0
+            assert geometry["overflow"] is False
+            assert geometry["tabsOffset"] < 20
+            assert geometry["visible"] >= minimum_visible
+            heading_box = page.locator(".screen-heading").bounding_box()
+            assert heading_box is not None
+            assert heading_box["width"] <= 1
+            assert heading_box["height"] <= 1
+            assert page.get_by_text("Имя или @username", exact=True).count() == 0
+            assert page.get_by_role("button", name="Найти", exact=True).count() == 0
+            search = page.get_by_placeholder("Найти участника")
+            assert search.get_attribute("aria-label") == "Найти участника"
+            search.fill(" \u0430 ")
+            with page.expect_request(lambda request: "query=%D0%B0" in request.url):
+                search.press("Enter")
+            assert page.get_by_text("Минимум", exact=False).count() == 0
+
+            page.locator(".member-row").first.click()
+            page.locator('[data-screen-id="P02"]').wait_for()
+            page.get_by_role("button", name="Назад").click()
+            page.locator('[data-screen-id="P01"]').wait_for()
+
+            page.get_by_role("button", name="Лидерборд").click()
+            page.get_by_role("button", name="Месяц").click()
+            page.get_by_text("20 XP").wait_for()
+            pending_week[0].fulfill(
+                json={
+                    "items": [
+                        {
+                            "rank": 1,
+                            "member_id": member_ids[0],
+                            "display_name": names[0],
+                            "experience": 10,
+                            "unique_recipients": 1,
+                            "reliability": "0.98",
+                            "no_show": 0,
+                        }
+                    ]
+                }
+            )
+            page.wait_for_timeout(50)
+            assert page.get_by_text("20 XP").count() == 1
+            assert page.get_by_text("10 XP").count() == 0
+            page.get_by_role("button", name="Всё время").click()
+            page.get_by_role("button", name="Неделя").click()
+            page.get_by_text("10 XP").wait_for()
+            assert page.get_by_text("Загружаем данные…", exact=True).count() == 0
+            pending_all[0].fulfill(
+                json={
+                    "items": [
+                        {
+                            "rank": 1,
+                            "member_id": member_ids[0],
+                            "display_name": names[0],
+                            "experience": 30,
+                            "unique_recipients": 1,
+                            "reliability": "0.98",
+                            "no_show": 0,
+                        }
+                    ]
+                }
+            )
+            page.wait_for_timeout(50)
+            assert page.get_by_text("10 XP").count() == 1
+            assert page.get_by_text("30 XP").count() == 0
+            page.get_by_role("button", name="Всё время").click()
+            page.get_by_text("30 XP").wait_for()
+            assert set(period_requests) == {"week", "month", "all"}
+            assert page.locator(".leaderboard-row").count() == len(member_ids)
+            assert page.locator(".leaderboard-row.is-current").count() == 1
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+            page.get_by_role("button", name="Профиль", exact=True).click()
+            page.locator(".profile-dashboard").wait_for()
+            heading_box = page.locator(".screen-heading").bounding_box()
+            assert heading_box is not None
+            assert heading_box["width"] <= 1
+            assert heading_box["height"] <= 1
+            assert page.get_by_text("Карма", exact=True).count() == 1
+            assert page.get_by_text("Надёжность", exact=True).count() == 1
+            assert page.get_by_text("—", exact=True).count() >= 4
+            edit_geometry = page.evaluate(
+                """() => {
+                  const copy = document.querySelector('.identity-copy').getBoundingClientRect();
+                  const edit = document.querySelector('.profile-edit-action')
+                    .getBoundingClientRect();
+                  return {
+                    width: edit.width,
+                    height: edit.height,
+                    overlap: !(edit.left >= copy.right || edit.right <= copy.left),
+                  };
+                }"""
+            )
+            assert edit_geometry["width"] >= 44
+            assert edit_geometry["height"] >= 44
+            assert edit_geometry["overlap"] is False
+            page.get_by_role("button", name="Редактировать профиль").click()
+            page.locator('[data-screen-id="P07"]').wait_for()
+            page.get_by_role("button", name="Назад").click()
+            page.locator('[data-screen-id="P06"]').wait_for()
+            page.close()
         browser.close()
 
 
@@ -1449,10 +1689,10 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.goto(mini_app_url)
-        page.get_by_role("button", name="Профиль").click()
+        page.get_by_role("button", name="Профиль", exact=True).click()
         page.get_by_role("button", name="Участники", exact=True).click()
         page.get_by_role("button", name="Лидерборд").click()
-        page.get_by_role("button", name=re.compile("1\\. Мария")).click()
+        page.locator(".leaderboard-row", has_text="Мария").click()
         page.locator('[data-screen-id="P02"]').wait_for()
         assert page.get_by_role("heading", name="Оценить взаимодействие").count() == 0
         page.get_by_role("button", name="Оценить карму").click()

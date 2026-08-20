@@ -214,6 +214,9 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
             stored_member = await session.get(MemberModel, member.id)
             assert stored_member is not None
             stored_member.status = MemberStatus.PAUSED.value
+        paused_profile = await client.get("/api/v1/me")
+        assert paused_profile.status_code == 200
+        assert paused_profile.json()["member_id"] == str(member.id)
         denied = await client.put(
             "/api/v1/me/profile",
             json={"field": "city", "value": "Mendoza"},
@@ -1096,7 +1099,15 @@ async def test_session_restart_reads_privacy_authority_and_concurrent_logout(
         ]
         assert "rater_id" not in detail.text
         assert "input_payload" not in tasks.text
-        assert (await client.get("/api/v1/members", params={"query": "@"})).status_code == 422
+        assert (await client.get("/api/v1/members", params={"query": "a"})).status_code == 200
+        assert (await client.get("/api/v1/members", params={"query": "   "})).status_code == 200
+        assert (await client.get("/api/v1/members", params={"query": "@"})).status_code == 200
+        assert (
+            await client.get("/api/v1/leaderboard", params={"period": "week"})
+        ).status_code == 200
+        assert (
+            await client.get("/api/v1/leaderboard", params={"period": "quarter"})
+        ).status_code == 422
 
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:

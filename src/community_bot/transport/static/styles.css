@@ -123,6 +123,42 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .segmented { display: grid; grid-template-columns: 1fr 1fr; padding: 4px; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface); }
 .segmented button { min-height: 44px; border: 0; border-radius: 10px; background: transparent; color: var(--app-text-muted); font-weight: 700; }
 .segmented button[aria-pressed="true"] { background: var(--app-surface-raised); color: var(--app-text); }
+.participants-screen .screen { gap: 0; padding-top: 12px; }
+.participants-screen .screen-heading { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.profile-screen .screen { gap: 0; padding-top: 14px; }
+.profile-screen .screen-heading { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.participants-screen .screen-content { gap: 10px; }
+.participants-view { gap: 9px; }
+.participants-tabs, .period-tabs { padding: 3px; border-radius: 12px; }
+.participants-tabs button, .period-tabs button { min-height: 36px; border-radius: 9px; font-size: 13px; }
+.period-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.period-tabs button { padding-inline: 5px; }
+.participant-search { position: relative; display: block; }
+.participant-search svg { position: absolute; z-index: 1; top: 50%; left: 12px; width: 17px; height: 17px; transform: translateY(-50%); fill: none; stroke: var(--app-text-muted); stroke-width: 1.8; stroke-linecap: round; }
+.participant-search input { min-height: 40px; padding: 8px 34px 8px 37px; border-color: var(--app-border); border-radius: 12px; font-size: 14px; }
+.member-list, .leaderboard-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.member-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) 12px; min-height: 82px; align-items: center; gap: 10px; width: 100%; padding: 9px 11px; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface); color: var(--app-text); text-align: left; cursor: pointer; }
+.member-row.is-current { border-color: color-mix(in srgb, var(--app-accent) 65%, var(--app-border)); background: color-mix(in srgb, var(--app-accent) 7%, var(--app-surface)); }
+.member-avatar { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid color-mix(in srgb, var(--app-brand-secondary) 65%, var(--app-border)); border-radius: 50%; background: color-mix(in srgb, var(--app-brand-secondary) 14%, var(--app-surface)); color: color-mix(in srgb, var(--app-brand-secondary) 65%, white); font-size: 12px; font-weight: 800; }
+.member-row.is-current .member-avatar { border-color: var(--app-accent); color: var(--app-accent); }
+.member-row-copy { display: grid; min-width: 0; gap: 3px; }
+.member-row-identity { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.member-row-name { min-width: 0; overflow: hidden; font-size: 13px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.level-badge { flex: 0 0 auto; padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--app-brand-secondary) 45%, var(--app-border)); border-radius: 999px; color: var(--app-text-muted); font-size: 9px; font-weight: 800; }
+.member-row.is-current .level-badge { border-color: color-mix(in srgb, var(--app-accent) 55%, var(--app-border)); color: var(--app-accent); }
+.member-row-metadata { overflow: hidden; color: var(--app-text-muted); font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.member-row-stats { display: flex; gap: 10px; color: var(--app-text-muted); font-size: 10px; font-weight: 700; }
+.member-chevron { color: var(--app-text-muted); font-size: 23px; font-weight: 300; }
+.leaderboard-boundary { display: grid; gap: 8px; }
+.leaderboard-list { overflow: hidden; gap: 0; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface); }
+.leaderboard-list li + li { border-top: 1px solid var(--app-border); }
+.leaderboard-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; min-height: 50px; align-items: center; gap: 8px; width: 100%; padding: 8px 11px; border: 0; background: transparent; color: var(--app-text); text-align: left; cursor: pointer; }
+.leaderboard-row.is-current { background: color-mix(in srgb, var(--app-accent) 9%, var(--app-surface)); color: var(--app-accent); }
+.leaderboard-rank { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 7px; background: var(--app-surface-raised); color: var(--app-text-muted); font-size: 11px; font-weight: 800; }
+.leaderboard-row.is-current .leaderboard-rank { background: color-mix(in srgb, var(--app-accent) 14%, var(--app-surface)); color: var(--app-accent); }
+.leaderboard-name { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.leaderboard-value { color: var(--app-text-muted); font-size: 12px; font-weight: 800; }
+.leaderboard-row.is-current .leaderboard-value { color: var(--app-accent); }
 .history-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border: 1px solid var(--app-border); border-radius: 16px; background: var(--app-surface); }
 .history-list li { display: grid; gap: 4px; padding: 14px; }
 .history-list li + li { border-top: 1px solid var(--app-border); }
@@ -185,6 +221,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reserve-summary strong { color: var(--app-accent); }
 .creation-form > .primary { width: 100%; min-height: 48px; margin-top: 2px; }
 .profile-identity { display: flex; align-items: center; gap: 12px; }
+.profile-edit-action { width: 44px; min-width: 44px; min-height: 44px; margin-left: auto; }
 .avatar { display: grid; width: 54px; height: 54px; place-items: center; flex: 0 0 54px; border: 1px solid color-mix(in srgb, var(--app-brand-secondary) 68%, var(--app-border)); border-radius: 50%; background: color-mix(in srgb, var(--app-brand-secondary) 15%, var(--app-surface)); color: color-mix(in srgb, var(--app-brand-secondary) 65%, white); font-weight: 800; }
 .identity-copy { display: grid; gap: 3px; min-width: 0; }
 .identity-copy h2 { font-size: 20px; }
