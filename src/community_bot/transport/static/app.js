@@ -123,6 +123,7 @@ const section = (heading, value) => {
 const setNavigation = (screen, context) => {
   heading.querySelector(".heading-action")?.remove();
   shell.classList.toggle("context-screen", context);
+  shell.classList.toggle("catalog-screen", screen === "catalog");
   shell.classList.toggle("participants-screen", screen === "participants");
   shell.classList.toggle("profile-screen", screen === "profile");
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
@@ -151,6 +152,14 @@ const searchIcon = () => {
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
   svg.innerHTML = '<circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/>';
+  return svg;
+};
+
+const slidersIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>';
   return svg;
 };
 
@@ -285,8 +294,7 @@ function showCatalog() {
   const create = element("button", "+ Создать", "secondary compact-create");
   create.type = "button";
   create.addEventListener("click", () => beginTaskCreationFlow());
-  setHeadingAction(create);
-  const boundary = element("section", undefined, "state-view");
+  const boundary = element("section", undefined, "state-view catalog-view");
   boundary.dataset.screenId = "T01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.template = "list";
@@ -295,15 +303,26 @@ function showCatalog() {
     && (!catalogFilters.minReward || task.credit_reward_per_performer >= Number(catalogFilters.minReward))
   ));
   boundary.dataset.state = visibleTasks.length ? "content" : "empty";
-  const filterTrigger = element(
-    "button",
-    visibleTasks.length ? `${visibleTasks.length} ${visibleTasks.length === 1 ? "задание доступно" : "задания доступны"} сейчас` : "Нет доступных заданий",
-    "screen-subtitle catalog-filter-trigger",
-  );
+  const activeFilterCount = Object.values(catalogFilters).filter(Boolean).length;
+  const actions = element("div", undefined, "catalog-actions");
+  const filterTrigger = element("button", undefined, "secondary catalog-filter-button");
   filterTrigger.type = "button";
+  filterTrigger.append(slidersIcon(), element("span", "Фильтры"));
+  if (activeFilterCount) {
+    filterTrigger.classList.add("is-active");
+    filterTrigger.setAttribute("aria-label", `Фильтры, выбрано: ${activeFilterCount}`);
+    filterTrigger.append(element("span", String(activeFilterCount), "catalog-filter-count"));
+  }
   markTransition(filterTrigger, "PE-012", "open_filters");
   filterTrigger.addEventListener("click", () => showCatalogFilters());
-  boundary.append(filterTrigger);
+  actions.append(filterTrigger, create);
+  const availableStatus = element(
+    "p",
+    visibleTasks.length ? `Доступно заданий: ${visibleTasks.length}` : "Доступных заданий нет",
+    "visually-hidden",
+  );
+  availableStatus.setAttribute("role", "status");
+  boundary.append(actions, availableStatus);
   if (!visibleTasks.length) {
     boundary.append(element("p", "Новые задания появятся здесь.", "compact-empty"));
     replaceContent(boundary);
