@@ -130,12 +130,8 @@ class MeDto(_Dto):
     member_id: UUID
     display_name: str
     city: str | None
-    timezone: str
     short_bio: str | None
-    current_goal: str | None
-    help_categories: tuple[str, ...]
     skill_tags: tuple[str, ...]
-    availability: str | None
     credit_balance: int
     experience_total: int
     level: LevelDto
@@ -145,7 +141,7 @@ class MeDto(_Dto):
 class ProfileUpdateRequest(_Dto):
     model_config = ConfigDict(extra="forbid")
 
-    field: ProfileField
+    field: Literal["display_name", "city", "short_bio", "skill_tags"]
     value: str
 
 
@@ -167,10 +163,7 @@ class MemberDto(_Dto):
     display_name: str
     city: str | None
     short_bio: str | None
-    current_goal: str | None
-    help_categories: tuple[str, ...]
     skill_tags: tuple[str, ...]
-    availability: str | None
     experience_total: int
     level_number: int
     karma: KarmaDto
@@ -596,7 +589,7 @@ def create_web_app(
             await registration.update_own_profile_field(
                 update_id=update_id,
                 actor_member_id=actor.member_id,
-                field=command.field,
+                field=ProfileField(command.field),
                 raw_value=command.value,
                 replay_fingerprint=fingerprint,
             )
@@ -1623,10 +1616,7 @@ def _member_dto(profile: SafeProfile) -> MemberDto:
         display_name=profile.display_name,
         city=profile.city,
         short_bio=profile.short_bio,
-        current_goal=profile.current_goal,
-        help_categories=profile.help_categories,
         skill_tags=profile.skill_tags,
-        availability=profile.availability,
         experience_total=profile.experience_total,
         level_number=profile.level_number,
         karma=KarmaDto(score=profile.karma.score, count=profile.karma.count),
@@ -1644,12 +1634,8 @@ def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
         member_id=profile.member_id,
         display_name=profile.display_name,
         city=profile.city,
-        timezone=profile.timezone,
         short_bio=profile.short_bio,
-        current_goal=profile.current_goal,
-        help_categories=profile.help_categories,
         skill_tags=profile.skill_tags,
-        availability=profile.availability,
         credit_balance=profile.credit_balance,
         experience_total=profile.experience_total,
         level=LevelDto(
