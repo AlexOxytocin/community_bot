@@ -201,12 +201,42 @@ const showActionConfirmation = ({
   confirm.focus({ preventScroll: true });
 };
 
+const GET_CACHE_TTL_MS = 60_000;
+const jsonCache = new Map();
+const jsonRequests = new Map();
+let jsonCacheGeneration = 0;
+
+const jsonCacheKey = (path) => {
+  const url = new URL(path, location.origin);
+  url.searchParams.sort();
+  return `GET ${url.pathname}${url.search}`;
+};
+
+const clearJsonCache = () => {
+  jsonCache.clear();
+  jsonRequests.clear();
+  jsonCacheGeneration += 1;
+};
+const cachedJson = (path) => jsonCache.get(jsonCacheKey(path))?.data;
+const storeJson = (path, data) => {
+  jsonCache.set(jsonCacheKey(path), { data, storedAt: Date.now() });
+  return data;
+};
+
+const apiFetch = async (path, options = {}) => {
+  const response = await fetch(path, options);
+  const method = (options.method || "GET").toUpperCase();
+  if (response.status === 401) clearJsonCache();
+  else if (response.ok && method !== "GET") {
+    clearJsonCache();
+  }
+  return response;
+};
+
 const configureRoleNavigation = async () => {
   try {
-    const response = await fetch("/api/v1/moderation/cases?limit=1", {
-      credentials: "same-origin",
-    });
-    moderationNav.hidden = !response.ok;
+    await getJson("/api/v1/moderation/cases?limit=1");
+    moderationNav.hidden = false;
   } catch {
     moderationNav.hidden = true;
   }
@@ -246,10 +276,37 @@ const requestError = (response) => {
   return "request_failed";
 };
 
-const getJson = async (path) => {
-  const response = await fetch(path, { credentials: "same-origin" });
-  if (!response.ok) throw new Error(requestError(response));
-  return response.json();
+const fetchJson = (path) => {
+  const key = jsonCacheKey(path);
+  if (jsonRequests.has(key)) return jsonRequests.get(key);
+  const generation = jsonCacheGeneration;
+  let request;
+  request = apiFetch(path, { credentials: "same-origin" })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(requestError(response));
+      if (!response.headers.get("content-type")?.includes("application/json")) {
+        throw new Error("request_failed");
+      }
+      const data = await response.json();
+      if (generation !== jsonCacheGeneration) throw new Error("request_obsolete");
+      return storeJson(path, data);
+    })
+    .finally(() => {
+      if (jsonRequests.get(key) === request) jsonRequests.delete(key);
+    });
+  jsonRequests.set(key, request);
+  return request;
+};
+
+const getJson = (path, onRefresh) => {
+  const entry = jsonCache.get(jsonCacheKey(path));
+  if (!entry) return fetchJson(path);
+  if (Date.now() - entry.storedAt >= GET_CACHE_TTL_MS) {
+    const refresh = fetchJson(path);
+    if (onRefresh) void refresh.then(onRefresh).catch(() => {});
+    else void refresh.catch(() => {});
+  }
+  return Promise.resolve(entry.data);
 };
 
 const assignmentError = (code, retry) => {
@@ -286,8 +343,8 @@ const newOperationKey = () => {
   return (value || 1n).toString();
 };
 
-function showCatalog() {
-  screenRevision += 1;
+function showCatalog(revision = ++screenRevision) {
+  if (revision !== screenRevision) return;
   setNavigation("catalog", false);
   title.textContent = "Каталог";
   back.classList.add("hidden");
@@ -372,6 +429,35 @@ function showCatalog() {
   restoreProfileFocus();
 }
 
+async function loadCatalog(push = true) {
+  const revision = ++screenRevision;
+  const path = "/api/v1/tasks";
+  const cached = cachedJson(path);
+  if (push) history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
+  if (cached) {
+    tasks = cached.items;
+    showCatalog(revision);
+  } else {
+    setNavigation("catalog", false);
+    title.textContent = "Каталог";
+    back.classList.add("hidden");
+    replaceContent(element("p", "Загружаем каталог…", "status muted"));
+  }
+  try {
+    const page = await getJson(path, (refreshed) => {
+      if (revision !== screenRevision) return;
+      tasks = refreshed.items;
+      showCatalog(revision);
+    });
+    if (revision !== screenRevision) return;
+    tasks = page.items;
+    showCatalog(revision);
+  } catch {
+    if (revision !== screenRevision || cached) return;
+    replaceContent(element("p", "Не удалось загрузить каталог.", "status"));
+  }
+}
+
 function showCatalogFilters(push = true) {
   const nextState = { screen: "catalog-filters" };
   if (push) history.pushState(nextState, "", presentationLocationFor("T02"));
@@ -406,7 +492,7 @@ function showCatalogFilters(push = true) {
 
 async function taskCreationCommand(body) {
   pendingTaskCreation ||= { key: newOperationKey(), body: JSON.stringify(body) };
-  const response = await fetch("/api/v1/task-creation", {
+  const response = await apiFetch("/api/v1/task-creation", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -460,7 +546,7 @@ function showTaskCreation(state, forceEdit = false) {
           const home = element("button", "В каталог", "primary");
           home.addEventListener("click", () => {
             history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-            showCatalog();
+            void loadCatalog(false);
           });
           replaceContent(connectedBoundary("T08", "success", element("p", "Задание опубликовано: " + result.task_id, "status success"), home));
         } catch {
@@ -987,17 +1073,26 @@ function showParticipantsState(state, revision) {
 }
 
 async function loadMembers(state, revision) {
-  state.loading = true;
+  const query = state.query ? "&query=" + encodeURIComponent(state.query) : "";
+  const path = "/api/v1/members?limit=30" + query;
+  const cached = cachedJson(path);
+  if (cached) state.members = cached.items;
+  state.loading = !cached;
   state.error = false;
   showParticipantsState(state, revision);
-  const query = state.query ? "&query=" + encodeURIComponent(state.query) : "";
   try {
-    const page = await getJson("/api/v1/members?limit=30" + query);
+    const page = await getJson(path, (refreshed) => {
+      if (revision !== screenRevision || state.view !== "members") return;
+      state.members = refreshed.items;
+      state.loading = false;
+      state.error = false;
+      showParticipantsState(state, revision);
+    });
     if (revision !== screenRevision) return;
     state.members = page.items;
   } catch {
     if (revision !== screenRevision) return;
-    state.error = true;
+    state.error = !cached;
   }
   state.loading = false;
   showParticipantsState(state, revision);
@@ -1006,16 +1101,29 @@ async function loadMembers(state, revision) {
 async function loadParticipantsLeaderboard(state, revision) {
   const request = ++state.leaderboardRequest;
   const period = state.period;
-  state.loading = true;
+  const path = `/api/v1/leaderboard?limit=30&period=${period}`;
+  const cached = cachedJson(path);
+  if (cached) state.leaderboards[period] = cached.items;
+  state.loading = !cached;
   state.error = false;
   showParticipantsState(state, revision);
   try {
-    const page = await getJson(`/api/v1/leaderboard?limit=30&period=${period}`);
+    const page = await getJson(path, (refreshed) => {
+      if (
+        revision !== screenRevision
+        || request !== state.leaderboardRequest
+        || state.period !== period
+      ) return;
+      state.leaderboards[period] = refreshed.items;
+      state.loading = false;
+      state.error = false;
+      showParticipantsState(state, revision);
+    });
     if (revision !== screenRevision || request !== state.leaderboardRequest) return;
     state.leaderboards[period] = page.items;
   } catch {
     if (revision !== screenRevision || request !== state.leaderboardRequest) return;
-    state.error = true;
+    state.error = !cached;
   }
   state.loading = false;
   showParticipantsState(state, revision);
@@ -1328,25 +1436,40 @@ function showProfileState(state, revision) {
 }
 
 async function loadOwnProfile(state, revision) {
-  state.profile = null;
   state.profileError = false;
-  showProfileState(state, revision);
+  if (!state.profile) showProfileState(state, revision);
   try {
-    const me = await getJson("/api/v1/me");
+    const me = await getJson("/api/v1/me", (refreshed) => {
+      if (revision !== screenRevision || !state.profile) return;
+      state.profile = { ...state.profile, me: refreshed };
+      showProfileState(state, revision);
+    });
     if (revision !== screenRevision) return;
-    const member = await getJson("/api/v1/members/" + encodeURIComponent(me.member_id));
+    const memberPath = "/api/v1/members/" + encodeURIComponent(me.member_id);
+    const member = await getJson(memberPath, (refreshed) => {
+      if (revision !== screenRevision || !state.profile) return;
+      state.profile = { ...state.profile, member: refreshed };
+      showProfileState(state, revision);
+    });
     if (revision !== screenRevision) return;
     state.profile = { me, member };
   } catch {
     if (revision !== screenRevision) return;
-    state.profileError = true;
+    state.profileError = !state.profile;
   }
   showProfileState(state, revision);
 }
 
 function loadProfile(push = true) {
   const revision = ++screenRevision;
-  const state = { profile: null, profileError: false };
+  const cachedMe = cachedJson("/api/v1/me");
+  const cachedMember = cachedMe
+    ? cachedJson("/api/v1/members/" + encodeURIComponent(cachedMe.member_id))
+    : null;
+  const state = {
+    profile: cachedMe && cachedMember ? { me: cachedMe, member: cachedMember } : null,
+    profileError: false,
+  };
   state.profileRetry = element("button", "Повторить профиль", "secondary");
   state.profileRetry.type = "button";
   state.profileRetry.addEventListener("click", () => loadOwnProfile(state, revision));
@@ -1426,7 +1549,7 @@ async function acceptTask(task, button, status) {
   const operationKey = pendingAcceptKeys.get(task.id) || newOperationKey();
   pendingAcceptKeys.set(task.id, operationKey);
   try {
-    const response = await fetch(
+    const response = await apiFetch(
       "/api/v1/tasks/" + task.id + "/assignments",
       {
         method: "POST",
@@ -1527,23 +1650,29 @@ function showTakenAssignments() {
 
 async function loadAssignments(push = true) {
   const revision = ++screenRevision;
+  const path = "/api/v1/assignments?status=active&limit=20";
+  const cached = cachedJson(path);
   if (push) history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
-  setNavigation("assignments", false);
-  title.textContent = "Мои задания";
-  back.classList.add("hidden");
-  replaceContent(element("p", "Загружаем активные назначения…", "status muted"));
+  if (cached) {
+    assignments = cached.items;
+    showAssignments(revision);
+  } else {
+    setNavigation("assignments", false);
+    title.textContent = "Мои задания";
+    back.classList.add("hidden");
+    replaceContent(element("p", "Загружаем активные назначения…", "status muted"));
+  }
   try {
-    const response = await fetch(
-      "/api/v1/assignments?status=active&limit=20",
-      { credentials: "same-origin" },
-    );
-    if (!response.ok) throw new Error(requestError(response));
+    const page = await getJson(path, (refreshed) => {
+      if (revision !== screenRevision) return;
+      assignments = refreshed.items;
+      showAssignments(revision);
+    });
     if (revision !== screenRevision) return;
-    assignments = (await response.json()).items;
-    if (revision !== screenRevision) return;
+    assignments = page.items;
     showAssignments(revision);
   } catch (error) {
-    if (revision !== screenRevision) return;
+    if (revision !== screenRevision || cached) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadAssignments(false));
@@ -1778,7 +1907,7 @@ async function submissionResponse(response) {
 }
 
 async function submissionRequest(path, method, operationKey, body) {
-  const response = await fetch(path, {
+  const response = await apiFetch(path, {
     method,
     headers: {
       "Content-Type": "application/json",
@@ -1808,7 +1937,7 @@ function submissionPanel(assignment, draft) {
       status.textContent = "Открываем черновик…";
       beginKey ||= newOperationKey();
       try {
-        const response = await fetch(
+        const response = await apiFetch(
           "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/submission-drafts",
           {
             method: "POST",
@@ -2136,12 +2265,9 @@ async function showAssignmentDetail(assignmentId, push = true) {
   back.classList.remove("hidden");
   replaceContent(element("p", "Загружаем назначение…", "status muted"));
   try {
-    const response = await fetch(
+    const assignment = await getJson(
       "/api/v1/assignments/" + encodeURIComponent(assignmentId),
-      { credentials: "same-origin" },
     );
-    if (!response.ok) throw new Error(requestError(response));
-    const assignment = await response.json();
     if (revision !== screenRevision) return;
     const detail = element("article", undefined, "card detail");
     detail.append(
@@ -2239,69 +2365,74 @@ const moderationError = (code, retry) => {
   ];
 };
 
-async function loadModeration(push = true) {
-  const revision = ++screenRevision;
-  returnFocusModeration = true;
-  if (push) history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
+function showModerationCases(cases, revision) {
+  if (revision !== screenRevision) return;
   setNavigation("moderation", false);
   title.textContent = "Модерация";
   back.classList.add("hidden");
-  replaceContent(
-    element("p", "Открытые обращения", "screen-subtitle"),
-    element("p", "Загружаем очередь…", "compact-empty"),
-  );
-  try {
-    const response = await fetch(
-      "/api/v1/moderation/cases?limit=20",
-      { credentials: "same-origin" },
-    );
-    if (!response.ok) throw new Error(requestError(response));
-    const cases = (await response.json()).items;
-    if (revision !== screenRevision) return;
-    setHeadingAction(element("span", String(cases.length), "queue-count"));
-    const boundary = element("section", undefined, "state-view");
-    boundary.dataset.screenId = "S01";
-    boundary.dataset.uiEngine = "concept-05";
-    boundary.dataset.state = cases.length ? "content" : "empty";
-    boundary.append(element("p", "Открытые обращения", "screen-subtitle"));
-    if (!cases.length) {
-      boundary.append(element("p", "Открытых обращений нет.", "compact-empty"));
-      replaceContent(boundary);
-      return;
-    }
-    const list = element("ul", undefined, "list");
-    let focusTarget = null;
-    for (const item of cases) {
-      const actionable = item.case_type === "dispute" && item.status === "open";
-      const card = element(actionable ? "button" : "article", undefined, "card moderation-card");
-      if (actionable) card.type = "button";
-      const chips = element("div", undefined, "card-chips");
-      chips.append(element("span", moderationStatus(item.status), "chip"));
-      if (item.case_type !== "dispute") chips.append(element("span", "Проверка", "chip muted-chip"));
-      const opened = element("p", "Открыт: ", "meta");
-      opened.append(time(item.opened_at));
-      card.append(
-        chips,
-        element("h3", moderationCaseType(item.case_type)),
-        opened,
-      );
-      if (item.current_code) {
-        card.append(element("p", "Текущее решение: " + item.current_code, "meta"));
-      }
-      if (actionable) {
-        card.addEventListener("click", () => showModerationCase(item.id));
-        if (item.id === returnFocusModerationCaseId) focusTarget = card;
-      }
-      const row = element("li");
-      row.append(card);
-      list.append(row);
-    }
-    boundary.append(list);
+  setHeadingAction(element("span", String(cases.length), "queue-count"));
+  const boundary = element("section", undefined, "state-view");
+  boundary.dataset.screenId = "S01";
+  boundary.dataset.uiEngine = "concept-05";
+  boundary.dataset.state = cases.length ? "content" : "empty";
+  boundary.append(element("p", "Открытые обращения", "screen-subtitle"));
+  if (!cases.length) {
+    boundary.append(element("p", "Открытых обращений нет.", "compact-empty"));
     replaceContent(boundary);
-    focusTarget?.focus({ preventScroll: true });
-    returnFocusModerationCaseId = null;
-  } catch (error) {
+    return;
+  }
+  const list = element("ul", undefined, "list");
+  let focusTarget = null;
+  for (const item of cases) {
+    const actionable = item.case_type === "dispute" && item.status === "open";
+    const card = element(actionable ? "button" : "article", undefined, "card moderation-card");
+    if (actionable) card.type = "button";
+    const chips = element("div", undefined, "card-chips");
+    chips.append(element("span", moderationStatus(item.status), "chip"));
+    if (item.case_type !== "dispute") chips.append(element("span", "Проверка", "chip muted-chip"));
+    const opened = element("p", "Открыт: ", "meta");
+    opened.append(time(item.opened_at));
+    card.append(chips, element("h3", moderationCaseType(item.case_type)), opened);
+    if (item.current_code) card.append(element("p", "Текущее решение: " + item.current_code, "meta"));
+    if (actionable) {
+      card.addEventListener("click", () => showModerationCase(item.id));
+      if (item.id === returnFocusModerationCaseId) focusTarget = card;
+    }
+    const row = element("li");
+    row.append(card);
+    list.append(row);
+  }
+  boundary.append(list);
+  replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
+  returnFocusModerationCaseId = null;
+}
+
+async function loadModeration(push = true) {
+  const revision = ++screenRevision;
+  const path = "/api/v1/moderation/cases?limit=20";
+  const cached = cachedJson(path);
+  returnFocusModeration = true;
+  if (push) history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
+  if (cached) {
+    showModerationCases(cached.items, revision);
+  } else {
+    setNavigation("moderation", false);
+    title.textContent = "Модерация";
+    back.classList.add("hidden");
+    replaceContent(
+      element("p", "Открытые обращения", "screen-subtitle"),
+      element("p", "Загружаем очередь…", "compact-empty"),
+    );
+  }
+  try {
+    const page = await getJson(path, (refreshed) => {
+      if (revision === screenRevision) showModerationCases(refreshed.items, revision);
+    });
     if (revision !== screenRevision) return;
+    showModerationCases(page.items, revision);
+  } catch (error) {
+    if (revision !== screenRevision || cached) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadModeration(false));
@@ -2435,11 +2566,11 @@ async function showModerationCase(caseId, push = true) {
 
 async function bootstrap(authAttempted = false) {
   try {
-    const me = await fetch("/api/v1/me", { credentials: "same-origin" });
+    const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
     if (me.status === 401 && !authAttempted) {
       const initData = globalThis.Telegram?.WebApp?.initData;
       if (!initData) throw new Error("telegram_init_data_missing");
-      const auth = await fetch("/api/v1/auth/telegram", {
+      const auth = await apiFetch("/api/v1/auth/telegram", {
         method: "POST",
         headers: { "Content-Type": "text/plain; charset=utf-8" },
         body: initData,
@@ -2448,9 +2579,9 @@ async function bootstrap(authAttempted = false) {
       if (!auth.ok) throw new Error("telegram_auth_failed");
       return bootstrap(true);
     }
-    const catalog = await fetch("/api/v1/tasks", { credentials: "same-origin" });
-    if (!me.ok || !catalog.ok) throw new Error("bootstrap_failed");
-    const [profile, page] = await Promise.all([me.json(), catalog.json()]);
+    if (!me.ok) throw new Error("bootstrap_failed");
+    const [profile, page] = await Promise.all([me.json(), getJson("/api/v1/tasks")]);
+    storeJson("/api/v1/me", profile);
     currentMemberId = profile.member_id;
     void configureRoleNavigation();
     tasks = page.items;
@@ -2517,8 +2648,7 @@ async function bootstrap(authAttempted = false) {
 }
 
 catalogNav.addEventListener("click", () => {
-  history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-  showCatalog();
+  void loadCatalog();
 });
 assignmentsNav.addEventListener("click", () => loadAssignments());
 participantsNav.addEventListener("click", () => loadParticipants("members"));
@@ -2565,13 +2695,13 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "task-preview") {
     openTaskCreation(false, "stale");
   } else {
-    showCatalog();
+    void loadCatalog(false);
   }
 });
 globalThis.addEventListener("hashchange", () => {
   if (!presentationFromLocation()) {
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    showCatalog();
+    void loadCatalog(false);
   }
 });
 bootstrap();

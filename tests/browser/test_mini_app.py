@@ -77,6 +77,126 @@ def _open_blank_task_creation(page: Any, *, group: bool = False) -> None:  # noq
         page.get_by_label("Тип").select_option("group")
 
 
+def _cache_profile(member_id: str = "member-cache") -> tuple[dict[str, Any], dict[str, Any]]:
+    me = {
+        "member_id": member_id,
+        "display_name": "Алекс",
+        "city": "Rosario",
+        "timezone": "UTC",
+        "short_bio": None,
+        "current_goal": None,
+        "help_categories": [],
+        "skill_tags": [],
+        "availability": None,
+        "credit_balance": 7,
+        "experience_total": 12,
+        "level": {"number": 2, "display_name": "Участник"},
+        "statistics": {"completed_tasks": 3, "created_tasks": 4},
+    }
+    member = {
+        "member_id": member_id,
+        "display_name": "Алекс",
+        "level_number": 2,
+        "karma": {"score": 5, "count": 2},
+        "reliability": {"rate": "0.9"},
+    }
+    return me, member
+
+
+@pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
+def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
+    mini_app_url: str,
+    viewport: tuple[int, int],
+) -> None:
+    me, member = _cache_profile()
+    task = {
+        "id": "task-cache-old",
+        "title": "Сохранённый каталог",
+        "description": "Старое содержимое остаётся видимым.",
+        "credit_reward_per_performer": 5,
+        "performer_slots": 1,
+        "deadline_at": "2026-08-21T20:00:00Z",
+        "origin": "community",
+    }
+    refreshed_task = {**task, "id": "task-cache-new", "title": "Обновлённый каталог"}
+    task_requests = 0
+    pending: list[Route] = []
+
+    def tasks_route(route: Route) -> None:
+        nonlocal task_requests
+        task_requests += 1
+        if task_requests in {2, 3}:
+            pending.append(route)
+        elif task_requests == 4:
+            route.fulfill(status=401, json={"code": "unauthorized"})
+        else:
+            payload = task if task_requests == 1 else refreshed_task
+            route.fulfill(json={"items": [payload], "next_cursor": None})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        page.add_init_script(
+            "let cacheNow = 1000; Date.now = () => cacheNow; "
+            "globalThis.advanceCacheClock = value => { cacheNow += value; };"
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
+        page.route("**/api/v1/tasks", tasks_route)
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+        page.route("**/api/v1/me/profile", lambda route: route.fulfill(json=me))
+        page.goto(mini_app_url)
+        page.get_by_text("Сохранённый каталог", exact=True).wait_for()
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.locator("h2", has_text="Алекс").wait_for()
+        page.get_by_role("button", name="Каталог", exact=True).click()
+        assert page.get_by_text("Сохранённый каталог", exact=True).is_visible()
+        assert page.get_by_text("Загружаем каталог…").count() == 0
+        assert task_requests == 1
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        assert page.locator("h2", has_text="Алекс").is_visible()
+        assert page.get_by_text("Загружаем профиль…").count() == 0
+        page.evaluate("advanceCacheClock(60001)")
+        page.get_by_role("button", name="Каталог", exact=True).click()
+        assert page.get_by_text("Сохранённый каталог", exact=True).is_visible()
+        assert page.get_by_text("Загружаем каталог…").count() == 0
+        assert task_requests == 2
+        pending.pop(0).fulfill(json={"items": [refreshed_task], "next_cursor": None})
+        page.get_by_text("Обновлённый каталог", exact=True).wait_for()
+
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.get_by_role("button", name="Редактировать профиль").click()
+        page.get_by_label("Поле профиля").select_option("city")
+        page.get_by_label("Новое значение").fill("Córdoba")
+        page.get_by_role("button", name="Сохранить поле").click()
+        page.get_by_role("button", name="Редактировать профиль").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.locator("h2", has_text="Алекс").wait_for()
+        catalog = page.get_by_role("button", name="Каталог", exact=True)
+        catalog.click()
+        catalog.click()
+        assert task_requests == 3
+        pending.pop(0).fulfill(json={"items": [refreshed_task], "next_cursor": None})
+        page.get_by_text("Обновлённый каталог", exact=True).wait_for()
+
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.evaluate("advanceCacheClock(60001)")
+        page.get_by_role("button", name="Каталог", exact=True).click()
+        assert page.get_by_text("Обновлённый каталог", exact=True).is_visible()
+        assert task_requests == 4
+        page.wait_for_timeout(50)
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.locator("h2", has_text="Алекс").wait_for()
+        page.get_by_role("button", name="Каталог", exact=True).click()
+        page.get_by_text("Обновлённый каталог", exact=True).wait_for()
+        assert task_requests == 5
+        browser.close()
+
+
 def test_assignment_action_eligibility_is_server_projected() -> None:
     source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert 'assignment.assignment_status === "accepted"' not in source
@@ -1358,12 +1478,13 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert private_marker not in page.locator("body").inner_text()
 
         modes.update(member="error", leaderboard="success")
+        requests_before_cached_profile = len(requests)
         profile_nav.click()
-        page.get_by_text("Не удалось загрузить профиль.").wait_for()  # noqa: RUF001
+        page.locator("h2", has_text=malicious).wait_for()
+        assert page.get_by_text("Не удалось загрузить профиль.").count() == 0  # noqa: RUF001
+        assert len(requests) == requests_before_cached_profile
         assert page.get_by_text("Лидерборд").count() == 0
         modes["member"] = "success"
-        page.get_by_role("button", name="Повторить профиль").click()
-        page.locator("h2", has_text=malicious).wait_for()
 
         modes["leaderboard"] = "error"
         page.get_by_role("button", name="Участники", exact=True).click()
@@ -1376,6 +1497,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.get_by_text("Получатели помощи: 3").count() == 0
         assert page.get_by_text("Неявки: 1").count() == 0
 
+        page.evaluate("Date.now = () => Number.MAX_SAFE_INTEGER")
         modes["leaderboard"] = "empty"
         assert page.locator("#primary-navigation").is_visible()
         page.locator("#participants-nav").click()
@@ -1389,7 +1511,8 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_role("heading", name="Каталог").wait_for()
         modes.update(member="pending", leaderboard="pending")
         profile_nav.click()
-        page.get_by_text("Загружаем профиль…").wait_for()
+        page.locator("h2", has_text=malicious).wait_for()
+        assert page.get_by_text("Загружаем профиль…").count() == 0
         page.wait_for_timeout(50)
         assert {urlsplit(route.request.url).path for route in pending} == {
             f"/api/v1/members/{member_id}"
@@ -1411,12 +1534,14 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             ("GET", "/api/v1/members"),
             ("GET", f"/api/v1/members/{member_id}"),
             ("GET", "/api/v1/leaderboard"),
+            ("GET", "/api/v1/tasks"),
         } == set(requests)
         assert {
             "/api/v1/me",
             "/api/v1/members",
             f"/api/v1/members/{member_id}",
             "/api/v1/leaderboard",
+            "/api/v1/tasks",
             "/api/v1/me/profile",
         } == {path for _method, path in requests}
         browser.close()
