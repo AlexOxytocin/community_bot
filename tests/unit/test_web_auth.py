@@ -65,6 +65,7 @@ class FakeDatabase:
     def __init__(self) -> None:
         self.member_id = uuid4()
         self.created_digest: bytes | None = None
+        self.created_sessions: list[dict[str, object]] = []
         self.fail_create = False
         self.resolve_member = False
         self.return_member = True
@@ -79,6 +80,7 @@ class FakeDatabase:
         digest = values["token_digest"]
         assert isinstance(digest, bytes)
         self.created_digest = digest
+        self.created_sessions.append(values)
         return self.member_id if self.return_member else None
 
     async def web_session_member_id(
@@ -397,8 +399,11 @@ async def test_auth_issues_exact_cookie_without_exposing_raw_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = FakeDatabase()
-    raw_token = b"x" * 32
-    monkeypatch.setattr("community_bot.transport.web.secrets.token_bytes", lambda _size: raw_token)
+    raw_tokens = [b"x" * 32, b"y" * 32]
+    monkeypatch.setattr(
+        "community_bot.transport.web.secrets.token_bytes",
+        lambda _size: raw_tokens.pop(0) if raw_tokens else b"z" * 32,
+    )
     app = _app(database)
     now = datetime.datetime.now(datetime.UTC)
     async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
@@ -450,6 +455,7 @@ async def test_auth_issues_exact_cookie_without_exposing_raw_token(
         )
         assert denied.status_code == 403
         response = await _authenticate(client, _proof(1, now=now))
+        repeated = await _authenticate(client, _proof(1, now=now))
 
     assert response.status_code == 204
     assert response.content == b""
@@ -457,9 +463,17 @@ async def test_auth_issues_exact_cookie_without_exposing_raw_token(
     cookie = response.headers["set-cookie"]
     assert "__Host-community_session=" in cookie
     assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
-    assert "Path=/" in cookie and "Max-Age=900" in cookie and "Domain=" not in cookie
-    assert database.created_digest == hashlib.sha256(raw_token).digest()
-    assert raw_token not in response.content
+    assert "Path=/" in cookie and "Max-Age=2592000" in cookie and "Domain=" not in cookie
+    assert response.headers["set-cookie"] != repeated.headers["set-cookie"]
+    assert [session["token_digest"] for session in database.created_sessions] == [
+        hashlib.sha256(b"x" * 32).digest(),
+        hashlib.sha256(b"y" * 32).digest(),
+    ]
+    assert all(
+        session["expires_at"] - session["authenticated_at"] == datetime.timedelta(days=30)
+        for session in database.created_sessions
+    )
+    assert b"x" * 32 not in response.content and b"y" * 32 not in repeated.content
 
     database.return_member = False
     async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
