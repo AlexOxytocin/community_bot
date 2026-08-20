@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import functools
 import http.server
-import json
-import os
 import re
 import threading
 from pathlib import Path
@@ -16,7 +14,7 @@ from playwright.sync_api import sync_playwright
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from playwright.sync_api import Page, Route
+    from playwright.sync_api import Route
 
 pytestmark = pytest.mark.browser
 
@@ -53,40 +51,13 @@ def mini_app_url() -> Iterator[str]:
         server.server_close()
 
 
-def _new_page(browser: Any, *, bridge: str = "", presentation_harness: bool = False) -> Any:  # noqa: ANN401
+def _new_page(browser: Any, *, bridge: str = "") -> Any:  # noqa: ANN401
     page = browser.new_page()
     page.route(
         TELEGRAM_BRIDGE_URL,
         lambda route: route.fulfill(body=bridge, content_type="application/javascript"),
     )
-    if presentation_harness:
-        source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-        source += (
-            "\nexport { navigatePresentationScreen, navigationClassFor, "
-            "presentationContent, presentationInventory, presentationTemplate, "
-            "productRouteFor, productRoutePatterns, renderPresentationScreen };\n"
-        )
-        page.route(
-            "**/mini-assets/app.js?*",
-            lambda route: route.fulfill(
-                body=source, content_type="application/javascript; charset=utf-8"
-            ),
-        )
     return page
-
-
-def _open_presentation(
-    page: Page,
-    screen_id: str,
-    state: str = "content",
-    history_mode: str = "replace",
-) -> Any:  # noqa: ANN401
-    return page.evaluate(
-        "([id, viewState, mode]) => import('/mini-assets/app.js?release=__RELEASE__')"
-        ".then(module => module.navigatePresentationScreen("
-        "id, viewState, mode, 'T01', '00000000-0000-0000-0000-000000000099'))",
-        [screen_id, state, history_mode],
-    )
 
 
 def _connected_control(page: Any, edge_id: str, trigger: str) -> Any:  # noqa: ANN401
@@ -96,6 +67,12 @@ def _connected_control(page: Any, edge_id: str, trigger: str) -> Any:  # noqa: A
     return control
 
 
+def _open_blank_task_creation(page: Any, *, group: bool = False) -> None:  # noqa: ANN401
+    page.get_by_role("button", name="+ Создать", exact=True).click()
+    page.get_by_role("button", name="Несколько участников" if group else "Один участник").click()
+    page.get_by_role("button", name="Без шаблона").click()
+
+
 def test_assignment_action_eligibility_is_server_projected() -> None:
     source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert 'assignment.assignment_status === "accepted"' not in source
@@ -103,376 +80,114 @@ def test_assignment_action_eligibility_is_server_projected() -> None:
     assert "if (assignment.can_cancel)" in source
 
 
-def test_presentation_inventory_route_patterns_and_view_states(  # noqa: C901, PLR0912, PLR0915
-    mini_app_url: str,
-    tmp_path: Path,
-) -> None:
-    production_source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    assert "presentationTestAdapter" not in production_source
-    assert "fixtureOnly" not in production_source
-    assert "test-resource" not in production_source
-    source_contract = json.loads(UI_CONTRACT.read_text(encoding="utf-8"))
-    expected_screens = {screen["id"]: screen for screen in source_contract["screens"]}
-    key_screens = {
-        "T01": ("Проверить доступность пандуса", "Создать задание"),
-        "T03": ("Критерии приёмки", "Новая библиотека"),
-        "M01": ("Взятые мной · 2", "Черновик результата сохранён"),
-        "P06": ("24 кредита", "96% надёжность"),
-        "S01": ("Спор по результату задания", "#1042"),
-        "T05": ("Тип задания", "Критерии приёмки"),
-        "P01": ("Мария Крылова", "Надёжность 98%"),
-        "P02": ("Значимый вклад", "Оценка кармы"),
-        "P05": ("260 XP", "Ваше место"),
-    }
-    raw_tokens = {
-        token for screen in source_contract["screens"] for token in screen["visual_contract"]
-    }
-    catalog_task = {
-        "id": "00000000-0000-0000-0000-000000000101",
+def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
+    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    markup = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    forbidden = (
+        "globalThis.confirm",
+        "renderPresentationScreen",
+        "navigatePresentationScreen",
+        "presentationContent",
+        "renderCatalog",
+        "renderAssignments",
+        "renderProfile",
+        "submission-preview",
+        "app-header",
+        'id="welcome"',
+        "▣",
+        "▤",
+        "♙",
+        "◇",
+    )
+    production = source + markup + styles
+    assert {token: production.count(token) for token in forbidden} == dict.fromkeys(forbidden, 0)
+
+    task = {
+        "id": "00000000-0000-0000-0000-000000000097",
         "title": "Проверить доступность пандуса",
-        "description": "Сделать три фотографии входа и отметить препятствия.",
-        "credit_reward_per_performer": 4,
-        "minimum_level": 1,
+        "description": "Сделать три фотографии входа и коротко описать препятствия.",
+        "credit_reward_per_performer": 5,
+        "performer_slots": 1,
+        "deadline_at": "2026-08-21T20:00:00Z",
+        "origin": "community",
     }
-    screenshot_dir = os.environ.get("UI_SCREENSHOT_DIR")
-    reference_dir = os.environ.get("UI_REFERENCE_SCREENSHOT_DIR")
-
-    def capture(page: Page, screen_id: str, viewport: str) -> None:
-        if screenshot_dir:
-            directory = Path(screenshot_dir)
-            directory.mkdir(parents=True, exist_ok=True)
-            page.screenshot(path=str(directory / f"{screen_id}-{viewport}.png"))
-        if reference_dir and viewport == "375x812":
-            directory = Path(reference_dir)
-            directory.mkdir(parents=True, exist_ok=True)
-            page.screenshot(path=str(directory / f"{screen_id}.png"))
-
-    def assert_mobile_layout(page: Page, *, root: bool) -> None:
-        assert page.evaluate(
-            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
-        )
-        assert page.locator("#primary-navigation").is_visible() == root
-        assert page.get_by_role("button", name="Назад").is_visible() != root
-        assert all(
-            width >= 44 and height >= 44
-            for width, height in page.locator("button:visible").evaluate_all(
-                "buttons => buttons.map(button => {"
-                "const box = button.getBoundingClientRect(); return [box.width, box.height];})"
-            )
-        )
-        assert all(
-            style["fontSize"] >= 16
-            and style["color"] == "rgb(246, 248, 252)"
-            and style["background"] != "rgb(0, 0, 0)"
-            for style in page.locator(
-                "input:visible, select:visible, textarea:visible"
-            ).evaluate_all(
-                "controls => controls.map(control => { const style = getComputedStyle(control);"
-                "return {fontSize: parseFloat(style.fontSize), color: style.color, "
-                "background: style.backgroundColor}; })"
-            )
-        )
-
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        page = _new_page(browser, presentation_harness=True)
-        api_requests: list[tuple[str, str]] = []
-        page.on(
-            "request",
-            lambda request: (
-                api_requests.append((request.method, urlsplit(request.url).path))
-                if urlsplit(request.url).path.startswith("/api/v1/")
-                else None
-            ),
-        )
-        page.set_viewport_size({"width": 375, "height": 812})
-        page.route(
-            "**/api/v1/me",
-            lambda route: route.fulfill(
-                json={"display_name": "Алекс", "member_id": "me", "role": "administrator"}
-            ),
-        )
-        page.route(
-            "**/api/v1/tasks",
-            lambda route: route.fulfill(json={"items": [catalog_task], "next_cursor": None}),
-        )
-        page.route(
-            "**/api/v1/members?*",
-            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
-        )
-        page.route(
-            "**/api/v1/leaderboard?*",
-            lambda route: route.fulfill(json={"items": []}),
-        )
-        page.goto(mini_app_url)
-        page.get_by_text("Алекс, выберите понятное задание").wait_for()
-        page.wait_for_function("() => location.hash === '#/catalog?view_state=t01'")
-        page.locator('[data-screen-id="T01"][data-state="content"]').wait_for()
-        page.get_by_role("heading", name=catalog_task["title"]).wait_for()
-        catalog_capture = tmp_path / "T01-final-settled.png"
-        page.screenshot(path=str(catalog_capture))
-        capture(page, "T01", "375x812")
-        assert catalog_capture.exists()
-
-        runtime_contract = page.evaluate(
-            "() => import('/mini-assets/app.js?release=__RELEASE__')"
-            ".then(module => ({ routes: module.productRoutePatterns, screens: "
-            "module.presentationInventory.map(screen => ({...screen, "
-            "template: module.presentationTemplate(screen.id), "
-            "route: module.productRouteFor(screen.id), "
-            "navigationClass: module.navigationClassFor(screen.id)})) }))"
-        )
-        runtime_screens = {screen["id"]: screen for screen in runtime_contract["screens"]}
-        runtime_content = page.evaluate(
-            "() => import('/mini-assets/app.js?release=__RELEASE__')"
-            ".then(module => module.presentationContent)"
-        )
-        assert runtime_screens.keys() == expected_screens.keys()
-        assert len(runtime_screens) == 103
-        assert runtime_contract["routes"] == [
-            "#/start",
-            "#/catalog",
-            "#/tasks/:task_id",
-            "#/compose/tasks/:draft_id?",
-            "#/work",
-            "#/work/:resource_id",
-            "#/members",
-            "#/members/:member_id",
-            "#/profile",
-            "#/moderation/:case_id?",
-            "#/admin/:resource_type?/:resource_id?",
-        ]
-        for screen_id, expected in expected_screens.items():
-            runtime = runtime_screens[screen_id]
-            assert runtime["fields"] == expected["visual_contract"]
-            assert runtime["states"] == expected["system_states"]
-            assert runtime["route"] == expected["route_pattern"]
-            assert runtime["template"] == expected["semantic_layout"]
-            assert runtime["navigationClass"] == expected["navigation_class"]
-
-        assert runtime_content.keys() == expected_screens.keys()
-        assert len({(copy["title"], copy["fields"][0]) for copy in runtime_content.values()}) == 103
-        old_fallback = {
-            "Актуальные сведения доступны в этой карточке",
-            "Следующий шаг",
-        }
-        for screen_id, copy in runtime_content.items():
-            assert not copy["title"].isascii()
-            assert not copy["subject"].isascii()
-            assert len(copy["fields"]) >= 2
-            _open_presentation(page, screen_id)
-            view = page.locator(f'[data-screen-id="{screen_id}"]')
-            view.wait_for()
-            text = view.inner_text()
-            control_values = view.locator("input, textarea").evaluate_all(
-                "controls => controls.map(control => control.value).join('\\n')"
+        for width, height in ((375, 812), (430, 932)):
+            page = _new_page(browser)
+            page.set_viewport_size({"width": width, "height": height})
+            page.route(
+                "**/api/v1/me",
+                lambda route: route.fulfill(
+                    json={
+                        "member_id": "me",
+                        "display_name": "Алекс",
+                        "city": None,
+                        "timezone": "UTC",
+                        "short_bio": None,
+                        "current_goal": None,
+                        "help_categories": [],
+                        "skill_tags": [],
+                        "availability": None,
+                        "credit_balance": 0,
+                        "experience_total": 0,
+                        "level": {"number": 1, "display_name": "Новичок"},
+                    }
+                ),
             )
-            rendered_copy = f"{text}\n{control_values}"
-            assert old_fallback.isdisjoint(text.splitlines()), (screen_id, text)
-            assert "—" not in rendered_copy
-            assert not raw_tokens.intersection(rendered_copy.splitlines())
-            assert page.locator("#screen-title").inner_text() == copy["title"]
-            for part in copy["fields"][0].split("|")[1:]:
-                assert part in rendered_copy, (screen_id, part, rendered_copy)
-            if copy["action"]:
-                assert copy["action"] in text
-            root = expected_screens[screen_id]["navigation_class"] == "root"
-            assert_mobile_layout(page, root=root)
-            _open_presentation(page, screen_id, "error")
-            error_text = page.locator(f'[data-screen-id="{screen_id}"]').inner_text()
-            assert copy["subject"] in error_text
-            assert "Не удалось обновить" in error_text  # noqa: RUF001
-            assert_mobile_layout(page, root=root)
-
-        page.set_viewport_size({"width": 430, "height": 932})
-        page.locator("#catalog-nav").evaluate("node => node.click()")
-        page.locator('[data-screen-id="T01"][data-state="content"]').wait_for()
-        capture(page, "T01", "430x932")
-        for screen_id in runtime_content:
-            root = expected_screens[screen_id]["navigation_class"] == "root"
-            _open_presentation(page, screen_id)
-            assert_mobile_layout(page, root=root)
-            if screen_id in key_screens and screen_id != "T01":
-                capture(page, screen_id, "430x932")
-            _open_presentation(page, screen_id, "error")
-            assert_mobile_layout(page, root=root)
-        page.set_viewport_size({"width": 375, "height": 812})
-
-        for screen_id, expected_copy in key_screens.items():
-            _open_presentation(page, screen_id)
-            view = page.locator(f'[data-screen-id="{screen_id}"]')
-            view.wait_for()
-            visible_text = view.inner_text()
-            assert all(copy in visible_text for copy in expected_copy), (screen_id, visible_text)
-            assert "—" not in visible_text
-            assert not raw_tokens.intersection(visible_text.splitlines())
-            assert page.evaluate("document.documentElement.scrollWidth") <= 375
-            assert all(
-                width >= 44 and height >= 44
-                for width, height in page.locator("button:visible").evaluate_all(
-                    "buttons => buttons.map(button => {"
-                    "const box = button.getBoundingClientRect(); return [box.width, box.height];})"
-                )
+            page.route(
+                "**/api/v1/moderation/cases?*",
+                lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
             )
-            root = expected_screens[screen_id]["navigation_class"] == "root"
-            assert page.locator("#primary-navigation").is_visible() == root
-            assert page.get_by_role("button", name="Назад").is_visible() != root
-            assert (
-                json.loads(view.get_attribute("data-visual-contract"))
-                == expected_screens[screen_id]["visual_contract"]
+            page.route(
+                "**/api/v1/tasks",
+                lambda route: route.fulfill(json={"items": [task], "next_cursor": None}),
             )
-            if screen_id == "T05":
-                assert page.get_by_label("Название").input_value() == (
-                    "Проверить доступность пандуса"
-                )
-            if screen_id != "T01":
-                capture(page, screen_id, "375x812")
-            if screen_id == "P05":
-                page.get_by_role("button", name="Назад").click()
-                page.locator('[data-screen-id="P01"]').wait_for()
-                assert page.locator('[data-transition-id="PE-057"]').evaluate(
-                    "node => node === document.activeElement"
-                )
-
-        sample_copy = {
-            "A02": "актуального сообщения Telegram",
-            "T06": "12 кредитов",
-            "T07": "зарезервированы",
-            "T08": "появилось в каталоге",
-            "M14A": "Комментарий исполнителя",
-        }
-        for screen_id, copy in sample_copy.items():
-            _open_presentation(page, screen_id)
-            assert copy in page.locator(f'[data-screen-id="{screen_id}"]').inner_text()
-
-        transitions = source_contract["transitions"]
-        local_edges = [
-            edge for edge in transitions if edge["runtime_scope"] == "production_ui_local"
-        ]
-        fixture_edges = [
-            edge for edge in transitions if edge["runtime_scope"] == "dev_test_fixture_only"
-        ]
-        connected_edges = [
-            edge for edge in transitions if edge["runtime_scope"] == "production_existing_api"
-        ]
-        assert (len(local_edges), len(fixture_edges), len(connected_edges)) == (93, 25, 10)
-
-        for edge in local_edges:
-            if edge["history"] == "pop":
-                _open_presentation(page, edge["target_id"])
-                _open_presentation(page, edge["source_id"], history_mode="push")
-            else:
-                _open_presentation(page, edge["source_id"])
-            control = page.locator(
-                f'[data-transition-id="{edge["id"]}"][data-transition-trigger="{edge["trigger"]}"]'
+            page.goto(mini_app_url)
+            page.locator('[data-screen-id="T01"][data-ui-engine="concept-05"]').wait_for()
+            page.get_by_role("button", name="Модерация").wait_for()
+            assert page.get_by_role("navigation", name="Основное меню").get_by_role(
+                "button"
+            ).all_inner_texts() == [
+                "Каталог",
+                "Мои",
+                "Участники",
+                "Профиль",
+                "Модерация",
+            ]
+            geometry = page.evaluate(
+                """() => {
+                  const shell = document.querySelector('.shell');
+                  const nav = document.querySelector('.bottom-nav');
+                  const s = getComputedStyle(shell);
+                  const n = getComputedStyle(nav);
+                  const sr = shell.getBoundingClientRect();
+                  const nr = nav.getBoundingClientRect();
+                  return {
+                    radius: s.borderRadius, border: s.borderTopWidth,
+                    overflow: s.overflow, shellBottom: sr.bottom,
+                    navBottom: nr.bottom, navHeight: nr.height,
+                    navBorder: n.borderTopWidth,
+                    icons: nav.querySelectorAll('svg.nav-icon path').length,
+                    minTarget: Math.min(...[...nav.querySelectorAll('button')]
+                      .map(node => node.getBoundingClientRect().height)),
+                    overflowX: document.documentElement.scrollWidth - innerWidth,
+                  };
+                }"""
             )
-            assert control.count() == 1
-            assert (
-                control.get_attribute("data-transition-fallback")
-                == edge["browser_oracle"]["safe_fallback"]
-            )
-            request_count = len(api_requests)
-            history_length = page.evaluate("history.length")
-            control.click()
-            page.wait_for_function(
-                "id => document.querySelector('[data-screen-id]')?.dataset.screenId === id",
-                arg=edge["browser_oracle"]["screen_marker"],
-            )
-            target = page.locator(f'[data-screen-id="{edge["browser_oracle"]["screen_marker"]}"]')
-            assert target.get_attribute("data-state") == edge["browser_oracle"]["state"]
-            if edge["history"] == "push":
-                assert page.evaluate("history.state.historyMode") == "push"
-                page.go_back()
-                page.wait_for_function(
-                    "id => document.querySelector('[data-screen-id]')?.dataset.screenId === id",
-                    arg=edge["source_id"],
-                )
-                page.go_forward()
-                page.wait_for_function(
-                    "id => document.querySelector('[data-screen-id]')?.dataset.screenId === id",
-                    arg=edge["browser_oracle"]["screen_marker"],
-                )
-            else:
-                assert page.evaluate("history.length") == history_length
-            if edge["history"] not in {"pop", "push"}:
-                assert (
-                    page.evaluate("history.state.historyMode") == edge["browser_oracle"]["history"]
-                )
-            assert "fixture-resource" not in page.evaluate("location.hash")
-            assert "unavailable-resource" not in page.evaluate("location.hash")
-            assert f"view_state={edge['target_view_state']}" in page.evaluate("location.hash")
-            assert edge["browser_oracle"]["focus"] == "target_heading"
-            assert page.locator("#screen-title").evaluate(
-                "heading => heading === document.activeElement"
-            )
-            assert edge["browser_oracle"]["request_count"] == "0"
-            assert len(api_requests) == request_count
-
-        fixture_ids = {edge["id"] for edge in fixture_edges}
-        for edge in fixture_edges:
-            _open_presentation(page, edge["source_id"])
-            assert page.locator(f'[data-transition-id="{edge["id"]}"]').count() == 0
-            _open_presentation(page, edge["target_id"], edge["target_state"], edge["history"])
-        assert len(fixture_ids) == 25
-
-        assert {edge["id"] for edge in connected_edges} == {
-            "PE-022",
-            "PE-024",
-            "PE-030",
-            "PE-034",
-            "PE-036",
-            "PE-040",
-            "PE-044",
-            "PE-059",
-            "PE-063",
-            "PE-068",
-        }
-
-        for expected in (
-            screen
-            for screen in source_contract["screens"]
-            if screen["connection_class"] == "disabled_unavailable"
-        ):
-            _open_presentation(page, expected["id"])
-            primary = page.locator("[data-primary-action]")
-            if expected["primary_action"] != "—":
-                assert primary.first.is_disabled()
-
-        for suffix in ("?ui-preview=1", "#screen/T05/content", "#ui-preview=T05"):
-            page.goto(mini_app_url + suffix)
-            page.get_by_text("Алекс, выберите понятное задание").wait_for()
-            assert page.evaluate("location.hash") == "#/catalog?view_state=t01", (
-                suffix,
-                page.evaluate("location.hash"),
-            )
-            assert page.evaluate(
-                "[typeof globalThis.__previewCommunityScreen, "
-                "typeof globalThis.__communityUiContract]"
-            ) == ["undefined", "undefined"]
-
-        _open_presentation(page, "unknown")
-        assert page.evaluate("location.hash") == "#/catalog?view_state=t01"
-        assert page.locator('[data-screen-id="T01"]').get_attribute("data-state") == (
-            "permission_closed"
-        )
-
-        production_page = _new_page(browser)
-        production_page.route(
-            "**/api/v1/me",
-            lambda route: route.fulfill(json={"display_name": "Алекс"}),
-        )
-        production_page.route(
-            "**/api/v1/tasks",
-            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
-        )
-        production_page.goto(mini_app_url)
-        production_page.get_by_text("Алекс, выберите понятное задание").wait_for()
-        assert production_page.evaluate(
-            "() => import('/mini-assets/app.js?release=__RELEASE__')"
-            ".then(module => ["
-            "typeof module.presentationTestAdapter, typeof module.navigatePresentationScreen])"
-        ) == ["undefined", "undefined"]
-        production_page.close()
+            assert geometry == geometry | {
+                "radius": "20px",
+                "border": "1px",
+                "overflow": "hidden",
+                "navBorder": "1px",
+                "icons": 5,
+                "overflowX": 0,
+            }
+            assert abs(geometry["shellBottom"] - geometry["navBottom"]) <= 1
+            assert 64 <= geometry["navHeight"] <= 96
+            assert geometry["minTarget"] >= 56
+            page.close()
         browser.close()
 
 
@@ -557,7 +272,7 @@ def test_core_hash_routes_restore_authoritatively_and_fail_closed(
 
         page.get_by_role("button", name="Мои задания").click()
         page.reload()
-        page.get_by_role("heading", name="Взятые мной").wait_for()
+        page.get_by_role("heading", name="Мои задания").wait_for()
         page.get_by_role("button", name="Каталог").click()
         page.goto(mini_app_url + "?case=detail#/work/" + assignment_id + "?view_state=m03")
         page.get_by_text("SERVER-PROJECTION").wait_for()
@@ -614,7 +329,7 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.goto(mini_app_url)
-        page.get_by_text("Алекс, выберите понятное задание").wait_for()
+        page.get_by_role("heading", name="Каталог").wait_for()
         assert me_calls == 2
         assert len(requests) == 1
         assert requests[0].post_data == init_data
@@ -645,7 +360,7 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         existing.goto(mini_app_url)
-        existing.get_by_text("Сессия, выберите понятное задание").wait_for()
+        existing.get_by_role("heading", name="Каталог").wait_for()
         assert auth_calls == 0
 
         invalid = _new_page(
@@ -1024,8 +739,21 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         )
 
         page.get_by_role("button", name="Принять задание").click()
+        assert page.url.endswith(f"#/tasks/{task_id}?view_state=t03a")
+        page.reload()
+        page.locator('[data-screen-id="T03"]').wait_for()
+        assert page.url.endswith(f"#/tasks/{task_id}?view_state=t03")
+        page.get_by_role("button", name="Принять задание").click()
+        assert page.url.endswith(f"#/tasks/{task_id}?view_state=t03a")
+        page.get_by_role("button", name="Принять слот").click()
         page.get_by_text("Задание сейчас недоступно.").wait_for()
         page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T03"]').wait_for()
+        assert page.url.endswith(f"#/tasks/{task_id}?view_state=t03")
+        page.go_back()
+        page.locator('[data-screen-id="T03"]').wait_for()
+        page.go_back()
+        page.locator('[data-screen-id="T01"]').wait_for()
         page.get_by_role("button", name=other_assignment_title).click()
         other_detail = page.locator("article.detail")
         assert other_detail.get_by_text("Сообщество", exact=True).count() == 1
@@ -1036,12 +764,17 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         assert "undefined" not in other_detail.inner_text()
         assert "null" not in other_detail.inner_text()
         accepted_before = len(accepted_tasks)
+        page.get_by_role("button", name="Принять задание").click()
         _connected_control(page, "PE-024", "authoritative_accept_success").click()
         page.get_by_role("heading", name=other_assignment_title).wait_for()
         assert len(accepted_tasks) == accepted_before + 1
         page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T03"]').wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T01"]').wait_for()
         page.get_by_role("button", name=malicious).click()
         page.get_by_role("button", name="Принять задание").click()
+        page.get_by_role("button", name="Принять слот").click()
         page.get_by_role("heading", name=assignment_title).wait_for()
         assert accepted_tasks == [task_id, other_task_id, task_id]
         assert accept_keys[0] == accept_keys[2]
@@ -1050,12 +783,15 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         assert not any(url.startswith("javascript:") for url in requests)
 
         page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T03"]').wait_for()
+        page.get_by_role("button", name="Назад").click()
         catalog_trigger = page.get_by_role("button", name=malicious)
         catalog_trigger.wait_for()
         assert catalog_trigger.evaluate("node => node === document.activeElement")
 
         page.get_by_role("button", name="Мои задания").click()
-        page.get_by_role("heading", name="Взятые мной").wait_for()
+        page.get_by_role("heading", name="Мои задания").wait_for()
+        page.get_by_role("button", name=re.compile("В работе · ")).click()  # noqa: RUF001
         page.get_by_role("button", name=re.compile(assignment_title)).click()
         page.get_by_text("План отправлен").wait_for()
         assert page.get_by_role("button", name="Принять задание").count() == 0
@@ -1084,7 +820,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         browser.close()
 
 
-def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa: PLR0915
+def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:
     malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
@@ -1096,6 +832,9 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
 
     def moderation_route(route: Route) -> None:
         requests.append((route.request.method, route.request.url))
+        if route.request.url.endswith("?limit=1"):
+            route.fulfill(json={"items": [], "next_cursor": None})
+            return
         if mode["name"] == "pending":
             pending.append(route)
         elif mode["name"] == "empty":
@@ -1157,7 +896,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
 
         page.goto(mini_app_url + "#/moderation?view_state=s01")
         moderation_nav = page.get_by_role("button", name="Модерация")
-        page.get_by_text("Загружаем открытые кейсы…").wait_for()
+        page.get_by_text("Загружаем очередь…").wait_for()
         assert len(pending) == 1
         pending.pop().fulfill(
             json={
@@ -1197,14 +936,28 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         review = page.get_by_role("button", name="Проверить решение")
         assert review.evaluate("node => node === document.activeElement")
         review.press("Enter")
-        confirm = page.get_by_role("button", name="Подтвердить решение")
+        assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s03")
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="S02"]').wait_for()
+        assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s02")
+        page.get_by_role("combobox", name="Решение").select_option("partial_payment")
+        page.get_by_role("textbox", name="Причина решения").fill("Подтверждена половина результата")
+        page.get_by_role("button", name="Проверить решение").click()
+        page.reload()
+        page.locator('[data-screen-id="S02"]').wait_for()
+        assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s02")
+        page.get_by_role("combobox", name="Решение").select_option("partial_payment")
+        page.get_by_role("textbox", name="Причина решения").fill("Подтверждена половина результата")
+        page.get_by_role("button", name="Проверить решение").click()
+        confirm = page.get_by_role("button", name="Применить решение")
         assert confirm.evaluate("node => node === document.activeElement")
         assert resolution_keys == []
         confirm.click()
         page.get_by_text("Не удалось применить решение.").wait_for()  # noqa: RUF001
         resolution_before = len(resolution_keys)
         _connected_control(page, "PE-068", "authoritative_resolution_success").click()
-        page.get_by_text("Открытых кейсов нет.").wait_for()
+        page.get_by_role("button", name="К очереди").click()  # noqa: RUF001
+        page.get_by_text("Открытых обращений нет.").wait_for()
         assert len(resolution_keys) == resolution_before + 1
         assert len(resolution_keys) == 2
         assert resolution_keys[0] == resolution_keys[1]
@@ -1237,8 +990,12 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.get_by_role("combobox", name="Решение").select_option("partial_payment")
         page.get_by_role("textbox", name="Причина решения").fill("Подтверждена половина результата")
         page.get_by_role("button", name="Проверить решение").click()
-        page.get_by_role("button", name="Подтвердить решение").click()
+        assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s03")
+        page.get_by_role("button", name="Применить решение").click()
         page.get_by_text("Кейс уже изменился").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="S02"]').wait_for()
+        assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s02")
         page.get_by_role("button", name="Назад").click()
         pending.pop().fulfill(
             json={
@@ -1265,7 +1022,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
 
         mode["name"] = "empty"
         moderation_nav.click()
-        page.get_by_text("Открытых кейсов нет.").wait_for()
+        page.get_by_text("Открытых обращений нет.").wait_for()
         page.get_by_role("button", name="Каталог").click()
         page.get_by_role("heading", name="Каталог").wait_for()
 
@@ -1409,33 +1166,27 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.goto(mini_app_url)
-        page.get_by_text("выберите понятное задание").wait_for()
+        page.get_by_role("heading", name="Каталог").wait_for()
 
         capture_requests = True
         profile_nav = page.get_by_role("button", name="Профиль")
         profile_nav.click()
         page.get_by_text("Загружаем профиль…").wait_for()
         page.wait_for_timeout(50)
-        assert len(pending) == 1
+        assert {urlsplit(route.request.url).path for route in pending} == {
+            f"/api/v1/members/{member_id}",
+            "/api/v1/leaderboard",
+        }
         member_pending = next(route for route in pending if "/members/" in route.request.url)
         member_pending.fulfill(json=member)
         pending.remove(member_pending)
 
-        page.locator("h3", has_text=malicious).wait_for()
+        page.locator("h2", has_text=malicious).wait_for()
+        assert page.get_by_role("heading", name="Лидерборд").count() == 0
         for value in (
-            "Буэнос-Айрес",
-            "America/Argentina/Buenos_Aires",
-            "Помогаю собирать ясные планы.",
-            "Найти партнёров для пилота.",
-            "Стратегия, Текст",
-            "Фасилитация, Редактура",
-            "По вечерам",
             "7",
             "12",
-            "2 · Участник",
-            "3 · оценок: 4",
             "3.5",
-            "Недостаточно данных",
         ):
             assert page.get_by_text(value, exact=True).count() >= 1
         body = page.locator("body").inner_text()
@@ -1444,7 +1195,22 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.locator("img, [onerror], [onclick]").count() == 0
         assert page.locator("script").count() == 2
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        for hidden_value in (
+            "Буэнос-Айрес",
+            "America/Argentina/Buenos_Aires",
+            "Помогаю собирать ясные планы.",
+            "Найти партнёров для пилота.",
+        ):
+            assert page.get_by_text(hidden_value, exact=True).count() == 0
+        leaderboard_pending = next(
+            route for route in pending if "/leaderboard" in route.request.url
+        )
+        leaderboard_pending.fulfill(json=leaderboard)
+        pending.remove(leaderboard_pending)
+        page.get_by_text("1 · " + malicious, exact=True).wait_for()
+        assert private_marker not in page.locator("body").inner_text()
 
+        page.get_by_role("button", name="Настройки профиля").click()
         page.get_by_label("Поле профиля").select_option("city")
         page.get_by_label("Новое значение").fill("Rosario")
         page.get_by_role("button", name="Сохранить поле").click()
@@ -1459,7 +1225,9 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         modes["member"] = "error"
         profile_updates_before = len(profile_update_keys)
         _connected_control(page, "PE-063", "authoritative_profile_success").click()
-        page.get_by_text("Rosario", exact=True).wait_for()
+        page.get_by_role("button", name="Настройки профиля").click()
+        page.get_by_label("Поле профиля").select_option("city")
+        assert page.get_by_label("Новое значение").input_value() == "Rosario"
         assert len(profile_update_keys) == profile_updates_before + 1
         page.wait_for_timeout(50)
         assert profile_update_keys[0] == profile_update_keys[1] == profile_update_keys[2]
@@ -1471,14 +1239,16 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_role("button", name="Сохранить поле").click()
         page.get_by_text("Проверьте значение поля.").wait_for()
         assert profile_update_keys[3] != profile_update_keys[2]
+        page.get_by_role("button", name="Назад").click()
 
         modes.update(member="success", leaderboard="success")
         me.update(help_categories=[], skill_tags=[])
         profile_nav.click()
-        page.locator("h3", has_text=malicious).wait_for()
+        page.locator("h2", has_text=malicious).wait_for()
         assert page.get_by_role("heading", name="Категории помощи").count() == 0
         assert page.get_by_role("heading", name="Навыки").count() == 0
-        assert page.get_by_text("Лидерборд").count() == 0
+        page.get_by_text("1 · " + malicious, exact=True).wait_for()
+        assert private_marker not in page.locator("body").inner_text()
 
         modes.update(member="error", leaderboard="success")
         profile_nav.click()
@@ -1486,10 +1256,10 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.get_by_text("Лидерборд").count() == 0
         modes["member"] = "success"
         page.get_by_role("button", name="Повторить профиль").click()
-        page.locator("h3", has_text=malicious).wait_for()
+        page.locator("h2", has_text=malicious).wait_for()
 
         modes["leaderboard"] = "error"
-        page.get_by_role("button", name="Участники").click()
+        page.get_by_role("button", name="Участники", exact=True).click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
         page.get_by_role("button", name="Лидерборд").click()
         page.get_by_text("Не удалось загрузить данные.").wait_for()  # noqa: RUF001
@@ -1499,16 +1269,13 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_text("Неявки: 1").wait_for()
 
         modes["leaderboard"] = "empty"
-        assert page.locator("#primary-navigation").is_hidden()
-        page.get_by_role("button", name="Назад").click()
+        assert page.locator("#primary-navigation").is_visible()
+        page.locator("#participants-nav").click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
-        assert page.get_by_role("button", name="Лидерборд").evaluate(
-            "node => node === document.activeElement"
-        )
         page.get_by_role("button", name="Лидерборд").click()
         page.get_by_text("В лидерборде пока никого нет.").wait_for()  # noqa: RUF001
 
-        page.get_by_role("button", name="Назад").click()
+        page.locator("#participants-nav").click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
         page.get_by_role("button", name="Каталог").click()
         page.get_by_role("heading", name="Каталог").wait_for()
@@ -1516,14 +1283,22 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         profile_nav.click()
         page.get_by_text("Загружаем профиль…").wait_for()
         page.wait_for_timeout(50)
-        assert len(pending) == 1
+        assert {urlsplit(route.request.url).path for route in pending} == {
+            f"/api/v1/members/{member_id}",
+            "/api/v1/leaderboard",
+        }
         catalog_nav = page.get_by_role("button", name="Каталог")
         assert page.get_by_role("button", name="Назад").is_hidden()
         catalog_nav.click()
         page.get_by_role("heading", name="Каталог").wait_for()
-        for route in pending[:]:
-            route.fulfill(json=member)
-            pending.remove(route)
+        late_leaderboard = next(route for route in pending if "/leaderboard" in route.request.url)
+        late_leaderboard.fulfill(json=leaderboard)
+        pending.remove(late_leaderboard)
+        page.get_by_role("heading", name="Каталог").wait_for()
+        assert private_marker not in page.locator("body").inner_text()
+        late_member = next(route for route in pending if "/members/" in route.request.url)
+        late_member.fulfill(json=member)
+        pending.remove(late_member)
         page.wait_for_timeout(50)
         assert page.get_by_role("heading", name="Профиль").count() == 0
         assert profile_nav.evaluate("node => node === document.activeElement")
@@ -1674,15 +1449,21 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.goto(mini_app_url)
-        page.locator("#participants-nav").click()
+        page.get_by_role("button", name="Профиль").click()
+        page.get_by_role("button", name="Участники", exact=True).click()
         page.get_by_role("button", name="Лидерборд").click()
         page.get_by_role("button", name=re.compile("1\\. Мария")).click()
+        page.locator('[data-screen-id="P02"]').wait_for()
+        assert page.get_by_role("heading", name="Оценить взаимодействие").count() == 0
+        page.get_by_role("button", name="Оценить карму").click()
         page.get_by_role("heading", name="Оценить взаимодействие").wait_for()
         page.get_by_label(re.compile("^Комментарий")).fill(private_comment)
         page.get_by_role("button", name="Подтвердить оценку").click()
+        page.get_by_role("button", name="Сохранить оценку").click()
         page.get_by_text("Оценка недоступна", exact=False).wait_for()
         actions_before = len(actions)
         _connected_control(page, "PE-059", "authoritative_karma_success").click()
+        page.get_by_role("button", name="К профилю").click()  # noqa: RUF001
         page.get_by_text("3 · оценок: 3", exact=True).wait_for()
         assert len(actions) == actions_before + 3
 
@@ -1777,7 +1558,7 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.goto(mini_app_url)
 
         page.get_by_role("button", name="Мои задания").click()
-        page.get_by_text("Активных назначений пока нет.").wait_for()
+        page.get_by_text("Активных заданий пока нет.").wait_for()
 
         list_mode["status"] = 503
         page.get_by_role("button", name="Мои задания").click()
@@ -1798,6 +1579,7 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
 
         list_mode.update(status=200, items=[assignment])
         page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="В работе · 1").click()  # noqa: RUF001
         row = page.get_by_role("button", name=re.compile("Собрать план"))
         row.wait_for()
         assert page.get_by_role("list").count() == 1
@@ -1831,7 +1613,7 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.get_by_text("Загружаем назначение…").wait_for()
         assert len(pending_routes) == 1
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("heading", name="Взятые мной").wait_for()
+        page.get_by_role("heading", name="Мои задания").wait_for()
         pending_routes.pop().fulfill(status=200, json=detail)
         page.wait_for_timeout(50)
         assert page.get_by_text("Собрать понятный план").count() == 0
@@ -1848,12 +1630,17 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.get_by_role("button", name=re.compile("Собрать план")).click()
         page.get_by_text("Условия спора").wait_for()
         assert page.locator("time[datetime='2026-08-21T20:30:00Z']").count() == 1
+        assert page.get_by_label("Почему результат нужно пересмотреть").count() == 0
+        page.get_by_role("button", name="Подать спор").click()
         page.get_by_label("Почему результат нужно пересмотреть").fill("Нужна независимая проверка")
         disputes_before = len(dispute_keys)
+        _connected_control(page, "PE-044", "open_dispute_materials").click()
         _connected_control(page, "PE-044", "open_dispute_materials").click()
         page.get_by_text("Передан команде модерации").wait_for()
         assert len(dispute_keys) == disputes_before + 1
 
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="M03"]').wait_for()
         page.get_by_role("button", name="Назад").click()
         detail.update(
             assignment_status="rejected_pending_dispute", case_status=None, can_dispute=False
@@ -1947,23 +1734,29 @@ def test_assignment_cancellation_returns_to_active_list(mini_app_url: str) -> No
         page.goto(mini_app_url)
 
         page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="В работе · 1").click()  # noqa: RUF001
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
+        page.locator('[data-screen-id="M03"]').wait_for()
+        assert page.get_by_label("Причина отказа").count() == 0
+        page.get_by_role("button", name="Отказаться от задания").click()
         page.get_by_label("Причина отказа").fill(" Cannot finish before deadline ")
         cancellations_before = len(operation_keys)
         _connected_control(page, "PE-036", "withdrawal_outcome").click()
-        page.get_by_text("Активных назначений пока нет.").wait_for()
+        _connected_control(page, "PE-036", "withdrawal_outcome").click()
+        page.get_by_text("Активных заданий пока нет.").wait_for()
         assert len(operation_keys) == cancellations_before + 1
         assert page.url.endswith("/#/work?view_state=m01")
         assert page.evaluate("history.state") == {"screen": "assignments"}
         browser.close()
 
 
-def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C901, PLR0915
+def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
     assignment_id, draft_id, assignment, submitted = _freeform_submission_rows()
     detail = submitted | {"assignment_status": "accepted", "result_summary": None}
     current_detail: dict[str, Any] = {"value": detail}
+    result_text = "<script>globalThis.pwned=true</script> " + "Подробный результат. " * 80
     begin_keys: list[str] = []
     confirm_keys: list[str] = []
     review_keys: list[str] = []
@@ -1978,11 +1771,6 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         "available_decisions": ["full", "partial", "reject"],
     }
 
-    def confirm_rejection(dialog) -> None:  # noqa: ANN001
-        expected = "Отклонить результат? Выплата и резерв останутся заморожены на 24 часа для возможного спора. Повторная отправка результата не откроется."  # noqa: E501
-        assert dialog.message == expected
-        dialog.accept()
-
     def save(route: Route) -> None:
         request = route.request
         assert request.method == "PUT"
@@ -1990,7 +1778,7 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         body = request.post_data_json
         assert isinstance(body, dict)
         assert body["expected_revision"] == 0
-        assert body["payload"]["result"] == "<script>globalThis.pwned=true</script>"
+        assert body["payload"]["result"] == result_text
         route.fulfill(json={"id": draft_id, "revision": 1, "result": body["payload"]["result"]})
 
     def begin(route: Route) -> None:
@@ -2073,7 +1861,12 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         page.route(f"**/api/v1/assignment-reviews/{assignment_id}/decision", decide)
         page.goto(mini_app_url)
         page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="В работе · 1").click()  # noqa: RUF001
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
+        page.locator('[data-screen-id="M03"]').wait_for()
+        assert page.get_by_role("textbox", name="Результат").count() == 0
+        assert page.get_by_label("Причина отказа").count() == 0
+        page.get_by_role("button", name="Отправить результат").click()
         page.get_by_role("button", name="Начать отправку").click()
         page.get_by_text("Сеть недоступна. Повторите запрос — он останется тем же.").wait_for()
         assert not page.get_by_role("button", name="Начать отправку").is_disabled()
@@ -2083,11 +1876,20 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         assert len(begin_keys) == begins_before + 1
         assert result.evaluate("node => node === document.activeElement")
         assert begin_keys[0] == begin_keys[1]
-        result.fill("<script>globalThis.pwned=true</script>")
+        result.fill(result_text)
+        page.locator(".screen").evaluate("node => { node.scrollTop = node.scrollHeight; }")
         page.get_by_role("button", name="Предпросмотр").click()
-        page.get_by_text("Подтвердите отправку.").wait_for()
+        page.locator('[data-screen-id="M05"]').wait_for()
+        page.get_by_text(result_text, exact=True).wait_for()
         assert page.evaluate("globalThis.pwned") is None
-        page.get_by_role("button", name="Подтвердить отправку").click()
+        assert page.locator(".screen").evaluate("node => node.scrollTop") == 0
+        page.locator(".screen").evaluate("node => { node.scrollTop = node.scrollHeight; }")
+        page.get_by_role("button", name="Продолжить").click()
+        page.locator('[data-screen-id="M06"]').wait_for()
+        assert page.locator(".screen").evaluate("node => node.scrollTop") == 0
+        assert page.locator("#screen-title").bounding_box()["y"] >= 0
+        assert page.locator("#back").bounding_box()["y"] >= 0
+        page.get_by_role("button", name="Отправить результат").click()
         page.get_by_text("Не удалось сохранить результат.").wait_for()  # noqa: RUF001
         confirms_before = len(confirm_keys)
         _connected_control(page, "PE-034", "authoritative_submit_success").click()
@@ -2095,35 +1897,200 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         assert confirm_keys[0] == confirm_keys[1]
         assert len(pending_confirm) == 1
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("heading", name="Взятые мной").wait_for()
+        page.locator('[data-screen-id="M03"]').wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Мои задания").wait_for()
         pending_confirm.pop().fulfill(status=204)
         page.wait_for_timeout(50)
-        assert page.get_by_role("heading", name="Взятые мной").count() == 1
+        assert page.get_by_role("heading", name="Мои задания").count() == 1
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.get_by_text("Результат отправлен").first.wait_for()
-        assert page.get_by_role("button", name="Начать отправку").count() == 1
+        assert page.get_by_role("button", name="Отправить результат").count() == 1
         assert page.locator("#primary-navigation").is_hidden()
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("heading", name="Взятые мной").wait_for()
+        page.get_by_role("heading", name="Мои задания").wait_for()
         page.get_by_role("button", name="Созданные мной").click()
         page.get_by_role("heading", name="Мои опубликованные задания").wait_for()
         page.get_by_text("Исполнители: 1/2").wait_for()
         page.get_by_text("Исполнитель · Результат отправлен").wait_for()
-        review_button = page.get_by_role("button", name=re.compile("Проверить форму"))
+        review_button = page.get_by_role(
+            "button", name=re.compile("Проверить форму Исполнитель: Участник")
+        )
         review_button.click()
         assert page.evaluate("globalThis.pwned") is None
         page.get_by_role("button", name="Назад").click()
         assert review_button.evaluate("node => node === document.activeElement")
         review_button.click()
+        assert page.url.endswith(f"#/work/{assignment_id}?view_state=m11")
+        _connected_control(page, "PE-040", "authoritative_review_success").last.click()
+        assert page.url.endswith(f"#/work/{assignment_id}?view_state=m12")
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="M11"]').wait_for()
+        assert page.url.endswith(f"#/work/{assignment_id}?view_state=m11")
+        _connected_control(page, "PE-040", "authoritative_review_success").last.click()
+        assert page.url.endswith(f"#/work/{assignment_id}?view_state=m12")
+        page.reload()
+        page.locator('[data-screen-id="M11"]').wait_for()
+        assert page.url.endswith(f"#/work/{assignment_id}?view_state=m11")
+        _connected_control(page, "PE-040", "authoritative_review_success").last.click()
         for _attempt in range(2):
-            page.once("dialog", confirm_rejection)
             reviews_before = len(review_keys)
-            _connected_control(page, "PE-040", "authoritative_review_success").last.click()
+            _connected_control(page, "PE-040", "authoritative_review_success").click()
             assert len(review_keys) == reviews_before + 1
             if len(review_keys) == 1:
                 page.get_by_text("ключ останется тем же").wait_for()
         assert review_keys[0] == review_keys[1]
+        page.get_by_role("button", name="К созданным заданиям").click()  # noqa: RUF001
         page.get_by_text("Результатов, ожидающих решения, пока нет.").wait_for()
+        browser.close()
+
+
+def test_context_transitions_reset_both_scroll_axes_at_supported_viewports(
+    mini_app_url: str,
+) -> None:
+    assignment_id = "00000000-0000-0000-0000-000000000073"
+    draft_id = "00000000-0000-0000-0000-000000000074"
+    member_id = "00000000-0000-0000-0000-000000000075"
+    detail = {
+        "id": assignment_id,
+        "task_title": "Длинное назначение",
+        "assignment_status": "accepted",
+        "task_deadline_at": "2026-09-01T20:00:00Z",
+        "description": "Описание " * 80,
+        "completion_criteria": "Критерии " * 60,
+        "performer_instructions": "Инструкция " * 60,
+        "result_summary": None,
+        "review_deadline_at": None,
+        "reject_dispute_deadline_at": None,
+        "case_status": None,
+        "can_dispute": False,
+        "can_submit": True,
+        "can_cancel": False,
+    }
+    member = {
+        "member_id": member_id,
+        "telegram_username": "maria",
+        "display_name": "Мария",
+        "city": None,
+        "short_bio": None,
+        "current_goal": None,
+        "help_categories": [],
+        "skill_tags": [],
+        "availability": None,
+        "level_number": 2,
+        "karma": {"score": 4, "count": 5},
+        "reliability": {"rate": "0.9"},
+    }
+
+    def assert_top_left(page: Any) -> None:  # noqa: ANN401
+        geometry = page.evaluate(
+            """() => {
+              const shell = document.querySelector('#app');
+              const screen = document.querySelector('.screen');
+              const back = document.querySelector('#back');
+              const title = document.querySelector('#screen-title');
+              const shellBox = shell.getBoundingClientRect();
+              const backBox = back.getBoundingClientRect();
+              const titleBox = title.getBoundingClientRect();
+              return {
+                windowX: scrollX, windowY: scrollY,
+                documentX: document.scrollingElement.scrollLeft,
+                documentY: document.scrollingElement.scrollTop,
+                shellX: shell.scrollLeft, shellY: shell.scrollTop,
+                screenX: screen.scrollLeft, screenY: screen.scrollTop,
+                shellLeft: shellBox.left, backLeft: backBox.left,
+                titleLeft: titleBox.left, titleTop: titleBox.top,
+              };
+            }"""
+        )
+        assert (
+            geometry
+            | {
+                "windowX": 0,
+                "windowY": 0,
+                "documentX": 0,
+                "documentY": 0,
+                "shellX": 0,
+                "shellY": 0,
+                "screenX": 0,
+                "screenY": 0,
+            }
+            == geometry
+        )
+        assert geometry["backLeft"] >= geometry["shellLeft"]
+        assert geometry["titleLeft"] >= geometry["shellLeft"]
+        assert geometry["titleTop"] >= 0
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        for width, height in ((375, 812), (430, 932)):
+            page = _new_page(browser)
+            page.set_viewport_size({"width": width, "height": height})
+            page.route(
+                "**/api/v1/me",
+                lambda route: route.fulfill(
+                    json={"member_id": "00000000-0000-0000-0000-000000000076"}
+                ),
+            )
+            page.route(
+                "**/api/v1/tasks",
+                lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+            )
+            page.route(
+                "**/api/v1/moderation/cases?*",
+                lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+            )
+            page.route(
+                f"**/api/v1/assignments/{assignment_id}/submission-drafts",
+                lambda route: route.fulfill(json={"id": draft_id, "revision": 0, "result": None}),
+            )
+            page.route(
+                f"**/api/v1/submission-drafts/{draft_id}",
+                lambda route: route.fulfill(
+                    json={
+                        "id": draft_id,
+                        "revision": 1,
+                        "result": route.request.post_data_json["payload"]["result"],
+                    }
+                ),
+            )
+            page.route(
+                f"**/api/v1/assignments/{assignment_id}",
+                lambda route: route.fulfill(json=detail),
+            )
+            page.route(
+                f"**/api/v1/members/{member_id}",
+                lambda route: route.fulfill(json=member),
+            )
+
+            page.goto(mini_app_url + f"#/work/{assignment_id}?view_state=m03")
+            page.locator('[data-screen-id="M03"]').wait_for()
+            assert_top_left(page)
+            page.get_by_role("button", name="Отправить результат").click()
+            page.get_by_role("button", name="Начать отправку").click()
+            page.get_by_role("textbox", name="Результат").fill("Результат " * 100)
+            page.locator(".screen").evaluate(
+                "node => { node.scrollTop = node.scrollHeight; "
+                "node.scrollLeft = node.scrollWidth; }"
+            )
+            page.get_by_role("button", name="Предпросмотр").click()
+            page.locator('[data-screen-id="M05"]').wait_for()
+            page.locator(".screen").evaluate(
+                "node => { node.scrollTop = node.scrollHeight; "
+                "node.scrollLeft = node.scrollWidth; }"
+            )
+            page.get_by_role("button", name="Продолжить").click()
+            page.locator('[data-screen-id="M06"]').wait_for()
+            assert_top_left(page)
+            page.get_by_role("button", name="Назад").click()
+            page.locator('[data-screen-id="M03"]').wait_for()
+            assert_top_left(page)
+
+            page.goto(mini_app_url + f"#/members/{member_id}?view_state=p02")
+            page.reload()
+            page.locator('[data-screen-id="P02"]').wait_for()
+            assert_top_left(page)
+            page.close()
         browser.close()
 
 
@@ -2206,10 +2173,10 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         )
         page.route("**/api/v1/task-creation", creation)
         page.goto(mini_app_url)
-        page.get_by_role("button", name="Создать задание").click()
+        _open_blank_task_creation(page)
         page.get_by_text("Не удалось открыть создание задания.").wait_for()  # noqa: RUF001
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("button", name="Создать задание").click()
+        _open_blank_task_creation(page, group=True)
         page.get_by_label("Тип").select_option("group")
         page.get_by_label("Категория").select_option(task_id)
         page.get_by_label("Размер").select_option("s")
@@ -2228,12 +2195,37 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_text("Предпросмотр устарел").wait_for()
         page.get_by_role("button", name="Предпросмотр").click()
         commands_before = len(commands)
+        page.locator('[data-screen-id="T06"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        page.reload()
+        page.locator('[data-screen-id="T06"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T05"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t05")
+        page.go_forward()
+        page.locator('[data-screen-id="T06"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        page.get_by_role("button", name="Продолжить").click()
+        page.locator('[data-screen-id="T07"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t07")
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T06"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        page.get_by_role("button", name="Продолжить").click()
+        page.locator('[data-screen-id="T07"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t07")
+        page.reload()
+        page.locator('[data-screen-id="T06"]').wait_for()
+        assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        page.get_by_role("button", name="Продолжить").click()
+        page.locator('[data-screen-id="T07"]').wait_for()
         _connected_control(page, "PE-022", "authoritative_publish_success").click()
         page.get_by_text("Задание опубликовано").wait_for()
         assert len(commands) == commands_before + 1
         assert page.evaluate("globalThis.pwned") is None
-        page.go_back()
-        page.get_by_role("button", name="Создать задание").wait_for()
+        page.get_by_role("button", name="В каталог").click()  # noqa: RUF001
+        page.get_by_role("button", name="+ Создать", exact=True).wait_for()
         assert actions == ["start", "start", "save", "save", "save", "publish"]
         assert commands[0][1:] == commands[1][1:]
         assert commands[2][2] == commands[3][2]
@@ -2322,7 +2314,7 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(
             page.route("**/api/v1/task-creation", creation)
             page.goto(mini_app_url)
 
-            page.get_by_role("button", name="Создать задание").click()
+            _open_blank_task_creation(page)
             deadline = page.get_by_label("Срок")
             preview = page.get_by_role("button", name="Предпросмотр")
             assert deadline.get_attribute("min") > "2000-01-01T00:00"
@@ -2361,8 +2353,8 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(
             assert styles == {
                 "className": "back",
                 "height": styles["height"],
-                "radius": "12px",
-                "color": "rgb(246, 248, 252)",
+                "radius": "10px",
+                "color": "rgb(169, 177, 196)",
                 "cursor": "pointer",
             }
             assert styles["height"] >= 44
