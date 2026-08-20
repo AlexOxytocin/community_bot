@@ -470,7 +470,9 @@ async def test_auth_issues_exact_cookie_without_exposing_raw_token(
         hashlib.sha256(b"y" * 32).digest(),
     ]
     assert all(
-        session["expires_at"] - session["authenticated_at"] == datetime.timedelta(days=30)
+        cast("datetime.datetime", session["expires_at"])
+        - cast("datetime.datetime", session["authenticated_at"])
+        == datetime.timedelta(days=30)
         for session in database.created_sessions
     )
     assert b"x" * 32 not in response.content and b"y" * 32 not in repeated.content
