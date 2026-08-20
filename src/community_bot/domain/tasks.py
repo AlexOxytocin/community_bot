@@ -238,6 +238,8 @@ def validate_freeform_text(value: object, *, field: str) -> str:
 
 def validate_freeform_materials(value: Mapping[str, object]) -> dict[str, object]:
     """Validate optional creator-supplied materials for a free-form task."""
+    if not value:
+        return {}
     normalized = validate_materials(value)
     text_value = normalized.get("text")
     if isinstance(text_value, str) and len(text_value) > FREEFORM_MATERIALS_TEXT_LIMIT:

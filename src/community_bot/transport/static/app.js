@@ -553,7 +553,7 @@ function showTaskCreation(state, forceEdit = false) {
   const values = draft.values;
   const form = element("form", undefined, "task-form");
   form.classList.add("creation-form");
-  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип"><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section">Число исполнителей<input name="performer_slots" type="number" min="1" required></label><label class="section">Формат<select name="format"><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section">Категория<select name="category_id"></select></label><label class="section">Название<input name="title" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать<textarea name="description" aria-label="Описание" required></textarea></label><label class="section">Критерии приёмки<textarea name="completion_criteria" aria-label="Критерии выполнения" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер<select name="time_size"></select></label><label class="section">Награда за исполнителя<input name="credit_reward_per_performer" aria-label="Награда" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок<input name="deadline_at" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text"></textarea><small>Ссылка или короткий текст</small></label><label class="section">Ссылка<input name="material_url" type="url"></label>';
+  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания *</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания *" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section">Число исполнителей *<input name="performer_slots" aria-label="Число исполнителей *" type="number" min="1" required></label><label class="section">Формат *<select name="format" aria-label="Формат *" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section">Категория *<select name="category_id" aria-label="Категория *" required></select></label><label class="section">Название *<input name="title" aria-label="Название *" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать *<textarea name="description" aria-label="Что нужно сделать *" required></textarea></label><label class="section">Критерии приёмки *<textarea name="completion_criteria" aria-label="Критерии приёмки *" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер *<select name="time_size" aria-label="Размер *" required></select></label><label class="section">Награда за исполнителя *<input name="credit_reward_per_performer" aria-label="Награда за исполнителя *" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок *<input name="deadline_at" aria-label="Срок *" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text" aria-label="Материалы"></textarea><small>Ссылка или короткий текст</small></label>';
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
@@ -585,8 +585,7 @@ function showTaskCreation(state, forceEdit = false) {
   deadlineMin.setSeconds(0, 0);
   form.deadline_at.min = new Date(deadlineMin - deadlineMin.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   form.performer_slots.value = values.performer_slots || 1;
-  form.material_text.value = values.materials?.text || "";
-  form.material_url.value = values.materials?.url || "";
+  form.material_text.value = values.materials?.text || values.materials?.url || "";
   const submit = element("button", "Предварительный просмотр", "primary");
   submit.type = "submit";
   submit.setAttribute("aria-label", "Предварительный просмотр");
@@ -629,7 +628,7 @@ function showTaskCreation(state, forceEdit = false) {
       return;
     }
     if (cityField) return;
-    cityField = element("label", "Город", "section city-field");
+    cityField = element("label", "Город *", "section city-field");
     const input = element("input");
     input.name = "city";
     input.autocomplete = "off";
@@ -697,9 +696,8 @@ function showTaskCreation(state, forceEdit = false) {
     value.performer_slots = form.task_kind.value === "solo" ? "1" : form.performer_slots.value;
     if (form.format.value === "offline") value.city = selectedCity;
     else delete value.city;
-    const materials = Object.fromEntries([["text", value.material_text], ["url", value.material_url]].filter(([, item]) => item));
+    const materials = value.material_text ? { text: value.material_text } : {};
     delete value.material_text;
-    delete value.material_url;
     try {
       let target = draft;
       if (!target.id) {
