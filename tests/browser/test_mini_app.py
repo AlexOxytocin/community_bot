@@ -195,6 +195,100 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
         browser.close()
 
 
+def test_catalog_actions_filters_and_list_density_are_compact(
+    mini_app_url: str,
+) -> None:
+    tasks = [
+        {
+            "id": f"00000000-0000-0000-0000-{index:012d}",
+            "title": f"Задание {index}: помочь участнику сообщества",
+            "description": (
+                "Короткое публичное описание результата без переноса detail-полей "
+                "в карточку списка."
+            ),
+            "credit_reward_per_performer": index + 1,
+            "performer_slots": 1 + index % 2,
+            "deadline_at": f"2026-08-{20 + index:02d}T20:00:00Z",
+            "origin": "community",
+            "category_name": "Продвижение" if index % 2 else "Практическая помощь",
+            "format": "online" if index != 5 else "offline",
+        }
+        for index in range(1, 6)
+    ]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        for width, height in ((375, 812), (430, 932)):
+            page = _new_page(browser)
+            page.set_viewport_size({"width": width, "height": height})
+            page.route(
+                "**/api/v1/me",
+                lambda route: route.fulfill(json={"member_id": "me", "display_name": "Алекс"}),
+            )
+            page.route(
+                "**/api/v1/tasks",
+                lambda route: route.fulfill(json={"items": tasks, "next_cursor": None}),
+            )
+            page.goto(mini_app_url)
+
+            catalog = page.locator('[data-screen-id="T01"][data-state="content"]')
+            catalog.wait_for()
+            heading = page.get_by_role("heading", name="Каталог", include_hidden=True)
+            assert heading.count() == 1
+            assert heading.evaluate(
+                "node => { const box = node.parentElement.getBoundingClientRect(); "
+                "return box.width <= 1 && box.height <= 1; }"
+            )
+            assert page.get_by_text("5 заданий доступно сейчас").count() == 0
+            assert page.get_by_text("Доступно заданий: 5", exact=True).evaluate(
+                "node => { const box = node.getBoundingClientRect(); "
+                "return box.width <= 1 && box.height <= 1; }"
+            )
+
+            filters = page.get_by_role("button", name="Фильтры", exact=True)
+            create = page.get_by_role("button", name="+ Создать", exact=True)
+            assert filters.is_visible()
+            assert create.is_visible()
+            cards = catalog.locator(".task-card")
+            geometry = page.evaluate(
+                """() => {
+                  const nav = document.querySelector('.bottom-nav').getBoundingClientRect();
+                  const rows = [...document.querySelectorAll('.catalog-view .task-card')]
+                    .map(node => node.getBoundingClientRect());
+                  return {
+                    visibleCards: rows.filter(row => row.top >= 0 && row.bottom <= nav.top).length,
+                    overflowX: document.documentElement.scrollWidth - innerWidth,
+                  };
+                }"""
+            )
+            assert geometry["visibleCards"] == (4 if width == 375 else 5), geometry
+            assert geometry["overflowX"] == 0
+            assert cards.count() == 5
+
+            filters.click()
+            page.get_by_role("heading", name="Фильтры каталога").wait_for()
+            page.get_by_role("button", name="Назад").click()
+            catalog.wait_for()
+            page.get_by_role("button", name="Фильтры", exact=True).click()
+            page.get_by_label("Формат").select_option("online")
+            page.get_by_label("Награда от").fill("3")
+            page.get_by_role("button", name="Применить").click()
+            active_filters = page.get_by_role("button", name="Фильтры, выбрано: 2")
+            active_filters.wait_for()
+            assert active_filters.locator(".catalog-filter-count").inner_text() == "2"
+            assert active_filters.get_attribute("class").endswith("is-active")
+            assert page.locator(".catalog-view .task-card").count() == 3
+            filtered_task = page.locator(".catalog-view .task-card").first
+            filtered_task.click()
+            page.get_by_role("heading", name=tasks[1]["title"]).wait_for()
+            page.get_by_role("button", name="Назад").click()
+            catalog.wait_for()
+            assert page.locator(".catalog-view .task-card").count() == 3
+            assert page.get_by_role("button", name="Фильтры, выбрано: 2").is_visible()
+            page.close()
+        browser.close()
+
+
 def test_core_hash_routes_restore_authoritatively_and_fail_closed(
     mini_app_url: str,
 ) -> None:

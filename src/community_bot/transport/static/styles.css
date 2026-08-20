@@ -127,6 +127,27 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .participants-screen .screen-heading { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .profile-screen .screen { gap: 0; padding-top: 14px; }
 .profile-screen .screen-heading { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.catalog-screen .screen { gap: 0; padding-top: 12px; }
+.catalog-screen .screen-heading { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.catalog-screen .screen-content { gap: 0; }
+.catalog-view { gap: 8px; }
+.catalog-actions { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
+.catalog-actions > button { min-height: 44px; }
+.catalog-filter-button { display: inline-flex; width: fit-content; align-items: center; gap: 7px; padding: 8px 12px; }
+.catalog-filter-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.catalog-filter-button.is-active { border-color: color-mix(in srgb, var(--app-accent) 65%, var(--app-border)); color: var(--app-accent); }
+.catalog-filter-count { display: grid; min-width: 20px; height: 20px; place-items: center; padding-inline: 5px; border-radius: 999px; background: var(--app-accent); color: var(--app-accent-text); font-size: 10px; font-weight: 800; }
+.catalog-view .list { gap: 7px; }
+.catalog-view .task-card { gap: 5px; padding: 9px 11px; border-radius: 14px; box-shadow: none; }
+.catalog-view .card-chips { flex-wrap: nowrap; gap: 5px; overflow: hidden; }
+.catalog-view .chip { flex: 0 0 auto; padding: 2px 7px; font-size: 10px; }
+.catalog-view .muted-chip { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+.catalog-view .task-card-title { min-width: 0; gap: 8px; }
+.catalog-view .task-card-title h3, .catalog-view .task-card > .muted { display: -webkit-box; overflow: hidden; margin: 0; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.catalog-view .task-card-title h3 { line-height: 1.2; }
+.catalog-view .task-card > .muted { min-height: 0; font-size: 12px; line-height: 1.25; }
+.catalog-view .chevron { flex: 0 0 16px; font-size: 25px; line-height: 1; text-align: right; }
+.catalog-view .task-meta { flex-wrap: nowrap; gap: 8px; overflow: hidden; font-size: 10px; white-space: nowrap; }
 .participants-screen .screen-content { gap: 10px; }
 .participants-view { gap: 9px; }
 .participants-tabs, .period-tabs { padding: 3px; border-radius: 12px; }
@@ -189,8 +210,6 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid var(--app-focus); outline-offset: 3px; }
 
 .screen-subtitle { margin: -10px 0 2px; color: var(--app-text-muted); font-size: 12px; font-weight: 700; }
-.catalog-filter-trigger { width: fit-content; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
-.catalog-filter-trigger:focus-visible { border-radius: 4px; }
 .compact-create { min-height: 40px; padding: 7px 13px; border-color: color-mix(in srgb, var(--app-accent) 65%, var(--app-border)); color: var(--app-accent); }
 .queue-count { display: grid; width: 30px; height: 30px; place-items: center; margin-left: auto; border-radius: 10px; background: color-mix(in srgb, var(--app-danger) 17%, var(--app-surface)); color: var(--app-danger-pressed); font-size: 12px; font-weight: 800; }
 .compact-empty { margin: 0; padding: 13px 14px; border: 1px solid var(--app-border); border-radius: 14px; color: var(--app-text-muted); }
