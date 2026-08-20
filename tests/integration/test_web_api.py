@@ -285,6 +285,16 @@ async def test_karma_vote_api_is_actor_scoped_exact_and_authoritative(
 
         invalid_actor = await action("8201", {"action": "begin", "actor_member_id": str(actor.id)})
         assert invalid_actor.json() == {"code": "invalid_request"}
+        async with sessions.begin() as session:
+            session.add(
+                ConversationStateModel(
+                    member_id=actor.id,
+                    flow_type="profile_edit",
+                    current_step="skill_tags",
+                    payload_json={"skill_tags": ["legacy"]},
+                    revision=50,
+                )
+            )
         begun = await action("8201", {"action": "begin"})
         assert (begun.status_code, begun.json()) == (
             200,
@@ -507,6 +517,19 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         ).status_code == 204
         state = (await client.get("/api/v1/task-creation")).json()
         draft_id = state["draft"]["id"]
+        assert state["draft"]["values"]["format"] == "online"
+        city_search = await client.get("/api/v1/task-cities", params={"q": "Buenos Aires"})
+        assert city_search.status_code == 200
+        canonical_city = next(
+            item["value"]
+            for item in city_search.json()["items"]
+            if item["value"] == "Buenos Aires — Argentina"
+        )
+        collisions = await client.get("/api/v1/task-cities", params={"q": "Dondo", "limit": 10})
+        collision_values = [item["value"] for item in collisions.json()["items"]]
+        assert collisions.status_code == 200
+        assert collision_values.count("Dondo — Angola · 05") == 1
+        assert len(collision_values) == len(set(collision_values))
         form = {
             "category_id": state["categories"][0]["id"],
             "task_kind": "group",
@@ -517,7 +540,6 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
             "credit_reward_per_performer": 3,
             "deadline_at": (now + datetime.timedelta(days=2)).isoformat(),
             "format": "online",
-            "city": "  Buenos Aires  ",
             "materials": {"url": "  https://example.com/task  "},
             "performer_slots": 2,
         }
@@ -529,7 +551,6 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
                 "title": form["title"].strip(),
                 "description": form["description"].strip(),
                 "completion_criteria": form["completion_criteria"].strip(),
-                "city": form["city"].strip(),
                 "materials": {"url": form["materials"]["url"].strip()},
             }
         }
@@ -552,7 +573,33 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         assert preview["preview"]["reward_total"] == 6
         assert preview["draft"]["values"]["title"] == "Помочь с проверкой"  # noqa: RUF001
         assert preview["draft"]["values"]["materials"] == {"url": "https://example.com/task"}
-        assert preview["draft"]["values"]["city"] == "Buenos Aires"
+        assert preview["draft"]["values"]["city"] is None
+
+        offline = save | {
+            "expected_revision": 1,
+            "form": form | {"format": "offline", "city": canonical_city},
+        }
+        assert (
+            await client.post(
+                "/api/v1/task-creation",
+                json=offline,
+                headers={"origin": ORIGIN, "idempotency-key": "7003"},
+            )
+        ).status_code == 204
+        tampered = offline | {
+            "expected_revision": 2,
+            "form": form | {"format": "offline", "city": "Buenos Aires"},
+        }
+        assert (
+            await client.post(
+                "/api/v1/task-creation",
+                json=tampered,
+                headers={"origin": ORIGIN, "idempotency-key": "7004"},
+            )
+        ).status_code == 422
+        after_tamper = (await client.get("/api/v1/task-creation")).json()
+        assert after_tamper["draft"]["revision"] == 2
+        assert after_tamper["draft"]["values"]["city"] == canonical_city
 
         sessions = async_sessionmaker(database.engine, expire_on_commit=False)
         async with sessions.begin() as session:
@@ -562,16 +609,16 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         expired = (await client.get("/api/v1/task-creation")).json()
         assert expired["needs_edit"] is True
         assert expired["preview"] is None
-        repaired = save | {"expected_revision": 1, "form": form}
+        repaired = offline | {"expected_revision": 2}
         assert (
             await client.post(
                 "/api/v1/task-creation",
                 json=repaired,
-                headers={"origin": ORIGIN, "idempotency-key": "7003"},
+                headers={"origin": ORIGIN, "idempotency-key": "7005"},
             )
         ).status_code == 204
-        publish = {"action": "publish", "draft_id": draft_id, "expected_revision": 2}
-        publish_headers = {"origin": ORIGIN, "idempotency-key": "7004"}
+        publish = {"action": "publish", "draft_id": draft_id, "expected_revision": 3}
+        publish_headers = {"origin": ORIGIN, "idempotency-key": "7006"}
         first = await client.post("/api/v1/task-creation", json=publish, headers=publish_headers)
         replay = await client.post("/api/v1/task-creation", json=publish, headers=publish_headers)
         assert first.status_code == replay.status_code == 200
@@ -1616,10 +1663,12 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
     async with sessions.begin() as session:
         author_model = await session.get(MemberModel, author.id)
         foreign_author_model = await session.get(MemberModel, foreign_author.id)
+        owned_source = await session.get(TaskModel, owned.id)
         source = await session.get(TaskModel, foreign.id)
         assert author_model is not None
         assert foreign_author_model is not None
         assert source is not None
+        assert owned_source is not None
         author_model.role = MemberRole.ADMINISTRATOR.value
         foreign_author_model.role = MemberRole.ADMINISTRATOR.value
         values = {
@@ -1652,6 +1701,40 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
                 accepted_at=datetime.datetime.now(datetime.UTC),
             )
         )
+        empty_owned = TaskModel(
+            **(
+                {
+                    column.key: getattr(owned_source, column.key)
+                    for column in inspect(TaskModel).mapper.column_attrs
+                    if column.key not in {"id", "created_at", "updated_at"}
+                }
+                | {"title": "Задание без исполнителей", "publish_command_id": uuid4()}
+            )
+        )
+        session.add(empty_owned)
+        hidden_run = DbTestRunModel(
+            marker="TEST-OWNED-CANCELLATION-HIDDEN", started_by_member_id=author.id
+        )
+        session.add(hidden_run)
+        await session.flush()
+        empty_owned_id = empty_owned.id
+        hidden_owned = TaskModel(
+            **(
+                {
+                    column.key: getattr(owned_source, column.key)
+                    for column in inspect(TaskModel).mapper.column_attrs
+                    if column.key not in {"id", "created_at", "updated_at"}
+                }
+                | {
+                    "title": "Скрытое test-run задание",
+                    "publish_command_id": uuid4(),
+                    "test_run_id": hidden_run.id,
+                }
+            )
+        )
+        session.add(hidden_owned)
+        await session.flush()
+        hidden_owned_id = hidden_owned.id
 
     app = create_web_app(
         settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
@@ -1668,17 +1751,31 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
 
         response = await client.get("/api/v1/owned-tasks", params={"member_id": str(performer.id)})
         assert response.status_code == 200, response.text
-        assert response.json()["items"] == [
-            {
-                "id": str(owned.id),
-                "title": owned.title,
-                "status": "published",
-                "performer_slots": 1,
-                "deadline_at": owned.deadline_at.isoformat().replace("+00:00", "Z"),
-                "assignees": [{"display_name": performer.display_name, "status": "accepted"}],
-                "cancellation_status": None,
-            }
-        ]
+        cards = {item["id"]: item for item in response.json()["items"]}
+        assert cards[str(owned.id)]["cancellation_action"] == "request"
+        assert cards[str(empty_owned_id)]["cancellation_action"] == "cancel"
+        assert str(hidden_owned_id) not in cards
+        cancel_path = f"/api/v1/owned-tasks/{empty_owned_id}/cancellation"
+        cancel_headers = {"origin": ORIGIN, "idempotency-key": "52631"}
+        cancelled = await client.post(cancel_path, headers=cancel_headers)
+        replay = await client.post(cancel_path, headers=cancel_headers)
+        assert cancelled.json() == replay.json() == {"status": "cancelled"}
+        request_path = f"/api/v1/owned-tasks/{owned.id}/cancellation"
+        requested = await client.post(
+            request_path,
+            headers={"origin": ORIGIN, "idempotency-key": "52632"},
+        )
+        assert requested.json() == {"status": "pending"}
+        foreign_cancel = await client.post(
+            f"/api/v1/owned-tasks/{foreign.id}/cancellation",
+            headers={"origin": ORIGIN, "idempotency-key": "52633"},
+        )
+        assert foreign_cancel.status_code == 409
+        hidden_cancel = await client.post(
+            f"/api/v1/owned-tasks/{hidden_owned_id}/cancellation",
+            headers={"origin": ORIGIN, "idempotency-key": "52634"},
+        )
+        assert hidden_cancel.status_code == 409
 
     await database.dispose()
 

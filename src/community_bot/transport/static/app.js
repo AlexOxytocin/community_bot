@@ -14,12 +14,15 @@ const moderationNav = document.getElementById("moderation-nav");
 const heading = title.parentElement;
 let tasks = [];
 let assignments = [];
+let ownedTasks = [];
+let ownedReviews = [];
 let catalogFilters = { format: "", minReward: "" };
 const pendingAcceptKeys = new Map();
 let pendingTaskCreation = null;
 let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
 let returnFocusReviewId = null;
+let returnFocusOwnedTaskId = null;
 let returnFocusModeration = false;
 let returnFocusModerationCaseId = null;
 let returnFocusProfile = false;
@@ -56,7 +59,7 @@ const replaceContent = (...nodes) => {
 };
 
 const connectedScreenIds = new Set(`
-T01 T02 T03 T03A T04B T05 T06 T07 T08
+T01 T02 T03 T03A T04B T05 T06 T08
 P01 P02 P03 P04 P05 P06 P07
 M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15
 S01 S02 S03 S04
@@ -126,6 +129,7 @@ const setNavigation = (screen, context) => {
   shell.classList.toggle("catalog-screen", screen === "catalog");
   shell.classList.toggle("participants-screen", screen === "participants");
   shell.classList.toggle("profile-screen", screen === "profile");
+  shell.classList.remove("task-detail-screen");
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
   profileNav.setAttribute("aria-pressed", String(screen === "profile"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
@@ -137,14 +141,6 @@ const setHeadingAction = (action) => {
   heading.querySelector(".heading-action")?.remove();
   action.classList.add("heading-action");
   heading.append(action);
-};
-
-const pencilIcon = () => {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  svg.innerHTML = '<path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m14 7 3 3"/>';
-  return svg;
 };
 
 const searchIcon = () => {
@@ -346,7 +342,7 @@ const newOperationKey = () => {
 function showCatalog(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
   setNavigation("catalog", false);
-  title.textContent = "Каталог";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const create = element("button", "+ Создать", "secondary compact-create");
   create.type = "button";
@@ -390,33 +386,7 @@ function showCatalog(revision = ++screenRevision) {
   const list = element("div", undefined, "list");
   let focusTarget = null;
   for (const task of visibleTasks) {
-    const button = element("button", undefined, "card task-card");
-    button.type = "button";
-    const chips = element("div", undefined, "card-chips");
-    chips.append(element("span", "Открыто", "chip"));
-    const category = task.category_name || (task.origin === "community" ? "Сообщество" : null);
-    if (category) chips.append(element("span", category, "chip muted-chip"));
-    const meta = element("div", undefined, "task-meta");
-    meta.append(
-      element("span", `✦ ${task.credit_reward_per_performer} кред.`),
-      element("span", `${task.performer_slots} ${task.performer_slots === 1 ? "место" : "места"}`),
-    );
-    const deadline = element(
-      "time",
-      task.deadline_at
-        ? `до ${new Intl.DateTimeFormat("ru", { day: "numeric", month: "short" }).format(new Date(task.deadline_at))}`
-        : "Срок уточняется",
-    );
-    if (task.deadline_at) deadline.dateTime = task.deadline_at;
-    meta.append(deadline);
-    const label = element("div", undefined, "task-card-title");
-    label.append(element("h3", task.title), element("span", "›", "chevron"));
-    button.append(
-      chips,
-      label,
-      element("p", task.description, "muted"),
-      meta,
-    );
+    const button = taskListCard(task);
     button.addEventListener("click", () => showTaskDetail(task));
     if (task.id === returnFocusTaskId) focusTarget = button;
     list.append(button);
@@ -439,9 +409,9 @@ async function loadCatalog(push = true) {
     showCatalog(revision);
   } else {
     setNavigation("catalog", false);
-    title.textContent = "Каталог";
+    title.textContent = "Задания";
     back.classList.add("hidden");
-    replaceContent(element("p", "Загружаем каталог…", "status muted"));
+    replaceContent(element("p", "Загружаем задания…", "status muted"));
   }
   try {
     const page = await getJson(path, (refreshed) => {
@@ -455,8 +425,36 @@ async function loadCatalog(push = true) {
     showCatalog(revision);
   } catch {
     if (revision !== screenRevision || cached) return;
-    replaceContent(element("p", "Не удалось загрузить каталог.", "status"));
+    replaceContent(element("p", "Не удалось загрузить задания.", "status"));
   }
+}
+
+function taskListCard(task, { preview = false } = {}) {
+  const card = element(preview ? "article" : "button", undefined, "card task-card");
+  if (!preview) card.type = "button";
+  if (preview) card.classList.add("preview-task-card");
+  const chips = element("div", undefined, "card-chips");
+  chips.append(element("span", preview ? "Предпросмотр" : "Открыто", "chip"));
+  const category = task.category_name || (task.origin === "community" ? "Сообщество" : null);
+  if (category) chips.append(element("span", category, "chip muted-chip"));
+  const meta = element("div", undefined, "task-meta");
+  meta.append(
+    element("span", `✦ ${task.credit_reward_per_performer} кред.`),
+    element("span", `${task.performer_slots} ${task.performer_slots === 1 ? "место" : "места"}`),
+  );
+  const deadline = element(
+    "time",
+    task.deadline_at
+      ? `до ${new Intl.DateTimeFormat("ru", { day: "numeric", month: "short" }).format(new Date(task.deadline_at))}`
+      : "Срок уточняется",
+  );
+  if (task.deadline_at) deadline.dateTime = task.deadline_at;
+  meta.append(deadline);
+  const label = element("div", undefined, "task-card-title");
+  label.append(element("h3", task.title));
+  if (!preview) label.append(element("span", "›", "chevron"));
+  card.append(chips, label, element("p", task.description, "muted"), meta);
+  return card;
 }
 
 function showCatalogFilters(push = true) {
@@ -464,7 +462,7 @@ function showCatalogFilters(push = true) {
   if (push) history.pushState(nextState, "", presentationLocationFor("T02"));
   else history.replaceState(nextState, "", presentationLocationFor("T02"));
   setNavigation("", true);
-  title.textContent = "Фильтры каталога";
+  title.textContent = "Фильтры заданий";
   back.classList.remove("hidden");
   const form = element("form", undefined, "task-form card");
   const formatLabel = element("label", "Формат");
@@ -515,72 +513,72 @@ async function taskCreationCommand(body) {
 function showTaskCreation(state, forceEdit = false) {
   let draft = state.draft || { id: null, revision: 0, values: {} };
   if (!forceEdit && state.preview && !state.needs_edit) {
-    const card = element("article", undefined, "card detail");
-    card.append(element("h3", state.preview.title), section("Описание", state.preview.description));
+    const values = draft.values;
+    const category = state.categories.find((item) => item.id === values.category_id);
+    const card = taskListCard({
+      ...values,
+      title: state.preview.title,
+      description: state.preview.description,
+      category_name: category?.name,
+      credit_reward_per_performer: values.credit_reward_per_performer,
+      performer_slots: values.performer_slots,
+      deadline_at: values.deadline_at,
+    }, { preview: true });
     card.append(section("Критерии", state.preview.completion_criteria));
-    card.append(section("Резерв", String(state.preview.reward_total) + " кредитов"));
-    const publish = element("button", "Продолжить", "primary");
+    const publish = element("button", "Опубликовать", "primary");
     publish.type = "button";
     markTransition(publish, "PE-021", "publish_task");
-    publish.addEventListener("click", () => {
-      history.pushState(
-        { screen: "task-publish-confirm", draftId: draft.id },
-        "",
-        presentationLocationFor("T07", draft.id),
-      );
-      showActionConfirmation({
-        screenId: "T07",
-        headingText: "Подтвердить публикацию",
-        description: `${state.preview.title}. Резерв: ${state.preview.reward_total} кредитов.`,
-        confirmLabel: "Опубликовать",
-        transitionId: "PE-022",
-        transitionTrigger: "authoritative_publish_success",
-        onEdit: () => history.back(),
-        onConfirm: async ({ confirm, edit, status }) => {
-        confirm.disabled = true;
-        edit.disabled = true;
-        status.className = "status";
-        status.textContent = "Публикуем задание…";
-        try {
-          const result = await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
-          history.replaceState({ screen: "task-creation", draftId: draft.id }, "", presentationLocationFor("T08", draft.id));
-          const home = element("button", "В каталог", "primary");
-          home.addEventListener("click", () => {
-            history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-            void loadCatalog(false);
-          });
-          replaceContent(connectedBoundary("T08", "success", element("p", "Задание опубликовано: " + result.task_id, "status success"), home));
-        } catch {
-          status.textContent = "Не удалось опубликовать задание. Повторите запрос.";
-          confirm.disabled = false;
-          edit.disabled = false;
-        }
-        },
-      });
+    const status = element("p", "", "status hidden");
+    publish.addEventListener("click", async () => {
+      publish.disabled = true;
+      status.className = "status";
+      status.textContent = "Публикуем задание…";
+      try {
+        await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
+        history.replaceState({ screen: "task-creation", draftId: draft.id }, "", presentationLocationFor("T08", draft.id));
+        const home = element("button", "К заданиям", "primary");
+        home.addEventListener("click", () => {
+          history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
+          void loadCatalog(false);
+        });
+        replaceContent(connectedBoundary("T08", "success", element("p", "Задание опубликовано.", "status success"), home));
+      } catch {
+        status.textContent = "Не удалось опубликовать задание. Повторите запрос.";
+        publish.disabled = false;
+      }
     });
-    card.append(publish);
+    card.append(publish, status);
     return replaceContent(connectedBoundary("T06", "content", card));
   }
   const values = draft.values;
   const form = element("form", undefined, "task-form");
   form.classList.add("creation-form");
-  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип"><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns"><label class="section">Число исполнителей<input name="performer_slots" type="number" min="1" required></label><label class="section">Формат<select name="format"><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section city-field">Город<input name="city"></label><label class="section">Категория<select name="category_id"></select></label><label class="section">Название<input name="title" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать<textarea name="description" aria-label="Описание" required></textarea></label><label class="section">Критерии приёмки<textarea name="completion_criteria" aria-label="Критерии выполнения" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер<select name="time_size"></select></label><label class="section">Награда за исполнителя<input name="credit_reward_per_performer" aria-label="Награда" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок<input name="deadline_at" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text"></textarea><small>Ссылка или короткий текст</small></label><label class="section">Ссылка<input name="material_url" type="url"></label>';
+  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип"><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section">Число исполнителей<input name="performer_slots" type="number" min="1" required></label><label class="section">Формат<select name="format"><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section">Категория<select name="category_id"></select></label><label class="section">Название<input name="title" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать<textarea name="description" aria-label="Описание" required></textarea></label><label class="section">Критерии приёмки<textarea name="completion_criteria" aria-label="Критерии выполнения" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер<select name="time_size"></select></label><label class="section">Награда за исполнителя<input name="credit_reward_per_performer" aria-label="Награда" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок<input name="deadline_at" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text"></textarea><small>Ссылка или короткий текст</small></label><label class="section">Ссылка<input name="material_url" type="url"></label>';
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
+  let groupSlots = values.task_kind === "group" && Number(values.performer_slots) >= 2
+    ? Number(values.performer_slots) : 2;
   const syncTaskKind = () => {
+    const group = form.task_kind.value === "group";
     for (const button of form.querySelectorAll("[data-kind]")) {
       button.setAttribute("aria-pressed", String(button.dataset.kind === form.task_kind.value));
     }
-    submit.textContent = `Проверить ${form.task_kind.value === "group" ? "групповое" : "личное"} задание`;
+    form.performer_slots.disabled = !group;
+    form.performer_slots.min = group ? "2" : "1";
+    form.performer_slots.value = String(group ? groupSlots : 1);
+    updateReserve();
   };
   for (const button of form.querySelectorAll("[data-kind]")) {
     button.addEventListener("click", () => {
+      if (form.task_kind.value === "group" && Number(form.performer_slots.value) >= 2) {
+        groupSlots = Number(form.performer_slots.value);
+      }
       form.task_kind.value = button.dataset.kind;
       syncTaskKind();
     });
   }
-  for (const name of ["title", "description", "completion_criteria", "city"]) form[name].value = values[name] || "";
+  for (const name of ["title", "description", "completion_criteria"]) form[name].value = values[name] || "";
   form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
   form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
   const deadlineMin = new Date(Date.now() + 60_000);
@@ -589,9 +587,9 @@ function showTaskCreation(state, forceEdit = false) {
   form.performer_slots.value = values.performer_slots || 1;
   form.material_text.value = values.materials?.text || "";
   form.material_url.value = values.materials?.url || "";
-  const submit = element("button", "Предпросмотр", "primary");
+  const submit = element("button", "Предварительный просмотр", "primary");
   submit.type = "submit";
-  submit.setAttribute("aria-label", "Предпросмотр");
+  submit.setAttribute("aria-label", "Предварительный просмотр");
   const reserve = form.querySelector("[data-reserve]");
   const updateReserve = () => {
     const slots = Number(form.performer_slots.value || 0);
@@ -599,6 +597,11 @@ function showTaskCreation(state, forceEdit = false) {
     reserve.textContent = slots && reward ? `${slots * reward} кредитов` : "—";
   };
   form.performer_slots.addEventListener("input", updateReserve);
+  form.performer_slots.addEventListener("input", () => {
+    if (form.task_kind.value === "group" && Number(form.performer_slots.value) >= 2) {
+      groupSlots = Number(form.performer_slots.value);
+    }
+  });
   form.credit_reward_per_performer.addEventListener("input", updateReserve);
   const deadlineStatus = element("p", "Выберите будущий срок.", "status hidden");
   deadlineStatus.id = "deadline-status";
@@ -615,6 +618,74 @@ function showTaskCreation(state, forceEdit = false) {
   const saveStatus = element("p", "", "status hidden");
   saveStatus.setAttribute("aria-live", "polite");
   form.append(submit, saveStatus);
+  let selectedCity = values.format === "offline" ? values.city || "" : "";
+  let cityField = null;
+  let cityTimer = null;
+  const syncFormat = () => {
+    if (form.format.value !== "offline") {
+      selectedCity = "";
+      cityField?.remove();
+      cityField = null;
+      return;
+    }
+    if (cityField) return;
+    cityField = element("label", "Город", "section city-field");
+    const input = element("input");
+    input.name = "city";
+    input.autocomplete = "off";
+    input.placeholder = "Начните вводить город";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.required = true;
+    input.value = selectedCity;
+    const results = element("div", undefined, "city-results hidden");
+    results.id = "task-city-results";
+    results.setAttribute("role", "listbox");
+    input.setAttribute("aria-controls", results.id);
+    const choose = (item) => {
+      selectedCity = item.value;
+      input.value = item.label;
+      input.setCustomValidity("");
+      input.setAttribute("aria-expanded", "false");
+      results.classList.add("hidden");
+    };
+    input.addEventListener("input", () => {
+      selectedCity = "";
+      input.setCustomValidity("Выберите город из списка.");
+      clearTimeout(cityTimer);
+      const query = input.value.trim();
+      if (!query) {
+        results.classList.add("hidden");
+        input.setAttribute("aria-expanded", "false");
+        return;
+      }
+      cityTimer = setTimeout(async () => {
+        const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
+        if (!cityField?.isConnected || input.value.trim() !== query) return;
+        results.replaceChildren();
+        for (const item of response.items) {
+          const option = element("button", item.label, "city-option");
+          option.type = "button";
+          option.setAttribute("role", "option");
+          option.addEventListener("click", () => choose(item));
+          results.append(option);
+        }
+        results.classList.toggle("hidden", !response.items.length);
+        input.setAttribute("aria-expanded", String(Boolean(response.items.length)));
+      }, 200);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        results.querySelector("button")?.focus();
+      }
+    });
+    cityField.append(input, results);
+    form.querySelector("[data-format-row]").after(cityField);
+  };
+  form.format.addEventListener("change", syncFormat);
+  syncFormat();
   syncTaskKind();
   updateReserve();
   updateDeadlineValidity();
@@ -623,6 +694,9 @@ function showTaskCreation(state, forceEdit = false) {
     submit.disabled = true;
     saveStatus.classList.add("hidden");
     const value = Object.fromEntries(new FormData(form));
+    value.performer_slots = form.task_kind.value === "solo" ? "1" : form.performer_slots.value;
+    if (form.format.value === "offline") value.city = selectedCity;
+    else delete value.city;
     const materials = Object.fromEntries([["text", value.material_text], ["url", value.material_url]].filter(([, item]) => item));
     delete value.material_text;
     delete value.material_url;
@@ -642,8 +716,15 @@ function showTaskCreation(state, forceEdit = false) {
         presentationLocationFor("T06", target.id),
       );
       await openTaskCreation(false, "stale");
-    } catch {
-      saveStatus.textContent = "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
+    } catch (error) {
+      const city = form.querySelector('[name="city"]');
+      if (error.message === "invalid_task_city" && city) {
+        city.setCustomValidity("Выберите город из списка.");
+        city.reportValidity();
+      }
+      saveStatus.textContent = error.message === "invalid_task_city"
+        ? "Выберите город из списка."
+        : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
     }
@@ -785,89 +866,97 @@ const editableProfileFields = [
   ["availability", "Доступность"],
 ];
 
-function profileEditor(me, state, revision) {
-  const form = element("form", undefined, "task-form");
-  const fieldLabel = element("label", "Поле профиля");
-  const field = element("select");
-  for (const [value, label] of editableProfileFields) {
-    const option = element("option", label);
-    option.value = value;
-    field.append(option);
-  }
-  fieldLabel.append(field);
-  const valueLabel = element("label", "Новое значение");
-  const input = element("textarea");
-  const profileValue = (name) => Array.isArray(me[name])
-    ? me[name].join(", ")
-    : (me[name] ?? "");
-  const draft = state.profileEdit ||= {
-    field: field.value,
-    value: profileValue(field.value),
-    operationKey: null,
-    message: "",
-  };
-  field.value = draft.field;
-  input.value = draft.value;
-  valueLabel.append(input);
-  const save = element("button", "Сохранить поле", "primary");
-  save.type = "submit";
-  markTransition(save, "PE-063", "authoritative_profile_success");
-  const status = element("p", draft.message, draft.message ? "status" : "status hidden");
-  status.setAttribute("aria-live", "polite");
-  field.addEventListener("change", () => {
-    draft.field = field.value;
-    draft.value = profileValue(field.value);
-    draft.operationKey = null;
-    draft.message = "";
-    input.value = draft.value;
-  });
-  input.addEventListener("input", () => {
-    draft.value = input.value;
-    draft.operationKey = null;
-    draft.message = "";
-  });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    save.disabled = true;
-    status.className = "status";
-    status.textContent = "Сохраняем профиль…";
-    draft.message = status.textContent;
-    draft.operationKey ||= newOperationKey();
-    try {
-      const updated = await submissionRequest(
-        "/api/v1/me/profile",
-        "PUT",
-        draft.operationKey,
-        { field: draft.field, value: draft.value },
+const profileValue = (me, field) => Array.isArray(me[field])
+  ? me[field].join(", ")
+  : (me[field] ?? "");
+
+function profileFields(me, state, revision) {
+  const section = element("section", undefined, "profile-section profile-fields");
+  section.append(element("h3", "Параметры профиля", "section-label"));
+  const list = element("div", undefined, "profile-field-list");
+  for (const [field, label] of editableProfileFields) {
+    const draft = state.profileEdit?.field === field ? state.profileEdit : null;
+    if (!draft) {
+      const row = element("button", undefined, "profile-field-row");
+      row.type = "button";
+      row.append(
+        element("span", label),
+        element("strong", profileValue(me, field) || "Не указано"),
       );
-      if (revision !== screenRevision) return;
-      state.profile = { me: updated, member: state.profile.member };
+      row.addEventListener("click", () => {
+        state.profileEdit = {
+          field,
+          value: profileValue(me, field),
+          operationKey: null,
+          message: "",
+        };
+        showProfileState(state, revision);
+        content.querySelector(`[data-profile-field="${field}"]`)?.focus({ preventScroll: true });
+      });
+      list.append(row);
+      continue;
+    }
+    const form = element("form", undefined, "profile-field-editor");
+    const inputLabel = element("label", label, "visually-hidden");
+    const multiline = ["short_bio", "current_goal", "availability"].includes(field);
+    const input = element(multiline ? "textarea" : "input");
+    input.dataset.profileField = field;
+    input.value = draft.value;
+    inputLabel.append(input);
+    input.addEventListener("input", () => {
+      draft.value = input.value;
+      draft.operationKey = null;
+      draft.message = "";
+    });
+    const actions = element("div", undefined, "profile-field-actions");
+    const save = element("button", "Сохранить", "primary");
+    save.type = "submit";
+    markTransition(save, "PE-063", "authoritative_profile_success");
+    const cancel = element("button", "Отмена", "secondary");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => {
       state.profileEdit = null;
       showProfileState(state, revision);
+    });
+    actions.append(save, cancel);
+    const status = element("p", draft.message, draft.message ? "profile-field-status" : "hidden");
+    status.setAttribute("aria-live", "polite");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      save.disabled = true;
+      cancel.disabled = true;
+      status.className = "profile-field-status";
+      status.textContent = "Сохраняем…";
+      draft.operationKey ||= newOperationKey();
       try {
-        const member = await getJson(
-          "/api/v1/members/" + encodeURIComponent(updated.member_id),
+        const updated = await submissionRequest(
+          "/api/v1/me/profile",
+          "PUT",
+          draft.operationKey,
+          { field, value: draft.value },
         );
         if (revision !== screenRevision) return;
-        state.profile = { me: updated, member };
+        state.profile = { me: updated, member: state.profile.member };
+        state.profileEdit = null;
         showProfileState(state, revision);
-      } catch {
-        // The authoritative profile mutation already succeeded; keep its response.
+      } catch (error) {
+        if (revision !== screenRevision) return;
+        if (!retryableSubmissionError(error)) draft.operationKey = null;
+        draft.message = error?.status === 422
+          ? "Проверьте значение поля."
+          : error?.status === 409
+            ? "Значение уже изменилось. Повторите сохранение."
+            : "Не удалось сохранить. Повторите попытку — запрос останется тем же.";
+        status.textContent = draft.message;
+        save.disabled = false;
+        cancel.disabled = false;
       }
-    } catch (error) {
-      if (revision !== screenRevision) return;
-      if (!retryableSubmissionError(error)) draft.operationKey = null;
-      draft.message = error?.status === 422
-        ? "Проверьте значение поля."
-        : error?.status === 409
-          ? "Запрос изменился. Повторите сохранение."
-          : "Не удалось сохранить. Повторите попытку — запрос останется тем же.";
-      status.textContent = draft.message;
-      save.disabled = false;
-    }
-  });
-  form.append(fieldLabel, valueLabel, status, save);
-  return form;
+    });
+    form.append(inputLabel, actions, status);
+    list.append(form);
+  }
+  section.append(list);
+  return section;
 }
 
 function profileDetails(me, member, state, revision) {
@@ -882,12 +971,6 @@ function profileDetails(me, member, state, revision) {
     element("h2", me.display_name),
     element("p", me.level?.display_name ? `Уровень ${me.level.number} · ${me.level.display_name}` : "Профиль участника", "muted"),
   );
-  const settings = element("button", undefined, "secondary icon-action profile-edit-action");
-  settings.type = "button";
-  settings.setAttribute("aria-label", "Редактировать профиль");
-  settings.append(pencilIcon());
-  settings.addEventListener("click", () => openProfileSettings(me, state, revision));
-  identity.append(settings);
   const metrics = element("div", undefined, "metric-grid");
   for (const [value, label] of [
     [valueOrDash(me.credit_balance), "Кредиты"],
@@ -910,19 +993,8 @@ function profileDetails(me, member, state, revision) {
     row.append(element("span", label), element("strong", valueOrDash(value)));
     indicatorList.append(row);
   }
-  view.append(identity, metrics, indicators);
+  view.append(identity, metrics, indicators, profileFields(me, state, revision));
   return view;
-}
-
-function openProfileSettings(me, state, revision) {
-  history.pushState({ screen: "profile-settings" }, "", presentationLocationFor("P07"));
-  setNavigation("", true);
-  title.textContent = "Настройки профиля";
-  back.classList.remove("hidden");
-  const detail = element("section", undefined, "profile-settings");
-  detail.append(profileEditor(me, state, revision));
-  replaceContent(connectedBoundary("P07", "content", detail));
-  back.focus({ preventScroll: true });
 }
 
 function leaderboardDetails(items) {
@@ -1349,7 +1421,9 @@ function karmaForm(state, revision) {
       actionStatus.textContent = error?.status === 422
         ? "Комментарий должен содержать от 10 до 300 символов."
         : error?.status === 409
-          ? "Черновик изменился. Повторите сохранение."
+          ? draft.stage === "begin"
+            ? "Оценка сейчас недоступна. Повторите попытку."
+            : "Оценка изменилась в другом окне. Вернитесь к редактированию и повторите."
           : "Оценка недоступна или не удалось сохранить. Повторите попытку.";
       confirm.disabled = false;
       edit.disabled = false;
@@ -1490,31 +1564,27 @@ function showTaskDetail(task, push = true) {
   screenRevision += 1;
   returnFocusTaskId = task.id;
   setNavigation("", true);
+  shell.classList.add("task-detail-screen");
   title.textContent = "Карточка задания";
   back.classList.remove("hidden");
   if (push) history.pushState({ screen: "task", taskId: task.id }, "", presentationLocationFor("T03", task.id));
-  const detail = element("article", undefined, "card detail");
-  detail.append(element("h3", task.title), section("Автор", task.author_display_name));
-  if (task.category_name) detail.append(section("Категория", task.category_name));
-  if (task.task_kind) {
-    detail.append(section("Тип", ({ solo: "Личное", group: "Групповое" })[task.task_kind]));
-  }
-  detail.append(
-    dateSection("Срок", task.deadline_at),
-    section("Награда", String(task.credit_reward_per_performer) + " кредитов"),
-    section("Мест", String(task.performer_slots)),
-    section("Формат", ({ online: "Онлайн", offline: "Офлайн", any: "Любой" })[task.format]),
-  );
-  if (task.city) detail.append(section("Город", task.city));
-  detail.append(section("Описание", task.description));
-  detail.append(section("Критерии выполнения", task.completion_criteria));
-  detail.append(section("Как выполнять", task.performer_instructions));
-  for (const [key, value] of Object.entries(task.public_input)) {
-    detail.append(section(key, String(value)));
-  }
-  for (const value of Object.values(task.materials)) {
-    detail.append(section("Материал", value));
-  }
+  const detail = element("article", undefined, "card detail task-detail");
+  detail.append(element("h3", task.title, "task-detail-title"));
+  const chips = element("div", undefined, "card-chips");
+  if (task.category_name) chips.append(element("span", task.category_name, "chip muted-chip"));
+  if (task.task_kind) chips.append(element("span", ({ solo: "Личное", group: "Групповое" })[task.task_kind], "chip"));
+  chips.append(element("span", ({ online: "Онлайн", offline: "Офлайн", any: "Любой" })[task.format], "chip muted-chip"));
+  detail.append(chips);
+  const metadata = element("dl", undefined, "task-detail-meta");
+  const appendMeta = (label, value) => {
+    metadata.append(element("dt", label), element("dd", value));
+  };
+  appendMeta("Автор", task.author_display_name);
+  appendMeta("Срок", formatDate(task.deadline_at));
+  appendMeta("Награда", `${task.credit_reward_per_performer} кредитов`);
+  appendMeta("Мест", String(task.performer_slots));
+  if (task.city) appendMeta("Город", task.city);
+  detail.append(metadata);
   const status = element("p", "", "status hidden");
   status.setAttribute("aria-live", "polite");
   const accept = element("button", "Принять задание", "primary");
@@ -1540,7 +1610,15 @@ function showTaskDetail(task, push = true) {
       },
     });
   });
-  detail.append(status, accept);
+  detail.append(status, accept, section("Описание", task.description));
+  detail.append(section("Критерии выполнения", task.completion_criteria));
+  detail.append(section("Как выполнять", task.performer_instructions));
+  for (const [key, value] of Object.entries(task.public_input)) {
+    detail.append(section(key, String(value)));
+  }
+  for (const value of Object.values(task.materials)) {
+    detail.append(section("Материал", value));
+  }
   replaceContent(connectedBoundary("T03", "content", detail));
   back.focus({ preventScroll: true });
 }
@@ -1567,7 +1645,7 @@ async function acceptTask(task, button, status) {
   } catch (error) {
     status.textContent = error instanceof TypeError
       ? "Сеть недоступна. Повторите попытку — запрос останется тем же."
-      : "Задание сейчас недоступно. Вернитесь в каталог и попробуйте другое.";
+      : "Задание сейчас недоступно. Вернитесь к заданиям и попробуйте другое.";
     if (!retryableSubmissionError(error)) pendingAcceptKeys.delete(task.id);
     button.disabled = false;
   }
@@ -1587,6 +1665,8 @@ function showAssignments(revision = ++screenRevision) {
   const active = element("button", `В работе · ${assignments.length}`, "active-tab");
   active.type = "button";
   active.addEventListener("click", () => showTakenAssignments());
+  createdAssignmentsButton.classList.remove("active-tab");
+  createdAssignmentsButton.disabled = false;
   tabs.append(active, createdAssignmentsButton);
   boundary.append(tabs);
   if (!assignments.length) {
@@ -1619,6 +1699,8 @@ function showTakenAssignments() {
   const active = element("button", `В работе · ${assignments.length}`, "active-tab");
   active.type = "button";
   active.disabled = true;
+  createdAssignmentsButton.classList.remove("active-tab");
+  createdAssignmentsButton.disabled = false;
   tabs.append(active, createdAssignmentsButton);
   boundary.append(tabs);
   const list = element("ul", undefined, "list");
@@ -1697,8 +1779,8 @@ const createdTaskStatus = (value) => ({
   cancelled: "Отменено",
 }[value] || value);
 
-function showOwnedTask(task) {
-  history.pushState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
+function showOwnedTask(task, push = true) {
+  if (push) history.pushState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
   setNavigation("", true);
   title.textContent = "Созданное задание";
   back.classList.remove("hidden");
@@ -1711,79 +1793,176 @@ function showOwnedTask(task) {
   for (const assignee of task.assignees) {
     detail.append(section(assignee.display_name, assignmentStatus(assignee.status)));
   }
+  if (task.cancellation_action) {
+    const cancel = element(
+      "button",
+      task.cancellation_action === "request" ? "Запросить отмену" : "Отменить задание",
+      "secondary danger",
+    );
+    cancel.type = "button";
+    cancel.addEventListener("click", () => confirmOwnedTaskCancellation(task));
+    detail.append(cancel);
+  } else if (task.cancellation_status === "pending") {
+    detail.append(element("p", "Запрос на отмену ожидает ответа исполнителей.", "status muted"));
+  }
   replaceContent(connectedBoundary("M10", "content", detail));
   back.focus({ preventScroll: true });
 }
 
+function confirmOwnedTaskCancellation(task) {
+  let operationKey = null;
+  showActionConfirmation({
+    screenId: "M10",
+    headingText: task.cancellation_action === "request" ? "Запросить отмену" : "Отменить задание",
+    description: task.cancellation_action === "request"
+      ? "Набор новых исполнителей закроется, а текущие получат запрос на отмену."
+      : "Задание будет отменено, зарезервированные кредиты вернутся.",
+    confirmLabel: task.cancellation_action === "request" ? "Отправить запрос" : "Отменить задание",
+    onEdit: () => showOwnedTask(task, false),
+    onConfirm: async ({ confirm, edit, status }) => {
+      confirm.disabled = true;
+      edit.disabled = true;
+      status.className = "status";
+      status.textContent = "Применяем отмену…";
+      operationKey ||= newOperationKey();
+      try {
+        const response = await apiFetch(
+          "/api/v1/owned-tasks/" + encodeURIComponent(task.id) + "/cancellation",
+          {
+            method: "POST",
+            headers: { "Idempotency-Key": operationKey },
+            credentials: "same-origin",
+          },
+        );
+        const outcome = await submissionResponse(response);
+        task.cancellation_action = null;
+        task.cancellation_status = outcome.status === "pending" ? "pending" : null;
+        task.status = outcome.status === "cancelled" ? "cancelled" : task.status;
+        history.replaceState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
+        showOwnedTask(task, false);
+        const message = outcome.status === "pending"
+          ? "Запрос на отмену отправлен исполнителям."
+          : "Задание отменено.";
+        content.querySelector(".detail")?.append(element("p", message, "status success"));
+      } catch (error) {
+        status.textContent = error?.status === 409
+          ? "Отмена больше недоступна для текущего состояния задания."
+          : "Не удалось применить отмену. Повторите запрос.";
+        if (!retryableSubmissionError(error)) operationKey = null;
+        confirm.disabled = false;
+        edit.disabled = false;
+      }
+    },
+  });
+}
+
+function renderCreatedAssignments(revision) {
+  if (revision !== screenRevision) return;
+  setNavigation("assignments", false);
+  title.textContent = "Мои задания";
+  back.classList.add("hidden");
+  const boundary = connectedBoundary("M09", "content");
+  boundary.classList.add("owned-tasks-view");
+  const tabs = element("div", undefined, "segmented root-tabs");
+  let focusTarget = null;
+  const active = element("button", `В работе · ${assignments.length}`);
+  active.type = "button";
+  active.addEventListener("click", () => showTakenAssignments());
+  createdAssignmentsButton.classList.add("active-tab");
+  createdAssignmentsButton.disabled = true;
+  tabs.append(active, createdAssignmentsButton);
+  boundary.append(tabs);
+  if (!ownedTasks.length) {
+    boundary.append(element("p", "Созданных заданий пока нет.", "compact-empty"));
+  } else {
+    const list = element("ul", undefined, "list owned-task-list");
+    for (const task of ownedTasks) {
+      const card = element("button", undefined, "card owned-task-card");
+      card.type = "button";
+      const chips = element("div", undefined, "card-chips");
+      chips.append(element("span", createdTaskStatus(task.status), "chip muted-chip"));
+      if (task.cancellation_status === "pending") {
+        chips.append(element("span", "Отмена ожидает", "chip"));
+      }
+      card.append(
+        chips,
+        element("h3", task.title),
+        element(
+          "p",
+          `Исполнители ${task.assignees.length}/${task.performer_slots} · ${formatDate(task.deadline_at)}`,
+          "meta",
+        ),
+      );
+      card.addEventListener("click", () => {
+        returnFocusOwnedTaskId = task.id;
+        const screen = content.closest(".screen");
+        history.replaceState(
+          { ...history.state, scrollTop: screen?.scrollTop || 0 },
+          "",
+          location.href,
+        );
+        showOwnedTask(task);
+      });
+      if (task.id === returnFocusOwnedTaskId) focusTarget = card;
+      const item = element("li");
+      item.append(card);
+      list.append(item);
+    }
+    boundary.append(list);
+  }
+  if (ownedReviews.length) {
+    const reviewList = element("ul", undefined, "list owned-review-list");
+    for (const review of ownedReviews) {
+      const button = element("button", undefined, "card owned-task-card");
+      button.type = "button";
+      button.append(
+        element("span", "Ожидает проверки", "chip"),
+        element("h3", review.task_title),
+        element("p", "Исполнитель: " + review.performer_display_name, "meta"),
+      );
+      button.addEventListener("click", () => showCreatedReview(review.id));
+      if (review.id === returnFocusReviewId) focusTarget = button;
+      const item = element("li");
+      item.append(button);
+      reviewList.append(item);
+    }
+    boundary.append(reviewList);
+  }
+  replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
+  returnFocusOwnedTaskId = null;
+  returnFocusReviewId = null;
+  const scrollTop = Number(history.state?.scrollTop || 0);
+  if (scrollTop) queueMicrotask(() => content.closest(".screen")?.scrollTo({ top: scrollTop }));
+}
+
 async function loadCreatedReviews(push = true) {
   const revision = ++screenRevision;
-  if (push) history.pushState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
-  setNavigation("assignments", true);
-  title.textContent = "Созданные мной";
-  back.classList.remove("hidden");
-  replaceContent(element("p", "Загружаем созданные задания…", "status muted"));
+  if (push) history.replaceState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
+  const ownedPath = "/api/v1/owned-tasks";
+  const reviewsPath = "/api/v1/assignment-reviews";
+  const cachedOwned = cachedJson(ownedPath);
+  const cachedReviews = cachedJson(reviewsPath);
+  if (cachedOwned && cachedReviews) {
+    ownedTasks = cachedOwned.items;
+    ownedReviews = cachedReviews.items;
+    renderCreatedAssignments(revision);
+  } else {
+    setNavigation("assignments", false);
+    title.textContent = "Мои задания";
+    back.classList.add("hidden");
+    replaceContent(element("p", "Загружаем созданные задания…", "status muted"));
+  }
   try {
     const [owned, reviews] = await Promise.all([
-      getJson("/api/v1/owned-tasks"),
-      getJson("/api/v1/assignment-reviews"),
+      getJson(ownedPath),
+      getJson(reviewsPath),
     ]);
     if (revision !== screenRevision) return;
-    const nodes = [element("h3", "Мои опубликованные задания")];
-    if (!owned.items.length) {
-      nodes.push(element("p", "Созданных заданий пока нет.", "status muted"));
-    } else {
-      const ownedList = element("ul", undefined, "list");
-      for (const task of owned.items) {
-        const card = element("button", undefined, "card");
-        card.type = "button";
-        card.append(
-          element("h3", task.title),
-          element("p", createdTaskStatus(task.status), "muted"),
-          element(
-            "p",
-            "Исполнители: " + String(task.assignees.length) + "/" + String(task.performer_slots),
-            "meta",
-          ),
-        );
-        for (const assignee of task.assignees) {
-          card.append(element(
-            "p",
-            assignee.display_name + " · " + assignmentStatus(assignee.status),
-            "muted",
-          ));
-        }
-        card.addEventListener("click", () => showOwnedTask(task));
-        const item = element("li");
-        item.append(card);
-        ownedList.append(item);
-      }
-      nodes.push(ownedList);
-    }
-    nodes.push(element("h3", "Результаты на проверку"));
-    if (!reviews.items.length) {
-      nodes.push(element("p", "Результатов, ожидающих решения, пока нет.", "status muted"));
-    } else {
-      const reviewList = element("ul", undefined, "list");
-      for (const review of reviews.items) {
-        const button = element("button", undefined, "card");
-        button.type = "button";
-        button.append(
-          element("h3", review.task_title),
-          element("p", "Исполнитель: " + review.performer_display_name, "muted"),
-          element("p", review.result, "muted"),
-        );
-        button.addEventListener("click", () => showCreatedReview(review.id));
-        if (review.id === returnFocusReviewId) {
-          queueMicrotask(() => button.focus({ preventScroll: true }));
-        }
-        const item = element("li");
-        item.append(button);
-        reviewList.append(item);
-      }
-      nodes.push(reviewList);
-    }
-    returnFocusReviewId = null;
-    replaceContent(connectedBoundary("M09", "content", ...nodes));
+    if (cachedOwned && cachedReviews) return;
+    ownedTasks = owned.items;
+    ownedReviews = reviews.items;
+    renderCreatedAssignments(revision);
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
@@ -2605,7 +2784,7 @@ async function bootstrap(authAttempted = false) {
       showCatalogFilters(false);
     } else if (presentationId === "T04B") {
       beginTaskCreationFlow(false);
-    } else if (["T05", "T06", "T07", "T08"].includes(presentationId)) {
+    } else if (["T05", "T06", "T08"].includes(presentationId)) {
       const forceEdit = presentationId === "T05";
       const screenId = forceEdit ? "T05" : "T06";
       history.replaceState(
@@ -2651,7 +2830,7 @@ async function bootstrap(authAttempted = false) {
     replaceContent(
       element(
         "p",
-        "Не удалось загрузить каталог. Откройте Mini App ещё раз.",
+        "Не удалось загрузить задания. Откройте Mini App ещё раз.",
         "status",
       ),
     );

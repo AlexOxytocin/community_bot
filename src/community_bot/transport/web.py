@@ -35,6 +35,7 @@ from community_bot.application.assignments import (
     DecideAssignmentCommand,
     SaveSubmissionDraftCommand,
 )
+from community_bot.application.cities import TaskCityError, search_task_cities
 from community_bot.application.identity import ActorContext
 from community_bot.application.moderation import (
     ModerationApplicationError,
@@ -100,6 +101,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "invalid_idempotency_key",
         "invalid_origin",
         "invalid_request",
+        "invalid_task_city",
         "karma_vote_unavailable",
         "not_found",
         "profile_unavailable",
@@ -235,6 +237,11 @@ class OwnedTaskDto(_Dto):
     deadline_at: datetime.datetime
     assignees: tuple[OwnedTaskAssigneeDto, ...]
     cancellation_status: str | None
+    cancellation_action: Literal["cancel", "request"] | None
+
+
+class OwnedTaskCancellationDto(_Dto):
+    status: Literal["cancelled", "pending", "closed", "declined", "obsolete"]
 
 
 class OwnedTasksDto(_Dto):
@@ -759,6 +766,20 @@ def create_web_app(
             }
         )
 
+    @app.get("/api/v1/task-cities")
+    async def task_cities(
+        q: Annotated[str, Query(max_length=80)] = "",
+        limit: Annotated[int, Query(ge=1, le=10)] = 8,
+        _actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        return _json_response(
+            {
+                "items": [
+                    {"value": item, "label": item} for item in search_task_cities(q, limit=limit)
+                ]
+            }
+        )
+
     @app.post("/api/v1/task-creation")
     async def change_task_creation(request: Request) -> Response:
         _require_origin(request, origin)
@@ -829,6 +850,8 @@ def create_web_app(
                     )
                 )
                 return _json_response({"task_id": str(published.id)})
+        except TaskCityError:
+            return _error_response(422, "invalid_task_city")
         except (TaskError, LookupError, PermissionError):
             return _error_response(409, "task_catalog_unavailable")
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
@@ -840,6 +863,33 @@ def create_web_app(
         except PermissionError:
             return _error_response(403, "task_catalog_unavailable")
         return _json_response(OwnedTasksDto(items=tuple(_owned_task_dto(card) for card in cards)))
+
+    @app.post(
+        "/api/v1/owned-tasks/{task_id}/cancellation",
+        response_model=OwnedTaskCancellationDto,
+    )
+    async def cancel_owned_task(task_id: UUID, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        operation_key = _idempotency_key(request)
+        if await request.body():
+            return _error_response(422, "invalid_request")
+        update_id = _submission_update_id(
+            actor.member_id,
+            task_id,
+            "cancel",
+            operation_key,
+            namespace=b"owned-task-cancellation-v1",
+        )
+        try:
+            outcome = await tasks.request_cancellation(
+                update_id=update_id,
+                actor=actor,
+                task_id=task_id,
+            )
+        except (TaskError, LookupError, PermissionError):
+            return _error_response(409, "task_cancellation_unavailable")
+        return _json_response(OwnedTaskCancellationDto(status=outcome.status))
 
     @app.get("/api/v1/leaderboard", response_model=LeaderboardDto)
     async def leaderboard(
@@ -1658,6 +1708,7 @@ def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
             for item in card.assignees
         ),
         cancellation_status=card.cancellation_status,
+        cancellation_action=card.cancellation_action,
     )
 
 

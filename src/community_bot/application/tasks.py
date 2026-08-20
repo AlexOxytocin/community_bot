@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
+from community_bot.application.cities import canonical_task_city
 from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.catalog import TaskFormat, validate_payload
 from community_bot.domain.economy import ResolvedLevel, refund_reward, reserve_reward
@@ -49,6 +50,7 @@ _MAX_OWNED_TASKS = 20
 _MAX_AVAILABLE_TASKS = 10
 _MAX_COMMUNITY_PUBLICATION_REQUESTS = 20
 _FORMAT_VALUE_SIZE = 2
+TaskCancellationStatus = Literal["cancelled", "pending", "closed", "declined", "obsolete"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +171,7 @@ class OwnedTaskCard:
     task: PublishedTask
     assignees: tuple[OwnedTaskAssignee, ...]
     cancellation_status: str | None
+    cancellation_action: Literal["cancel", "request"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +194,7 @@ class TaskCancellationOutcome:
 
     task: PublishedTask
     request_id: UUID | None
-    status: str
+    status: TaskCancellationStatus
     reason: str | None = None
 
 
@@ -441,6 +444,23 @@ class TaskUnitOfWorkFactory(Protocol):  # pragma: no cover - structural typing c
     def __call__(self) -> AbstractAsyncContextManager[TaskUnitOfWork]: ...
 
 
+def _owned_cancellation_action(
+    card: OwnedTaskCard, now: datetime.datetime
+) -> Literal["cancel", "request"] | None:
+    """Project the existing cancellation command selected by the task engine."""
+    task = card.task
+    if (
+        card.cancellation_status == "pending"
+        or task.deadline_at <= now
+        or task.status not in {TaskStatus.PUBLISHED, TaskStatus.PARTIALLY_COMPLETED}
+    ):
+        return None
+    occupied = len(card.assignees)
+    if task.status is TaskStatus.PARTIALLY_COMPLETED and occupied >= task.performer_slots:
+        return None
+    return "request" if occupied else "cancel"
+
+
 class TaskService:
     """Coordinate persistent drafts, publication, ownership, and cancellation."""
 
@@ -510,6 +530,10 @@ class TaskService:
                         template_id=None,
                         origin=origin,
                     )
+                    if actor_member_id is not None:
+                        draft = await uow.save_task_draft(
+                            _replace_draft(draft, format=TaskFormat.ONLINE)
+                        )
                 outcome = f"task_draft:{draft.id}"
             else:
                 await uow.acquire_catalog_mutation_gate()
@@ -596,8 +620,11 @@ class TaskService:
             category = await uow.task_category_for_creation(
                 category_id=command.category_id, actor_role=actor.role
             )
+            requested_city = (
+                canonical_task_city(command.city) if command.format is TaskFormat.OFFLINE else None
+            )
             task_format, city = validate_task_format(
-                command.format, template_format=TaskFormat.ANY, city=command.city
+                command.format, template_format=TaskFormat.ANY, city=requested_city
             )
             candidate = _replace_draft(
                 draft,
@@ -1320,7 +1347,7 @@ class TaskService:
                 if actor is not None
                 else await _active_actor(uow, cast("int", actor_telegram_user_id))
             )
-            return await uow.list_owned_task_cards(
+            cards = await uow.list_owned_task_cards(
                 creator_id=member.id,
                 limit=limit,
                 status=status,
@@ -1328,6 +1355,11 @@ class TaskService:
                 before_id=None if cursor is None else cursor[1],
                 creator_only=creator_only,
                 order_by_updated_at=order_by_updated_at,
+            )
+            now = _utc_now()
+            return tuple(
+                replace(card, cancellation_action=_owned_cancellation_action(card, now))
+                for card in cards
             )
 
     async def owned_card(self, *, actor_telegram_user_id: int, task_id: UUID) -> OwnedTaskCard:
@@ -1428,15 +1460,33 @@ class TaskService:
             await _finish_receipt(uow, update_id, actor, f"task:{task.id}")
             return task
 
-    async def request_cancellation(
-        self, *, update_id: int, actor_telegram_user_id: int, task_id: UUID
+    async def request_cancellation(  # noqa: PLR0915 - existing exact cancellation transaction.
+        self,
+        *,
+        update_id: int,
+        task_id: UUID,
+        actor_telegram_user_id: int | None = None,
+        actor: ActorContext | None = None,
     ) -> TaskCancellationOutcome:
         """Close performer intake and ask accepted performers for cancellation consent."""
+        if (actor_telegram_user_id is None) == (actor is None):
+            raise TaskError("Exactly one task actor identity is required.")
         async with self._unit_of_work_factory() as uow:
             replay = await _begin_update(uow, update_id)
             if replay is not None:
-                return await _cancellation_outcome_from_receipt(uow, replay)
-            await uow.acquire_task_identity_gate(actor_telegram_user_id)
+                outcome = await _cancellation_outcome_from_receipt(uow, replay)
+                if actor is not None:
+                    replay_actor = await _active_context_actor(uow, actor)
+                    await uow.ensure_task_test_access(
+                        task_id=outcome.task.id, member_id=replay_actor.id
+                    )
+                return outcome
+            member = (
+                await _active_context_actor(uow, actor)
+                if actor is not None
+                else await _active_actor(uow, cast("int", actor_telegram_user_id))
+            )
+            await uow.acquire_task_identity_gate(member.telegram_user_id)
             preliminary = await uow.get_task(task_id)
             if preliminary is None:
                 raise TaskError("Task does not exist.")
@@ -1445,11 +1495,11 @@ class TaskService:
             task = await uow.lock_task(task_id)
             if task is None or task.creator_id is None:
                 raise PermissionError("Only the member task creator can cancel this task.")
-            actor = await _active_actor(uow, actor_telegram_user_id)
-            if actor.id != task.creator_id:
+            if member.id != task.creator_id:
                 raise PermissionError("Only the task creator can cancel this task.")
+            await uow.ensure_task_test_access(task_id=task.id, member_id=member.id)
             if task.status is TaskStatus.CANCELLED:
-                await _finish_receipt(uow, update_id, actor, f"task_cancelled:{task.id}")
+                await _finish_receipt(uow, update_id, member, f"task_cancelled:{task.id}")
                 return TaskCancellationOutcome(task, None, "cancelled")
             if task.status not in {TaskStatus.PUBLISHED, TaskStatus.PARTIALLY_COMPLETED}:
                 raise TaskError("Task cannot be cancelled from its current state.")
@@ -1466,7 +1516,7 @@ class TaskService:
                 prepared = await uow.economy.prepare_batch(
                     (
                         refund_reward(
-                            member_id=actor.id,
+                            member_id=member.id,
                             amount=task.reserved_credit_total,
                             idempotency_key=f"task_cancel:{task.id}:refund",
                         ),
@@ -1480,13 +1530,13 @@ class TaskService:
                     business_key=f"task.cancelled:{task.id}",
                 )
                 await uow.append_audit_event(
-                    actor_member_id=actor.id,
+                    actor_member_id=member.id,
                     action="task_cancelled",
                     entity_type="task",
                     entity_id=str(task.id),
                     reason="assignment_slots_released",
                 )
-                await _finish_receipt(uow, update_id, actor, f"task_cancelled:{task.id}")
+                await _finish_receipt(uow, update_id, member, f"task_cancelled:{task.id}")
                 return TaskCancellationOutcome(task, None, "cancelled")
             pending = await uow.get_pending_task_cancellation(task.id)
             if pending is not None:
@@ -1495,7 +1545,7 @@ class TaskService:
                 prepared = await uow.economy.prepare_batch(
                     (
                         refund_reward(
-                            member_id=actor.id,
+                            member_id=member.id,
                             amount=free_slots * task.credit_reward_per_performer,
                             idempotency_key=f"task_close:{task.id}:free_slots:refund",
                         ),
@@ -1507,26 +1557,26 @@ class TaskService:
             request_id = (
                 await uow.create_task_cancellation(
                     task_id=task.id,
-                    creator_id=actor.id,
+                    creator_id=member.id,
                     assignments=accepted,
                 )
                 if accepted
                 else None
             )
             await uow.append_audit_event(
-                actor_member_id=actor.id,
+                actor_member_id=member.id,
                 action="task_intake_closed",
                 entity_type="task",
                 entity_id=str(task.id),
                 reason="creator_closed_group_intake",
             )
             if request_id is None:
-                await _finish_receipt(uow, update_id, actor, f"task_closed:{task.id}")
+                await _finish_receipt(uow, update_id, member, f"task_closed:{task.id}")
                 return TaskCancellationOutcome(task, None, "closed")
             await _finish_receipt(
                 uow,
                 update_id,
-                actor,
+                member,
                 f"task_cancel_request:{task.id}:{request_id}",
             )
             return TaskCancellationOutcome(task, request_id, "pending")
@@ -1752,7 +1802,7 @@ async def _begin_update(uow: TaskUnitOfWork, update_id: int) -> str | None:
 async def _cancellation_outcome_from_receipt(
     uow: TaskUnitOfWork, outcome: str
 ) -> TaskCancellationOutcome:
-    statuses = {
+    statuses: dict[str, TaskCancellationStatus] = {
         "task_cancelled:": "cancelled",
         "task_closed:": "closed",
         "task_cancel_pending:": "pending",

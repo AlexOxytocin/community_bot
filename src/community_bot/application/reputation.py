@@ -198,6 +198,9 @@ class ReputationUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def lock_members(self, member_ids: tuple[UUID, ...]) -> dict[UUID, Member]: ...
     async def karma_eligible(self, first_id: UUID, second_id: UUID) -> bool: ...
     async def get_karma_draft(self, member_id: UUID, *, for_update: bool) -> KarmaDraft | None: ...
+    async def clear_text_flow(
+        self, *, member_id: UUID, flow_type: str, reference_id: UUID | None = None
+    ) -> bool: ...
     async def begin_karma_draft(self, member_id: UUID, target_id: UUID) -> KarmaDraft: ...
     async def save_karma_draft(
         self,
@@ -307,6 +310,8 @@ class ReputationService:
             require_karma_actor(
                 actor, target, eligible=await uow.karma_eligible(actor.id, target.id)
             )
+            if actor_member_id is not None:
+                await uow.clear_text_flow(member_id=actor.id, flow_type="profile_edit")
             draft = await uow.begin_karma_draft(actor.id, target.id)
             outcome = (
                 _web_draft_outcome("begin", actor.id, draft, replay_fingerprint)
