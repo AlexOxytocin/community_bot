@@ -1,0 +1,18 @@
+{
+  "schema": "community_bot.ui_base_snapshot.v3",
+  "issue": "CB-96",
+  "checked_at": "2026-08-19",
+  "base_sha": "949c837dccaea9c3549737d6f14e782947a291ff",
+  "scope": "static_ui_and_browser_tests_only",
+  "open_pull_requests": [],
+  "refresh_gates": [
+    "before first runtime edit",
+    "after every origin/main rebase",
+    "before final review"
+  ],
+  "stop_on": [
+    "conflict in transport/static or browser test paths",
+    "new backend/API/schema/dependency change required",
+    "manifest counts or transition references diverge"
+  ]
+}
