@@ -56,7 +56,7 @@ const replaceContent = (...nodes) => {
 };
 
 const connectedScreenIds = new Set(`
-T01 T02 T03 T03A T04 T04A T05 T06 T07 T08
+T01 T02 T03 T03A T04B T05 T06 T07 T08
 P01 P02 P03 P04 P05 P06 P07
 M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15
 S01 S02 S03 S04
@@ -406,9 +406,8 @@ async function taskCreationCommand(body) {
   }
 }
 
-function showTaskCreation(state, preferredKind = null, forceEdit = false) {
-  const draft = state.draft;
-  if (!draft) return replaceContent(element("p", "Черновик недоступен.", "status"));
+function showTaskCreation(state, forceEdit = false) {
+  let draft = state.draft || { id: null, revision: 0, values: {} };
   if (!forceEdit && state.preview && !state.needs_edit) {
     const card = element("article", undefined, "card detail");
     card.append(element("h3", state.preview.title), section("Описание", state.preview.description));
@@ -463,7 +462,6 @@ function showTaskCreation(state, preferredKind = null, forceEdit = false) {
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
-  if (!values.task_kind && preferredKind) form.task_kind.value = preferredKind;
   const syncTaskKind = () => {
     for (const button of form.querySelectorAll("[data-kind]")) {
       button.setAttribute("aria-pressed", String(button.dataset.kind === form.task_kind.value));
@@ -523,82 +521,120 @@ function showTaskCreation(state, preferredKind = null, forceEdit = false) {
     delete value.material_text;
     delete value.material_url;
     try {
-      await taskCreationCommand({ action: "save", draft_id: draft.id, expected_revision: draft.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
+      let target = draft;
+      if (!target.id) {
+        await taskCreationCommand({ action: "start" });
+        const started = await getJson("/api/v1/task-creation");
+        if (!started.draft) throw new Error("task_draft_unavailable");
+        draft = started.draft;
+        target = draft;
+      }
+      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
       history.pushState(
-        { screen: "task-preview", draftId: draft.id },
+        { screen: "task-preview", draftId: target.id },
         "",
-        presentationLocationFor("T06", draft.id),
+        presentationLocationFor("T06", target.id),
       );
-      await openTaskCreation(false, false, preferredKind);
+      await openTaskCreation(false, "stale");
     } catch {
       saveStatus.textContent = "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
     }
   });
-  replaceContent(connectedBoundary(
-    "T05",
-    state.needs_edit ? "error" : "content",
-    ...(state.needs_edit ? [element("p", "Предпросмотр устарел. Обновите данные.", "status")] : []),
-    form,
-  ));
+  replaceContent(connectedBoundary("T05", "content", form));
+}
+
+function showTaskRecovery(state) {
+  const draft = state.draft;
+  const card = element("article", undefined, "card detail");
+  card.append(element("h3", draft.values.title || "Сохранённый черновик"));
+  if (state.needs_edit) {
+    card.append(element("p", "Предпросмотр устарел. Исправьте срок или другие поля.", "status"));
+  } else {
+    card.append(element("p", "Можно продолжить с сохранёнными данными.", "muted"));
+  }
+  const resume = element("button", state.needs_edit ? "Редактировать черновик" : "Продолжить", "primary");
+  resume.type = "button";
+  resume.addEventListener("click", async () => {
+    resume.disabled = true;
+    restart.disabled = true;
+    recoveryStatus.classList.add("hidden");
+    try {
+      const current = await getJson("/api/v1/task-creation");
+      pendingTaskCreation = null;
+      const preview = Boolean(current.preview && !current.needs_edit);
+      history.pushState(
+        { screen: preview ? "task-preview" : "task-creation", draftId: current.draft?.id || null },
+        "",
+        presentationLocationFor(preview ? "T06" : "T05", current.draft?.id),
+      );
+      showTaskCreation(current, !preview);
+    } catch {
+      resume.disabled = false;
+      restart.disabled = false;
+      recoveryStatus.textContent = "Не удалось обновить черновик. Повторите запрос.";
+      recoveryStatus.classList.remove("hidden");
+    }
+  });
+  const restart = element("button", "Создать новое", "secondary");
+  restart.type = "button";
+  const recoveryStatus = element("p", "", "status hidden");
+  recoveryStatus.setAttribute("aria-live", "polite");
+  restart.addEventListener("click", async () => {
+    restart.disabled = true;
+    resume.disabled = true;
+    let created = false;
+    try {
+      await taskCreationCommand({ action: "start_new", draft_id: draft.id, expected_revision: draft.revision });
+      created = true;
+      const fresh = await getJson("/api/v1/task-creation");
+      history.pushState(
+        { screen: "task-creation", draftId: fresh.draft?.id || null },
+        "",
+        presentationLocationFor("T05", fresh.draft?.id),
+      );
+      showTaskCreation(fresh, true);
+    } catch {
+      restart.disabled = created;
+      resume.disabled = false;
+      recoveryStatus.textContent = created
+        ? "Новый черновик создан. Обновите данные через редактирование."
+        : "Не удалось создать новый черновик. Повторите запрос.";
+      recoveryStatus.classList.remove("hidden");
+    }
+  });
+  card.append(resume, restart, recoveryStatus);
+  replaceContent(connectedBoundary("T04B", state.needs_edit ? "error" : "content", card));
 }
 
 function beginTaskCreationFlow(push = true) {
   screenRevision += 1;
-  const nextState = { screen: "task-creation-path" };
-  if (push) history.pushState(nextState, "", presentationLocationFor("T04"));
-  else history.replaceState(nextState, "", presentationLocationFor("T04"));
-  setNavigation("", true);
-  title.textContent = "Новое задание";
-  back.classList.remove("hidden");
-  const card = element("article", undefined, "card detail");
-  card.append(element("h3", "Кто будет выполнять?"));
-  for (const [label, kind] of [["Один участник", "solo"], ["Несколько участников", "group"]]) {
-    const choice = element("button", label, kind === "solo" ? "primary" : "secondary");
-    choice.type = "button";
-    choice.addEventListener("click", () => showTaskSourceChoice(kind));
-    card.append(choice);
-  }
-  replaceContent(connectedBoundary("T04", "content", card));
-}
-
-function showTaskSourceChoice(kind) {
-  history.replaceState({ screen: "task-creation-source", kind }, "", presentationLocationFor("T04A"));
-  title.textContent = "Основа задания";
-  const card = element("article", undefined, "card detail");
-  card.append(element("h3", "Создать без шаблона"), element("p", "Шаблоны сервера не подключены; используем поля текущего API.", "muted"));
-  const blank = element("button", "Без шаблона", "primary");
-  blank.type = "button";
-  blank.addEventListener("click", () => openTaskCreation(true, false, kind));
-  const drafts = element("button", "Черновики", "secondary");
-  drafts.type = "button";
-  drafts.addEventListener("click", () => {
-    history.replaceState({ screen: "task-creation-drafts", kind }, "", presentationLocationFor("T04B"));
-    title.textContent = "Черновики";
-    replaceContent(connectedBoundary("T04B", "loading", element("p", "Проверяем сохранённый черновик…", "status muted")));
-    void openTaskCreation(false, false, kind);
-  });
-  card.append(blank, drafts);
-  replaceContent(connectedBoundary("T04A", "content", card));
-}
-
-async function openTaskCreation(start, push = true, preferredKind = null, forceEdit = false) {
   if (push) {
-    history.pushState(
-      { screen: "task-creation", draftId: null },
-      "",
-      presentationLocationFor("T05"),
-    );
+    history.pushState({ screen: "task-creation-entry" }, "", presentationLocationFor("T05"));
+  } else {
+    history.replaceState({ screen: "task-creation-entry" }, "", presentationLocationFor("T05"));
   }
+  void openTaskCreation(false, "entry");
+}
+
+async function openTaskCreation(forceEdit = false, recovery = null) {
   setNavigation("", true);
   title.textContent = "Создать задание";
   back.classList.remove("hidden");
   replaceContent(element("p", "Загружаем черновик…", "status muted"));
   try {
-    if (start) await taskCreationCommand({ action: "start" });
     const state = await getJson("/api/v1/task-creation");
     const draftId = state.draft?.id;
+    if (draftId && (recovery === "entry" || (recovery === "stale" && state.needs_edit))) {
+      history.replaceState(
+        { screen: "task-recovery", draftId },
+        "",
+        presentationLocationFor("T04B", draftId),
+      );
+      showTaskRecovery(state);
+      return;
+    }
     if (draftId) {
       const screenId = !forceEdit && state.preview && !state.needs_edit ? "T06" : "T05";
       history.replaceState(
@@ -607,7 +643,7 @@ async function openTaskCreation(start, push = true, preferredKind = null, forceE
         presentationLocationFor(screenId, draftId),
       );
     }
-    showTaskCreation(state, preferredKind, forceEdit);
+    showTaskCreation(state, forceEdit);
   } catch { replaceContent(element("p", "Не удалось открыть создание задания.", "status")); }
 }
 
@@ -2406,11 +2442,8 @@ async function bootstrap(authAttempted = false) {
     const resourceId = initialPresentation?.resourceId;
     if (presentationId === "T02") {
       showCatalogFilters(false);
-    } else if (presentationId === "T04") {
+    } else if (presentationId === "T04B") {
       beginTaskCreationFlow(false);
-    } else if (presentationId === "T04A") {
-      beginTaskCreationFlow(false);
-      showTaskSourceChoice("solo");
     } else if (["T05", "T06", "T07", "T08"].includes(presentationId)) {
       const forceEdit = presentationId === "T05";
       const screenId = forceEdit ? "T05" : "T06";
@@ -2419,7 +2452,7 @@ async function bootstrap(authAttempted = false) {
         "",
         presentationLocationFor(screenId, resourceId),
       );
-      openTaskCreation(false, false, null, forceEdit);
+      openTaskCreation(forceEdit, forceEdit ? null : "stale");
     } else if (presentationId === "P01" || presentationId === "P05") {
       loadParticipants(presentationId === "P05" ? "leaderboard" : "members");
     } else if (presentationId === "P06" || presentationId === "P07") {
@@ -2507,9 +2540,11 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "moderation-case") {
     showModerationCase(event.state.caseId, false);
   } else if (event.state?.screen === "task-creation") {
-    openTaskCreation(false, false, null, true);
+    openTaskCreation(true);
+  } else if (event.state?.screen === "task-recovery") {
+    beginTaskCreationFlow(false);
   } else if (event.state?.screen === "task-preview") {
-    openTaskCreation(false, false);
+    openTaskCreation(false, "stale");
   } else {
     showCatalog();
   }

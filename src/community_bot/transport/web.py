@@ -392,7 +392,7 @@ class TaskFormRequest(_Dto):
 
 
 class TaskCreationRequest(_Dto):
-    action: Literal["start", "save", "publish"]
+    action: Literal["start", "start_new", "save", "publish"]
     draft_id: UUID | None = None
     expected_revision: int | None = Field(default=None, ge=0, strict=True)
     form: TaskFormRequest | None = None
@@ -772,6 +772,7 @@ def create_web_app(
             model = TaskCreationRequest.model_validate(parsed)
             expected = {
                 "start": {"action"},
+                "start_new": {"action", "draft_id", "expected_revision"},
                 "save": {"action", "draft_id", "expected_revision", "form"},
                 "publish": {"action", "draft_id", "expected_revision"},
             }[model.action]
@@ -791,13 +792,18 @@ def create_web_app(
             actor.member_id, resource, model.action, key, namespace=b"task-creation-v1"
         )
         try:
-            if model.action == "start":
+            if model.action in {"start", "start_new"}:
                 await tasks.start(
                     update_id=update_id,
                     actor_telegram_user_id=None,
                     template_id=None,
                     actor_member_id=actor.member_id,
                     replay_fingerprint=fingerprint,
+                    replace_current=(
+                        (cast("UUID", model.draft_id), cast("int", model.expected_revision))
+                        if model.action == "start_new"
+                        else None
+                    ),
                 )
             elif model.action == "save":
                 form = cast("TaskFormRequest", model.form)

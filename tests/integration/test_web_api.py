@@ -592,6 +592,103 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         assert await session.scalar(select(func.count()).select_from(ConversationStateModel)) == 0
 
 
+async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=52_071)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    now = datetime.datetime.now(datetime.UTC)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(member.telegram_user_id, now=now),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        assert (
+            await client.post(
+                "/api/v1/task-creation",
+                json={"action": "start"},
+                headers={"origin": ORIGIN, "idempotency-key": "7101"},
+            )
+        ).status_code == 204
+        first_state = (await client.get("/api/v1/task-creation")).json()["draft"]
+        first_id = first_state["id"]
+        replacement = {
+            "action": "start_new",
+            "draft_id": first_id,
+            "expected_revision": first_state["revision"],
+        }
+        replacement_headers = {"origin": ORIGIN, "idempotency-key": "7102"}
+        first = await client.post(
+            "/api/v1/task-creation", json=replacement, headers=replacement_headers
+        )
+        replay = await client.post(
+            "/api/v1/task-creation", json=replacement, headers=replacement_headers
+        )
+        assert first.status_code == replay.status_code == 204
+        second_id = (await client.get("/api/v1/task-creation")).json()["draft"]["id"]
+        assert second_id != first_id
+        conflict = await client.post(
+            "/api/v1/task-creation",
+            json=replacement,
+            headers={"origin": ORIGIN, "idempotency-key": "7103"},
+        )
+        assert conflict.status_code == 409
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        drafts = (
+            await session.scalars(
+                select(TaskCreationDraftModel)
+                .where(TaskCreationDraftModel.creator_id == member.id)
+                .order_by(TaskCreationDraftModel.created_at)
+            )
+        ).all()
+        assert [draft.is_current for draft in drafts] == [False, True]
+        assert str(drafts[-1].id) == second_id
+        hidden_run = DbTestRunModel(
+            marker="TEST-CB100-HIDDEN-DRAFT", started_by_member_id=member.id
+        )
+        session.add(hidden_run)
+        await session.flush()
+        drafts[-1].test_run_id = hidden_run.id
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(member.telegram_user_id, now=now),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        hidden = await client.post(
+            "/api/v1/task-creation",
+            json={"action": "start_new", "draft_id": second_id, "expected_revision": 0},
+            headers={"origin": ORIGIN, "idempotency-key": "7104"},
+        )
+        assert hidden.status_code == 409
+
+    async with sessions() as session:
+        drafts = (
+            await session.scalars(
+                select(TaskCreationDraftModel)
+                .where(TaskCreationDraftModel.creator_id == member.id)
+                .order_by(TaskCreationDraftModel.created_at)
+            )
+        ).all()
+        assert len(drafts) == 2
+        assert [draft.is_current for draft in drafts] == [False, True]
+        assert str(drafts[-1].id) == second_id
+    await database.dispose()
+
+
 async def schema_snapshot(engine: AsyncEngine) -> tuple[set[str], dict[str, int]]:
     async with engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))

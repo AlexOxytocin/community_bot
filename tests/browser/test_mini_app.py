@@ -69,8 +69,12 @@ def _connected_control(page: Any, edge_id: str, trigger: str) -> Any:  # noqa: A
 
 def _open_blank_task_creation(page: Any, *, group: bool = False) -> None:  # noqa: ANN401
     page.get_by_role("button", name="+ Создать", exact=True).click()
-    page.get_by_role("button", name="Несколько участников" if group else "Один участник").click()
-    page.get_by_role("button", name="Без шаблона").click()
+    page.locator('[data-screen-id="T04B"], [data-screen-id="T05"]').wait_for()
+    recovery = page.locator('[data-screen-id="T04B"]')
+    if recovery.count():
+        recovery.get_by_role("button", name=re.compile("Продолжить|Редактировать")).click()
+    if group:
+        page.get_by_label("Тип").select_option("group")
 
 
 def test_assignment_action_eligibility_is_server_projected() -> None:
@@ -2339,7 +2343,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
 ) -> None:
     draft_id = "00000000-0000-0000-0000-000000000070"
     task_id = "00000000-0000-0000-0000-000000000071"
-    state: dict[str, Any] = {"stage": "draft", "values": {}}
+    state: dict[str, Any] = {"stage": "none", "values": {}}
     actions: list[str] = []
     commands: list[tuple[str, str, dict[str, object]]] = []
     failed_start = False
@@ -2370,7 +2374,9 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
                             "minimum_reward": 2,
                         }
                     ],
-                    "draft": {
+                    "draft": None
+                    if state["stage"] == "none"
+                    else {
                         "id": draft_id,
                         "revision": 0 if state["stage"] == "draft" else 1 if needs_edit else 2,
                         "values": values,
@@ -2391,6 +2397,8 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
             failed_start = True
             route.fulfill(status=503, json={"code": "request_failed"})
             return
+        if body["action"] == "start":
+            state["stage"] = "draft"
         if body["action"] == "save" and not rejected_save:
             rejected_save = True
             route.fulfill(status=422, json={"detail": "raw validation payload"})
@@ -2413,10 +2421,9 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         )
         page.route("**/api/v1/task-creation", creation)
         page.goto(mini_app_url)
-        _open_blank_task_creation(page)
-        page.get_by_text("Не удалось открыть создание задания.").wait_for()  # noqa: RUF001
-        page.get_by_role("button", name="Назад").click()
         _open_blank_task_creation(page, group=True)
+        assert actions == []
+        assert page.locator('[data-screen-id="T04B"]').count() == 0
         page.get_by_label("Тип").select_option("group")
         page.get_by_label("Категория").select_option(task_id)
         page.get_by_label("Размер").select_option("s")
@@ -2429,10 +2436,18 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_label("Материалы").fill("Описание материала")
         page.get_by_role("button", name="Предпросмотр").click()
         page.get_by_text("Не удалось сохранить задание").wait_for()  # noqa: RUF001
+        with page.expect_request(
+            lambda request: request.method == "POST" and request.post_data_json["action"] == "save"
+        ):
+            page.get_by_role("button", name="Предпросмотр").click()
+        page.get_by_text("Не удалось сохранить задание").wait_for()  # noqa: RUF001
+        assert actions[:3] == ["start", "start", "save"]
         assert page.get_by_role("button", name="Опубликовать").count() == 0
         assert page.get_by_text("raw validation payload").count() == 0
         page.get_by_role("button", name="Предпросмотр").click()
         page.get_by_text("Предпросмотр устарел").wait_for()
+        page.get_by_role("button", name="Редактировать черновик").click()
+        page.get_by_label("Срок").fill("2026-08-22T20:00")
         page.get_by_role("button", name="Предпросмотр").click()
         commands_before = len(commands)
         page.locator('[data-screen-id="T06"]').wait_for()
@@ -2487,7 +2502,115 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
             "title",
         }
         assert saved_form["materials"] == {"text": "Описание материала"}
+        assert commands[4][2]["expected_revision"] == 1
+        repaired_form = commands[4][2]["form"]
+        assert isinstance(repaired_form, dict)
+        repaired_deadline = repaired_form["deadline_at"]
+        assert isinstance(repaired_deadline, str)
+        assert "2026-08-22" in repaired_deadline
         assert len({key for _action, key, _body in commands[1:]}) == 5
+        browser.close()
+
+
+def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    removed = (
+        "Кто будет выполнять?",
+        "Основа задания",
+        "Шаблоны сервера не подключены",
+        "Создать без шаблона",
+        "Без шаблона",
+        'presentationLocationFor("T04")',
+        'presentationLocationFor("T04A")',
+    )
+    assert {text: source.count(text) for text in removed} == dict.fromkeys(removed, 0)
+    old_id = "00000000-0000-0000-0000-000000000072"
+    new_id = "00000000-0000-0000-0000-000000000073"
+    category_id = "00000000-0000-0000-0000-000000000074"
+    current = old_id
+    fail_next_get = False
+    start_keys: list[str] = []
+
+    def creation(route: Route) -> None:
+        nonlocal current, fail_next_get
+        if route.request.method == "GET":
+            if fail_next_get:
+                fail_next_get = False
+                route.fulfill(status=503, json={"code": "request_failed"})
+                return
+            stale = current == old_id
+            route.fulfill(
+                json={
+                    "categories": [
+                        {"id": category_id, "name": "Практическая помощь", "icon": "⭐"}
+                    ],
+                    "time_sizes": [
+                        {
+                            "value": "s",
+                            "label": "15-40 минут",
+                            "reward_options": [2, 3, 4],
+                            "minimum_reward": 2,
+                        }
+                    ],
+                    "draft": {
+                        "id": current,
+                        "revision": 7 if stale else 0,
+                        "values": {
+                            "title": "Сохранённое задание" if stale else None,
+                            "deadline_at": "2000-01-01T00:00:00Z" if stale else None,
+                        },
+                    },
+                    "preview": None,
+                    "needs_edit": stale,
+                }
+            )
+            return
+        body = route.request.post_data_json
+        assert body == {"action": "start_new", "draft_id": old_id, "expected_revision": 7}
+        start_keys.append(route.request.headers["idempotency-key"])
+        if len(start_keys) == 1:
+            route.fulfill(status=503, json={"code": "request_failed"})
+            return
+        current = new_id
+        fail_next_get = True
+        route.fulfill(status=204)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route("**/api/v1/task-creation", creation)
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="+ Создать", exact=True).click()
+        page.get_by_text("Сохранённое задание", exact=True).wait_for()
+        assert page.get_by_text("Предпросмотр устарел", exact=False).count() == 1
+        assert page.get_by_role("button", name="Редактировать черновик").count() == 1
+        assert start_keys == []
+        assert page.get_by_text("Кто будет выполнять?").count() == 0
+        assert page.get_by_text("Основа задания").count() == 0
+        assert page.get_by_text("Шаблоны сервера не подключены", exact=False).count() == 0
+
+        page.get_by_role("button", name="Создать новое").click()
+        page.get_by_text("Не удалось создать новый черновик").wait_for()  # noqa: RUF001
+        assert page.get_by_role("button", name="Редактировать черновик").is_enabled()
+        page.get_by_role("button", name="Создать новое").click()
+        page.get_by_text("Новый черновик создан", exact=False).wait_for()
+        assert page.get_by_role("button", name="Создать новое").is_disabled()
+        assert start_keys[0] == start_keys[1]
+        page.get_by_role("button", name="Редактировать черновик").click()
+        page.locator('[data-screen-id="T05"]').wait_for()
+        assert len(start_keys) == 2
+        assert page.get_by_label("Название").input_value() == ""
+        assert page.url.endswith(f"#/compose/tasks/{new_id}?view_state=t05")
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T04B"]').wait_for()
+        assert page.get_by_text("Предпросмотр устарел", exact=False).count() == 0
         browser.close()
 
 
@@ -2579,6 +2702,8 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(
             assert input_styles["fontSize"] >= 16
 
             assert page.locator("#primary-navigation").is_hidden()
+            page.get_by_role("button", name="Назад").click()
+            page.locator('[data-screen-id="T04B"]').wait_for()
             page.get_by_role("button", name="Назад").click()
             page.get_by_role("heading", name="Каталог").wait_for()
             page.get_by_role("button", name="Мои задания").click()
