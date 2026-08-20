@@ -278,6 +278,8 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/members/{member_id}/karma-vote", ("POST",)),
         ("/api/v1/tasks", ("GET",)),
         ("/api/v1/owned-tasks", ("GET",)),
+        ("/api/v1/owned-tasks/{task_id}/cancellation", ("POST",)),
+        ("/api/v1/task-cities", ("GET",)),
         ("/api/v1/task-creation", ("GET",)),
         ("/api/v1/task-creation", ("POST",)),
         ("/api/v1/tasks/{task_id}/assignments", ("POST",)),
