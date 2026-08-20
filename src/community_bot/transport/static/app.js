@@ -123,6 +123,8 @@ const section = (heading, value) => {
 const setNavigation = (screen, context) => {
   heading.querySelector(".heading-action")?.remove();
   shell.classList.toggle("context-screen", context);
+  shell.classList.toggle("participants-screen", screen === "participants");
+  shell.classList.toggle("profile-screen", screen === "profile");
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
   profileNav.setAttribute("aria-pressed", String(screen === "profile"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
@@ -136,11 +138,19 @@ const setHeadingAction = (action) => {
   heading.append(action);
 };
 
-const sliderIcon = () => {
+const pencilIcon = () => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
-  svg.innerHTML = '<path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6"/>';
+  svg.innerHTML = '<path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m14 7 3 3"/>';
+  return svg;
+};
+
+const searchIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/>';
   return svg;
 };
 
@@ -617,6 +627,10 @@ const valueSection = (heading, value) => {
 };
 
 const reliabilityText = (value) => value == null ? "Недостаточно данных" : String(value);
+const reliabilityPercent = (value) => value == null ? "—" : `${Math.round(Number(value) * 100)}%`;
+const valueOrDash = (value) => value == null ? "—" : String(value);
+const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
+  .map((part) => part[0]).join("").toUpperCase() || "?";
 
 const editableProfileFields = [
   ["display_name", "Имя"],
@@ -716,22 +730,27 @@ function profileEditor(me, state, revision) {
 
 function profileDetails(me, member, state, revision) {
   const view = element("section", undefined, "profile-dashboard");
-  const initials = me.display_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const identity = element("div", undefined, "profile-identity");
+  const identityCopy = element("div", undefined, "identity-copy");
   identity.append(
-    element("span", initials || "?", "avatar"),
-    element("div", undefined, "identity-copy"),
+    element("span", initialsFor(me.display_name), "avatar"),
+    identityCopy,
   );
-  identity.lastElementChild.append(
+  identityCopy.append(
     element("h2", me.display_name),
     element("p", me.level?.display_name ? `Уровень ${me.level.number} · ${me.level.display_name}` : "Профиль участника", "muted"),
   );
+  const settings = element("button", undefined, "secondary icon-action profile-edit-action");
+  settings.type = "button";
+  settings.setAttribute("aria-label", "Редактировать профиль");
+  settings.append(pencilIcon());
+  settings.addEventListener("click", () => openProfileSettings(me, state, revision));
+  identity.append(settings);
   const metrics = element("div", undefined, "metric-grid");
-  const reliability = reliabilityText(member.reliability?.rate);
   for (const [value, label] of [
-    [String(me.credit_balance), "кредита"],
-    [String(me.experience_total), "опыт"],
-    [reliability === "Недостаточно данных" ? "—" : `${Math.round(Number(reliability) * 100)}%`, "надёжность"],
+    [valueOrDash(me.credit_balance), "Кредиты"],
+    [valueOrDash(me.experience_total), "Опыт"],
+    [valueOrDash(member.karma?.score), "Карма"],
   ]) {
     const metric = element("article", undefined, "metric-card");
     metric.append(element("strong", value), element("span", label));
@@ -741,32 +760,15 @@ function profileDetails(me, member, state, revision) {
   const indicatorList = element("div", undefined, "indicator-list");
   indicators.append(element("h3", "Мои показатели", "section-label"), indicatorList);
   for (const [label, value] of [
-    ["Принято заданий", member.reliability?.accepted],
-    ["Подтверждённый вес", member.reliability?.approved_weight],
-    ["Неявки", member.reliability?.no_show],
+    ["Завершено заданий", me.statistics?.completed_tasks],
+    ["Создано заданий", me.statistics?.created_tasks],
+    ["Надёжность", reliabilityPercent(member.reliability?.rate)],
   ]) {
     const row = element("p", undefined, "indicator-row");
-    row.append(element("span", label), element("strong", value == null ? "—" : String(value)));
+    row.append(element("span", label), element("strong", valueOrDash(value)));
     indicatorList.append(row);
   }
   view.append(identity, metrics, indicators);
-  if (state.leaderboard?.length) {
-    const contribution = element("section", undefined, "profile-section");
-    const contributionList = element("div", undefined, "contribution-list");
-    contribution.append(element("h3", "Лидерборд", "section-label"), contributionList);
-    for (const item of state.leaderboard.slice(0, 3)) {
-      const row = element("p", undefined, "indicator-row");
-      row.append(element("span", `${item.rank} · ${item.display_name}`), element("strong", `${item.experience} XP`));
-      contributionList.append(row);
-    }
-    view.append(contribution);
-  }
-  const settings = element("button", undefined, "secondary icon-action profile-settings-action");
-  settings.type = "button";
-  settings.setAttribute("aria-label", "Настройки профиля");
-  settings.append(sliderIcon());
-  settings.addEventListener("click", () => openProfileSettings(me, state, revision));
-  setHeadingAction(settings);
   return view;
 }
 
@@ -782,23 +784,24 @@ function openProfileSettings(me, state, revision) {
 }
 
 function leaderboardDetails(items) {
-  const boundary = element("section", undefined, "profile-boundary");
-  boundary.append(element("h3", "Лидерборд"));
+  const boundary = element("section", undefined, "leaderboard-boundary");
   if (!items.length) {
     boundary.append(element("p", "В лидерборде пока никого нет.", "status muted"));
     return boundary;
   }
-  const list = element("ol", undefined, "list leaderboard");
+  const list = element("ol", undefined, "leaderboard-list");
   for (const item of items) {
     const row = element("li");
-    const button = element("button", undefined, "card");
+    const button = element(
+      "button",
+      undefined,
+      `leaderboard-row${item.member_id === currentMemberId ? " is-current" : ""}`,
+    );
     button.type = "button";
     button.append(
-      element("h4", String(item.rank) + ". " + item.display_name),
-      element("p", "Опыт: " + String(item.experience), "meta"),
-      element("p", "Получатели помощи: " + String(item.unique_recipients), "meta"),
-      element("p", "Надёжность: " + reliabilityText(item.reliability), "meta"),
-      element("p", "Неявки: " + String(item.no_show), "meta"),
+      element("span", String(item.rank), "leaderboard-rank"),
+      element("strong", item.display_name, "leaderboard-name"),
+      element("span", `${item.experience} XP`, "leaderboard-value"),
     );
     button.addEventListener("click", () => showMemberProfile(item.member_id));
     row.append(button);
@@ -810,22 +813,35 @@ function leaderboardDetails(items) {
 
 function memberListDetails(items) {
   if (!items.length) return element("p", "Участники не найдены.", "status muted");
-  const list = element("ul", undefined, "list");
+  const list = element("ul", undefined, "member-list");
   for (const member of items) {
     const row = element("li");
-    const button = element("button", undefined, "card");
+    const button = element(
+      "button",
+      undefined,
+      `member-row${member.member_id === currentMemberId ? " is-current" : ""}`,
+    );
     button.type = "button";
-    button.append(element("h3", member.display_name));
-    if (member.telegram_username) {
-      button.append(element("p", "@" + member.telegram_username, "meta"));
-    }
+    const copy = element("span", undefined, "member-row-copy");
+    const identity = element("span", undefined, "member-row-identity");
+    identity.append(
+      element("strong", member.display_name, "member-row-name"),
+      element("span", `Уровень ${member.level_number}`, "level-badge"),
+    );
+    const metadata = [...(member.skill_tags || []).slice(0, 2), member.city]
+      .filter(Boolean).slice(0, 3).join(" · ") || member.availability;
+    copy.append(identity);
+    if (metadata) copy.append(element("span", metadata, "member-row-metadata"));
+    const stats = element("span", undefined, "member-row-stats");
+    stats.append(
+      element("span", `Карма ${member.karma.score}`),
+      element("span", `Надёжность ${reliabilityPercent(member.reliability?.rate)}`),
+    );
+    copy.append(stats);
     button.append(
-      element("p", "Уровень " + String(member.level_number), "meta"),
-      element(
-        "p",
-        "Карма " + String(member.karma.score) + " · оценок " + String(member.karma.count),
-        "meta",
-      ),
+      element("span", initialsFor(member.display_name), "member-avatar"),
+      copy,
+      element("span", "›", "member-chevron"),
     );
     button.addEventListener("click", () => showMemberProfile(member.member_id));
     row.append(button);
@@ -836,14 +852,14 @@ function memberListDetails(items) {
 
 function showParticipantsState(state, revision) {
   if (revision !== screenRevision) return;
-  setNavigation("", false);
+  setNavigation("participants", false);
   back.classList.add("hidden");
   title.textContent = state.view === "leaderboard" ? "Лидерборд" : "Участники";
-  const boundary = element("section", undefined, "state-view");
+  const boundary = element("section", undefined, "state-view participants-view");
   boundary.dataset.screenId = state.view === "leaderboard" ? "P05" : "P01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = state.loading ? "loading" : state.error ? "error" : "content";
-  const tabs = element("div", undefined, "segmented");
+  const tabs = element("div", undefined, "segmented participants-tabs");
   const membersTab = element("button", "Участники");
   const leaderboardTab = element("button", "Лидерборд");
   membersTab.type = leaderboardTab.type = "button";
@@ -859,31 +875,35 @@ function showParticipantsState(state, revision) {
   tabs.append(membersTab, leaderboardTab);
   boundary.append(tabs);
   if (state.view === "members") {
-    const search = element("form", undefined, "task-form");
-    const label = element("label", "Имя или @username");
+    const search = element("form", undefined, "participant-search");
+    search.setAttribute("role", "search");
     const input = element("input");
     input.type = "search";
-    input.minLength = 3;
-    input.placeholder = "Минимум 3 символа";
+    input.placeholder = "Найти участника";
+    input.setAttribute("aria-label", "Найти участника");
     input.value = state.query;
-    label.append(input);
-    const submit = element("button", "Найти", "primary");
-    submit.type = "submit";
     search.addEventListener("submit", (event) => {
       event.preventDefault();
-      const query = input.value.trim();
-      if (query && query.length < 3) {
-        state.validation = "Введите минимум 3 символа.";
-        showParticipantsState(state, revision);
-        return;
-      }
-      state.query = query;
-      state.validation = "";
+      state.query = input.value.trim();
       void loadMembers(state, revision);
     });
-    search.append(label, submit);
+    search.append(searchIcon(), input);
     boundary.append(search);
-    if (state.validation) boundary.append(element("p", state.validation, "status"));
+  } else {
+    const periods = element("div", undefined, "segmented period-tabs");
+    periods.setAttribute("aria-label", "Период лидерборда");
+    for (const [period, label] of [
+      ["week", "Неделя"],
+      ["month", "Месяц"],
+      ["all", "Всё время"],
+    ]) {
+      const button = element("button", label);
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(state.period === period));
+      button.addEventListener("click", () => selectLeaderboardPeriod(state, revision, period));
+      periods.append(button);
+    }
+    boundary.append(periods);
   }
   if (state.loading) {
     boundary.append(element("p", "Загружаем данные…", "status muted"));
@@ -896,7 +916,7 @@ function showParticipantsState(state, revision) {
     });
     boundary.append(element("p", "Не удалось загрузить данные.", "status"), retry);
   } else if (state.view === "leaderboard") {
-    boundary.append(leaderboardDetails(state.leaderboard || []));
+    boundary.append(leaderboardDetails(state.leaderboards[state.period] || []));
   } else {
     boundary.append(memberListDetails(state.members || []));
   }
@@ -929,19 +949,38 @@ async function loadMembers(state, revision) {
 }
 
 async function loadParticipantsLeaderboard(state, revision) {
+  const request = ++state.leaderboardRequest;
+  const period = state.period;
   state.loading = true;
   state.error = false;
   showParticipantsState(state, revision);
   try {
-    const page = await getJson("/api/v1/leaderboard?limit=30");
-    if (revision !== screenRevision) return;
-    state.leaderboard = page.items;
+    const page = await getJson(`/api/v1/leaderboard?limit=30&period=${period}`);
+    if (revision !== screenRevision || request !== state.leaderboardRequest) return;
+    state.leaderboards[period] = page.items;
   } catch {
-    if (revision !== screenRevision) return;
+    if (revision !== screenRevision || request !== state.leaderboardRequest) return;
     state.error = true;
   }
   state.loading = false;
   showParticipantsState(state, revision);
+}
+
+function selectLeaderboardPeriod(state, revision, period) {
+  if (state.period === period) return;
+  state.period = period;
+  state.error = false;
+  history.replaceState(
+    { screen: "participants", view: "leaderboard", period },
+    "",
+    presentationLocationFor("P05"),
+  );
+  if (state.leaderboards[period] === undefined) void loadParticipantsLeaderboard(state, revision);
+  else {
+    state.leaderboardRequest += 1;
+    state.loading = false;
+    showParticipantsState(state, revision);
+  }
 }
 
 function switchParticipantsView(state, revision, view) {
@@ -949,11 +988,11 @@ function switchParticipantsView(state, revision, view) {
   state.error = false;
   state.focusHeading = view === "leaderboard";
   history.replaceState(
-    { screen: "participants", view },
+    { screen: "participants", view, period: state.period },
     "",
     presentationLocationFor(view === "leaderboard" ? "P05" : "P01"),
   );
-  if (view === "leaderboard" && state.leaderboard === null) {
+  if (view === "leaderboard" && state.leaderboards[state.period] === undefined) {
     void loadParticipantsLeaderboard(state, revision);
   } else if (view === "members" && state.members === null) {
     void loadMembers(state, revision);
@@ -962,14 +1001,15 @@ function switchParticipantsView(state, revision, view) {
   }
 }
 
-function loadParticipants(view = "members") {
+function loadParticipants(view = "members", period = "week") {
   const revision = ++screenRevision;
   const state = {
     view,
     query: "",
-    validation: "",
     members: null,
-    leaderboard: null,
+    period,
+    leaderboards: {},
+    leaderboardRequest: 0,
     loading: false,
     error: false,
   };
@@ -1221,7 +1261,7 @@ async function showMemberProfile(memberId, push = true) {
 function showProfileState(state, revision) {
   if (revision !== screenRevision) return;
   const profileBoundary = state.profile
-    ? profileDetails(state.profile.me, state.profile.member, { ...state, leaderboard: state.profile.leaderboard }, revision)
+    ? profileDetails(state.profile.me, state.profile.member, state, revision)
     : state.profileError
       ? boundaryError("Мои показатели", "Не удалось загрузить профиль.", state.profileRetry)
       : element("p", "Загружаем профиль…", "status muted");
@@ -1239,16 +1279,9 @@ async function loadOwnProfile(state, revision) {
   try {
     const me = await getJson("/api/v1/me");
     if (revision !== screenRevision) return;
-    const leaderboardRequest = getJson("/api/v1/leaderboard?limit=3")
-      .then((page) => page.items)
-      .catch(() => []);
     const member = await getJson("/api/v1/members/" + encodeURIComponent(me.member_id));
     if (revision !== screenRevision) return;
-    state.profile = { me, member, leaderboard: [] };
-    showProfileState(state, revision);
-    const leaderboard = await leaderboardRequest;
-    if (revision !== screenRevision) return;
-    state.profile = { me, member, leaderboard };
+    state.profile = { me, member };
   } catch {
     if (revision !== screenRevision) return;
     state.profileError = true;
@@ -2449,7 +2482,7 @@ back.addEventListener("click", () => {
 });
 globalThis.addEventListener("popstate", (event) => {
   if (event.state?.screen === "participants") {
-    loadParticipants(event.state.view || "members");
+    loadParticipants(event.state.view || "members", event.state.period || "week");
   } else if (event.state?.screen === "task") {
     const task = tasks.find((item) => item.id === event.state.taskId);
     if (task) showTaskDetail(task, false);

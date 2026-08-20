@@ -237,7 +237,10 @@ def test_member_query_and_session_token_contract() -> None:
     assert _member_query("") is None
     assert _member_query("  \t") is None
     assert _member_query("@@Na  Me") == "na me"
-    for query in ("@", "@ ", "@@", "ab", "x" * 81):
+    assert _member_query(" a ") == "a"
+    assert _member_query("ab") == "ab"
+    assert _member_query("@") == ""
+    for query in ("x" * 81,):
         with pytest.raises(Exception, match="422"):
             _member_query(query)
 
@@ -584,12 +587,18 @@ async def test_read_routes_map_application_denials_to_closed_errors(
         "community_bot.application.reputation.ReputationService.profile",
         AsyncMock(return_value=safe_profile),
     )
+    monkeypatch.setattr(
+        "community_bot.application.reputation.ReputationService.own_statistics",
+        AsyncMock(return_value=SimpleNamespace(completed=6, created=2)),
+    )
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url=ORIGIN,
         cookies={"__Host-community_session": SESSION_TOKEN},
     ) as client:
-        assert (await client.get("/api/v1/me")).status_code == 200
+        me = await client.get("/api/v1/me")
+        assert me.status_code == 200
+        assert me.json()["statistics"] == {"completed_tasks": 6, "created_tasks": 2}
         assert (await client.get(f"/api/v1/members/{database.member_id}")).status_code == 200
 
 

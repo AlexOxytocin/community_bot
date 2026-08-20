@@ -840,8 +840,17 @@ async def test_safe_catalog_own_paused_profile_and_ledger_pagination(  # noqa: P
     assert display_name_search.items[0].member_id not in {
         item.member_id for item in display_name_next_page.items
     }
-    with pytest.raises(ValueError, match="at least 3"):
-        await service.members(actor=actor_context(actor), query="@be")
+    async with sessions.begin() as session:
+        stored_second = await session.get(MemberModel, second.id)
+        assert stored_second is not None
+        stored_second.display_name = "Анна"
+    one_character_search = await service.members(
+        actor=actor_context(actor),
+        query=" \u0430 ",
+    )
+    assert [item.member_id for item in one_character_search.items] == [second.id]
+    whitespace_search = await service.members(actor=actor_context(actor), query="   ")
+    assert {item.member_id for item in whitespace_search.items} == {actor.id, second.id}
     assert (await service.profile(actor=actor_context(paused))).member_id == paused.id
     for hidden in hidden_members:
         with pytest.raises(ProfileUnavailableError):
@@ -871,6 +880,46 @@ async def test_safe_catalog_own_paused_profile_and_ledger_pagination(  # noqa: P
         cursor=first_page.next_cursor,
     )
     assert second.id not in {item.member_id for item in second_page.items}
+    await database.dispose()
+
+
+async def test_leaderboard_periods_reuse_ledger_history(database_url: str) -> None:
+    """Week, month, and all-time rank the same ledger with bounded cutoffs."""
+    database = Database(database_url)
+    actor = await add_member(database, 8390)
+    await prepare_config(database, actor.id)
+    recent = await add_member(database, 8391)
+    monthly = await add_member(database, 8392)
+    historic = await add_member(database, 8393)
+    now = datetime.datetime.now(datetime.UTC)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add_all(
+            AccountTransactionModel(
+                id=uuid4(),
+                member_id=member.id,
+                credit_delta=experience,
+                experience_delta=experience,
+                transaction_type="admin_adjustment",
+                idempotency_key=f"period-{label}",
+                payload_hash=label * 64,
+                created_at=created_at,
+            )
+            for member, experience, created_at, label in (
+                (recent, 3, now - datetime.timedelta(days=1), "1"),
+                (monthly, 6, now - datetime.timedelta(days=20), "2"),
+                (historic, 9, now - datetime.timedelta(days=40), "3"),
+            )
+        )
+
+    service = ReputationService(database.unit_of_work)
+    week = await service.leaderboard(actor=actor_context(actor), period="week")
+    month = await service.leaderboard(actor=actor_context(actor), period="month")
+    all_time = await service.leaderboard(actor=actor_context(actor), period="all")
+
+    assert (week.items[0].member_id, week.items[0].experience) == (recent.id, 3)
+    assert (month.items[0].member_id, month.items[0].experience) == (monthly.id, 6)
+    assert (all_time.items[0].member_id, all_time.items[0].experience) == (historic.id, 9)
     await database.dispose()
 
 

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from community_bot.domain.members import MemberStatus
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from community_bot.domain.members import Member
 
 _PROFILE_UNAVAILABLE = "Profile unavailable."
-MEMBER_SEARCH_MIN_LENGTH = 3
+LeaderboardPeriod = Literal["week", "month", "all"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +145,7 @@ class PersonalStatistics:
     categories: tuple[str, ...]
     no_show: int
     reliability: ReliabilityView
+    created: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +233,7 @@ class ReputationUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def personal_statistics(self, member_id: UUID) -> PersonalStatistics: ...
     async def raw_karma(self, target_id: UUID) -> tuple[RawKarmaVote, ...]: ...
     async def leaderboard(
-        self, *, limit: int, cursor: LeaderboardCursor | None
+        self, *, limit: int, cursor: LeaderboardCursor | None, period: LeaderboardPeriod
     ) -> LeaderboardPage: ...
     async def append_audit_event(
         self,
@@ -512,6 +513,13 @@ class ReputationService:
             require_profile_visible(actor, actor)
             return await uow.personal_statistics(actor.id)
 
+    async def own_statistics(self, actor: ActorContext) -> PersonalStatistics:
+        """Return contribution statistics for the authenticated profile owner."""
+        async with self._unit_of_work_factory() as uow:
+            member = await self._context_actor(uow, actor)
+            require_profile_visible(member, member)
+            return await uow.personal_statistics(member.id)
+
     async def members(
         self,
         *,
@@ -579,11 +587,14 @@ class ReputationService:
         actor: ActorContext,
         limit: int = 20,
         cursor: LeaderboardCursor | None = None,
+        period: LeaderboardPeriod = "all",
     ) -> LeaderboardPage:
         """Return the main contribution leaderboard to an active member."""
         async with self._unit_of_work_factory() as uow:
             await self._active_context_actor(uow, actor)
-            return await uow.leaderboard(limit=max(1, min(limit, 100)), cursor=cursor)
+            return await uow.leaderboard(
+                limit=max(1, min(limit, 100)), cursor=cursor, period=period
+            )
 
     async def _save_draft(  # noqa: PLR0913 - explicit state fields form the revision gate.
         self,
@@ -837,8 +848,4 @@ def normalize_member_search_query(query: str | None) -> str | None:
     raw_query = (query or "").strip()
     if not raw_query:
         return None
-    normalized = " ".join(raw_query.lstrip("@").split()).casefold()
-    if len(normalized) < MEMBER_SEARCH_MIN_LENGTH:
-        message = "Member search query must contain at least 3 characters."
-        raise ValueError(message)
-    return normalized
+    return " ".join(raw_query.lstrip("@").split()).casefold()

@@ -47,6 +47,7 @@ from community_bot.application.registration import ProfileSnapshot, Registration
 from community_bot.application.reputation import (
     KarmaDraft,
     KarmaVoteResult,
+    PersonalStatistics,
     ProfileUnavailableError,
     ReputationService,
     SafeProfile,
@@ -118,6 +119,11 @@ class LevelDto(_Dto):
     display_name: str
 
 
+class ProfileStatisticsDto(_Dto):
+    completed_tasks: int | None
+    created_tasks: int | None
+
+
 class MeDto(_Dto):
     member_id: UUID
     display_name: str
@@ -131,6 +137,7 @@ class MeDto(_Dto):
     credit_balance: int
     experience_total: int
     level: LevelDto
+    statistics: ProfileStatisticsDto
 
 
 class ProfileUpdateRequest(_Dto):
@@ -552,9 +559,10 @@ def create_web_app(
     async def me(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
         try:
             profile = await registration.own_profile(actor)
-        except PermissionError as error:
+            statistics = await reputation.own_statistics(actor)
+        except (PermissionError, ProfileUnavailableError) as error:
             raise HTTPException(status_code=403, detail="profile_unavailable") from error
-        return _json_response(_me_dto(profile))
+        return _json_response(_me_dto(profile, statistics))
 
     @app.put("/api/v1/me/profile", response_model=MeDto)
     async def update_me(request: Request) -> JSONResponse:
@@ -586,13 +594,14 @@ def create_web_app(
                 replay_fingerprint=fingerprint,
             )
             profile = await registration.own_profile(actor)
+            statistics = await reputation.own_statistics(actor)
         except StaleRegistrationStepError:
             return _error_response(409, "profile_unavailable")
         except RegistrationError:
             return _error_response(422, "invalid_request")
         except PermissionError:
             return _error_response(403, "profile_unavailable")
-        return _json_response(_me_dto(profile))
+        return _json_response(_me_dto(profile, statistics))
 
     @app.get("/api/v1/members", response_model=MembersDto)
     async def members(
@@ -830,9 +839,10 @@ def create_web_app(
     async def leaderboard(
         actor: ActorContext = Depends(current_actor),
         limit: Annotated[int, Query(ge=1, le=50)] = 30,
+        period: Literal["week", "month", "all"] = "all",
     ) -> JSONResponse:
         try:
-            page = await reputation.leaderboard(actor=actor, limit=limit)
+            page = await reputation.leaderboard(actor=actor, limit=limit, period=period)
         except ProfileUnavailableError as error:
             raise HTTPException(status_code=403, detail="profile_unavailable") from error
         return _json_response(
@@ -1573,7 +1583,7 @@ def _member_dto(profile: SafeProfile) -> MemberDto:
     )
 
 
-def _me_dto(profile: ProfileSnapshot) -> MeDto:
+def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
     return MeDto(
         member_id=profile.member_id,
         display_name=profile.display_name,
@@ -1589,6 +1599,10 @@ def _me_dto(profile: ProfileSnapshot) -> MeDto:
         level=LevelDto(
             number=profile.level.level_number,
             display_name=profile.level.display_name,
+        ),
+        statistics=ProfileStatisticsDto(
+            completed_tasks=statistics.completed,
+            created_tasks=statistics.created,
         ),
     )
 

@@ -75,6 +75,7 @@ if TYPE_CHECKING:
         KarmaVoteResult,
         LeaderboardCursor,
         LeaderboardPage,
+        LeaderboardPeriod,
         MemberCatalogCursor,
         MemberCatalogPage,
         PersonalStatistics,
@@ -1297,10 +1298,16 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Return current raw karma after application authorization."""
         return await reputation_store.raw_karma(self._require_session(), target_id)
 
-    async def leaderboard(self, *, limit: int, cursor: LeaderboardCursor | None) -> LeaderboardPage:
+    async def leaderboard(
+        self,
+        *,
+        limit: int,
+        cursor: LeaderboardCursor | None,
+        period: LeaderboardPeriod,
+    ) -> LeaderboardPage:
         """Return a ledger-authoritative leaderboard page."""
         return await reputation_store.leaderboard(
-            self._require_session(), limit=limit, cursor=cursor
+            self._require_session(), limit=limit, cursor=cursor, period=period
         )
 
     async def lock_members(self, member_ids: Sequence[UUID]) -> dict[UUID, Member]:
