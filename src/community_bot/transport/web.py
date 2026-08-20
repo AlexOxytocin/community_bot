@@ -85,7 +85,7 @@ from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
 
 _COOKIE_NAME = "__Host-community_session"
-_SESSION_SECONDS = 900
+_SESSION_LIFETIME_SECONDS = 2_592_000
 _PROOF_MAX_AGE_SECONDS = 300
 _PROOF_FUTURE_SKEW_SECONDS = 30
 _PROOF_MAX_BYTES = 8192
@@ -512,7 +512,7 @@ def create_web_app(
                 telegram_user_id=telegram_user_id,
                 token_digest=digest,
                 authenticated_at=now,
-                expires_at=now + datetime.timedelta(seconds=_SESSION_SECONDS),
+                expires_at=now + datetime.timedelta(seconds=_SESSION_LIFETIME_SECONDS),
             )
         except SQLAlchemyError:
             return _error_response(503, "temporarily_unavailable")
@@ -523,7 +523,7 @@ def create_web_app(
         response.set_cookie(
             _COOKIE_NAME,
             token,
-            max_age=_SESSION_SECONDS,
+            max_age=_SESSION_LIFETIME_SECONDS,
             secure=True,
             httponly=True,
             samesite="strict",

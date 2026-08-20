@@ -1214,6 +1214,26 @@ async def test_session_restart_reads_privacy_authority_and_concurrent_logout(
             == hashlib.sha256(__import__("base64").b64decode(f"{token}=", altchars=b"-_")).digest()
         )
         assert token.encode() not in stored.token_digest
+        assert stored.expires_at - stored.authenticated_at == datetime.timedelta(days=30)
+        assert (
+            await database.web_session_member_id(
+                token_digest=stored.token_digest,
+                now=stored.expires_at - datetime.timedelta(microseconds=1),
+            )
+        ) == (member.id, stored.authenticated_at)
+        assert (
+            await database.web_session_member_id(
+                token_digest=stored.token_digest, now=stored.expires_at
+            )
+            is None
+        )
+        assert (
+            await database.web_session_member_id(
+                token_digest=stored.token_digest,
+                now=stored.expires_at + datetime.timedelta(microseconds=1),
+            )
+            is None
+        )
         assert await session.scalar(select(func.count()).select_from(WebSessionModel)) == 1
 
     restarted = Database(database_url)

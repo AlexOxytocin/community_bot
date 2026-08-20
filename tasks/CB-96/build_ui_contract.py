@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import cast
 
 ROOT = Path(__file__).resolve().parent
 BOARD = ROOT / "design" / "cb93-complete-screen-board.html"
@@ -804,7 +805,7 @@ lines = [
     "| ID | Экран | Route pattern | view_state | family | role | action class | data mode | parent |",
     "|---|---|---|---|---|---|---|---|---|",
 ]
-for screen in contract["screens"]:
+for screen in cast("list[dict[str, object]]", contract["screens"]):
     lines.append(
         f"| {screen['id']} | {screen['title']} | `{screen['route_pattern']}` | "
         f"`{screen['view_state']}` | `{screen['component_family']}` | "
@@ -821,7 +822,7 @@ lines.extend(
         "|---|---|---|---|---|---|---|---|",
     ]
 )
-for transition in contract["transitions"]:
+for transition in cast("list[dict[str, object]]", contract["transitions"]):
     lines.append(
         f"| {transition['id']} | {transition['source_id']}/`{transition['source_view_state']}` | "
         f"`{transition['trigger']}` | {transition['target_id']} "
@@ -839,7 +840,7 @@ lines.extend(
         "|---|---|---|",
     ]
 )
-for item in contract["no_ui"]:
+for item in cast("list[dict[str, object]]", contract["no_ui"]):
     lines.append(
         f"| {item['id']} | {item['title']} (`{item['connection_class']}`) | {item['reason']} |"
     )
