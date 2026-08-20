@@ -609,7 +609,15 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         expired = (await client.get("/api/v1/task-creation")).json()
         assert expired["needs_edit"] is True
         assert expired["preview"] is None
-        repaired = offline | {"expected_revision": 2}
+        repaired = offline | {
+            "expected_revision": 2,
+            "form": form
+            | {
+                "format": "offline",
+                "city": canonical_city,
+                "materials": {},
+            },
+        }
         assert (
             await client.post(
                 "/api/v1/task-creation",
@@ -617,6 +625,9 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
                 headers={"origin": ORIGIN, "idempotency-key": "7005"},
             )
         ).status_code == 204
+        repaired_state = (await client.get("/api/v1/task-creation")).json()
+        assert repaired_state["draft"]["values"]["materials"] == {}
+        assert repaired_state["preview"] is not None
         publish = {"action": "publish", "draft_id": draft_id, "expected_revision": 3}
         publish_headers = {"origin": ORIGIN, "idempotency-key": "7006"}
         first = await client.post("/api/v1/task-creation", json=publish, headers=publish_headers)

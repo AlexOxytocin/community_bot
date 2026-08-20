@@ -2743,7 +2743,31 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         _open_blank_task_creation(page)
         assert actions == []
         assert page.locator('[data-screen-id="T04B"]').count() == 0
-        slots = page.get_by_label("Число исполнителей")
+        required_labels = (
+            "Тип задания *",
+            "Число исполнителей *",
+            "Формат *",
+            "Категория *",
+            "Название *",
+            "Что нужно сделать *",
+            "Критерии приёмки *",
+            "Размер *",
+            "Награда за исполнителя *",
+            "Срок *",
+        )
+        required_controls = [page.get_by_label(label, exact=True) for label in required_labels]
+        assert [control.count() for control in required_controls] == [1] * len(required_labels)
+        assert all(control.evaluate("node => node.required") for control in required_controls)
+        materials = page.get_by_label("Материалы", exact=True)
+        assert materials.evaluate("node => !node.required")
+        assert page.get_by_text("Ссылка", exact=True).count() == 0
+        assert page.locator('[name="material_url"]').count() == 0
+        page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
+        assert actions == []
+        assert page.get_by_label("Название *", exact=True).evaluate(
+            "node => node.matches(':invalid')"
+        )
+        slots = page.get_by_label("Число исполнителей *", exact=True)
         assert slots.input_value() == "1"
         assert slots.is_disabled()
         assert page.get_by_label("Город").count() == 0
@@ -2756,25 +2780,27 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert slots.is_disabled()
         page.get_by_role("button", name="Групповое", exact=True).click()
         assert slots.input_value() == "3"
-        page.get_by_label("Категория").select_option(task_id)
-        page.get_by_label("Размер").select_option("s")
-        page.get_by_label("Награда").fill("3")
-        page.get_by_label("Название").fill("<script>globalThis.pwned=true</script>")
-        page.get_by_label("Описание").fill("Проверить безопасный предпросмотр.")
-        page.get_by_label("Критерии выполнения").fill("Есть результат.")
-        page.get_by_label("Срок").fill("2026-08-21T20:00")
-        page.get_by_label("Число исполнителей").fill("2")
-        page.get_by_label("Формат").select_option("offline")
+        page.get_by_label("Категория *", exact=True).select_option(task_id)
+        page.get_by_label("Размер *", exact=True).select_option("s")
+        page.get_by_label("Награда за исполнителя *", exact=True).fill("3")
+        page.get_by_label("Название *", exact=True).fill("<script>globalThis.pwned=true</script>")
+        page.get_by_label("Что нужно сделать *", exact=True).fill(
+            "Проверить безопасный предпросмотр."
+        )
+        page.get_by_label("Критерии приёмки *", exact=True).fill("Есть результат.")
+        page.get_by_label("Срок *", exact=True).fill("2026-08-21T20:00")
+        page.get_by_label("Число исполнителей *", exact=True).fill("2")
+        page.get_by_label("Формат *", exact=True).select_option("offline")
         city = page.get_by_label("Город")
+        assert city.evaluate("node => node.required")
         city.fill("Buenos Aires")
         page.get_by_role("option", name="Buenos Aires — Argentina").click()
-        page.get_by_label("Формат").select_option("online")
+        page.get_by_label("Формат *", exact=True).select_option("online")
         assert page.get_by_label("Город").count() == 0
-        page.get_by_label("Формат").select_option("offline")
+        page.get_by_label("Формат *", exact=True).select_option("offline")
         city = page.get_by_label("Город")
         city.fill("Buenos Aires")
         page.get_by_role("option", name="Buenos Aires — Argentina").click()
-        page.get_by_label("Материалы").fill("Описание материала")
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         page.get_by_text("Не удалось сохранить задание").wait_for()  # noqa: RUF001
         with page.expect_request(
@@ -2788,19 +2814,23 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         page.get_by_text("Предпросмотр устарел").wait_for()
         page.get_by_role("button", name="Редактировать черновик").click()
-        page.get_by_label("Срок").fill("2026-08-22T20:00")
+        page.get_by_label("Срок *", exact=True).fill("2026-08-22T20:00")
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         commands_before = len(commands)
         page.locator('[data-screen-id="T06"]').wait_for()
         publish = page.get_by_role("button", name="Опубликовать", exact=True)
         assert publish.evaluate("node => node.parentElement.matches('.preview-task-card')")
         assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        state["values"]["materials"] = {"url": "https://legacy.example/material"}
         page.reload()
         page.locator('[data-screen-id="T06"]').wait_for()
         assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
         page.get_by_role("button", name="Назад").click()
         page.locator('[data-screen-id="T05"]').wait_for()
         assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t05")
+        assert page.get_by_label("Материалы", exact=True).input_value() == (
+            "https://legacy.example/material"
+        )
         page.go_forward()
         page.locator('[data-screen-id="T06"]').wait_for()
         assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
@@ -2834,7 +2864,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
             "time_size",
             "title",
         }
-        assert saved_form["materials"] == {"text": "Описание материала"}
+        assert saved_form["materials"] == {}
         assert saved_form["city"] == "Buenos Aires — Argentina"
         assert commands[-2][1:] == commands[-1][1:]
         assert commands[4][2]["expected_revision"] == 1
