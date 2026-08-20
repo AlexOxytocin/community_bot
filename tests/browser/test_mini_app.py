@@ -1307,6 +1307,19 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
 def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:
+    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    removed_profile_surface = (
+        "help_categories",
+        "current_goal",
+        "member.availability",
+        "Часовой пояс",
+        "Категории помощи",
+        "Текущая цель",
+        "Доступность",
+    )
+    assert {token: source.count(token) for token in removed_profile_surface} == dict.fromkeys(
+        removed_profile_surface, 0
+    )
     member_id = "00000000-0000-0000-0000-000000000068"
     malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
     private_marker = "PRIVATE_PROFILE_MARKER"
@@ -1330,6 +1343,14 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         "member_id": member_id,
         "telegram_username": private_marker,
         "display_name": malicious,
+        "city": "Буэнос-Айрес",
+        "short_bio": "Публичное описание",
+        "current_goal": "LEGACY_GOAL_VALUE",
+        "help_categories": ["LEGACY_HELP_VALUE"],
+        "skill_tags": ["Фасилитация", "Редактура"],
+        "availability": "LEGACY_AVAILABILITY_VALUE",
+        "experience_total": 12,
+        "level_number": 2,
         "karma": {"score": 3, "count": 4, "comment": private_marker},
         "reliability": {
             "accepted": 4,
@@ -1465,16 +1486,28 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.locator("img, [onerror], [onclick]").count() == 0
         assert page.locator("script").count() == 2
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        for editable_value in (
-            "Буэнос-Айрес",
-            "America/Argentina/Buenos_Aires",
-            "Помогаю собирать ясные планы.",
-            "Найти партнёров для пилота.",
-        ):
+        for editable_value in ("Буэнос-Айрес", "Помогаю собирать ясные планы."):
             assert page.get_by_text(editable_value, exact=True).count() == 1
+        for legacy_value in (
+            "America/Argentina/Buenos_Aires",
+            "Найти партнёров для пилота.",
+            "Стратегия, Текст",
+            "По вечерам",
+            "LEGACY_GOAL_VALUE",
+            "LEGACY_HELP_VALUE",
+            "LEGACY_AVAILABILITY_VALUE",
+        ):
+            assert page.get_by_text(legacy_value, exact=True).count() == 0
+        for legacy_label in (
+            "Часовой пояс",
+            "Текущая цель",
+            "Категории помощи",
+            "Доступность",
+        ):
+            assert page.get_by_text(legacy_label, exact=True).count() == 0
         assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
         assert page.get_by_role("button", name="Редактировать профиль").count() == 0
-        assert page.locator(".profile-field-row").count() == 8
+        assert page.locator(".profile-field-row").count() == 4
         assert page.locator(".profile-field-row").evaluate_all(
             "nodes => nodes.slice(0, 4).every(node => "
             "node.getBoundingClientRect().bottom <= innerHeight)"
@@ -1517,10 +1550,9 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.get_by_text("Помогаю собирать ясные планы.", exact=True).count() == 1
 
         modes.update(member="success", leaderboard="success")
-        me.update(help_categories=[], skill_tags=[])
+        me["skill_tags"] = []
         profile_nav.click()
         page.locator("h2", has_text=malicious).wait_for()
-        assert page.get_by_role("heading", name="Категории помощи").count() == 0
         assert page.get_by_role("heading", name="Навыки").count() == 0
         assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
         assert private_marker not in page.locator("body").inner_text()
@@ -1612,12 +1644,12 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             "member_id": member_id,
             "telegram_username": f"member{index}",
             "display_name": name,
-            "city": "Buenos Aires" if index % 2 else "Córdoba",
+            "city": None if index == 0 else ("Buenos Aires" if index % 2 else "Córdoba"),
             "short_bio": None,
             "current_goal": None,
             "help_categories": [],
-            "skill_tags": ["Дизайн", "Исследования"],
-            "availability": "онлайн",
+            "skill_tags": [] if index == 0 else ["Дизайн", "Исследования"],
+            "availability": "LEGACY_AVAILABILITY_VALUE",
             "experience_total": 20 - index,
             "level_number": 7 - index,
             "karma": {"score": 12 - index, "count": 4},
@@ -1707,6 +1739,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             page.goto(mini_app_url)
             page.get_by_role("button", name="Участники", exact=True).click()
             page.locator(".member-row").nth(5).wait_for()
+            assert page.get_by_text("LEGACY_AVAILABILITY_VALUE", exact=True).count() == 0
 
             geometry = page.evaluate(
                 """() => {
@@ -1746,6 +1779,13 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
 
             page.locator(".member-row").first.click()
             page.locator('[data-screen-id="P02"]').wait_for()
+            for legacy_label in (
+                "Текущая цель",
+                "Категории помощи",
+                "Доступность",
+            ):
+                assert page.get_by_text(legacy_label, exact=True).count() == 0
+            assert page.get_by_text("LEGACY_AVAILABILITY_VALUE", exact=True).count() == 0
             page.get_by_role("button", name="Назад").click()
             page.locator('[data-screen-id="P01"]').wait_for()
 
@@ -1811,7 +1851,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("Карма", exact=True).count() == 1
             assert page.get_by_text("Надёжность", exact=True).count() == 1
             assert page.get_by_text("—", exact=True).count() >= 4
-            assert page.locator(".profile-field-row").count() == 8
+            assert page.locator(".profile-field-row").count() == 4
             assert page.get_by_role("button", name="Редактировать профиль").count() == 0
             assert page.locator('[data-screen-id="P07"]').count() == 0
             page.locator('[data-screen-id="P06"]').wait_for()

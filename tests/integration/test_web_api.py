@@ -150,7 +150,7 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         assert replay.status_code == 200
         conflict = await client.put(
             "/api/v1/me/profile",
-            json={"field": "current_goal", "value": "Другой command"},
+            json={"field": "short_bio", "value": "Другой command"},
             headers=headers,
         )
         assert conflict.status_code == 409
@@ -193,7 +193,7 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         )
         assert foreign.status_code == 409
 
-        city, goal = await asyncio.gather(
+        city, bio = await asyncio.gather(
             client.put(
                 "/api/v1/me/profile",
                 json={"field": "city", "value": "Córdoba"},
@@ -201,18 +201,34 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
             ),
             client.put(
                 "/api/v1/me/profile",
-                json={"field": "current_goal", "value": "Запустить пилот"},
+                json={"field": "short_bio", "value": "Запустить пилот"},
                 headers={"origin": ORIGIN, "idempotency-key": "8106"},
             ),
         )
-        assert city.status_code == goal.status_code == 200
+        assert city.status_code == bio.status_code == 200
         authoritative = (await client.get("/api/v1/me")).json()
         assert authoritative["city"] == "Córdoba"
-        assert authoritative["current_goal"] == "Запустить пилот"
+        assert authoritative["short_bio"] == "Запустить пилот"
+        legacy_fields = ("availability", "timezone", "current_goal", "help_categories")
+        assert set(authoritative).isdisjoint(legacy_fields)
+        for index, field in enumerate(legacy_fields, start=8110):
+            rejected = await client.put(
+                "/api/v1/me/profile",
+                json={"field": field, "value": "legacy value"},
+                headers={"origin": ORIGIN, "idempotency-key": str(index)},
+            )
+            assert rejected.status_code == 422
+            assert rejected.json() == {"code": "invalid_request"}
+        member_list = (await client.get("/api/v1/members")).json()["items"]
+        public_profile = (await client.get(f"/api/v1/members/{member.id}")).json()
+        assert member_list
+        assert set(member_list[0]).isdisjoint(legacy_fields)
+        assert set(public_profile).isdisjoint(legacy_fields)
 
         async with sessions.begin() as session:
             stored_member = await session.get(MemberModel, member.id)
             assert stored_member is not None
+            assert stored_member.timezone == "UTC"
             stored_member.status = MemberStatus.PAUSED.value
         paused_profile = await client.get("/api/v1/me")
         assert paused_profile.status_code == 200

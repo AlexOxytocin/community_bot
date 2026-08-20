@@ -856,12 +856,8 @@ const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
 const editableProfileFields = [
   ["display_name", "Имя"],
   ["city", "Город"],
-  ["timezone", "Часовой пояс"],
   ["short_bio", "О себе"],
-  ["current_goal", "Текущая цель"],
-  ["help_categories", "Категории помощи"],
   ["skill_tags", "Навыки"],
-  ["availability", "Доступность"],
 ];
 
 const profileValue = (me, field) => Array.isArray(me[field])
@@ -896,7 +892,7 @@ function profileFields(me, state, revision) {
     }
     const form = element("form", undefined, "profile-field-editor");
     const inputLabel = element("label", label, "visually-hidden");
-    const multiline = ["short_bio", "current_goal", "availability"].includes(field);
+    const multiline = field === "short_bio";
     const input = element(multiline ? "textarea" : "input");
     input.dataset.profileField = field;
     input.value = draft.value;
@@ -1041,7 +1037,7 @@ function memberListDetails(items) {
       element("span", `Уровень ${member.level_number}`, "level-badge"),
     );
     const metadata = [...(member.skill_tags || []).slice(0, 2), member.city]
-      .filter(Boolean).slice(0, 3).join(" · ") || member.availability;
+      .filter(Boolean).slice(0, 3).join(" · ");
     copy.append(identity);
     if (metadata) copy.append(element("span", metadata, "member-row-metadata"));
     const stats = element("span", undefined, "member-row-stats");
@@ -1259,10 +1255,7 @@ function safeMemberDetails(member) {
     ["Telegram", member.telegram_username ? "@" + member.telegram_username : null],
     ["Город", member.city],
     ["О себе", member.short_bio],
-    ["Текущая цель", member.current_goal],
-    ["Категории помощи", member.help_categories],
     ["Навыки", member.skill_tags],
-    ["Доступность", member.availability],
     ["Опыт", member.experience_total],
     ["Уровень", member.level_number],
     ["Карма", String(member.karma.score) + " · оценок: " + String(member.karma.count)],

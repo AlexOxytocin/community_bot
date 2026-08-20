@@ -108,10 +108,7 @@ class SafeProfile:
     display_name: str
     city: str | None
     short_bio: str | None
-    current_goal: str | None
-    help_categories: tuple[str, ...]
     skill_tags: tuple[str, ...]
-    availability: str | None
     experience_total: int
     level_number: int
     karma: KarmaAggregate
