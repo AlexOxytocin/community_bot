@@ -11,8 +11,9 @@ Status: approved
   route/state revision guards;
 - persistent storage, service worker и новые abstractions отсутствуют.
 
-Ponytail size gate: approved. Production `app.js` net +130; test diff net +125.
-Конкретных удаляемых дублей reviewer не обнаружил.
+Ponytail size gate: approved. После CI narrowing production `app.js` net +141;
+test diff net +149. Повторный cached render удалён из всех пяти adapters; assignment
+detail возвращён к прежнему uncached owner.
 
-Targeted gates: `5 passed, 15 deselected`; Ruff, Node syntax и diff-check green.
+Targeted gates: `7 passed, 13 deselected`; Ruff, Node syntax и diff-check green.
 Полный browser suite выполняет CI согласно решению владельца.

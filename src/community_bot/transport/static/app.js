@@ -450,6 +450,7 @@ async function loadCatalog(push = true) {
       showCatalog(revision);
     });
     if (revision !== screenRevision) return;
+    if (cached) return;
     tasks = page.items;
     showCatalog(revision);
   } catch {
@@ -1089,6 +1090,7 @@ async function loadMembers(state, revision) {
       showParticipantsState(state, revision);
     });
     if (revision !== screenRevision) return;
+    if (cached) return;
     state.members = page.items;
   } catch {
     if (revision !== screenRevision) return;
@@ -1120,6 +1122,7 @@ async function loadParticipantsLeaderboard(state, revision) {
       showParticipantsState(state, revision);
     });
     if (revision !== screenRevision || request !== state.leaderboardRequest) return;
+    if (cached) return;
     state.leaderboards[period] = page.items;
   } catch {
     if (revision !== screenRevision || request !== state.leaderboardRequest) return;
@@ -1669,6 +1672,7 @@ async function loadAssignments(push = true) {
       showAssignments(revision);
     });
     if (revision !== screenRevision) return;
+    if (cached) return;
     assignments = page.items;
     showAssignments(revision);
   } catch (error) {
@@ -2265,9 +2269,12 @@ async function showAssignmentDetail(assignmentId, push = true) {
   back.classList.remove("hidden");
   replaceContent(element("p", "Загружаем назначение…", "status muted"));
   try {
-    const assignment = await getJson(
+    const response = await apiFetch(
       "/api/v1/assignments/" + encodeURIComponent(assignmentId),
+      { credentials: "same-origin" },
     );
+    if (!response.ok) throw new Error(requestError(response));
+    const assignment = await response.json();
     if (revision !== screenRevision) return;
     const detail = element("article", undefined, "card detail");
     detail.append(
@@ -2367,6 +2374,8 @@ const moderationError = (code, retry) => {
 
 function showModerationCases(cases, revision) {
   if (revision !== screenRevision) return;
+  const focusedCaseId = returnFocusModerationCaseId
+    || document.activeElement?.closest?.(".moderation-card")?.dataset.caseId;
   setNavigation("moderation", false);
   title.textContent = "Модерация";
   back.classList.add("hidden");
@@ -2386,6 +2395,7 @@ function showModerationCases(cases, revision) {
   for (const item of cases) {
     const actionable = item.case_type === "dispute" && item.status === "open";
     const card = element(actionable ? "button" : "article", undefined, "card moderation-card");
+    card.dataset.caseId = item.id;
     if (actionable) card.type = "button";
     const chips = element("div", undefined, "card-chips");
     chips.append(element("span", moderationStatus(item.status), "chip"));
@@ -2396,7 +2406,7 @@ function showModerationCases(cases, revision) {
     if (item.current_code) card.append(element("p", "Текущее решение: " + item.current_code, "meta"));
     if (actionable) {
       card.addEventListener("click", () => showModerationCase(item.id));
-      if (item.id === returnFocusModerationCaseId) focusTarget = card;
+      if (item.id === focusedCaseId) focusTarget = card;
     }
     const row = element("li");
     row.append(card);
@@ -2430,6 +2440,7 @@ async function loadModeration(push = true) {
       if (revision === screenRevision) showModerationCases(refreshed.items, revision);
     });
     if (revision !== screenRevision) return;
+    if (cached) return;
     showModerationCases(page.items, revision);
   } catch (error) {
     if (revision !== screenRevision || cached) return;

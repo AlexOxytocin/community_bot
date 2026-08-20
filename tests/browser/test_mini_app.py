@@ -1100,6 +1100,10 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
+        page.add_init_script(
+            "let cacheNow = 1000; Date.now = () => cacheNow; "
+            "globalThis.advanceCacheClock = value => { cacheNow += value; };"
+        )
         page.route(
             "**/api/v1/me",
             lambda route: route.fulfill(json={"display_name": "Алекс"}),
@@ -1187,6 +1191,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
 
         mode["name"] = "pending"
         resolution_mode["name"] = "conflict"
+        page.evaluate("advanceCacheClock(60001)")
         moderation_nav.click()
         pending.pop().fulfill(
             json={
@@ -1214,6 +1219,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.get_by_role("button", name="Назад").click()
         page.locator('[data-screen-id="S02"]').wait_for()
         assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s02")
+        page.evaluate("advanceCacheClock(60001)")
         with page.expect_request("**/api/v1/moderation/cases?*"):
             page.get_by_role("button", name="Назад").click()
         pending.pop().fulfill(
@@ -1240,19 +1246,27 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.get_by_role("heading", name="Каталог").wait_for()
 
         mode["name"] = "empty"
+        page.evaluate("advanceCacheClock(60001)")
         moderation_nav.click()
         page.get_by_text("Открытых обращений нет.").wait_for()
         page.get_by_role("button", name="Каталог").click()
         page.get_by_role("heading", name="Каталог").wait_for()
 
         mode["name"] = "closed"
-        moderation_nav.click()
-        page.get_by_text("Очередь модерации недоступна для этого аккаунта.").wait_for()
+        page.evaluate("advanceCacheClock(60001)")
+        with page.expect_response(lambda response: response.status == 403):
+            moderation_nav.click()
+        page.get_by_text("Открытых обращений нет.").wait_for()
+        assert page.get_by_text("Очередь модерации недоступна").count() == 0
         assert "Moderator" not in page.locator("body").inner_text()
         page.get_by_role("button", name="Каталог").click()
         page.get_by_role("heading", name="Каталог").wait_for()
 
         mode["name"] = "unauthorized"
+        page.evaluate("advanceCacheClock(60001)")
+        with page.expect_response(lambda response: response.status == 401):
+            moderation_nav.click()
+        page.get_by_text("Открытых обращений нет.").wait_for()
         moderation_nav.click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         page.get_by_role("button", name="Каталог").click()
@@ -1747,6 +1761,9 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             page.get_by_role("button", name="Всё время").click()
             page.get_by_text("30 XP").wait_for()
             assert set(period_requests) == {"week", "month", "all"}
+            assert page.locator(".leaderboard-row").count() == 1
+            page.get_by_role("button", name="Месяц").click()
+            page.get_by_text("20 XP").wait_for()
             assert page.locator(".leaderboard-row").count() == len(member_ids)
             assert page.locator(".leaderboard-row.is-current").count() == 1
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -2009,6 +2026,10 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
+        page.add_init_script(
+            "let cacheNow = 1000; Date.now = () => cacheNow; "
+            "globalThis.advanceCacheClock = value => { cacheNow += value; };"
+        )
         page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
         page.route(
             "**/api/v1/tasks",
@@ -2024,13 +2045,16 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.get_by_text("Активных заданий пока нет.").wait_for()
 
         list_mode["status"] = 503
-        page.get_by_role("button", name="Мои задания").click()
-        page.get_by_text(
-            "Не удалось загрузить активные назначения."  # noqa: RUF001
-        ).wait_for()
-        assert page.get_by_role("button", name="Повторить").count() == 1
+        page.evaluate("advanceCacheClock(60001)")
+        with page.expect_response(lambda response: response.status == 503):
+            page.get_by_role("button", name="Мои задания").click()
+        page.get_by_text("Активных заданий пока нет.").wait_for()
+        assert page.get_by_text("Не удалось загрузить активные назначения.").count() == 0  # noqa: RUF001
 
         list_mode["status"] = 401
+        with page.expect_response(lambda response: response.status == 401):
+            page.get_by_role("button", name="Мои задания").click()
+        page.get_by_text("Активных заданий пока нет.").wait_for()
         page.get_by_role("button", name="Мои задания").click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0

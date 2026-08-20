@@ -15,7 +15,7 @@
 
 ## Проверки
 
-- Focused browser: `5 passed, 15 deselected` — 375×812/430×932, fresh hit,
+- Focused browser: `7 passed, 13 deselected` — 375×812/430×932, fresh hit,
   controlled TTL, stale settled DOM, dedup, mutation/401 invalidation, hash-route и
   Telegram one-retry.
 - `ruff check tests/browser/test_mini_app.py` — green.
@@ -25,7 +25,7 @@
 
 ## Ponytail
 
-Production diff: один `app.js`, net +130 строк. Test diff: net +125 строк, включая
-адаптацию существующего oracle к новому fresh-cache контракту. Общий
+Production diff: один `app.js`, net +141 строк. Test diff: net +149 строк, включая
+адаптацию существующих error/race oracles к fresh/stale-cache контракту. Общий
 cache owner — два native `Map`, одна TTL-константа и generation counter; adapters
 пяти root loaders не создают отдельные cache policies или duplicated engines.
