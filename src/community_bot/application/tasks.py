@@ -448,7 +448,7 @@ class TaskService:
         """Configure the shared caller-owned transaction factory."""
         self._unit_of_work_factory = unit_of_work_factory
 
-    async def start(  # noqa: PLR0913
+    async def start(  # noqa: PLR0913, PLR0915
         self,
         *,
         update_id: int,
@@ -457,6 +457,7 @@ class TaskService:
         origin: str = "member",
         actor_member_id: UUID | None = None,
         replay_fingerprint: str | None = None,
+        replace_current: tuple[UUID, int] | None = None,
     ) -> TaskDraft | None:
         """Create a new current draft or resume the existing current draft."""
         async with self._unit_of_work_factory() as uow:
@@ -476,7 +477,22 @@ class TaskService:
                     return await _web_draft_replay(uow, replay, actor.id, replay_fingerprint or "")
             await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.CREATE_TASK)
             if template_id is None:
-                draft = await uow.get_current_task_draft(actor.id)
+                if replace_current is not None:
+                    source_id, source_revision = replace_current
+                    source = await uow.lock_task_draft(source_id)
+                    if (
+                        source is None
+                        or source.creator_id != actor.id
+                        or source.template_id is not None
+                        or source.origin != "member"
+                    ):
+                        raise PermissionError("Task draft is unavailable.")
+                    await uow.ensure_task_test_access(draft_id=source.id, member_id=actor.id)
+                    if not source.is_current or source.revision != source_revision:
+                        raise StaleTaskDraftError("Task draft step or revision is stale.")
+                    draft = None
+                else:
+                    draft = await uow.get_current_task_draft(actor.id)
                 if draft is not None and actor_member_id is not None:
                     draft = (
                         None if draft.template_id is not None or draft.origin != "member" else draft

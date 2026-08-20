@@ -1,0 +1,43 @@
+{
+  "schema": "cb100.creation-entry-delta.v1",
+  "removed_reachable_states": ["T04", "T04A"],
+  "conditional_state": {
+    "id": "T04B",
+    "condition": "authoritative current actor draft exists",
+    "states": ["content", "error"],
+    "actions": ["resume_or_edit", "start_new"]
+  },
+  "paths": [
+    {
+      "from": "T01",
+      "condition": "draft=null",
+      "to": "T05",
+      "mutations_before_editor_action": 0
+    },
+    {
+      "from": "T01",
+      "condition": "current draft",
+      "to": "T04B",
+      "mutations": 0
+    },
+    {
+      "from": "T04B",
+      "action": "resume_or_edit",
+      "to": "T05_or_T06",
+      "mutations": 0
+    },
+    {
+      "from": "T04B",
+      "action": "start_new",
+      "to": "T05",
+      "mutations": 1,
+      "idempotency": "existing receipt replay"
+    }
+  ],
+  "unchanged": [
+    "backend template capability",
+    "task domain validation",
+    "test-run scope",
+    "publish command"
+  ]
+}
