@@ -4,7 +4,6 @@ applyPlatformTheme();
 
 const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
-const welcome = document.getElementById("welcome");
 const back = document.getElementById("back");
 const shell = document.getElementById("app");
 const catalogNav = document.getElementById("catalog-nav");
@@ -12,9 +11,10 @@ const profileNav = document.getElementById("profile-nav");
 const assignmentsNav = document.getElementById("assignments-nav");
 const participantsNav = document.getElementById("participants-nav");
 const moderationNav = document.getElementById("moderation-nav");
-const managementNav = document.getElementById("management-nav");
+const heading = title.parentElement;
 let tasks = [];
 let assignments = [];
+let catalogFilters = { format: "", minReward: "" };
 const pendingAcceptKeys = new Map();
 let pendingTaskCreation = null;
 let returnFocusTaskId = null;
@@ -40,276 +40,28 @@ const markTransition = (node, id, trigger) => {
   return node;
 };
 
-const replaceContent = (...nodes) => content.replaceChildren(...nodes);
-
-const screenStateSets = [
-  "loading§content§error§permission_closed",
-  "loading§content§error§permission_closed§validation§confirm§disabled_reason",
-  "loading§content§error§permission_closed§disabled_reason",
-  "loading§content§error§permission_closed§empty",
-  "loading§content§error§permission_closed§validation§confirm",
-  "loading§content§error§permission_closed§confirm",
-  "loading§content§error§permission_closed§empty§disabled_reason",
-  "loading§content§error§permission_closed§success",
-  "loading§content§error§permission_closed§confirm§disabled_reason",
-].map((states) => states.split("§"));
-
-const presentationInventory = `
-A01\tLaunch / bootstrap\t\tloading§offline§auth error\t0
-A02\tНедоступная сессия\tПовторить\texpired§revoked§unsupported§error\t0
-A03\tПриглашение\tПродолжить\tinvalid§expired§exhausted§revoked\t1
-A04\tПравила и consent\tПринять правила\tdisabled§loading§error\t2
-A05\tАнкета регистрации\tПродолжить\t8 profile fields§autosave§validation\t1
-A05A\tPreview и отправка заявки\tОтправить заявку\tchanged§loading§error§success\t2
-A06\tОжидает одобрения\tОбновить статус\tpending§loading§error\t2
-A06A\tЗаявка отклонена\tИсправить и отправить\treview comment§reopened§success\t2
-A07\tОграниченный доступ\tРазрешённое действие\tstatus§blocked actions§expiry\t0
-T01\tКаталог заданий\tСоздать задание\tfilters§cursor§TEST marker§empty\t3
-T02\tФильтры каталога\tПрименить\tcategory§format§deadline§reward§level\t4
-T03\tПолная карточка задания\tПринять\tsnapshot fields§open§full§expired§unavailable\t0
-T03A\tПодтверждение обязательства\tПринять слот\tdeadline§criteria§withdrawal consequences§limits\t5
-T04\tSolo / group\tПродолжить\tsolo=1§group≥2\t4
-T04A\tВыбор шаблона\tИспользовать / Без шаблона\tapproved§inactive§empty§error\t6
-T04B\tЧерновики заданий\tПродолжить черновик\tcurrent§saved§stale revision§cancel\t3
-T05\tРедактор задания\tПроверить\tall engine fields§schema§autosave§balance\t4
-T06\tPreview задания\tОпубликовать\timmutable snapshot§reserve§role variant\t0
-T07\tConfirm публикации\tОпубликовать\texact revision§loading§conflict§error\t5
-T08\tОпубликовано\tОткрыть задание\tsuccess§exact replay\t7
-M01\tМои задания\tКонтекст карточки\ttaken§created§recent§archive\t3
-M02\tВзятые мной\tОткрыть назначение\tactive§submitted§dispute§terminal§cursor\t3
-M03\tНазначение\tПродолжить\tall task fields§exact state§deadlines\t0
-M04\tРедактор результата\tПроверить\tsaved result schema / freeform result§autosave\t4
-M04A\tВерсии результата\tОткрыть версию\timmutable versions§current§empty\t6
-M05\tPreview результата\tОтправить\tschema labels§criteria§changed revision\t0
-M06\tConfirm отправки\tОтправить\texact revision§loading§deadline race§error\t5
-M07\tРезультат отправлен\tК заданию\tversion N§review deadline§exact replay\t7
-M08\tОтказ исполнителя\tПодтвердить отказ\treason§timing§reliability consequence\t4
-M09\tСозданные мной\tОткрыть задание\tdraft§recruiting§closed§settling§terminal\t3
-M10\tСозданное задание / слоты\tКонтекст слота\tfree§accepted§submitted§terminal§cancellations\t0
-M11\tПроверка результата\tВыбрать решение\tlatest/all versions§criteria§72h§conflict\t0
-M12\tРешение по результату\tПроверить решение\tfull§half-ceil partial§reject; no invented comment\t4
-M13\tРешение сохранено\tК заданию\tledger outcome§dispute window§exact replay\t7
-M14\tОткрытие спора\tОтправить спор\t24h§обязательный comment\t4
-M14A\tМатериалы спора\t\tappend-only evidence history§visibility\t3
-M15\tСтатус спора\tРазрешённое действие\topen§resolved§appealed§frozen settlement\t0
-M16\tАпелляция\tПодать апелляцию\tодна§7 дней§reason§conflict-safe\t1
-M17\tЗакрытие набора / отмена автора\tПодтвердить\tfree-slot refund§occupied performers§deadline\t1
-M18\tОтвет на запрос отмены\tСогласиться / Продолжить\tpending§obsolete§accepted§declined\t1
-M19\tСтатус отмены задания\tК заданию\tresponses§closed intake§cancelled§obsolete\t2
-P01\tУчастники\tОткрыть карточку\tactive-only§name/@username ≥3§cursor\t3
-P02\tКарточка участника\tОценить карму\tsafe profile fields§aggregate§eligibility\t0
-P03\tОценка кармы\tСохранить\t+1§0§−1§comment 10–300§edit\t4
-P04\tКарма сохранена\tК профилю\taggregate§exact replay\t7
-P05\tЛидерборд\tОткрыть карточку\tall-time XP§tie-breaks§own rank§cursor\t3
-P06\tСобственный профиль\tИзменить профиль\tprofile§balance§XP/level§karma§statistics\t0
-P07\tРедактор профиля\tСохранить\t8 editable fields§dirty§validation§success\t4
-P08\tБаланс\tИстория операций\tcredit§experience§level progress\t0
-P09\tИстория операций\tОткрыть операцию\t10 ledger types§cursor§empty§error\t6
-P10\tОперация\tОткрыть связанный объект\tdelta§source§reversal link§unavailable target\t2
-S01\tОчередь кейсов\tОткрыть кейс\tdispute§appeal§fraud admin-only§filters\t3
-S02\tКейс модерации\tК preview решения\ttask snapshot§versions§evidence§history\t0
-S03\tPreview решения\tПодтвердить решение\t7 outcome codes§reason§effect preview§stale revision\t4
-S04\tРешение сохранено\tК очереди\tledger/reliability/audit outcome§exact replay\t7
-S05\tОчередь регистраций\tОткрыть заявку\tsubmitted§empty§error\t6
-S06\tЗаявка участника\tВыбрать решение\tall profile fields§consent§prior comment\t2
-S07\tРешение по регистрации\tПодтвердить\tapprove§reject§comment§single grant\t1
-S08\tНовая санкция\tПроверить\tnotice§warning§restriction§suspension§ban\t1
-S09\tАктивные санкции\tОткрыть санкцию\tactive§expiring§role visibility§empty\t6
-S10\tСанкция и история\tОтозвать, если разрешено\tactions§reason§period§issue/revoke/expire\t2
-S11\tОплаченные выполнения\tОткрыть выполнение\tpaid§reversible§filters§empty\t6
-S12\tОткрытие fraud-case\tПодтвердить открытие\treason§evidence reference§reversal precheck\t1
-G01\tHub управления\tОткрыть capability\tpermission-shaped tiles§loading§error\t6
-G02\tПриглашения\tСоздать приглашение\tactive§exhausted§expired§revoked\t6
-G03\tНовое приглашение\tСоздать\tintended Telegram ID§uses§expiry§validation\t1
-G04\tПриглашение / использования\tОтозвать\tcreator§uses§redemptions§confirm\t2
-G05\tУправление участниками\tОткрыть участника\tstatus§role§permission filters§non-active privacy\t6
-G06\tАдмин-карточка участника\tРазрешённое действие\tprofile§role§status§restrictions§histories\t2
-G07\tСтатус / роль\tПодтвердить\tactive↔paused§member↔moderator§admin super-only\t1
-G08\tКатегории / шаблоны\tОткрыть объект\tversioned§active/inactive§empty§error\t6
-G08A\tКатегория\tВключить / выключить\tmetadata read-only§active/inactive§exact toggle\t2
-G08B\tШаблон и версии\tСоздать версию\tall template fields§schemas§active history\t2
-G09\tРедактор версии шаблона\tПроверить версию\tinput/result JSON Schema§limits§validation\t1
-G10\tВсе задания / выполнения\tОткрыть объект\torigin§status§deadline§filters§cursor\t6
-G11\tКорректировка ledger\tПроверить операцию\tcredit/experience delta§reason§comment\t1
-G12\tConfirm корректировки / reversal\tПрименить\tsource link§totals§exact replay§insufficient balance\t8
-G13\tRaw-карма\tОткрыть vote\tauthor§value§comment§audited read§filters\t6
-G14\tVote и история версий\tРазрешённая модерация\trevisions§actor§audit§permission\t2
-G14C\tExclude / restore версии кармы\tПодтвердить\texact revision§reason§no auto-sanction\t1
-G14A\tИстория надёжности\tОткрыть source\troot§responsibility chain§outcome corrections\t2
-G14B\tLedger участника\tПроверить корректировку\tall types§reversal links§cursor\t6
-G15\tЖурнал действий\tОткрыть запись\tactor§action§entity§reason§pagination\t6
-G15A\tЗапись аудита\tОткрыть разрешённый объект\tbefore/after safe projection§immutable\t2
-G16\tВерсии конфигурации\tЗагрузить версию\tactive§candidates§history§hashes\t6
-G16A\tВерсия конфигурации\tАктивировать / сравнить\tlevels§alert policy§assignment limit§hash\t2
-G17\tЗагрузка и проверка config\tПроверить\tschema/version/hash§duplicate/conflict§valid/invalid\t1
-G18\tАктивация конфигурации\tАктивировать\texact version/hash§reason§backfill outcome\t8
-G19\tЗадание сообщества\tПроверить карточку\tall snapshot fields§slots§reward 1–4§independent reviewer\t1
-G20\tPreview задания сообщества\tОпубликовать / На подтверждение\trole variant§conflict checks§exact revision\t2
-G21\tОчередь публикаций\tОткрыть карточку\tpending§empty§permission\t6
-G22\tПодтверждение публикации\tПодтвердить / Отклонить\treason§exact revision§success\t2
-G22A\tОчередь community review\tОткрыть результат\tempty§conflict-closed§reviewer-required\t6
-G22B\tCommunity result review\tВыбрать решение\tcriteria§versions§72h§issued reward\t2
-G22C\tЗамена проверяющего\tПодтвердить замену\tindependence§generation§new 72h window\t1
-G22D\tОтмена community assignment\tПодтвердить\tcommunity/system reason§audit§appealable\t1
-G23\tInteraction alerts\tОткрыть алерт\tprivate pair§count/window/config§empty\t6
-G23A\tRisk signals\tОткрыть сигнал\treview-only§no automatic effects§privacy\t6
-G24\tInteraction alert\tСохранить итог\tassignments§private notes§legitimate/monitor/penalty\t2
-G25\tШтраф по алерту\tПодтвердить пакет\tone/both§unreserved balance§atomic§exact once\t1
-G26\tАдминистраторы\tИзменить роль\tsuper permission boundary§self-disabled\t6
-G27\tАпелляции\tОткрыть апелляцию\tone/7d§empty§permission\t6
-G28\tРешение по апелляции\tПодтвердить новый outcome\texact reversals§corrections§paid slot occupied\t2
-`.trim().split("\n").map((record) => {
-  const [id, label, primary, fields, stateSet] = record.split("\t");
-  return {
-    id,
-    family: id[0],
-    label,
-    primary,
-    fields: fields.split("§"),
-    states: screenStateSets[Number(stateSet)],
-  };
-});
-
-const productRoutePatterns = [
-  "#/start",
-  "#/catalog",
-  "#/tasks/:task_id",
-  "#/compose/tasks/:draft_id?",
-  "#/work",
-  "#/work/:resource_id",
-  "#/members",
-  "#/members/:member_id",
-  "#/profile",
-  "#/moderation/:case_id?",
-  "#/admin/:resource_type?/:resource_id?",
-];
-const presentationStates = [...new Set(presentationInventory.flatMap((screen) => screen.states))];
-const presentationScreen = (id) => presentationInventory.find((screen) => screen.id === id);
-const disabledPresentationIds = new Set(
-  "A03 A04 A05 A05A A06A M16 M17 M18 S07 S08 S10 S12 G03 G04 G07 G08A G09 G11 G12 G14C G17 G18 G19 G20 G22 G22B G22C G22D G24 G25 G26 G28".split(" "),
-);
-const connectedPresentationIds = new Set(
-  "T03A T07 M04 M06 M08 M12 M14 P03 P07 S03".split(" "),
-);
-const rootPresentationIds = new Set("T01 M01 P01 P06 S01 G01".split(" "));
-const dialogPresentationIds = new Set("T03A T07 M06 G12 G18".split(" "));
-const successPresentationIds = new Set("T08 M07 M13 P04 S04".split(" "));
-const navigationClassFor = (id) => rootPresentationIds.has(id)
-  ? "root"
-  : dialogPresentationIds.has(id)
-    ? "dialog"
-    : successPresentationIds.has(id) ? "success" : "context";
-const localFallbackOverrides = {
-  "PE-004": "A02", "PE-009": "A02", "PE-019": "T04A", "PE-023": "M09",
-  "PE-031": "M03", "PE-035": "M02", "PE-041": "M09", "PE-042": "M02",
-  "PE-043": "M03", "PE-045": "M14", "PE-054": "M09", "PE-055": "M02",
-  "PE-060": "P01", "PE-069": "A02", "PE-077": "S01", "PE-078": "S01",
-  "PE-094": "G06", "PE-108": "G16A",
+const resetScrollPosition = () => {
+  const options = { top: 0, left: 0, behavior: "instant" };
+  content.closest(".screen")?.scrollTo(options);
+  shell.scrollTo(options);
+  document.scrollingElement?.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  globalThis.scrollTo({ top: 0, left: 0, behavior: "instant" });
 };
-const localTransitions = `
-PE-001 A01 A02 auth_failure replace error
-PE-002 A01 A03 valid_invitation replace content
-PE-003 A01 A07 restricted_status replace permission_closed
-PE-004 A01 T01 active_member replace loading
-PE-009 A06 T01 registration_approved replace loading
-PE-010 A06 A06A registration_rejected replace content
-PE-012 T01 T02 open_filters push content
-PE-013 T01 T03 open_task push loading
-PE-014 T01 T04 create_task push content
-PE-015 T03 T03A accept_task push confirm
-PE-016 T04 T04A choose_template_path push content
-PE-017 T04 T04B resume_draft_path push content
-PE-018 T04A T05 use_template_or_freeform push content
-PE-019 T04B T05 resume_draft push content
-PE-020 T05 T06 preview_task push content
-PE-021 T06 T07 publish_task push confirm
-PE-023 T08 M10 open_published_task replace loading
-PE-025 M01 M02 open_accepted_tab stay content
-PE-026 M01 M09 open_created_tab stay content
-PE-027 M02 M03 open_assignment push loading
-PE-028 M03 M04 create_or_extend_submission push content
-PE-029 M03 M08 withdraw_assignment push content
-PE-031 M04A M04 continue_submission pop content
-PE-032 M04 M05 preview_result push content
-PE-033 M05 M06 submit_result push confirm
-PE-035 M07 M03 open_assignment replace loading
-PE-037 M09 M10 open_created_task push loading
-PE-038 M10 M11 open_review push loading
-PE-039 M11 M12 choose_review_decision push content
-PE-041 M13 M10 open_created_task replace loading
-PE-042 M13 M03 open_assignment replace loading
-PE-043 M13 M14 open_reject_dispute push content
-PE-045 M14A M15 open_dispute_status replace loading
-PE-046 M15 M16 open_appeal push content
-PE-048 G27 G28 open_appeal push loading
-PE-051 M10 M17 request_group_cancellation push content
-PE-054 M19 M10 open_created_task_outcome replace loading
-PE-055 M19 M03 open_assignment_outcome replace loading
-PE-056 P01 P02 open_member push loading
-PE-057 P01 P05 open_leaderboard stay loading
-PE-058 P02 P03 rate_karma push content
-PE-060 P04 P02 return_to_member replace loading
-PE-061 P06 P07 edit_profile push content
-PE-062 P06 P08 open_balance push content
-PE-064 P08 P09 open_ledger push loading
-PE-065 P09 P10 open_operation push loading
-PE-066 S01 S02 open_case push loading
-PE-067 S02 S03 preview_resolution push content
-PE-069 S04 S01 return_to_case_queue replace loading
-PE-070 S01 S05 open_registration_queue stay loading
-PE-071 S05 S06 open_application push loading
-PE-072 S06 S07 choose_registration_decision push content
-PE-074 S01 S11 open_paid_assignments stay loading
-PE-075 S11 S12 open_fraud_case push content
-PE-077 G06 S08 issue_sanction push content
-PE-078 S02 S08 issue_case_sanction push content
-PE-081 S09 S10 open_sanction push loading
-PE-082 G01 G02 open_invitations push loading
-PE-083 G02 G03 create_invitation push content
-PE-084 G02 G04 open_invitation push loading
-PE-085 G01 G05 open_member_admin push loading
-PE-086 G05 G06 open_admin_member push loading
-PE-087 G06 G07 change_role_or_status push content
-PE-088 G01 G08 open_catalog_admin push loading
-PE-089 G08 G08A open_category push loading
-PE-090 G08 G08B open_template push loading
-PE-091 G08B G09 create_template_version push content
-PE-092 G01 G10 open_all_tasks push loading
-PE-093 G06 G11 correct_member_ledger push content
-PE-094 G14B G11 correct_ledger push content
-PE-095 G11 G12 preview_ledger_change push confirm
-PE-097 G01 G13 open_raw_karma push loading
-PE-098 G13 G14 open_karma_vote push loading
-PE-099 G14 G14C moderate_karma_version push content
-PE-100 G06 G14A open_reliability_history push loading
-PE-101 G06 G14B open_member_ledger push loading
-PE-102 G01 G15 open_audit push loading
-PE-103 G15 G15A open_audit_record push loading
-PE-104 G01 G16 open_config_versions push loading
-PE-105 G16 G16A open_config_version push loading
-PE-106 G16 G17 upload_config push content
-PE-107 G16A G18 activate_config push confirm
-PE-108 G17 G18 activate_validated_config push confirm
-PE-109 G01 G19 create_community_task push content
-PE-110 G19 G20 preview_community_task push content
-PE-113 G21 G22 open_publication_request push loading
-PE-115 G01 G22A open_community_reviews push loading
-PE-116 G22A G22B open_community_result push loading
-PE-121 G01 G23 open_interaction_alerts push loading
-PE-122 G01 G23A open_risk_signals push loading
-PE-123 G23 G24 open_interaction_alert push loading
-PE-127 G01 G26 open_administrators push loading
-PE-128 G01 G27 open_appeals push loading
-`.trim().split("\n").map((row) => {
-  const [id, source, target, trigger, historyMode, state] = row.split(" ");
-  return {
-    id, source, target, trigger, historyMode, state,
-    fallback: localFallbackOverrides[id] || source,
-  };
-});
-const transitionsFrom = (id) => localTransitions.filter((edge) => edge.source === id);
+
+const replaceContent = (...nodes) => {
+  content.replaceChildren(...nodes);
+  resetScrollPosition();
+  queueMicrotask(resetScrollPosition);
+  requestAnimationFrame(resetScrollPosition);
+};
+
+const connectedScreenIds = new Set(`
+T01 T02 T03 T03A T04 T04A T05 T06 T07 T08
+P01 P02 P03 P04 P05 P06 P07
+M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15
+S01 S02 S03 S04
+`.trim().split(/\s+/));
 const productRouteFor = (id) => {
-  if (id.startsWith("A")) return "#/start";
   if (["T01", "T02"].includes(id)) return "#/catalog";
   if (["T03", "T03A"].includes(id)) return "#/tasks/:task_id";
   if (id.startsWith("T")) return "#/compose/tasks/:draft_id?";
@@ -318,41 +70,24 @@ const productRouteFor = (id) => {
   if (["P01", "P05"].includes(id)) return "#/members";
   if (["P02", "P03", "P04"].includes(id)) return "#/members/:member_id";
   if (id.startsWith("P")) return "#/profile";
-  if (id.startsWith("S")) return "#/moderation/:case_id?";
-  return "#/admin/:resource_type?/:resource_id?";
+  return "#/moderation/:case_id?";
 };
-const resourceRoute = (pattern, resourceId, resourceType) => {
+const resourceRoute = (pattern, resourceId) => {
   const required = pattern.match(/:\w+(?!\?)/g) || [];
   if (required.length && !resourceId) return null;
-  const values = [resourceType, resourceId].filter(Boolean).map(encodeURIComponent);
+  const values = [resourceId].filter(Boolean).map(encodeURIComponent);
   let index = 0;
   return pattern
     .replace(/\/:(\w+)\?/g, () => values[index] ? `/${values[index++]}` : "")
     .replace(/:(\w+)/g, () => values[index++] || "");
 };
 
-const presentationLocationFor = (id, resourceId, resourceType) => {
+const presentationLocationFor = (id, resourceId) => {
   const pattern = productRouteFor(id);
-  const route = resourceRoute(pattern, resourceId, resourceType);
+  const route = resourceRoute(pattern, resourceId);
   return route ? `${route}?view_state=${id.toLowerCase()}` : null;
 };
-const templateIds = {
-  list: new Set("T01 T04A T04B M01 M02 M04A M09 M14A P01 P05 S01 S05 S09 S11 G02 G05 G08 G10 G13 G16 G21 G22A G23 G23A G26 G27".split(" ")),
-  editor: new Set("A03 A05 T02 T04 T05 M04 M08 M12 M14 M16 M17 M18 P03 P07 S03 S07 S08 S12 G03 G07 G09 G11 G14C G17 G19 G22C G22D G25".split(" ")),
-  preview: new Set("A05A T06 M05 G20".split(" ")),
-  confirm: new Set("T03A T07 M06 G12 G18".split(" ")),
-  outcome: new Set("A01 A02 A06 A06A A07 T08 M07 M13 P04 S04".split(" ")),
-  history: new Set("P09 S10 G14 G14A G14B G15".split(" ")),
-  hub: new Set(["G01"]),
-};
-const presentationTemplate = (id) => Object.entries(templateIds)
-  .find(([, ids]) => ids.has(id))?.[0] || "detail";
-
-const presentationState = (screen, requestedState) => {
-  const defaultState = disabledPresentationIds.has(screen.id) ? "disabled_reason" : "content";
-  return presentationStates.includes(requestedState) ? requestedState : defaultState;
-};
-
+const presentationScreen = (id) => connectedScreenIds.has(id) ? { id } : null;
 const presentationFromLocation = () => {
   const [path, query = ""] = location.hash.split("?", 2);
   const id = new URLSearchParams(query).get("view_state")?.toUpperCase();
@@ -386,434 +121,85 @@ const section = (heading, value) => {
 };
 
 const setNavigation = (screen, context) => {
+  heading.querySelector(".heading-action")?.remove();
   shell.classList.toggle("context-screen", context);
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
   profileNav.setAttribute("aria-pressed", String(screen === "profile"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
   participantsNav.setAttribute("aria-pressed", String(screen === "participants"));
   moderationNav.setAttribute("aria-pressed", String(screen === "moderation"));
-  managementNav.setAttribute("aria-pressed", String(screen === "management"));
 };
 
-const presentationContent = `
-A01\tЗапуск сообщества\tзапуск Mini App\t\tСессия|Проверяем вход через Telegram§Продолжение|Откроется только разрешённый раздел
-A02\tСессия недоступна\tсессию\tПовторить вход\tПричина|Ссылка устарела или доступ был отозван§Что делать|Откройте Mini App из актуального сообщения Telegram
-A03\tПроверка приглашения\tприглашение\tПродолжить\tПолучатель|Приглашение предназначено вашему Telegram-профилю§Срок действия|Использовать до 24 августа, 20:00
-A04\tПравила сообщества\tправила сообщества\tПринять правила\tОбязательство|Уважать участников и не публиковать приватные данные§Согласие|Версия правил сохранится вместе с заявкой
-A05\tАнкета участника\tанкету участника\tПродолжить\tПрофиль|Имя, город, часовой пояс и короткое описание§Помощь|Цель, категории, навыки и доступность
-A05A\tПроверка анкеты\tпредпросмотр анкеты\tОтправить заявку\tЛичные данные|Показаны только поля будущего профиля§После отправки|Заявка перейдёт команде сообщества
-A06\tЗаявка на рассмотрении\tстатус заявки\tОбновить статус\tСостояние|Команда сообщества ещё рассматривает анкету§После решения|Доступный раздел появится при обновлении
-A06A\tЗаявку нужно исправить\tзамечания к заявке\tИсправить анкету\tКомментарий команды|Уточните, чем вы готовы помогать§Повторная отправка|Сохранённые поля можно отредактировать
-A07\tОграниченный доступ\tограничения аккаунта\tОткрыть разрешённый раздел\tСтатус|Часть действий временно недоступна§Доступные действия|Собственный профиль и разрешённые разделы
-T01\tКаталог\tкаталог заданий\tСоздать задание\tПроверить доступность пандуса у библиотеки|Открыто · Помощь сообществу|4 кредита · до 20:00§Вычитать памятку для новых участников|Открыто · Онлайн|3 кредита · 2 места§Собрать контакты районных волонтёров|Открыто · 30 минут|4 кредита · до завтра
-T02\tФильтры каталога\tфильтры каталога\tПрименить фильтры\tКатегория|Помощь сообществу§Условия|Онлайн · до завтра · награда от 3 кредитов
-T03\tУсловия задания\tкарточку задания\tПринять задание\tСоздатель|Новая библиотека§Награда и места|4 кредита · 2 из 3 мест свободно§Что нужно сделать|Сделайте три фотографии главного входа и пандуса§Критерии приёмки|Вход виден полностью, комментарий называет препятствия§Формат и место|Офлайн · Buenos Aires · Центральная библиотека§Срок и доступ|20 августа, 20:00 · уровень 1
-T03A\tПодтверждение участия\tусловия принятия\tПринять слот\tОбязательство|Завершить работу до 20 августа, 20:00§Отказ|Слот освободится, причина повлияет на надёжность
-T04\tТип задания\tтип нового задания\tПродолжить\tЛичное|Один исполнитель и один результат§Групповое|Несколько независимых слотов
-T04A\tОснова задания\tшаблоны заданий\tВыбрать основу\tГотовый шаблон|Поля и критерии уже настроены§Без шаблона|Заполнить разрешённые поля вручную
-T04B\tЧерновики заданий\tчерновики заданий\tПродолжить черновик\tПандус у библиотеки|Сохранено сегодня в 14:20§Помощь на мероприятии|Нужно обновить срок
-T05\tНовое задание\tредактор задания\tПроверить задание\tТип задания|Групповое§Число исполнителей|3§Формат|Офлайн§Город|Buenos Aires§Категория|Помощь сообществу§Название|Проверить доступность пандуса§Что нужно сделать|Сделать 3 фотографии входа и описать препятствия§Критерии приёмки|На каждой фотографии полностью виден вход§Награда|4 кредита§Срок|20 августа, 20:00
-T06\tПредпросмотр задания\tпредпросмотр задания\tПерейти к публикации\tЗадание|Проверить доступность пандуса§Исполнители|3 места · по 4 кредита§Проверка|Фотографии входа, описание препятствий и точный адрес§Резерв|12 кредитов после подтверждения
-T07\tПубликация задания\tподтверждение публикации\tОпубликовать\tБудет опубликовано|Групповое задание на 3 исполнителей§Списание|12 кредитов будут зарезервированы§После публикации|Условия принятых слотов останутся неизменными
-T08\tЗадание опубликовано\tрезультат публикации\tОткрыть задание\tРезультат|Задание появилось в каталоге§Резерв|12 кредитов · операция сохранена
-M01\tМои задания\tсписок моих заданий\tОткрыть карточку\tПроверить доступность пандуса|В работе · осталось 2 часа|Черновик результата сохранён§Вычитать памятку для участников|На проверке|Отправлено сегодня в 14:20§Проверить ссылки в каталоге|Завершено|Начислено 4 кредита
-M02\tВзятые мной\tпринятые задания\tОткрыть назначение\tПроверить доступность пандуса|В работе · срок сегодня§Вычитать памятку|Результат на проверке
-M03\tАктивное назначение\tназначение\tПродолжить выполнение\tЗадание|Проверить доступность пандуса§Срок|20 августа, 20:00§Критерии|Три фотографии и описание препятствий
-M04\tРезультат задания\tчерновик результата\tПроверить результат\tРезультат|Добавлены три фотографии и описание доступности§Сохранение|Черновик сохранён сегодня в 15:10
-M04A\tВерсии результата\tверсии результата\tОткрыть версию\tВерсия 2|Текущая · сегодня в 15:10§Версия 1|Сохранена вчера в 19:40
-M05\tПредпросмотр результата\tпредпросмотр результата\tПерейти к отправке\tРезультат|Три фотографии входа и описание препятствий§Проверка|Все критерии задания заполнены
-M06\tОтправка результата\tподтверждение отправки\tОтправить результат\tВерсия|Будет отправлена версия 2§Последствие|После отправки начнётся срок проверки
-M07\tРезультат отправлен\tотправленный результат\tК назначению\tСостояние|Версия 2 передана создателю§Срок проверки|До 23 августа, 15:10
-M08\tОтказ от задания\tотказ исполнителя\tПодтвердить отказ\tПричина|Необходимо объяснить, почему работа не завершена§Последствие|Слот освободится, надёжность будет пересчитана
-M09\tСозданные мной\tсозданные задания\tОткрыть задание\tПроверить доступность пандуса|Набор открыт · 1 из 3 слотов занят§Вычитать памятку|Результат ожидает проверки
-M10\tЗадание и исполнители\tслоты задания\tОткрыть слот\tСвободные места|2 из 3§Мария Крылова|Результат отправлен§Резерв|12 кредитов
-M11\tПроверка результата\tрезультат на проверке\tВыбрать решение\tИсполнитель|Мария Крылова§Результат|Три фотографии и описание препятствий§Срок решения|Осталось 48 часов
-M12\tРешение по результату\tрешение по результату\tПроверить решение\tПолностью|Начислить 4 кредита§Частично|Начислить 2 кредита§Отклонить|Открыть окно для спора на 24 часа
-M13\tРешение сохранено\tитог проверки\tК заданию\tВыплата|Исполнителю начислено 4 кредита§Запись|Решение добавлено в историю задания
-M14\tСпор по результату\tформу спора\tОтправить спор\tСрок|Осталось 18 часов§Причина|Создатель не учёл приложенные фотографии
-M14A\tМатериалы спора\tисторию спора\t\tКомментарий исполнителя|Сегодня · 12:04|Вход был закрыт, приложена фотография объявления§Версия результата 2|Сегодня · 12:18|Доступно сторонам спора и модератору
-M15\tСтатус спора\tстатус спора\tОткрыть доступное действие\tСостояние|Материалы переданы модератору§Расчёт|Выплата и резерв временно заморожены
-M16\tАпелляция\tформу апелляции\tПодать апелляцию\tСрок|Подать можно один раз в течение 7 дней§Причина|Объясните, какая часть решения требует пересмотра
-M17\tЗакрытие набора\tотмену задания автором\tПодтвердить закрытие\tСвободные слоты|Средства вернутся сразу§Занятые слоты|Исполнители получат запрос на решение
-M18\tЗапрос на отмену\tответ исполнителя\tСохранить ответ\tСогласиться|Задание завершится без результата§Продолжить|Работу можно закончить до текущего срока
-M19\tСтатус отмены\tсостояние отмены\tК заданию\tНабор|Закрыт для новых исполнителей§Ответы|1 согласие · 1 продолжает работу
-P01\tУчастники\tкаталог участников\tОткрыть карточку\tМария Крылова|Уровень 7 · Дизайн · Buenos Aires|Карма +12 · Надёжность 98%§Илья Петров|Уровень 5 · Разработка · онлайн|Карма +7 · Надёжность 94%§Анна Соколова|Уровень 4 · Тексты · Córdoba|Карма +9 · Недостаточно данных
-P02\tКарточка участника\tпрофиль участника\tОценить карму\tМария Крылова|Уровень 7 · Значимый вклад§Показатели|+12 кармы · 98% надёжность · 34 задания§О себе|Помогаю с исследованиями и проверкой сценариев§Навыки|Дизайн · Исследования · Тексты§Оценка кармы|Доступна после совместного оплачиваемого задания
-P03\tОценка взаимодействия\tоценку кармы\tСохранить оценку\tОценка|+1 · положительно§Комментарий|Мария помогла проверить сценарий и подробно описала результат
-P04\tОценка сохранена\tрезультат оценки\tК профилю\tКарма|Новая оценка учтена в общем показателе§Повтор|Та же операция не создаст вторую оценку
-P05\tЛидерборд\tлидерборд\tОткрыть карточку\t1 · Мария Крылова|260 XP§2 · Вы|180 XP|Ваше место§3 · Илья Петров|145 XP§4 · Анна Соколова|122 XP§5 · Денис Волков|118 XP
-P06\tПрофиль\tсобственный профиль\tИзменить профиль\tAlex Oxytocin|Активный участник · с мая 2026§Личный прогресс|24 кредита · 180 опыта · 96% надёжность§Мои показатели|12 заданий завершено · 4 создано · 9 получателей§Карточка профиля|Карма +8 · Продукт и аналитика · Buenos Aires
-P07\tРедактор профиля\tполя профиля\tСохранить профиль\tГород|Buenos Aires§О себе|Помогаю превращать идеи в ясные планы§Доступность|По вечерам
-P08\tБаланс и опыт\tбаланс участника\tИстория операций\tКредиты|24 доступно§Опыт|180 · уровень 7§До следующего уровня|20 опыта
-P09\tИстория операций\tоперации участника\tОткрыть операцию\tНаграда за задание|+4 кредита · сегодня§Резерв задания|-12 кредитов · вчера
-P10\tОперация баланса\tоперацию баланса\tОткрыть связанное задание\tИзменение|+4 кредита§Источник|Подтверждённое выполнение§Связь|Проверить доступность пандуса
-S01\tМодерация\tочередь кейсов\tОткрыть кейс\tСпор по результату задания|Обжалование · открыто|Сегодня · 12:40 · #1042§Нарушение условий публикации|Проверка · открыто|Вчера · 18:05 · #1038§Пересмотр решения создателя|Апелляция|18 августа · #1029
-S02\tКейс модерации\tматериалы кейса\tПроверить решение\tЗадание|Проверить доступность пандуса§Стороны|Создатель и исполнитель§Материалы|Две версии результата и комментарий спора
-S03\tРешение модератора\tпредпросмотр решения\tПодтвердить решение\tИтог|Частичная выплата§Причина|Подтверждена половина результата§Последствия|2 кредита исполнителю · 2 кредита автору
-S04\tРешение применено\tитог модерации\tК очереди\tРасчёт|Выплата и возврат записаны§История|Решение доступно сторонам спора
-S05\tЗаявки участников\tочередь регистраций\tОткрыть заявку\tМария Крылова|Отправлена сегодня§Илья Петров|Нужна повторная проверка
-S06\tЗаявка участника\tанкету участника\tВыбрать решение\tПрофиль|Мария · Buenos Aires · исследователь§Помощь|Дизайн, интервью и тексты§Согласие|Правила приняты 18 августа
-S07\tРешение по заявке\tрешение регистрации\tПодтвердить решение\tОдобрить|Открыть участнику основные разделы§Отклонить|Вернуть анкету с одним комментарием
-S08\tНовая санкция\tпараметры санкции\tПроверить санкцию\tМера|Временное ограничение§Действия|Создание и принятие заданий§Срок|До 27 августа
-S09\tАктивные санкции\tсписок санкций\tОткрыть санкцию\tОграничение заданий|Истекает через 5 дней§Предупреждение|Выдано 12 августа
-S10\tСанкция и история\tисторию санкции\tОтозвать санкцию\tПричина|Повторная публикация приватных данных§Период|С 17 по 27 августа§История|Выдана модератором · пока активна
-S11\tОплаченные выполнения\tпроверяемые выплаты\tОткрыть выполнение\tПроверка анкеты|4 кредита · выплата доступна для пересмотра§Помощь на встрече|3 кредита · подтверждено
-S12\tОткрытие проверки выплаты\tновый кейс выплаты\tПодтвердить открытие\tПричина|Признаки повторного результата§Материал|Ссылка на разрешённое доказательство§Проверка|Выплата допускает обратную операцию
-G01\tУправление сообществом\tразделы управления\tОткрыть раздел\tУчастники|Роли, статусы и ограничения§Каталог|Категории и шаблоны§Контроль|Аудит, конфигурация и апелляции
-G02\tПриглашения\tсписок приглашений\tСоздать приглашение\tДля Марии|1 использование · до 24 августа§Для команды встречи|3 использования · активно
-G03\tНовое приглашение\tпараметры приглашения\tСоздать приглашение\tПолучатель Telegram|123456789§Использований|1§Срок|24 августа, 20:00
-G04\tПриглашение\tиспользование приглашения\tОтозвать приглашение\tСоздатель|Администратор сообщества§Использовано|1 из 3§Получатели|Мария Крылова
-G05\tУправление участниками\tкаталог участников для администратора\tОткрыть участника\tМария Крылова|Активна · участник§Илья Петров|Пауза · модератор
-G06\tУчастник в управлении\tадминистративную карточку участника\tОткрыть доступное действие\tПрофиль|Мария Крылова · активна§Роль|Участник§Ограничения|Нет активных
-G07\tРоль и статус\tизменение роли или статуса\tПодтвердить изменение\tТекущее значение|Активный участник§Новое значение|Модератор§Ограничение|Администраторов меняет только главный администратор
-G08\tКатегории и шаблоны\tкаталог настроек заданий\tОткрыть объект\tПомощь сообществу|Категория активна§Полевое исследование|Шаблон · версия 3
-G08A\tКатегория заданий\tкатегорию заданий\tИзменить доступность\tНазвание|Помощь сообществу§Порядок|2§Создание|Участникам разрешено
-G08B\tШаблон задания\tверсии шаблона\tСоздать версию\tТекущая версия|3 · активна§Результат|Текст и фотографии§Ограничение|До 3 исполнителей
-G09\tНовая версия шаблона\tредактор шаблона\tПроверить версию\tНазвание|Полевое исследование§Поля задания|Адрес и описание места§Поля результата|Комментарий и фотографии
-G10\tВсе задания и выполнения\tобщий журнал заданий\tОткрыть объект\tПандус у библиотеки|Участник · набор открыт§Навигация на встрече|Сообщество · выполнено
-G11\tКорректировка баланса\tкорректировку учёта\tПроверить операцию\tПоказатель|Кредиты§Изменение|+2§Причина|Исправление подтверждённой ошибки расчёта
-G12\tПодтверждение корректировки\tпоследствия корректировки\tПрименить корректировку\tДо операции|24 кредита§После операции|26 кредитов§Основание|Запись проверки №418
-G13\tОценки кармы\tжурнал оценок кармы\tОткрыть оценку\tМария о Денисе|+1 · помощь на задании§Илья об Анне|0 · нейтральная оценка
-G14\tОценка и версии\tисторию оценки кармы\tОткрыть модерацию\tТекущая версия|+1 · подтверждена§Предыдущая версия|0 · изменена автором
-G14C\tМодерация версии кармы\tизменение видимости оценки\tПодтвердить действие\tВерсия|2 · оценка +1§Причина|Комментарий раскрывает приватные данные§Санкция|Автоматически не создаётся
-G14A\tИстория надёжности\tизменения надёжности\tОткрыть источник\tПодтверждённое выполнение|Вес +1 · сегодня§Неявка|Вес -1 · 12 августа
-G14B\tОперации участника\tжурнал баланса участника\tПроверить корректировку\tНаграда|+4 кредита · подтверждено§Возврат резерва|+8 кредитов · связан с отменой
-G15\tЖурнал действий\tаудит действий\tОткрыть запись\tАдминистратор|Изменил статус участника · сегодня§Модератор|Разрешил спор · вчера
-G15A\tЗапись журнала\tдетали аудита\tОткрыть разрешённый объект\tДействие|Статус изменён с паузы на активный§Причина|Запрос участника подтверждён§Неизменность|Запись доступна только для чтения
-G16\tВерсии настроек\tверсии конфигурации\tЗагрузить версию\tВерсия 12|Активна · 18 августа§Версия 13|Кандидат · проверка пройдена
-G16A\tВерсия настроек\tсодержимое конфигурации\tАктивировать или сравнить\tУровни|8 ступеней опыта§Лимит|3 активных назначения§Алерты|Окно 30 дней · порог 3
-G17\tПроверка настроек\tзагруженную конфигурацию\tПроверить файл\tВерсия|13§Схема|Поддерживается§Целостность|Совпадает с загруженным содержимым
-G18\tАктивация настроек\tподтверждение активации\tАктивировать версию\tТекущая версия|12§Новая версия|13§Причина|Обновление порога взаимодействий
-G19\tЗадание от сообщества\tредактор задания сообщества\tПроверить карточку\tАвтор|Сообщество§Награда|4 кредита на слот§Исполнители|3§Проверяющий|Независимый администратор
-G20\tПредпросмотр задания сообщества\tпредпросмотр задания сообщества\tОтправить на публикацию\tКарточка|Полевое исследование доступности§Проверяющий|Мария Крылова§Публикация|Требует подтверждения главного администратора
-G21\tОчередь публикаций\tзапросы на публикацию\tОткрыть запрос\tИсследование доступности|Ожидает подтверждения§Помощь на встрече|Возвращено на доработку
-G22\tПодтверждение публикации\tрешение о публикации\tСохранить решение\tЗадание|Исследование доступности§Автор|Сообщество§Причина решения|Условия и проверяющий подтверждены
-G22A\tПроверки заданий сообщества\tочередь результатов сообщества\tОткрыть результат\tИсследование доступности|Нужен независимый проверяющий§Навигация на встрече|Результат ожидает решения
-G22B\tРезультат задания сообщества\tпроверку результата сообщества\tВыбрать решение\tИсполнитель|Мария Крылова§Критерии|Три фотографии и точный адрес§Награда|4 кредита после подтверждения
-G22C\tЗамена проверяющего\tнового проверяющего\tПодтвердить замену\tПричина|Текущий проверяющий стал участником задания§Новый проверяющий|Илья Петров§Срок|Новые 72 часа после назначения
-G22D\tОтмена задания сообщества\tотмену назначения сообщества\tПодтвердить отмену\tПричина|Место проведения больше недоступно§Расчёт|Средства сообщества не резервировались§Обжалование|Исполнитель увидит разрешённый путь
-G23\tАлерты взаимодействий\tсписок алертов\tОткрыть алерт\tМария и Илья|3 совместных задания за 30 дней§Анна и Денис|Порог ещё не достигнут
-G23A\tСигналы риска\tсигналы для проверки\tОткрыть сигнал\tПовторяющиеся описания|Требует ручной проверки§Частые отмены|Не меняет доступ автоматически
-G24\tАлерт взаимодействия\tпроверку взаимодействия\tСохранить итог\tПара|Мария Крылова и Илья Петров§Совместные задания|3 за 30 дней§Итог|Наблюдать, автоматических последствий нет
-G25\tШтраф по алерту\tпакет штрафа\tПодтвердить штраф\tУчастники|Один из двух§Сумма|2 незарезервированных кредита§Применение|Одна атомарная операция
-G26\tАдминистраторы\tсписок администраторов\tИзменить роль\tAlex Oxytocin|Главный администратор§Мария Крылова|Администратор§Самоизменение|Недоступно
-G27\tАпелляции\tочередь апелляций\tОткрыть апелляцию\tСпор по пандусу|Подана сегодня§Отмена задания|Срок решения через 4 дня
-G28\tРешение по апелляции\tпересмотр исхода\tПодтвердить новый итог\tПредыдущее решение|Частичная выплата§Новый итог|Полная выплата§Коррекция|Предыдущие эффекты будут обращены точно
-`.trim().split("\n").reduce((result, record) => {
-  const [id, titleText, subject, action, fields] = record.split("\t");
-  result[id] = { title: titleText, subject, action, fields: fields.split("§") };
-  return result;
-}, {});
-
-const userFields = (screen) => presentationContent[screen.id]?.fields || null;
-const fieldParts = (field) => field.split("|");
-const contentFor = (screen) => presentationContent[screen.id];
-const actionFor = (screen) => contentFor(screen)?.action || screen.primary;
-
-const appendPresentationAction = (node, screen) => {
-  const edges = transitionsFrom(screen.id);
-  const actionText = actionFor(screen);
-  if ((disabledPresentationIds.has(screen.id) || connectedPresentationIds.has(screen.id)) && actionText) {
-    const unavailable = element("button", actionText, "unavailable-action");
-    unavailable.type = "button";
-    unavailable.disabled = true;
-    unavailable.dataset.primaryAction = actionText;
-    node.append(unavailable);
-  }
-  edges.forEach((transition, index) => {
-    const target = presentationScreen(transition.target);
-    const primary = index === 0 && actionText && !disabledPresentationIds.has(screen.id) && !connectedPresentationIds.has(screen.id);
-    const label = primary ? actionText : contentFor(target).title;
-    const action = element("button", label, primary ? "primary" : "secondary");
-    action.type = "button";
-    if (primary) action.dataset.primaryAction = actionText;
-    action.dataset.transitionId = transition.id;
-    action.dataset.transitionTrigger = transition.trigger;
-    action.dataset.transitionFallback = transition.fallback;
-    action.addEventListener("click", () => navigatePresentationScreen(
-      transition.target,
-      transition.state,
-      transition.historyMode,
-      transition.fallback,
-      history.state?.resourceId,
-    ));
-    node.append(action);
-  });
-  if (!edges.length && actionText && !disabledPresentationIds.has(screen.id) && !connectedPresentationIds.has(screen.id)) {
-    const action = element("button", actionText, "primary");
-    action.type = "button";
-    action.dataset.primaryAction = actionText;
-    action.addEventListener("click", () => renderPresentationScreen(screen.id, "content"));
-    node.append(action);
-  }
+const setHeadingAction = (action) => {
+  heading.querySelector(".heading-action")?.remove();
+  action.classList.add("heading-action");
+  heading.append(action);
 };
 
-const renderListTemplate = (screen, state) => {
-  const view = element("section", undefined, "semantic-shell");
-  const tabs = element("div", undefined, "segmented");
-  const labels = {
-    M01: ["Взятые мной · 2", "Созданные · 1"],
-    P01: ["Участники", "Лидерборд"],
-    P05: ["Участники", "Лидерборд"],
-  }[screen.id] || ["Активные", "История"];
-  tabs.append(element("button", labels[0]), element("button", labels[1]));
-  for (const tab of tabs.children) tab.disabled = true;
-  tabs.children[screen.id === "P05" ? 1 : 0].setAttribute("aria-pressed", "true");
-  view.append(tabs);
-  if (screen.id === "P01") {
-    const label = element("label", "Поиск участников");
-    const input = element("input");
-    input.placeholder = "Имя или @username · от 3 знаков";
-    label.append(input);
-    view.append(label);
-  }
-  if (state === "empty") {
-    view.append(element("p", "Доступных объектов пока нет.", "status muted"));
-  } else {
-    const list = element("div", undefined, "list");
-    for (const field of userFields(screen)) {
-      const [heading, description, meta] = fieldParts(field);
-      const card = element("article", undefined, "card");
-      card.append(
-        element("h3", heading),
-        element("p", description, "muted"),
-      );
-      if (meta) card.append(element("p", meta, "meta"));
-      list.append(card);
-    }
-    view.append(list);
-  }
-  if (screen.id === "P05") view.append(element("p", "Место считается по опыту за подтверждённые задания. Карма и баланс на место не влияют.", "status muted"));
-  appendPresentationAction(view, screen);
-  return view;
+const sliderIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6"/>';
+  return svg;
 };
 
-const renderDetailTemplate = (screen) => {
-  const card = element("article", undefined, "card detail");
-  card.append(element("h3", contentFor(screen).title));
-  for (const field of userFields(screen)) {
-    const [heading, value] = fieldParts(field);
-    card.append(section(heading, value));
-  }
-  appendPresentationAction(card, screen);
-  return card;
-};
-
-const renderEditorTemplate = (screen) => {
-  const form = element("form", undefined, "task-form card");
-  const fields = userFields(screen);
-  for (const [index, field] of fields.entries()) {
-    const [heading, value] = fieldParts(field);
-    const label = element("label", heading);
-    const control = index === fields.length - 1 ? element("textarea") : element("input");
-    control.value = value;
-    label.append(control);
-    form.append(label);
-  }
-  appendPresentationAction(form, screen);
-  return form;
-};
-
-const renderPreviewTemplate = (screen) => {
-  const card = element("article", undefined, "card detail preview-grid");
-  card.append(element("p", "Предпросмотр", "badge"), element("h3", contentFor(screen).title));
-  for (const field of userFields(screen)) {
-    const [heading, value] = fieldParts(field);
-    card.append(section(heading, value));
-  }
-  appendPresentationAction(card, screen);
-  return card;
-};
-
-const renderConfirmTemplate = (screen) => {
-  const card = element("article", undefined, "card detail route-accent");
-  card.append(
-    element("p", "Подтверждение", "badge"),
-    element("h3", contentFor(screen).title),
-  );
-  for (const field of userFields(screen)) {
-    const [heading, value] = fieldParts(field);
-    card.append(section(heading, value));
-  }
-  appendPresentationAction(card, screen);
-  return card;
-};
-
-const renderOutcomeTemplate = (screen) => {
-  const card = element("article", undefined, "card detail outcome-view");
-  card.append(
-    element("p", "Статус", "badge"),
-    element("h3", contentFor(screen).title),
-    element("p", fieldParts(userFields(screen)[0])[1], "muted"),
-  );
-  for (const field of userFields(screen).slice(1)) card.append(element("p", fieldParts(field)[1], "meta"));
-  appendPresentationAction(card, screen);
-  return card;
-};
-
-const renderHistoryTemplate = (screen) => {
-  const view = element("section", undefined, "semantic-shell");
-  view.append(element("p", "История", "badge"));
-  const historyList = element("ol", undefined, "history-list");
-  for (const field of userFields(screen)) {
-    const [headingText, description, meta] = fieldParts(field);
-    const item = element("li");
-    item.append(element("strong", headingText), element("span", description, "muted"));
-    if (meta) item.append(element("span", meta, "meta"));
-    historyList.append(item);
-  }
-  view.append(historyList);
-  appendPresentationAction(view, screen);
-  return view;
-};
-
-const renderHubTemplate = (screen) => {
-  const hub = element("section", undefined, "hub-grid");
-  for (const field of userFields(screen)) {
-    const [heading, value] = fieldParts(field);
-    const tile = element("article", undefined, "card");
-    tile.append(element("h3", heading), element("p", value, "muted"));
-    hub.append(tile);
-  }
-  appendPresentationAction(hub, screen);
-  return hub;
-};
-
-const presentationRenderers = {
-  list: renderListTemplate,
-  detail: renderDetailTemplate,
-  editor: renderEditorTemplate,
-  preview: renderPreviewTemplate,
-  confirm: renderConfirmTemplate,
-  outcome: renderOutcomeTemplate,
-  history: renderHistoryTemplate,
-  hub: renderHubTemplate,
-};
-
-function renderPresentationScreen(id, requestedState) {
-  const screen = presentationScreen(id);
-  const screenContent = screen && contentFor(screen);
-  const state = screen ? presentationState(screen, requestedState) : "permission_closed";
-  const rootNavigation = {
-    T01: "catalog",
-    M01: "assignments",
-    P01: "participants",
-    P06: "profile",
-    S01: "moderation",
-    G01: "management",
-  }[id] || "";
-  const isRoot = navigationClassFor(id) === "root";
-  setNavigation(rootNavigation, !isRoot);
-  back.classList.toggle("hidden", isRoot);
-  title.textContent = screenContent?.title || "Экран недоступен";
-  if (!screen || !screenContent) {
-    const notice = element("section", undefined, "state-view");
-    notice.dataset.state = "permission_closed";
-    notice.append(
-      element("h3", "Запрошенный раздел недоступен"),
-      element("p", "Откройте один из разрешённых разделов навигации.", "status muted"),
-    );
-    replaceContent(notice);
-    return false;
-  }
-  const template = presentationTemplate(id);
-  const boundary = element("section", undefined, "state-view");
-  boundary.dataset.screenId = id;
-  boundary.dataset.template = template;
+const connectedBoundary = (screenId, state, ...nodes) => {
+  const boundary = element("section", undefined, "state-view concept-screen");
+  boundary.dataset.screenId = screenId;
   boundary.dataset.state = state;
-  boundary.dataset.primary = actionFor(screen);
-  boundary.dataset.systemStates = JSON.stringify(screen.states);
-  boundary.dataset.visualContract = JSON.stringify(screen.fields);
-  if (state === "loading") {
-    boundary.append(element("p", `Проверяем ${screenContent.subject} и актуальное состояние.`, "status muted"));
-    boundary.append(element("span", undefined, "skeleton"), element("span", undefined, "skeleton"));
-  } else if (state !== "content") {
-    const copy = {
-      empty: `Для раздела «${screenContent.title}» пока нет доступных записей.`,
-      error: `Не удалось обновить ${screenContent.subject}. Повторите запрос позже.`,
-      permission_closed: `Доступ к разделу «${screenContent.title}» не подтверждён.`,
-      disabled_reason: `Действие «${actionFor(screen)}» пока не подключено к серверу.`,
-      validation: `Проверьте поля раздела «${screenContent.title}».`,
-      confirm: `Проверьте последствия действия «${actionFor(screen)}».`,
-      success: `Итог для раздела «${screenContent.title}» появится после ответа сервера.`,
-    }[state] || `Состояние раздела «${screenContent.title}» недоступно.`;
-    const notice = element("p", copy, "status muted");
-    if (state === "disabled_reason") notice.id = "connection-reason";
-    boundary.append(notice);
-  }
-  boundary.append(presentationRenderers[template](screen, state));
-  replaceContent(boundary);
-  title.tabIndex = -1;
-  title.focus();
-}
+  boundary.dataset.uiEngine = "concept-05";
+  boundary.append(...nodes);
+  return boundary;
+};
 
-function navigatePresentationScreen(
-  id,
-  requestedState = "content",
-  historyMode = "push",
-  fallbackId = "T01",
-  resourceId = history.state?.resourceId,
-) {
-  const screen = presentationScreen(id);
-  if (!screen) {
-    const fallback = presentationScreen(fallbackId);
-    if (fallback) {
-      const fallbackState = "permission_closed";
-      const fallbackLocation = presentationLocationFor(fallback.id, resourceId);
-      if (!fallbackLocation) {
-        return navigatePresentationScreen("T01", fallbackState, "replace", "T01", null);
-      }
-      history.replaceState({
-        screen: "presentation",
-        screenId: fallback.id,
-        viewState: fallback.id.toLowerCase(),
-        presentationState: fallbackState,
-        route: productRouteFor(fallback.id),
-        historyMode: "replace",
-        resourceId,
-      }, "", fallbackLocation);
-      renderPresentationScreen(fallback.id, fallbackState);
-    } else {
-      history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-      renderCatalog();
-    }
-    return false;
-  }
-  if (historyMode === "pop") {
-    history.back();
-    return true;
-  }
-  const method = historyMode === "push" ? "pushState" : "replaceState";
-  const state = presentationState(screen, requestedState);
-  const destination = presentationLocationFor(id, resourceId);
-  if (!destination) return navigatePresentationScreen(fallbackId, "permission_closed", "replace", "T01", resourceId);
-  history[method]({
-    screen: "presentation",
-    screenId: id,
-    viewState: id.toLowerCase(),
-    presentationState: state,
-    route: productRouteFor(id),
-    historyMode,
-    resourceId,
-  }, "", destination);
-  renderPresentationScreen(id, state);
-  return true;
-}
+const showActionConfirmation = ({
+  screenId,
+  headingText,
+  description,
+  confirmLabel,
+  onConfirm,
+  onEdit,
+  transitionId,
+  transitionTrigger,
+}) => {
+  title.textContent = headingText;
+  const card = element("article", undefined, "card detail route-accent confirm-screen");
+  card.append(element("p", "Подтверждение", "badge"), element("p", description, "muted"));
+  const actions = element("div", undefined, "confirm-actions");
+  const edit = element("button", "Изменить", "secondary");
+  edit.type = "button";
+  edit.addEventListener("click", onEdit);
+  const confirm = element("button", confirmLabel, "primary");
+  confirm.type = "button";
+  if (transitionId) markTransition(confirm, transitionId, transitionTrigger);
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+  confirm.addEventListener("click", () => onConfirm({ confirm, edit, status }));
+  actions.append(edit, confirm);
+  card.append(actions, status);
+  replaceContent(connectedBoundary(screenId, "confirm", card));
+  confirm.focus({ preventScroll: true });
+};
 
-const configureRoleNavigation = (profile) => {
-  const roles = new Set(Array.isArray(profile.roles) ? profile.roles : [profile.role].filter(Boolean));
-  const known = roles.size > 0;
-  moderationNav.hidden = known && !roles.has("moderator");
-  managementNav.hidden = !roles.has("administrator");
+const configureRoleNavigation = async () => {
+  try {
+    const response = await fetch("/api/v1/moderation/cases?limit=1", {
+      credentials: "same-origin",
+    });
+    moderationNav.hidden = !response.ok;
+  } catch {
+    moderationNav.hidden = true;
+  }
 };
 
 const restoreModerationFocus = () => {
-  if (returnFocusModeration) moderationNav.focus();
+  if (returnFocusModeration) moderationNav.focus({ preventScroll: true });
   returnFocusModeration = false;
 };
 
 const restoreProfileFocus = () => {
-  if (returnFocusProfile) profileNav.focus();
+  if (returnFocusProfile) profileNav.focus({ preventScroll: true });
   returnFocusProfile = false;
 };
 
@@ -881,21 +267,35 @@ const newOperationKey = () => {
   return (value || 1n).toString();
 };
 
-function renderCatalog() {
+function showCatalog() {
   screenRevision += 1;
   setNavigation("catalog", false);
   title.textContent = "Каталог";
   back.classList.add("hidden");
+  const create = element("button", "+ Создать", "secondary compact-create");
+  create.type = "button";
+  create.addEventListener("click", () => beginTaskCreationFlow());
+  setHeadingAction(create);
   const boundary = element("section", undefined, "state-view");
   boundary.dataset.screenId = "T01";
+  boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.template = "list";
-  boundary.dataset.state = tasks.length ? "content" : "empty";
-  boundary.dataset.visualContract = JSON.stringify(presentationScreen("T01").fields);
-  const create = element("button", "Создать задание", "primary");
-  create.type = "button";
-  create.addEventListener("click", () => openTaskCreation(true));
-  if (!tasks.length) {
-    boundary.append(create, element("p", "Сейчас нет доступных заданий.", "status muted"));
+  const visibleTasks = tasks.filter((task) => (
+    (!catalogFilters.format || task.format === catalogFilters.format)
+    && (!catalogFilters.minReward || task.credit_reward_per_performer >= Number(catalogFilters.minReward))
+  ));
+  boundary.dataset.state = visibleTasks.length ? "content" : "empty";
+  const filterTrigger = element(
+    "button",
+    visibleTasks.length ? `${visibleTasks.length} ${visibleTasks.length === 1 ? "задание доступно" : "задания доступны"} сейчас` : "Нет доступных заданий",
+    "screen-subtitle catalog-filter-trigger",
+  );
+  filterTrigger.type = "button";
+  markTransition(filterTrigger, "PE-012", "open_filters");
+  filterTrigger.addEventListener("click", () => showCatalogFilters());
+  boundary.append(filterTrigger);
+  if (!visibleTasks.length) {
+    boundary.append(element("p", "Новые задания появятся здесь.", "compact-empty"));
     replaceContent(boundary);
     restoreModerationFocus();
     restoreProfileFocus();
@@ -903,30 +303,76 @@ function renderCatalog() {
   }
   const list = element("div", undefined, "list");
   let focusTarget = null;
-  for (const task of tasks) {
-    const button = element("button", undefined, "card");
+  for (const task of visibleTasks) {
+    const button = element("button", undefined, "card task-card");
     button.type = "button";
+    const chips = element("div", undefined, "card-chips");
+    chips.append(element("span", "Открыто", "chip"));
+    const category = task.category_name || (task.origin === "community" ? "Сообщество" : null);
+    if (category) chips.append(element("span", category, "chip muted-chip"));
+    const meta = element("div", undefined, "task-meta");
+    meta.append(
+      element("span", `✦ ${task.credit_reward_per_performer} кред.`),
+      element("span", `${task.performer_slots} ${task.performer_slots === 1 ? "место" : "места"}`),
+    );
+    const deadline = element(
+      "time",
+      task.deadline_at
+        ? `до ${new Intl.DateTimeFormat("ru", { day: "numeric", month: "short" }).format(new Date(task.deadline_at))}`
+        : "Срок уточняется",
+    );
+    if (task.deadline_at) deadline.dateTime = task.deadline_at;
+    meta.append(deadline);
+    const label = element("div", undefined, "task-card-title");
+    label.append(element("h3", task.title), element("span", "›", "chevron"));
     button.append(
-      element("h3", task.title),
+      chips,
+      label,
       element("p", task.description, "muted"),
-      element(
-        "p",
-        String(task.credit_reward_per_performer)
-          + " кредитов · уровень "
-          + String(task.minimum_level),
-        "meta",
-      ),
+      meta,
     );
     button.addEventListener("click", () => showTaskDetail(task));
     if (task.id === returnFocusTaskId) focusTarget = button;
     list.append(button);
   }
-  boundary.append(create, list);
+  boundary.append(list);
   replaceContent(boundary);
-  focusTarget?.focus();
+  focusTarget?.focus({ preventScroll: true });
   returnFocusTaskId = null;
   restoreModerationFocus();
   restoreProfileFocus();
+}
+
+function showCatalogFilters(push = true) {
+  const nextState = { screen: "catalog-filters" };
+  if (push) history.pushState(nextState, "", presentationLocationFor("T02"));
+  else history.replaceState(nextState, "", presentationLocationFor("T02"));
+  setNavigation("", true);
+  title.textContent = "Фильтры каталога";
+  back.classList.remove("hidden");
+  const form = element("form", undefined, "task-form card");
+  const formatLabel = element("label", "Формат");
+  const format = element("select");
+  format.append(new Option("Любой", ""), new Option("Онлайн", "online"), new Option("Офлайн", "offline"));
+  format.value = catalogFilters.format;
+  formatLabel.append(format);
+  const rewardLabel = element("label", "Награда от");
+  const reward = element("input");
+  reward.type = "number";
+  reward.min = "1";
+  reward.value = catalogFilters.minReward;
+  rewardLabel.append(reward);
+  const apply = element("button", "Применить", "primary");
+  apply.type = "submit";
+  form.append(formatLabel, rewardLabel, apply);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    catalogFilters = { format: format.value, minReward: reward.value };
+    history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
+    showCatalog();
+  });
+  replaceContent(connectedBoundary("T02", "content", form));
+  format.focus({ preventScroll: true });
 }
 
 async function taskCreationCommand(body) {
@@ -950,39 +396,76 @@ async function taskCreationCommand(body) {
   }
 }
 
-function renderTaskCreation(state) {
+function showTaskCreation(state, preferredKind = null, forceEdit = false) {
   const draft = state.draft;
   if (!draft) return replaceContent(element("p", "Черновик недоступен.", "status"));
-  if (state.preview && !state.needs_edit) {
+  if (!forceEdit && state.preview && !state.needs_edit) {
     const card = element("article", undefined, "card detail");
     card.append(element("h3", state.preview.title), section("Описание", state.preview.description));
     card.append(section("Критерии", state.preview.completion_criteria));
     card.append(section("Резерв", String(state.preview.reward_total) + " кредитов"));
-    const publish = element("button", "Опубликовать", "primary");
+    const publish = element("button", "Продолжить", "primary");
     publish.type = "button";
-    markTransition(publish, "PE-022", "authoritative_publish_success");
-    publish.addEventListener("click", async () => {
-      publish.disabled = true;
-      try {
-        const result = await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
-        history.replaceState({ screen: "task-creation", draftId: draft.id }, "", presentationLocationFor("T08", draft.id));
-        const home = element("button", "В каталог", "primary");
-        home.addEventListener("click", () => {
-          history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-          renderCatalog();
-        });
-        replaceContent(element("p", "Задание опубликовано: " + result.task_id, "status success"), home);
-      } catch { publish.disabled = false; }
+    markTransition(publish, "PE-021", "publish_task");
+    publish.addEventListener("click", () => {
+      history.pushState(
+        { screen: "task-publish-confirm", draftId: draft.id },
+        "",
+        presentationLocationFor("T07", draft.id),
+      );
+      showActionConfirmation({
+        screenId: "T07",
+        headingText: "Подтвердить публикацию",
+        description: `${state.preview.title}. Резерв: ${state.preview.reward_total} кредитов.`,
+        confirmLabel: "Опубликовать",
+        transitionId: "PE-022",
+        transitionTrigger: "authoritative_publish_success",
+        onEdit: () => history.back(),
+        onConfirm: async ({ confirm, edit, status }) => {
+        confirm.disabled = true;
+        edit.disabled = true;
+        status.className = "status";
+        status.textContent = "Публикуем задание…";
+        try {
+          const result = await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
+          history.replaceState({ screen: "task-creation", draftId: draft.id }, "", presentationLocationFor("T08", draft.id));
+          const home = element("button", "В каталог", "primary");
+          home.addEventListener("click", () => {
+            history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
+            showCatalog();
+          });
+          replaceContent(connectedBoundary("T08", "success", element("p", "Задание опубликовано: " + result.task_id, "status success"), home));
+        } catch {
+          status.textContent = "Не удалось опубликовать задание. Повторите запрос.";
+          confirm.disabled = false;
+          edit.disabled = false;
+        }
+        },
+      });
     });
     card.append(publish);
-    return replaceContent(card);
+    return replaceContent(connectedBoundary("T06", "content", card));
   }
   const values = draft.values;
   const form = element("form", undefined, "task-form");
-  form.innerHTML = '<label class="section">Тип<select name="task_kind"><option value="solo">Личное</option><option value="group">Групповое</option></select></label><label class="section">Категория<select name="category_id"></select></label><label class="section">Размер<select name="time_size"></select></label><label class="section">Награда<input name="credit_reward_per_performer" type="number" min="1" required></label><label class="section">Формат<select name="format"><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label><label class="section">Название<input name="title" required></label><label class="section">Описание<textarea name="description" required></textarea></label><label class="section">Критерии выполнения<textarea name="completion_criteria" required></textarea></label><label class="section">Срок<input name="deadline_at" type="datetime-local" required></label><label class="section">Число исполнителей<input name="performer_slots" type="number" min="1" required></label><label class="section">Город для офлайн-задания<input name="city"></label><label class="section">Материалы<textarea name="material_text"></textarea></label><label class="section">Ссылка<input name="material_url" type="url"></label>';
+  form.classList.add("creation-form");
+  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип"><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns"><label class="section">Число исполнителей<input name="performer_slots" type="number" min="1" required></label><label class="section">Формат<select name="format"><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section city-field">Город<input name="city"></label><label class="section">Категория<select name="category_id"></select></label><label class="section">Название<input name="title" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать<textarea name="description" aria-label="Описание" required></textarea></label><label class="section">Критерии приёмки<textarea name="completion_criteria" aria-label="Критерии выполнения" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер<select name="time_size"></select></label><label class="section">Награда за исполнителя<input name="credit_reward_per_performer" aria-label="Награда" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок<input name="deadline_at" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text"></textarea><small>Ссылка или короткий текст</small></label><label class="section">Ссылка<input name="material_url" type="url"></label>';
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
+  if (!values.task_kind && preferredKind) form.task_kind.value = preferredKind;
+  const syncTaskKind = () => {
+    for (const button of form.querySelectorAll("[data-kind]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.kind === form.task_kind.value));
+    }
+    submit.textContent = `Проверить ${form.task_kind.value === "group" ? "групповое" : "личное"} задание`;
+  };
+  for (const button of form.querySelectorAll("[data-kind]")) {
+    button.addEventListener("click", () => {
+      form.task_kind.value = button.dataset.kind;
+      syncTaskKind();
+    });
+  }
   for (const name of ["title", "description", "completion_criteria", "city"]) form[name].value = values[name] || "";
   form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
   form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
@@ -994,6 +477,15 @@ function renderTaskCreation(state) {
   form.material_url.value = values.materials?.url || "";
   const submit = element("button", "Предпросмотр", "primary");
   submit.type = "submit";
+  submit.setAttribute("aria-label", "Предпросмотр");
+  const reserve = form.querySelector("[data-reserve]");
+  const updateReserve = () => {
+    const slots = Number(form.performer_slots.value || 0);
+    const reward = Number(form.credit_reward_per_performer.value || 0);
+    reserve.textContent = slots && reward ? `${slots * reward} кредитов` : "—";
+  };
+  form.performer_slots.addEventListener("input", updateReserve);
+  form.credit_reward_per_performer.addEventListener("input", updateReserve);
   const deadlineStatus = element("p", "Выберите будущий срок.", "status hidden");
   deadlineStatus.id = "deadline-status";
   deadlineStatus.setAttribute("aria-live", "polite");
@@ -1009,6 +501,8 @@ function renderTaskCreation(state) {
   const saveStatus = element("p", "", "status hidden");
   saveStatus.setAttribute("aria-live", "polite");
   form.append(submit, saveStatus);
+  syncTaskKind();
+  updateReserve();
   updateDeadlineValidity();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1020,17 +514,66 @@ function renderTaskCreation(state) {
     delete value.material_url;
     try {
       await taskCreationCommand({ action: "save", draft_id: draft.id, expected_revision: draft.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
-      await openTaskCreation(false, false);
+      history.pushState(
+        { screen: "task-preview", draftId: draft.id },
+        "",
+        presentationLocationFor("T06", draft.id),
+      );
+      await openTaskCreation(false, false, preferredKind);
     } catch {
       saveStatus.textContent = "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
     }
   });
-  replaceContent(state.needs_edit ? element("p", "Предпросмотр устарел. Обновите данные.", "status") : form, form);
+  replaceContent(connectedBoundary(
+    "T05",
+    state.needs_edit ? "error" : "content",
+    ...(state.needs_edit ? [element("p", "Предпросмотр устарел. Обновите данные.", "status")] : []),
+    form,
+  ));
 }
 
-async function openTaskCreation(start, push = true) {
+function beginTaskCreationFlow(push = true) {
+  screenRevision += 1;
+  const nextState = { screen: "task-creation-path" };
+  if (push) history.pushState(nextState, "", presentationLocationFor("T04"));
+  else history.replaceState(nextState, "", presentationLocationFor("T04"));
+  setNavigation("", true);
+  title.textContent = "Новое задание";
+  back.classList.remove("hidden");
+  const card = element("article", undefined, "card detail");
+  card.append(element("h3", "Кто будет выполнять?"));
+  for (const [label, kind] of [["Один участник", "solo"], ["Несколько участников", "group"]]) {
+    const choice = element("button", label, kind === "solo" ? "primary" : "secondary");
+    choice.type = "button";
+    choice.addEventListener("click", () => showTaskSourceChoice(kind));
+    card.append(choice);
+  }
+  replaceContent(connectedBoundary("T04", "content", card));
+}
+
+function showTaskSourceChoice(kind) {
+  history.replaceState({ screen: "task-creation-source", kind }, "", presentationLocationFor("T04A"));
+  title.textContent = "Основа задания";
+  const card = element("article", undefined, "card detail");
+  card.append(element("h3", "Создать без шаблона"), element("p", "Шаблоны сервера не подключены; используем поля текущего API.", "muted"));
+  const blank = element("button", "Без шаблона", "primary");
+  blank.type = "button";
+  blank.addEventListener("click", () => openTaskCreation(true, false, kind));
+  const drafts = element("button", "Черновики", "secondary");
+  drafts.type = "button";
+  drafts.addEventListener("click", () => {
+    history.replaceState({ screen: "task-creation-drafts", kind }, "", presentationLocationFor("T04B"));
+    title.textContent = "Черновики";
+    replaceContent(connectedBoundary("T04B", "loading", element("p", "Проверяем сохранённый черновик…", "status muted")));
+    void openTaskCreation(false, false, kind);
+  });
+  card.append(blank, drafts);
+  replaceContent(connectedBoundary("T04A", "content", card));
+}
+
+async function openTaskCreation(start, push = true, preferredKind = null, forceEdit = false) {
   if (push) {
     history.pushState(
       { screen: "task-creation", draftId: null },
@@ -1047,13 +590,14 @@ async function openTaskCreation(start, push = true) {
     const state = await getJson("/api/v1/task-creation");
     const draftId = state.draft?.id;
     if (draftId) {
+      const screenId = !forceEdit && state.preview && !state.needs_edit ? "T06" : "T05";
       history.replaceState(
-        { screen: "task-creation", draftId },
+        { screen: screenId === "T06" ? "task-preview" : "task-creation", draftId },
         "",
-        presentationLocationFor("T05", draftId),
+        presentationLocationFor(screenId, draftId),
       );
     }
-    renderTaskCreation(state);
+    showTaskCreation(state, preferredKind, forceEdit);
   } catch { replaceContent(element("p", "Не удалось открыть создание задания.", "status")); }
 }
 
@@ -1143,14 +687,14 @@ function profileEditor(me, state, revision) {
       if (revision !== screenRevision) return;
       state.profile = { me: updated, member: state.profile.member };
       state.profileEdit = null;
-      renderProfile(state, revision);
+      showProfileState(state, revision);
       try {
         const member = await getJson(
           "/api/v1/members/" + encodeURIComponent(updated.member_id),
         );
         if (revision !== screenRevision) return;
         state.profile = { me: updated, member };
-        renderProfile(state, revision);
+        showProfileState(state, revision);
       } catch {
         // The authoritative profile mutation already succeeded; keep its response.
       }
@@ -1171,35 +715,70 @@ function profileEditor(me, state, revision) {
 }
 
 function profileDetails(me, member, state, revision) {
-  const card = element("article", undefined, "card detail");
-  const fields = [
-    ["Город", me.city],
-    ["Часовой пояс", me.timezone],
-    ["О себе", me.short_bio],
-    ["Текущая цель", me.current_goal],
-    ["Категории помощи", me.help_categories],
-    ["Навыки", me.skill_tags],
-    ["Доступность", me.availability],
-    ["Баланс", me.credit_balance],
-    ["Опыт", me.experience_total],
-    ["Уровень", me.level && me.level.display_name
-      ? String(me.level.number) + " · " + me.level.display_name
-      : null],
-    ["Карма", member.karma
-      ? String(member.karma.score) + " · оценок: " + String(member.karma.count)
-      : null],
-    ["Надёжность", member.reliability ? reliabilityText(member.reliability.rate) : null],
-    ["Принято заданий", member.reliability && member.reliability.accepted],
-    ["Подтверждённый вес", member.reliability && member.reliability.approved_weight],
-    ["Неявки", member.reliability && member.reliability.no_show],
-  ];
-  card.append(element("h3", me.display_name));
-  for (const [heading, value] of fields) {
-    const item = valueSection(heading, value);
-    if (item) card.append(item);
+  const view = element("section", undefined, "profile-dashboard");
+  const initials = me.display_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+  const identity = element("div", undefined, "profile-identity");
+  identity.append(
+    element("span", initials || "?", "avatar"),
+    element("div", undefined, "identity-copy"),
+  );
+  identity.lastElementChild.append(
+    element("h2", me.display_name),
+    element("p", me.level?.display_name ? `Уровень ${me.level.number} · ${me.level.display_name}` : "Профиль участника", "muted"),
+  );
+  const metrics = element("div", undefined, "metric-grid");
+  const reliability = reliabilityText(member.reliability?.rate);
+  for (const [value, label] of [
+    [String(me.credit_balance), "кредита"],
+    [String(me.experience_total), "опыт"],
+    [reliability === "Недостаточно данных" ? "—" : `${Math.round(Number(reliability) * 100)}%`, "надёжность"],
+  ]) {
+    const metric = element("article", undefined, "metric-card");
+    metric.append(element("strong", value), element("span", label));
+    metrics.append(metric);
   }
-  card.append(profileEditor(me, state, revision));
-  return card;
+  const indicators = element("section", undefined, "profile-section");
+  const indicatorList = element("div", undefined, "indicator-list");
+  indicators.append(element("h3", "Мои показатели", "section-label"), indicatorList);
+  for (const [label, value] of [
+    ["Принято заданий", member.reliability?.accepted],
+    ["Подтверждённый вес", member.reliability?.approved_weight],
+    ["Неявки", member.reliability?.no_show],
+  ]) {
+    const row = element("p", undefined, "indicator-row");
+    row.append(element("span", label), element("strong", value == null ? "—" : String(value)));
+    indicatorList.append(row);
+  }
+  view.append(identity, metrics, indicators);
+  if (state.leaderboard?.length) {
+    const contribution = element("section", undefined, "profile-section");
+    const contributionList = element("div", undefined, "contribution-list");
+    contribution.append(element("h3", "Лидерборд", "section-label"), contributionList);
+    for (const item of state.leaderboard.slice(0, 3)) {
+      const row = element("p", undefined, "indicator-row");
+      row.append(element("span", `${item.rank} · ${item.display_name}`), element("strong", `${item.experience} XP`));
+      contributionList.append(row);
+    }
+    view.append(contribution);
+  }
+  const settings = element("button", undefined, "secondary icon-action profile-settings-action");
+  settings.type = "button";
+  settings.setAttribute("aria-label", "Настройки профиля");
+  settings.append(sliderIcon());
+  settings.addEventListener("click", () => openProfileSettings(me, state, revision));
+  setHeadingAction(settings);
+  return view;
+}
+
+function openProfileSettings(me, state, revision) {
+  history.pushState({ screen: "profile-settings" }, "", presentationLocationFor("P07"));
+  setNavigation("", true);
+  title.textContent = "Настройки профиля";
+  back.classList.remove("hidden");
+  const detail = element("section", undefined, "profile-settings");
+  detail.append(profileEditor(me, state, revision));
+  replaceContent(connectedBoundary("P07", "content", detail));
+  back.focus({ preventScroll: true });
 }
 
 function leaderboardDetails(items) {
@@ -1255,14 +834,14 @@ function memberListDetails(items) {
   return list;
 }
 
-function renderParticipants(state, revision) {
+function showParticipantsState(state, revision) {
   if (revision !== screenRevision) return;
-  const isLeaderboard = state.view === "leaderboard";
-  setNavigation(isLeaderboard ? "" : "participants", isLeaderboard);
-  back.classList.toggle("hidden", !isLeaderboard);
+  setNavigation("", false);
+  back.classList.add("hidden");
   title.textContent = state.view === "leaderboard" ? "Лидерборд" : "Участники";
   const boundary = element("section", undefined, "state-view");
   boundary.dataset.screenId = state.view === "leaderboard" ? "P05" : "P01";
+  boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = state.loading ? "loading" : state.error ? "error" : "content";
   const tabs = element("div", undefined, "segmented");
   const membersTab = element("button", "Участники");
@@ -1295,7 +874,7 @@ function renderParticipants(state, revision) {
       const query = input.value.trim();
       if (query && query.length < 3) {
         state.validation = "Введите минимум 3 символа.";
-        renderParticipants(state, revision);
+        showParticipantsState(state, revision);
         return;
       }
       state.query = query;
@@ -1325,17 +904,17 @@ function renderParticipants(state, revision) {
   if (state.focusHeading) {
     state.focusHeading = false;
     title.tabIndex = -1;
-    title.focus();
+    title.focus({ preventScroll: true });
   } else if (returnFocusLeaderboardTab && state.view === "members" && !state.loading) {
     returnFocusLeaderboardTab = false;
-    leaderboardTab.focus();
+    leaderboardTab.focus({ preventScroll: true });
   }
 }
 
 async function loadMembers(state, revision) {
   state.loading = true;
   state.error = false;
-  renderParticipants(state, revision);
+  showParticipantsState(state, revision);
   const query = state.query ? "&query=" + encodeURIComponent(state.query) : "";
   try {
     const page = await getJson("/api/v1/members?limit=30" + query);
@@ -1346,13 +925,13 @@ async function loadMembers(state, revision) {
     state.error = true;
   }
   state.loading = false;
-  renderParticipants(state, revision);
+  showParticipantsState(state, revision);
 }
 
 async function loadParticipantsLeaderboard(state, revision) {
   state.loading = true;
   state.error = false;
-  renderParticipants(state, revision);
+  showParticipantsState(state, revision);
   try {
     const page = await getJson("/api/v1/leaderboard?limit=30");
     if (revision !== screenRevision) return;
@@ -1362,7 +941,7 @@ async function loadParticipantsLeaderboard(state, revision) {
     state.error = true;
   }
   state.loading = false;
-  renderParticipants(state, revision);
+  showParticipantsState(state, revision);
 }
 
 function switchParticipantsView(state, revision, view) {
@@ -1379,7 +958,7 @@ function switchParticipantsView(state, revision, view) {
   } else if (view === "members" && state.members === null) {
     void loadMembers(state, revision);
   } else {
-    renderParticipants(state, revision);
+    showParticipantsState(state, revision);
   }
 }
 
@@ -1465,7 +1044,7 @@ function karmaForm(state, revision) {
           if (revision !== screenRevision) return;
           state.karma = null;
           state.message = "Оценка сохранена.";
-          renderMemberProfile(state, revision);
+          showMemberState(state, revision);
         } catch {
           retry.disabled = false;
         }
@@ -1504,13 +1083,11 @@ function karmaForm(state, revision) {
     draft.comment = comment.value;
     resetPendingAction();
   });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    submit.disabled = true;
-    value.disabled = true;
-    comment.disabled = true;
-    status.className = "status";
-    status.textContent = "Сохраняем оценку…";
+  const saveKarma = async ({ confirm, edit, status: actionStatus }) => {
+    confirm.disabled = true;
+    edit.disabled = true;
+    actionStatus.className = "status";
+    actionStatus.textContent = "Сохраняем оценку…";
     try {
       if (draft.stage === "begin") {
         await karmaCommand(state.member.member_id, draft, "begin", {});
@@ -1550,25 +1127,61 @@ function karmaForm(state, revision) {
       } catch {
         draft.refreshError = true;
       }
-      renderMemberProfile(state, revision);
+      title.textContent = "Карма сохранена";
+      history.replaceState(
+        { screen: "member-karma-success", memberId: state.member.member_id },
+        "",
+        presentationLocationFor("P04", state.member.member_id),
+      );
+      const done = element("button", "К профилю", "primary");
+      done.type = "button";
+      done.addEventListener("click", () => history.back());
+      replaceContent(connectedBoundary("P04", "success", element("p", "Оценка сохранена.", "status success"), done));
     } catch (error) {
       if (revision !== screenRevision) return;
       if (!retryableSubmissionError(error)) resetPendingAction();
-      status.textContent = error?.status === 422
+      actionStatus.textContent = error?.status === 422
         ? "Комментарий должен содержать от 10 до 300 символов."
         : error?.status === 409
           ? "Черновик изменился. Повторите сохранение."
           : "Оценка недоступна или не удалось сохранить. Повторите попытку.";
-      submit.disabled = false;
-      value.disabled = false;
-      comment.disabled = false;
+      confirm.disabled = false;
+      edit.disabled = false;
     }
+  };
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    draft.value = value.value;
+    draft.comment = comment.value;
+    showActionConfirmation({
+      screenId: "P03",
+      headingText: "Подтвердить оценку",
+      description: `${value.options[value.selectedIndex].text}. ${comment.value}`,
+      confirmLabel: "Сохранить оценку",
+      transitionId: "PE-059",
+      transitionTrigger: "authoritative_karma_success",
+      onEdit: () => openKarmaEditor(state, revision, false),
+      onConfirm: saveKarma,
+    });
   });
   form.append(valueLabel, commentLabel, status, submit);
   return form;
 }
 
-function renderMemberProfile(state, revision) {
+function openKarmaEditor(state, revision, push = true) {
+  if (revision !== screenRevision || !state.member) return;
+  const location = presentationLocationFor("P03", state.member.member_id);
+  const nextState = { screen: "member-karma", memberId: state.member.member_id };
+  if (push) history.pushState(nextState, "", location);
+  else history.replaceState(nextState, "", location);
+  setNavigation("", true);
+  title.textContent = "Оценка кармы";
+  back.classList.remove("hidden");
+  replaceContent(connectedBoundary("P03", "content", karmaForm(state, revision)));
+  content.querySelector("select")?.focus({ preventScroll: true });
+}
+
+function showMemberState(state, revision) {
   if (revision !== screenRevision) return;
   if (state.error) {
     return replaceContent(element("p", "Профиль участника недоступен.", "status"));
@@ -1576,10 +1189,16 @@ function renderMemberProfile(state, revision) {
   if (!state.member) {
     return replaceContent(element("p", "Загружаем профиль…", "status muted"));
   }
-  const nodes = [safeMemberDetails(state.member)];
+  const details = safeMemberDetails(state.member);
+  const nodes = [details];
   if (state.message) nodes.push(element("p", state.message, "status success"));
-  if (state.member.member_id !== currentMemberId) nodes.push(karmaForm(state, revision));
-  replaceContent(...nodes);
+  if (state.member.member_id !== currentMemberId) {
+    const rate = element("button", "Оценить карму", "primary");
+    rate.type = "button";
+    rate.addEventListener("click", () => openKarmaEditor(state, revision));
+    details.append(rate);
+  }
+  replaceContent(connectedBoundary("P02", "content", ...nodes));
 }
 
 async function showMemberProfile(memberId, push = true) {
@@ -1589,41 +1208,52 @@ async function showMemberProfile(memberId, push = true) {
   setNavigation("", true);
   title.textContent = "Профиль участника";
   back.classList.remove("hidden");
-  renderMemberProfile(state, revision);
-  back.focus();
+  showMemberState(state, revision);
+  back.focus({ preventScroll: true });
   try {
     state.member = await getJson("/api/v1/members/" + encodeURIComponent(memberId));
   } catch {
     state.error = true;
   }
-  renderMemberProfile(state, revision);
+  showMemberState(state, revision);
 }
 
-function renderProfile(state, revision) {
+function showProfileState(state, revision) {
   if (revision !== screenRevision) return;
   const profileBoundary = state.profile
-    ? profileDetails(state.profile.me, state.profile.member, state, revision)
+    ? profileDetails(state.profile.me, state.profile.member, { ...state, leaderboard: state.profile.leaderboard }, revision)
     : state.profileError
       ? boundaryError("Мои показатели", "Не удалось загрузить профиль.", state.profileRetry)
       : element("p", "Загружаем профиль…", "status muted");
-  replaceContent(profileBoundary);
+  replaceContent(connectedBoundary(
+    "P06",
+    state.profile ? "content" : state.profileError ? "error" : "loading",
+    profileBoundary,
+  ));
 }
 
 async function loadOwnProfile(state, revision) {
   state.profile = null;
   state.profileError = false;
-  renderProfile(state, revision);
+  showProfileState(state, revision);
   try {
     const me = await getJson("/api/v1/me");
     if (revision !== screenRevision) return;
+    const leaderboardRequest = getJson("/api/v1/leaderboard?limit=3")
+      .then((page) => page.items)
+      .catch(() => []);
     const member = await getJson("/api/v1/members/" + encodeURIComponent(me.member_id));
     if (revision !== screenRevision) return;
-    state.profile = { me, member };
+    state.profile = { me, member, leaderboard: [] };
+    showProfileState(state, revision);
+    const leaderboard = await leaderboardRequest;
+    if (revision !== screenRevision) return;
+    state.profile = { me, member, leaderboard };
   } catch {
     if (revision !== screenRevision) return;
     state.profileError = true;
   }
-  renderProfile(state, revision);
+  showProfileState(state, revision);
 }
 
 function loadProfile(push = true) {
@@ -1637,8 +1267,8 @@ function loadProfile(push = true) {
   setNavigation("profile", false);
   title.textContent = "Профиль";
   back.classList.add("hidden");
-  renderProfile(state, revision);
-  back.focus();
+  showProfileState(state, revision);
+  back.focus({ preventScroll: true });
   void loadOwnProfile(state, revision);
 }
 
@@ -1675,11 +1305,30 @@ function showTaskDetail(task, push = true) {
   status.setAttribute("aria-live", "polite");
   const accept = element("button", "Принять задание", "primary");
   accept.type = "button";
-  markTransition(accept, "PE-024", "authoritative_accept_success");
-  accept.addEventListener("click", () => acceptTask(task, accept, status));
+  markTransition(accept, "PE-015", "accept_task");
+  accept.addEventListener("click", () => {
+    history.pushState(
+      { screen: "task-accept", taskId: task.id },
+      "",
+      presentationLocationFor("T03A", task.id),
+    );
+    showActionConfirmation({
+      screenId: "T03A",
+      headingText: "Подтвердить принятие",
+      description: `${task.title}. Срок: ${formatDate(task.deadline_at)}. Критерии: ${task.completion_criteria}`,
+      confirmLabel: "Принять слот",
+      transitionId: "PE-024",
+      transitionTrigger: "authoritative_accept_success",
+      onEdit: () => history.back(),
+      onConfirm: ({ confirm, edit, status: actionStatus }) => {
+        edit.disabled = true;
+        void acceptTask(task, confirm, actionStatus).finally(() => { edit.disabled = false; });
+      },
+    });
+  });
   detail.append(status, accept);
-  replaceContent(detail);
-  back.focus();
+  replaceContent(connectedBoundary("T03", "content", detail));
+  back.focus({ preventScroll: true });
 }
 
 async function acceptTask(task, button, status) {
@@ -1710,30 +1359,66 @@ async function acceptTask(task, button, status) {
   }
 }
 
-function renderAssignments(revision = ++screenRevision) {
+function showAssignments(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
   setNavigation("assignments", false);
-  title.textContent = "Взятые мной";
+  title.textContent = "Мои задания";
   back.classList.add("hidden");
+  const boundary = element("section", undefined, "state-view");
+  boundary.dataset.screenId = "M01";
+  boundary.dataset.uiEngine = "concept-05";
+  boundary.dataset.state = assignments.length ? "content" : "empty";
+  boundary.append(element("p", "Работа и проверки в одном месте", "screen-subtitle"));
+  const tabs = element("div", undefined, "segmented root-tabs");
+  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
+  active.type = "button";
+  active.addEventListener("click", () => showTakenAssignments());
+  tabs.append(active, createdAssignmentsButton);
+  boundary.append(tabs);
   if (!assignments.length) {
-    replaceContent(
-      createdAssignmentsButton,
-      element("p", "Активных назначений пока нет.", "status muted"),
-    );
+    boundary.append(element("p", "Активных заданий пока нет.", "compact-empty"));
+    replaceContent(boundary);
     restoreModerationFocus();
     return;
   }
-  const intro = element("p", "Активные назначения", "muted");
+  const summary = element("button", undefined, "card assignment-card");
+  summary.type = "button";
+  summary.append(
+    element("h3", "Взятые мной"),
+    element("p", `${assignments.length} активных назначений`, "muted"),
+  );
+  summary.addEventListener("click", () => showTakenAssignments());
+  boundary.append(summary);
+  replaceContent(boundary);
+  restoreModerationFocus();
+}
+
+function showTakenAssignments() {
+  screenRevision += 1;
+  history.replaceState({ screen: "assignments-taken" }, "", presentationLocationFor("M02"));
+  setNavigation("assignments", false);
+  title.textContent = "Мои задания";
+  back.classList.add("hidden");
+  const boundary = connectedBoundary("M02", "content");
+  boundary.append(element("p", "Взятые мной", "screen-subtitle"));
+  const tabs = element("div", undefined, "segmented root-tabs");
+  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
+  active.type = "button";
+  active.disabled = true;
+  tabs.append(active, createdAssignmentsButton);
+  boundary.append(tabs);
   const list = element("ul", undefined, "list");
   let focusTarget = null;
   for (const assignment of assignments) {
-    const button = element("button", undefined, "card");
+    const button = element("button", undefined, "card assignment-card");
     button.type = "button";
+    const chips = element("div", undefined, "card-chips");
+    chips.append(element("span", assignmentStatus(assignment.assignment_status), "chip"));
     const deadline = element("p", "Срок: ", "meta");
     deadline.append(time(assignment.task_deadline_at));
     button.append(
+      chips,
       element("h3", assignment.task_title),
-      element("p", assignmentStatus(assignment.assignment_status), "muted"),
       deadline,
     );
     if (assignment.result_summary) {
@@ -1745,8 +1430,9 @@ function renderAssignments(revision = ++screenRevision) {
     item.append(button);
     list.append(item);
   }
-  replaceContent(createdAssignmentsButton, intro, list);
-  focusTarget?.focus();
+  boundary.append(list);
+  replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
   returnFocusAssignmentId = null;
   restoreModerationFocus();
 }
@@ -1755,7 +1441,7 @@ async function loadAssignments(push = true) {
   const revision = ++screenRevision;
   if (push) history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
   setNavigation("assignments", false);
-  title.textContent = "Взятые мной";
+  title.textContent = "Мои задания";
   back.classList.add("hidden");
   replaceContent(element("p", "Загружаем активные назначения…", "status muted"));
   try {
@@ -1767,7 +1453,7 @@ async function loadAssignments(push = true) {
     if (revision !== screenRevision) return;
     assignments = (await response.json()).items;
     if (revision !== screenRevision) return;
-    renderAssignments(revision);
+    showAssignments(revision);
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
@@ -1790,6 +1476,24 @@ const createdTaskStatus = (value) => ({
   cancelled: "Отменено",
 }[value] || value);
 
+function showOwnedTask(task) {
+  history.pushState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
+  setNavigation("", true);
+  title.textContent = "Созданное задание";
+  back.classList.remove("hidden");
+  const detail = element("article", undefined, "card detail");
+  detail.append(
+    element("h3", task.title),
+    section("Статус", createdTaskStatus(task.status)),
+    section("Слоты", `${task.assignees.length}/${task.performer_slots}`),
+  );
+  for (const assignee of task.assignees) {
+    detail.append(section(assignee.display_name, assignmentStatus(assignee.status)));
+  }
+  replaceContent(connectedBoundary("M10", "content", detail));
+  back.focus({ preventScroll: true });
+}
+
 async function loadCreatedReviews(push = true) {
   const revision = ++screenRevision;
   if (push) history.pushState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
@@ -1809,7 +1513,8 @@ async function loadCreatedReviews(push = true) {
     } else {
       const ownedList = element("ul", undefined, "list");
       for (const task of owned.items) {
-        const card = element("article", undefined, "card");
+        const card = element("button", undefined, "card");
+        card.type = "button";
         card.append(
           element("h3", task.title),
           element("p", createdTaskStatus(task.status), "muted"),
@@ -1826,6 +1531,7 @@ async function loadCreatedReviews(push = true) {
             "muted",
           ));
         }
+        card.addEventListener("click", () => showOwnedTask(task));
         const item = element("li");
         item.append(card);
         ownedList.append(item);
@@ -1846,7 +1552,9 @@ async function loadCreatedReviews(push = true) {
           element("p", review.result, "muted"),
         );
         button.addEventListener("click", () => showCreatedReview(review.id));
-        if (review.id === returnFocusReviewId) queueMicrotask(() => button.focus());
+        if (review.id === returnFocusReviewId) {
+          queueMicrotask(() => button.focus({ preventScroll: true }));
+        }
         const item = element("li");
         item.append(button);
         reviewList.append(item);
@@ -1854,7 +1562,7 @@ async function loadCreatedReviews(push = true) {
       nodes.push(reviewList);
     }
     returnFocusReviewId = null;
-    replaceContent(...nodes);
+    replaceContent(connectedBoundary("M09", "content", ...nodes));
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
@@ -1867,7 +1575,7 @@ async function loadCreatedReviews(push = true) {
 async function showCreatedReview(assignmentId, push = true) {
   const revision = ++screenRevision;
   returnFocusReviewId = assignmentId;
-  if (push) history.pushState({ screen: "assignment-review", assignmentId }, "", presentationLocationFor("M12", assignmentId));
+  if (push) history.pushState({ screen: "assignment-review", assignmentId }, "", presentationLocationFor("M11", assignmentId));
   setNavigation("", true);
   title.textContent = "Решение по результату";
   back.classList.remove("hidden");
@@ -1891,13 +1599,11 @@ async function showCreatedReview(assignmentId, push = true) {
       button.type = "button";
       markTransition(button, "PE-040", "authoritative_review_success");
       let operationKey = null;
-      button.addEventListener("click", async () => {
-        if (decision === "reject" && !globalThis.confirm(
-          "Отклонить результат? Выплата и резерв останутся заморожены на 24 часа для возможного спора. Повторная отправка результата не откроется.",
-        )) return;
-        button.disabled = true;
-        status.className = "status";
-        status.textContent = "Сохраняем решение…";
+      const saveDecision = async ({ confirm = button, edit = null, status: actionStatus = status } = {}) => {
+        confirm.disabled = true;
+        if (edit) edit.disabled = true;
+        actionStatus.className = "status";
+        actionStatus.textContent = "Сохраняем решение…";
         operationKey ||= newOperationKey();
         try {
           await submissionRequest(
@@ -1907,22 +1613,49 @@ async function showCreatedReview(assignmentId, push = true) {
             { decision },
           );
           history.replaceState(
-            { screen: "created-assignments" },
+            { screen: "review-outcome", assignmentId },
             "",
-            presentationLocationFor("M09"),
+            presentationLocationFor("M13", assignmentId),
           );
-          await loadCreatedReviews(false);
+          title.textContent = "Решение сохранено";
+          const done = element("button", "К созданным заданиям", "primary");
+          done.type = "button";
+          done.addEventListener("click", () => {
+            history.replaceState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
+            void loadCreatedReviews(false);
+          });
+          replaceContent(connectedBoundary("M13", "success", element("p", `Решение «${decisionLabels[decision]}» сохранено.`, "status success"), done));
         } catch (error) {
-          status.textContent = "Не удалось сохранить решение. Повторите запрос — ключ останется тем же.";
+          actionStatus.textContent = "Не удалось сохранить решение. Повторите запрос — ключ останется тем же.";
           if (!retryableSubmissionError(error)) operationKey = null;
-          button.disabled = false;
+          confirm.disabled = false;
+          if (edit) edit.disabled = false;
         }
+      };
+      button.addEventListener("click", () => {
+        history.pushState(
+          { screen: "assignment-review-confirm", assignmentId },
+          "",
+          presentationLocationFor("M12", assignmentId),
+        );
+        showActionConfirmation({
+          screenId: "M12",
+          headingText: "Подтвердить решение",
+          description: decision === "reject"
+            ? "Выплата и резерв останутся заморожены на 24 часа для возможного спора. Повторная отправка результата не откроется."
+            : `Решение: ${decisionLabels[decision]}.`,
+          confirmLabel: decisionLabels[decision],
+          transitionId: "PE-040",
+          transitionTrigger: "authoritative_review_success",
+          onEdit: () => history.back(),
+          onConfirm: saveDecision,
+        });
       });
       detail.append(button);
     }
     detail.append(status);
-    replaceContent(detail);
-    back.focus();
+    replaceContent(connectedBoundary("M11", "content", detail));
+    back.focus({ preventScroll: true });
   } catch (error) {
     if (revision === screenRevision) replaceContent(...assignmentError(error.message));
   }
@@ -1969,7 +1702,7 @@ async function submissionRequest(path, method, operationKey, body) {
   return submissionResponse(response);
 }
 
-function renderSubmission(assignment, draft) {
+function submissionPanel(assignment, draft) {
   const submissionRevision = screenRevision;
   const boundary = element("section", undefined, "submission");
   boundary.append(element("h3", "Отправить результат"));
@@ -1996,9 +1729,9 @@ function renderSubmission(assignment, draft) {
           },
         );
         const payload = await submissionResponse(response);
-        const next = renderSubmission(assignment, payload);
+        const next = submissionPanel(assignment, payload);
         boundary.replaceWith(next);
-        next.querySelector("textarea")?.focus();
+        next.querySelector("textarea")?.focus({ preventScroll: true });
       } catch (error) {
         status.textContent = submissionMessage(error);
         if (!retryableSubmissionError(error)) beginKey = null;
@@ -2008,6 +1741,9 @@ function renderSubmission(assignment, draft) {
     boundary.append(status, begin);
     return boundary;
   }
+
+  boundary.dataset.screenId = "M04";
+  boundary.dataset.uiEngine = "concept-05";
 
   const form = element("form", undefined, "submission-form");
   const label = element("label", "Результат", "section");
@@ -2025,38 +1761,75 @@ function renderSubmission(assignment, draft) {
   let confirmKey = null;
 
   const addPreview = (saved) => {
-    const previewCard = element("section", undefined, "section submission-preview");
-    previewCard.append(
-      element("h4", "Предпросмотр"),
-      element("p", typeof saved.result === "string" ? saved.result : ""),
+    history.replaceState(
+      { screen: "assignment-result-preview", assignmentId: assignment.id },
+      "",
+      presentationLocationFor("M05", assignment.id),
     );
-    const confirm = element("button", "Подтвердить отправку", "primary");
-    confirm.type = "button";
-    markTransition(confirm, "PE-034", "authoritative_submit_success");
-    confirm.addEventListener("click", async () => {
-      confirm.disabled = true;
-      status.className = "status";
-      status.textContent = "Отправляем результат…";
-      confirmKey ||= newOperationKey();
-      try {
-        await submissionRequest(
-          "/api/v1/submission-drafts/" + encodeURIComponent(saved.id) + "/confirm",
-          "POST",
-          confirmKey,
-          { expected_revision: saved.revision },
-        );
-        if (submissionRevision === screenRevision) {
-          await showAssignmentDetail(assignment.id, false);
-        }
-      } catch (error) {
-        status.textContent = submissionMessage(error);
-        if (!retryableSubmissionError(error)) confirmKey = null;
-        confirm.disabled = false;
-      }
+    title.textContent = "Предпросмотр результата";
+    const card = element("article", undefined, "card detail preview-grid");
+    card.append(element("p", "Предпросмотр", "badge"), element("p", typeof saved.result === "string" ? saved.result : ""));
+    const proceed = element("button", "Продолжить", "primary");
+    proceed.type = "button";
+    proceed.addEventListener("click", () => {
+      history.replaceState(
+        { screen: "assignment-submission-confirm", assignmentId: assignment.id },
+        "",
+        presentationLocationFor("M06", assignment.id),
+      );
+      showActionConfirmation({
+        screenId: "M06",
+        headingText: "Подтвердить отправку",
+        description: typeof saved.result === "string" ? saved.result : "",
+        confirmLabel: "Отправить результат",
+        transitionId: "PE-034",
+        transitionTrigger: "authoritative_submit_success",
+        onEdit: () => {
+          history.replaceState(
+            { screen: "assignment-submission", assignmentId: assignment.id },
+            "",
+            presentationLocationFor("M04", assignment.id),
+          );
+          title.textContent = "Редактор результата";
+          replaceContent(connectedBoundary("M04", "content", submissionPanel(assignment, saved)));
+          content.querySelector("textarea")?.focus({ preventScroll: true });
+        },
+        onConfirm: async ({ confirm, edit, status: actionStatus }) => {
+          confirm.disabled = true;
+          edit.disabled = true;
+          actionStatus.className = "status";
+          actionStatus.textContent = "Отправляем результат…";
+          confirmKey ||= newOperationKey();
+          try {
+            await submissionRequest(
+              "/api/v1/submission-drafts/" + encodeURIComponent(saved.id) + "/confirm",
+              "POST",
+              confirmKey,
+              { expected_revision: saved.revision },
+            );
+            if (submissionRevision === screenRevision) {
+              const done = element("button", "К заданию", "primary");
+              done.type = "button";
+              done.addEventListener("click", () => history.back());
+              title.textContent = "Результат отправлен";
+              history.replaceState(
+                { screen: "assignment-submission-success", assignmentId: assignment.id },
+                "",
+                presentationLocationFor("M07", assignment.id),
+              );
+              replaceContent(connectedBoundary("M07", "success", element("p", "Результат сохранён и отправлен на проверку.", "status success"), done));
+            }
+          } catch (error) {
+            actionStatus.textContent = submissionMessage(error);
+            if (!retryableSubmissionError(error)) confirmKey = null;
+            confirm.disabled = false;
+            edit.disabled = false;
+          }
+        },
+      });
     });
-    previewCard.append(confirm);
-    form.querySelector(".submission-preview")?.remove();
-    form.append(previewCard);
+    card.append(proceed);
+    replaceContent(connectedBoundary("M05", "content", card));
   };
 
   form.addEventListener("submit", async (event) => {
@@ -2086,11 +1859,26 @@ function renderSubmission(assignment, draft) {
   });
   form.append(label, preview);
   boundary.append(form, status);
-  if (draft.result !== null) addPreview(draft);
+  if (draft.result !== null) input.value = draft.result;
   return boundary;
 }
 
-function renderDispute(assignment) {
+function openSubmissionEditor(assignment, push = true) {
+  if (push) {
+    history.pushState(
+      { screen: "assignment-submission", assignmentId: assignment.id },
+      "",
+      presentationLocationFor("M04", assignment.id),
+    );
+  }
+  setNavigation("", true);
+  title.textContent = "Редактор результата";
+  back.classList.remove("hidden");
+  replaceContent(connectedBoundary("M04", "content", submissionPanel(assignment, null)));
+  content.querySelector("button")?.focus({ preventScroll: true });
+}
+
+function disputePanel(assignment) {
   const form = element("form", undefined, "submission-form");
   const label = element("label", "Почему результат нужно пересмотреть", "section");
   const comment = document.createElement("textarea");
@@ -2109,38 +1897,66 @@ function renderDispute(assignment) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const normalized = comment.value.trim();
-    if (!normalized || !globalThis.confirm(
-      "Подать спор? Комментарий увидит только команда модерации.",
-    )) return;
-    submit.disabled = true;
-    status.className = "status";
-    status.textContent = "Подаём спор…";
-    operationKey ||= newOperationKey();
-    try {
-      await submissionRequest(
-        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/disputes",
-        "POST",
-        operationKey,
-        { comment: normalized },
-      );
-      await showAssignmentDetail(assignment.id, false);
-    } catch (error) {
-      if (error?.status === 409) {
-        await showAssignmentDetail(assignment.id, false);
-        return;
-      }
-      status.textContent = error instanceof TypeError
-        ? "Сеть недоступна. Повторите запрос — он останется тем же."
-        : "Не удалось подать спор. Проверьте комментарий и состояние назначения.";
-      if (!retryableSubmissionError(error)) operationKey = null;
-      submit.disabled = false;
-    }
+    if (!normalized) return;
+    showActionConfirmation({
+      screenId: "M14",
+      headingText: "Подтвердить спор",
+      description: normalized + " Комментарий увидит только команда модерации.",
+      confirmLabel: "Подать спор",
+      transitionId: "PE-044",
+      transitionTrigger: "open_dispute_materials",
+      onEdit: () => {
+        openDisputeEditor(assignment, false);
+        const restored = content.querySelector("#dispute-comment");
+        if (restored) restored.value = normalized;
+        restored?.focus({ preventScroll: true });
+      },
+      onConfirm: async ({ confirm, edit, status: actionStatus }) => {
+        confirm.disabled = true;
+        edit.disabled = true;
+        actionStatus.className = "status";
+        actionStatus.textContent = "Подаём спор…";
+        operationKey ||= newOperationKey();
+        try {
+          await submissionRequest(
+            "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/disputes",
+            "POST",
+            operationKey,
+            { comment: normalized },
+          );
+          await showAssignmentDetail(assignment.id, false);
+        } catch (error) {
+          if (error?.status === 409) {
+            await showAssignmentDetail(assignment.id, false);
+            return;
+          }
+          actionStatus.textContent = error instanceof TypeError
+            ? "Сеть недоступна. Повторите запрос — он останется тем же."
+            : "Не удалось подать спор. Проверьте комментарий и состояние назначения.";
+          if (!retryableSubmissionError(error)) operationKey = null;
+          confirm.disabled = false;
+          edit.disabled = false;
+        }
+      },
+    });
   });
   form.append(label, submit, status);
   return form;
 }
 
-function renderCancellation(assignment) {
+function openDisputeEditor(assignment, push = true) {
+  const nextState = { screen: "assignment-dispute", assignmentId: assignment.id };
+  const location = presentationLocationFor("M14", assignment.id);
+  if (push) history.pushState(nextState, "", location);
+  else history.replaceState(nextState, "", location);
+  setNavigation("", true);
+  title.textContent = "Открытие спора";
+  back.classList.remove("hidden");
+  replaceContent(connectedBoundary("M14", "content", disputePanel(assignment)));
+  content.querySelector("textarea")?.focus({ preventScroll: true });
+}
+
+function cancellationPanel(assignment) {
   const form = element("form", undefined, "submission-form");
   const heading = element("h3", "Отказаться от задания");
   const label = element("label", "Причина отказа", "section");
@@ -2161,30 +1977,60 @@ function renderCancellation(assignment) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const normalized = reason.value.trim();
-    if (!normalized || !globalThis.confirm("Отказаться от задания и освободить слот?")) return;
-    submit.disabled = true;
-    status.className = "status";
-    status.textContent = "Отказываемся от задания…";
-    operationKey ||= newOperationKey();
-    try {
-      await submissionRequest(
-        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/cancellation",
-        "POST",
-        operationKey,
-        { reason: normalized },
-      );
-      history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
-      await loadAssignments(false);
-    } catch (error) {
-      status.textContent = error instanceof TypeError
-        ? "Сеть недоступна. Повторите запрос — он останется тем же."
-        : "Не удалось отказаться. Проверьте состояние назначения и повторите.";
-      if (!retryableSubmissionError(error)) operationKey = null;
-      submit.disabled = false;
-    }
+    if (!normalized) return;
+    showActionConfirmation({
+      screenId: "M08",
+      headingText: "Подтвердить отказ",
+      description: normalized + " Слот будет освобождён.",
+      confirmLabel: "Отказаться от задания",
+      transitionId: "PE-036",
+      transitionTrigger: "withdrawal_outcome",
+      onEdit: () => {
+        openCancellationEditor(assignment, false);
+        const restored = content.querySelector("#assignment-cancellation-reason");
+        if (restored) restored.value = normalized;
+        restored?.focus({ preventScroll: true });
+      },
+      onConfirm: async ({ confirm, edit, status: actionStatus }) => {
+        confirm.disabled = true;
+        edit.disabled = true;
+        actionStatus.className = "status";
+        actionStatus.textContent = "Отказываемся от задания…";
+        operationKey ||= newOperationKey();
+        try {
+          await submissionRequest(
+            "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/cancellation",
+            "POST",
+            operationKey,
+            { reason: normalized },
+          );
+          history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
+          await loadAssignments(false);
+        } catch (error) {
+          actionStatus.textContent = error instanceof TypeError
+            ? "Сеть недоступна. Повторите запрос — он останется тем же."
+            : "Не удалось отказаться. Проверьте состояние назначения и повторите.";
+          if (!retryableSubmissionError(error)) operationKey = null;
+          confirm.disabled = false;
+          edit.disabled = false;
+        }
+      },
+    });
   });
   form.append(heading, label, submit, status);
   return form;
+}
+
+function openCancellationEditor(assignment, push = true) {
+  const nextState = { screen: "assignment-cancellation", assignmentId: assignment.id };
+  const location = presentationLocationFor("M08", assignment.id);
+  if (push) history.pushState(nextState, "", location);
+  else history.replaceState(nextState, "", location);
+  setNavigation("", true);
+  title.textContent = "Отказ от задания";
+  back.classList.remove("hidden");
+  replaceContent(connectedBoundary("M08", "content", cancellationPanel(assignment)));
+  content.querySelector("textarea")?.focus({ preventScroll: true });
 }
 
 async function showAssignmentDetail(assignmentId, push = true) {
@@ -2228,7 +2074,10 @@ async function showAssignmentDetail(assignmentId, push = true) {
       detail.append(dateSection("Подать спор до", assignment.reject_dispute_deadline_at));
     }
     if (assignment.case_status) {
-      detail.append(section("Спор", "Передан команде модерации"));
+      const disputeStatus = section("Спор", "Передан команде модерации");
+      disputeStatus.dataset.screenId = "M15";
+      disputeStatus.dataset.uiEngine = "concept-05";
+      detail.append(disputeStatus);
     } else if (assignment.assignment_status === "rejected_pending_dispute") {
       detail.append(section(
         "Условия спора",
@@ -2237,15 +2086,28 @@ async function showAssignmentDetail(assignmentId, push = true) {
           : "Срок подачи спора истёк.",
       ));
     }
-    if (assignment.can_dispute) detail.append(renderDispute(assignment));
+    const actions = element("div", undefined, "detail-actions");
     if (assignment.can_submit) {
-      detail.append(renderSubmission(assignment, null));
+      const submit = element("button", "Отправить результат", "primary");
+      submit.type = "button";
+      submit.addEventListener("click", () => openSubmissionEditor(assignment));
+      actions.append(submit);
+    }
+    if (assignment.can_dispute) {
+      const dispute = element("button", "Подать спор", "secondary");
+      dispute.type = "button";
+      dispute.addEventListener("click", () => openDisputeEditor(assignment));
+      actions.append(dispute);
     }
     if (assignment.can_cancel) {
-      detail.append(renderCancellation(assignment));
+      const cancel = element("button", "Отказаться от задания", "secondary danger");
+      cancel.type = "button";
+      cancel.addEventListener("click", () => openCancellationEditor(assignment));
+      actions.append(cancel);
     }
-    replaceContent(detail);
-    back.focus();
+    if (actions.childElementCount) detail.append(actions);
+    replaceContent(connectedBoundary("M03", "content", detail));
+    back.focus({ preventScroll: true });
   } catch (error) {
     if (revision !== screenRevision) return;
     const code = error.message === "request_failed" ? "detail_failed" : error.message;
@@ -2294,10 +2156,12 @@ async function loadModeration(push = true) {
   returnFocusModeration = true;
   if (push) history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
   setNavigation("moderation", false);
-  title.textContent = "Очередь модерации";
+  title.textContent = "Модерация";
   back.classList.add("hidden");
-  replaceContent(element("p", "Загружаем открытые кейсы…", "status muted"));
-  back.focus();
+  replaceContent(
+    element("p", "Открытые обращения", "screen-subtitle"),
+    element("p", "Загружаем очередь…", "compact-empty"),
+  );
   try {
     const response = await fetch(
       "/api/v1/moderation/cases?limit=20",
@@ -2306,21 +2170,31 @@ async function loadModeration(push = true) {
     if (!response.ok) throw new Error(requestError(response));
     const cases = (await response.json()).items;
     if (revision !== screenRevision) return;
+    setHeadingAction(element("span", String(cases.length), "queue-count"));
+    const boundary = element("section", undefined, "state-view");
+    boundary.dataset.screenId = "S01";
+    boundary.dataset.uiEngine = "concept-05";
+    boundary.dataset.state = cases.length ? "content" : "empty";
+    boundary.append(element("p", "Открытые обращения", "screen-subtitle"));
     if (!cases.length) {
-      replaceContent(element("p", "Открытых кейсов нет.", "status muted"));
+      boundary.append(element("p", "Открытых обращений нет.", "compact-empty"));
+      replaceContent(boundary);
       return;
     }
     const list = element("ul", undefined, "list");
     let focusTarget = null;
     for (const item of cases) {
       const actionable = item.case_type === "dispute" && item.status === "open";
-      const card = element(actionable ? "button" : "article", undefined, "card");
+      const card = element(actionable ? "button" : "article", undefined, "card moderation-card");
       if (actionable) card.type = "button";
+      const chips = element("div", undefined, "card-chips");
+      chips.append(element("span", moderationStatus(item.status), "chip"));
+      if (item.case_type !== "dispute") chips.append(element("span", "Проверка", "chip muted-chip"));
       const opened = element("p", "Открыт: ", "meta");
       opened.append(time(item.opened_at));
       card.append(
+        chips,
         element("h3", moderationCaseType(item.case_type)),
-        element("p", moderationStatus(item.status), "muted"),
         opened,
       );
       if (item.current_code) {
@@ -2334,15 +2208,16 @@ async function loadModeration(push = true) {
       row.append(card);
       list.append(row);
     }
-    replaceContent(list);
-    focusTarget?.focus();
+    boundary.append(list);
+    replaceContent(boundary);
+    focusTarget?.focus({ preventScroll: true });
     returnFocusModerationCaseId = null;
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadModeration(false));
-    replaceContent(...moderationError(error.message, retry));
+    replaceContent(element("p", "Открытые обращения", "screen-subtitle"), ...moderationError(error.message, retry));
   }
 }
 
@@ -2360,7 +2235,7 @@ async function showModerationCase(caseId, push = true) {
   title.textContent = "Решение по спору";
   back.classList.remove("hidden");
   replaceContent(element("p", "Загружаем спор…", "status muted"));
-  back.focus();
+  back.focus({ preventScroll: true });
   try {
     const dispute = await getJson(
       "/api/v1/moderation/cases/" + encodeURIComponent(caseId),
@@ -2395,42 +2270,34 @@ async function showModerationCase(caseId, push = true) {
     status.setAttribute("aria-live", "polite");
     const review = element("button", "Проверить решение", "primary");
     review.type = "submit";
+    let operationKey = null;
     form.append(label, reasonLabel, review, status);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const normalizedReason = reason.value.trim();
       if (!normalizedReason) {
-        reason.focus();
+        reason.focus({ preventScroll: true });
         return;
       }
-      select.disabled = true;
-      reason.disabled = true;
-      review.remove();
-      const confirmation = section(
-        "Подтверждение",
-        (resolutionLabels[select.value] || select.value) + ". " + normalizedReason,
+      const resolution = select.value;
+      history.pushState(
+        { screen: "moderation-confirm", caseId },
+        "",
+        presentationLocationFor("S03", caseId),
       );
-      const edit = element("button", "Изменить");
-      edit.type = "button";
-      const confirm = element("button", "Подтвердить решение", "primary");
-      confirm.type = "button";
-      markTransition(confirm, "PE-068", "authoritative_resolution_success");
-      let operationKey = null;
-      edit.addEventListener("click", () => {
-        confirmation.remove();
-        edit.remove();
-        confirm.remove();
-        select.disabled = false;
-        reason.disabled = false;
-        status.className = "status hidden";
-        form.insertBefore(review, status);
-        reason.focus();
-      });
-      confirm.addEventListener("click", async () => {
+      showActionConfirmation({
+        screenId: "S03",
+        headingText: "Подтвердить решение",
+        description: (resolutionLabels[resolution] || resolution) + ". " + normalizedReason,
+        confirmLabel: "Применить решение",
+        transitionId: "PE-068",
+        transitionTrigger: "authoritative_resolution_success",
+        onEdit: () => history.back(),
+        onConfirm: async ({ confirm, edit, status: actionStatus }) => {
         edit.disabled = true;
         confirm.disabled = true;
-        status.className = "status";
-        status.textContent = "Применяем решение…";
+        actionStatus.className = "status";
+        actionStatus.textContent = "Применяем решение…";
         operationKey ||= newOperationKey();
         try {
           await submissionRequest(
@@ -2439,29 +2306,31 @@ async function showModerationCase(caseId, push = true) {
             operationKey,
             {
               expected_revision: dispute.revision,
-              code: select.value,
+              code: resolution,
               reason: normalizedReason,
             },
           );
-          history.back();
+          history.replaceState({ screen: "moderation-outcome" }, "", presentationLocationFor("S04", caseId));
+          title.textContent = "Решение сохранено";
+          const queue = element("button", "К очереди", "primary");
+          queue.type = "button";
+          queue.addEventListener("click", () => loadModeration(false));
+          replaceContent(connectedBoundary("S04", "success", element("p", "Решение применено.", "status success"), queue));
         } catch (error) {
-          status.textContent = error?.status === 409
+          actionStatus.textContent = error?.status === 409
             ? "Кейс уже изменился или больше недоступен. Вернитесь в очередь."
             : "Не удалось применить решение. Повторите запрос — ключ останется тем же.";
           if (!retryableSubmissionError(error)) operationKey = null;
           edit.disabled = false;
           confirm.disabled = false;
-          confirm.focus();
+          confirm.focus({ preventScroll: true });
         }
+        },
       });
-      form.insertBefore(confirmation, status);
-      form.insertBefore(edit, status);
-      form.insertBefore(confirm, status);
-      confirm.focus();
     });
     detail.append(form);
-    replaceContent(detail);
-    select.focus();
+    replaceContent(connectedBoundary("S02", "content", detail));
+    select.focus({ preventScroll: true });
   } catch (error) {
     if (revision !== screenRevision) return;
     replaceContent(
@@ -2495,42 +2364,59 @@ async function bootstrap(authAttempted = false) {
     if (!me.ok || !catalog.ok) throw new Error("bootstrap_failed");
     const [profile, page] = await Promise.all([me.json(), catalog.json()]);
     currentMemberId = profile.member_id;
-    configureRoleNavigation(profile);
-    welcome.textContent = profile.display_name
-      + ", выберите понятное задание и помогите сообществу.";
+    void configureRoleNavigation();
     tasks = page.items;
     const initialPresentation = presentationFromLocation();
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    renderCatalog();
+    showCatalog();
     const presentationId = initialPresentation?.screen.id;
     const resourceId = initialPresentation?.resourceId;
-    if (presentationId === "P01" || presentationId === "P05") {
+    if (presentationId === "T02") {
+      showCatalogFilters(false);
+    } else if (presentationId === "T04") {
+      beginTaskCreationFlow(false);
+    } else if (presentationId === "T04A") {
+      beginTaskCreationFlow(false);
+      showTaskSourceChoice("solo");
+    } else if (["T05", "T06", "T07", "T08"].includes(presentationId)) {
+      const forceEdit = presentationId === "T05";
+      const screenId = forceEdit ? "T05" : "T06";
+      history.replaceState(
+        { screen: forceEdit ? "task-creation" : "task-preview", draftId: resourceId },
+        "",
+        presentationLocationFor(screenId, resourceId),
+      );
+      openTaskCreation(false, false, null, forceEdit);
+    } else if (presentationId === "P01" || presentationId === "P05") {
       loadParticipants(presentationId === "P05" ? "leaderboard" : "members");
-    } else if (presentationId === "P06") {
+    } else if (presentationId === "P06" || presentationId === "P07") {
       history.replaceState({ screen: "profile" }, "", presentationLocationFor("P06"));
       loadProfile(false);
-    } else if (presentationId === "M01") {
+    } else if (presentationId === "M01" || presentationId === "M02") {
       history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
       loadAssignments(false);
+    } else if (presentationId === "M09" || presentationId === "M10") {
+      history.replaceState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
+      loadCreatedReviews(false);
     } else if (presentationId === "S01") {
       history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
       loadModeration(false);
-    } else if (presentationId === "T03" && resourceId) {
+    } else if (["T03", "T03A"].includes(presentationId) && resourceId) {
       const task = tasks.find((item) => item.id === resourceId);
       if (task) {
         history.replaceState({ screen: "task", taskId: task.id }, "", presentationLocationFor("T03", task.id));
         showTaskDetail(task, false);
       }
-    } else if (presentationId === "P02" && resourceId) {
+    } else if (["P02", "P03", "P04"].includes(presentationId) && resourceId) {
       history.replaceState({ screen: "member-profile", memberId: resourceId }, "", presentationLocationFor("P02", resourceId));
       showMemberProfile(resourceId, false);
-    } else if (presentationId === "M03" && resourceId) {
+    } else if (["M03", "M04", "M05", "M06", "M07", "M08", "M14", "M15"].includes(presentationId) && resourceId) {
       history.replaceState({ screen: "assignment", assignmentId: resourceId }, "", presentationLocationFor("M03", resourceId));
       showAssignmentDetail(resourceId, false);
-    } else if (presentationId === "M12" && resourceId) {
-      history.replaceState({ screen: "assignment-review", assignmentId: resourceId }, "", presentationLocationFor("M12", resourceId));
+    } else if (["M11", "M12", "M13"].includes(presentationId) && resourceId) {
+      history.replaceState({ screen: "assignment-review", assignmentId: resourceId }, "", presentationLocationFor("M11", resourceId));
       showCreatedReview(resourceId, false);
-    } else if (presentationId === "S02" && resourceId) {
+    } else if (["S02", "S03", "S04"].includes(presentationId) && resourceId) {
       history.replaceState({ screen: "moderation-case", caseId: resourceId }, "", presentationLocationFor("S02", resourceId));
       showModerationCase(resourceId, false);
     }
@@ -2547,36 +2433,30 @@ async function bootstrap(authAttempted = false) {
 
 catalogNav.addEventListener("click", () => {
   history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-  renderCatalog();
+  showCatalog();
 });
 assignmentsNav.addEventListener("click", () => loadAssignments());
+participantsNav.addEventListener("click", () => loadParticipants("members"));
 profileNav.addEventListener("click", () => loadProfile());
-participantsNav.addEventListener("click", () => loadParticipants());
 moderationNav.addEventListener("click", () => loadModeration());
-managementNav.addEventListener("click", () => {
-  navigatePresentationScreen("G01", "content", "replace");
-});
 back.addEventListener("click", () => {
   if (history.state?.screen === "participants" && history.state.view === "leaderboard") {
     returnFocusLeaderboardTab = true;
     loadParticipants("members");
-  } else if (history.state?.screen === "presentation" && history.state.screenId === "P05") {
-    navigatePresentationScreen("P01", "content", "replace", "P01");
-    queueMicrotask(() => content.querySelector('[data-transition-id="PE-057"]')?.focus());
   } else {
     history.back();
   }
 });
 globalThis.addEventListener("popstate", (event) => {
-  if (event.state?.screen === "presentation") {
-    renderPresentationScreen(event.state.screenId, event.state.presentationState);
-  } else if (event.state?.screen === "participants") {
+  if (event.state?.screen === "participants") {
     loadParticipants(event.state.view || "members");
   } else if (event.state?.screen === "task") {
     const task = tasks.find((item) => item.id === event.state.taskId);
     if (task) showTaskDetail(task, false);
   } else if (event.state?.screen === "assignments") {
-    renderAssignments();
+    showAssignments();
+  } else if (event.state?.screen === "assignments-taken") {
+    showTakenAssignments();
   } else if (event.state?.screen === "created-assignments") {
     loadCreatedReviews(false);
   } else if (event.state?.screen === "assignment-review") {
@@ -2585,6 +2465,8 @@ globalThis.addEventListener("popstate", (event) => {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
     loadProfile(false);
+  } else if (event.state?.screen === "profile-settings") {
+    loadProfile(false);
   } else if (event.state?.screen === "member-profile") {
     showMemberProfile(event.state.memberId, false);
   } else if (event.state?.screen === "moderation") {
@@ -2592,15 +2474,17 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "moderation-case") {
     showModerationCase(event.state.caseId, false);
   } else if (event.state?.screen === "task-creation") {
+    openTaskCreation(false, false, null, true);
+  } else if (event.state?.screen === "task-preview") {
     openTaskCreation(false, false);
   } else {
-    renderCatalog();
+    showCatalog();
   }
 });
 globalThis.addEventListener("hashchange", () => {
   if (!presentationFromLocation()) {
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    renderCatalog();
+    showCatalog();
   }
 });
 bootstrap();
