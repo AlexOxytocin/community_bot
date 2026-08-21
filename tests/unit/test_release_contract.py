@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import pytest
 from ops import release_contract as contract
@@ -687,13 +687,503 @@ def test_rollback_rejects_other_pending_operation(
         contract.rollback(tmp_path)
 
 
-def test_cli_routes_only_the_four_explicit_contract_commands(
+@pytest.mark.parametrize(
+    ("state_status", "live_head"),
+    [("ready", "0021"), ("pending", "0021"), ("pending", "0022")],
+)
+def test_exact_cutover_orders_durable_freeze_proof_migrate_and_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_status: str,
+    live_head: str,
+) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
+    root = tmp_path / "host"
+    releases = root / "shared" / "releases"
+    releases.mkdir(parents=True)
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_bytes(b"transferred")
+    target_raw = b'{"target":"0022"}\n'
+    target_digest = contract._digest(target_raw)
+    source_digest = "a" * 64
+    source_directory = releases / source_digest
+    target_directory = releases / target_digest
+    source_directory.mkdir()
+    target_directory.mkdir()
+    source = {
+        "migration_head": "0021",
+        "release_run_number": 104,
+        "release_run_attempt": 1,
+        "image": "source-image",
+        "commit_sha": "a" * 40,
+    }
+    target = {
+        "migration_head": "0022",
+        "release_run_number": 105,
+        "release_run_attempt": 1,
+        "image": "target-image",
+        "commit_sha": "b" * 40,
+    }
+    state = (
+        {
+            "status": "pending",
+            "operation": {"kind": "cutover", "target_manifest_sha256": target_digest},
+            "current": {"manifest_sha256": target_digest},
+            "previous": {"manifest_sha256": source_digest},
+        }
+        if state_status == "pending"
+        else {
+            "status": "ready",
+            "operation": None,
+            "current": {"manifest_sha256": source_digest},
+            "previous": None,
+        }
+    )
+    timeline: list[str] = []
+
+    @contextmanager
+    def unlocked(_root: Path) -> Iterator[None]:
+        yield
+
+    def release(_root: Path, digest: str) -> tuple[dict[str, Any], Path]:
+        return (source, source_directory) if digest == source_digest else (target, target_directory)
+
+    def durable(_path: Path, value: dict[str, Any]) -> None:
+        timeline.append(f"state:{value['status']}")
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        if "stop" in argv:
+            timeline.append("stop:web+worker")
+        elif "migrate" in argv:
+            timeline.append("migrate")
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contract, "_exclusive_lock", unlocked)
+    monkeypatch.setattr(contract, "verify_bundle", lambda _bundle: (target, target_raw, {}))
+    monkeypatch.setattr(contract, "_release", release)
+    monkeypatch.setattr(contract, "_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(contract, "_cutover_preflight", lambda *_args: (["target"], {}, live_head))
+    monkeypatch.setattr(contract, "_cutover_backup_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        contract,
+        "_compose",
+        lambda _root, directory, _manifest: ([directory.name], {}),
+    )
+    monkeypatch.setattr(contract, "_durable", durable)
+    monkeypatch.setattr(contract, "_run", run)
+    monkeypatch.setattr(
+        contract,
+        "_create_cutover_proof",
+        lambda *_args, **_kwargs: timeline.append("backup+restore") or tmp_path / "backup.dump",
+    )
+    monkeypatch.setattr(
+        contract,
+        "_verify_cutover_proof",
+        lambda *_args: timeline.append("verify-proof") or tmp_path / "backup.dump",
+    )
+    monkeypatch.setattr(contract, "_live_head", lambda *_args: "0022")
+    monkeypatch.setattr(
+        contract,
+        "_lifecycle",
+        lambda *_args, **_kwargs: timeline.append("lifecycle"),
+    )
+
+    contract.cutover_0021_to_0022(bundle, root)
+
+    middle = ["backup+restore", "migrate"] if live_head == "0021" else ["verify-proof"]
+    assert timeline == ["state:pending", "stop:web+worker", *middle, "lifecycle", "state:ready"]
+
+
+def test_cutover_backup_is_durable_before_it_is_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    real_replace = Path.replace
+
+    def run(_argv: list[str], **kwargs: object) -> SimpleNamespace:
+        events.append("pg_dump")
+        output = cast("BinaryIO", kwargs["stdout"])
+        output.write(b"durable dump")
+        return SimpleNamespace(stdout="")
+
+    def replace(source: Path, target: Path) -> Path:
+        events.append("rename")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contract, "_run", run)
+    monkeypatch.setattr(contract.os, "fsync", lambda _descriptor: events.append("fsync:dump"))
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(
+        contract, "_fsync_directory", lambda _path: events.append("fsync:directory")
+    )
+
+    (tmp_path / "backups").mkdir(mode=0o700)
+    backup = contract._create_cutover_backup(
+        tmp_path / "backups", "production", "operator", ["compose"], {}
+    )
+
+    assert backup.read_bytes() == b"durable dump"
+    assert backup.name.startswith(".cutover-")
+    assert "production" not in backup.name
+    assert events == ["pg_dump", "fsync:dump", "rename", "fsync:directory"]
+
+
+def test_ready_cutover_requires_existing_proof_before_health_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
+    root = tmp_path / "host"
+    releases = root / "shared" / "releases"
+    releases.mkdir(parents=True)
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_bytes(b"transferred")
+    raw = b'{"target":"0022"}\n'
+    target_digest = contract._digest(raw)
+    (releases / target_digest).mkdir()
+    source_digest = "a" * 64
+    target = {"migration_head": "0022"}
+    state = {
+        "status": "ready",
+        "operation": None,
+        "current": {"manifest_sha256": target_digest},
+        "previous": {"manifest_sha256": source_digest},
+    }
+
+    @contextmanager
+    def unlocked(_root: Path) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contract, "_exclusive_lock", unlocked)
+    monkeypatch.setattr(contract, "verify_bundle", lambda _bundle: (target, raw, {}))
+    monkeypatch.setattr(contract, "_release", lambda *_args: (target, releases / target_digest))
+    monkeypatch.setattr(contract, "_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(contract, "_preflight", lambda *_args: (["compose"], {}))
+    monkeypatch.setattr(contract, "_cutover_backup_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        contract,
+        "_verify_cutover_proof",
+        lambda *_args: (_ for _ in ()).throw(contract.ContractError("missing proof")),
+    )
+    monkeypatch.setattr(contract, "_ready", lambda *_args: pytest.fail("health before proof"))
+
+    with pytest.raises(contract.ContractError, match="missing proof"):
+        contract.cutover_0021_to_0022(bundle, root)
+
+
+def test_cutover_proof_rejects_changed_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    backup = backup_dir / "production.dump"
+    backup.write_bytes(b"original")
+    proof = tmp_path / "proof.json"
+    proof.write_bytes(
+        contract._canonical(
+            {
+                "contract_version": contract.CUTOVER_PROOF_VERSION,
+                "from_head": "0021",
+                "to_head": "0022",
+                "current_manifest_sha256": "a" * 64,
+                "target_manifest_sha256": "b" * 64,
+                "backup_path": str(backup),
+                "backup_sha256": contract._file_digest(backup),
+            }
+        )
+    )
+    backup.write_bytes(b"changed")
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(contract.ContractError, match="digest"):
+        contract._verify_cutover_proof(proof, "a" * 64, "b" * 64, backup_dir)
+
+
+def test_cutover_proof_rejects_parent_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    escaped = tmp_path / "escaped.dump"
+    escaped.write_bytes(b"dump")
+    proof = tmp_path / "proof.json"
+    proof.write_bytes(
+        contract._canonical(
+            {
+                "contract_version": contract.CUTOVER_PROOF_VERSION,
+                "from_head": "0021",
+                "to_head": "0022",
+                "current_manifest_sha256": "a" * 64,
+                "target_manifest_sha256": "b" * 64,
+                "backup_path": str(backup_dir / ".." / escaped.name),
+                "backup_sha256": contract._file_digest(escaped),
+            }
+        )
+    )
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(contract.ContractError, match="outside"):
+        contract._verify_cutover_proof(proof, "a" * 64, "b" * 64, backup_dir)
+
+
+def test_cutover_proof_rechecks_backup_directory_before_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    backup = backup_dir / "cutover.dump"
+    backup.write_bytes(b"dump")
+    proof = tmp_path / "proof.json"
+    proof.write_bytes(
+        contract._canonical(
+            {
+                "contract_version": contract.CUTOVER_PROOF_VERSION,
+                "from_head": "0021",
+                "to_head": "0022",
+                "current_manifest_sha256": "a" * 64,
+                "target_manifest_sha256": "b" * 64,
+                "backup_path": str(backup),
+                "backup_sha256": contract._file_digest(backup),
+            }
+        )
+    )
+    secure_calls: list[tuple[Path, int, bool]] = []
+    monkeypatch.setattr(
+        contract,
+        "_secure",
+        lambda path, mode, *, directory=False: secure_calls.append((path, mode, directory)),
+    )
+
+    assert contract._verify_cutover_proof(proof, "a" * 64, "b" * 64, backup_dir) == backup
+    assert secure_calls[0] == (backup_dir, 0o700, True)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("0020", "0022", "0021", "only migration"),
+        ("0021", "0023", "0021", "only migration"),
+        ("0021", "0022", "0020", "neither source nor target"),
+    ],
+)
+def test_cutover_preflight_rejects_wrong_source_target_or_live_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, str, str, str],
+) -> None:
+    source_head, target_head, live_head, message = case
+    source = {"migration_head": source_head}
+    target = {"migration_head": target_head}
+    monkeypatch.setattr(contract, "_compose", lambda *_args: (["compose"], {}))
+    monkeypatch.setattr(contract, "_run", lambda *_args, **_kwargs: SimpleNamespace(stdout=""))
+    monkeypatch.setattr(contract, "_image_head", lambda _manifest: target_head)
+    monkeypatch.setattr(contract, "_live_head", lambda *_args: live_head)
+
+    with pytest.raises(contract.ContractError, match=message):
+        contract._cutover_preflight(tmp_path, target, tmp_path, source)
+
+
+@pytest.mark.parametrize("rejection", ["foreign-pending", "stale"])
+def test_cutover_rejects_foreign_pending_or_stale_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rejection: str
+) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
+    root = tmp_path / "host"
+    releases = root / "shared" / "releases"
+    releases.mkdir(parents=True)
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_bytes(b"transferred")
+    raw = b'{"target":"0022"}\n'
+    target_digest = contract._digest(raw)
+    source_digest = "a" * 64
+    (releases / target_digest).mkdir()
+    (releases / source_digest).mkdir()
+    target = {"migration_head": "0022", "release_run_number": 2, "release_run_attempt": 1}
+    source = {
+        "migration_head": "0021",
+        "release_run_number": 2 if rejection == "stale" else 1,
+        "release_run_attempt": 1,
+    }
+    state = (
+        {
+            "status": "pending",
+            "operation": {"kind": "activate", "target_manifest_sha256": target_digest},
+            "current": {"manifest_sha256": target_digest},
+            "previous": {"manifest_sha256": source_digest},
+        }
+        if rejection == "foreign-pending"
+        else {
+            "status": "ready",
+            "operation": None,
+            "current": {"manifest_sha256": source_digest},
+            "previous": None,
+        }
+    )
+
+    @contextmanager
+    def unlocked(_root: Path) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contract, "_exclusive_lock", unlocked)
+    monkeypatch.setattr(contract, "verify_bundle", lambda _bundle: (target, raw, {}))
+    monkeypatch.setattr(
+        contract,
+        "_release",
+        lambda _root, digest: (
+            (source, releases / source_digest)
+            if digest == source_digest
+            else (target, releases / target_digest)
+        ),
+    )
+    monkeypatch.setattr(contract, "_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(contract, "_durable", lambda *_args: pytest.fail("mutation"))
+
+    with pytest.raises(contract.ContractError, match=r"different operation|stale"):
+        contract.cutover_0021_to_0022(bundle, root)
+
+
+def test_cutover_rejects_noncurrent_operations_package_before_backup(
+    tmp_path: Path,
+) -> None:
+    current_directory = tmp_path / "release"
+    (current_directory / "ops").mkdir(parents=True)
+
+    with pytest.raises(contract.ContractError, match="not the current release package"):
+        contract._create_cutover_proof(
+            tmp_path,
+            {"image": "source", "commit_sha": "a" * 40},
+            current_directory,
+            "a" * 64,
+            "b" * 64,
+            backup_dir=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("failure", ["backup-dir", "restore", "migrate"])
+def test_cutover_failure_after_pending_never_writes_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
+    root = tmp_path / "host"
+    releases = root / "shared" / "releases"
+    releases.mkdir(parents=True)
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_bytes(b"transferred")
+    raw = b'{"target":"0022"}\n'
+    target_digest = contract._digest(raw)
+    source_digest = "a" * 64
+    source_directory = releases / source_digest
+    target_directory = releases / target_digest
+    source_directory.mkdir()
+    target_directory.mkdir()
+    source = {"migration_head": "0021", "release_run_number": 1, "release_run_attempt": 1}
+    target = {"migration_head": "0022", "release_run_number": 2, "release_run_attempt": 1}
+    states: list[str] = []
+
+    @contextmanager
+    def unlocked(_root: Path) -> Iterator[None]:
+        yield
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        if failure == "migrate" and "migrate" in argv:
+            raise subprocess.CalledProcessError(1, argv)
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(contract, "_secure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contract, "_exclusive_lock", unlocked)
+    monkeypatch.setattr(contract, "verify_bundle", lambda _bundle: (target, raw, {}))
+    monkeypatch.setattr(
+        contract,
+        "_release",
+        lambda _root, digest: (
+            (source, source_directory) if digest == source_digest else (target, target_directory)
+        ),
+    )
+    monkeypatch.setattr(
+        contract,
+        "_state",
+        lambda *_args, **_kwargs: {
+            "status": "ready",
+            "operation": None,
+            "current": {"manifest_sha256": source_digest},
+            "previous": None,
+        },
+    )
+    monkeypatch.setattr(contract, "_cutover_preflight", lambda *_args: (["target"], {}, "0021"))
+    monkeypatch.setattr(
+        contract,
+        "_cutover_backup_directory",
+        lambda: (
+            (_ for _ in ()).throw(contract.ContractError("unsafe backup directory"))
+            if failure == "backup-dir"
+            else tmp_path
+        ),
+    )
+    monkeypatch.setattr(contract, "_compose", lambda *_args: (["source"], {}))
+    monkeypatch.setattr(contract, "_durable", lambda _path, value: states.append(value["status"]))
+    monkeypatch.setattr(contract, "_run", run)
+    monkeypatch.setattr(
+        contract,
+        "_create_cutover_proof",
+        lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(contract.ContractError("restore failed"))
+            if failure == "restore"
+            else tmp_path / "backup.dump"
+        ),
+    )
+
+    with pytest.raises((contract.ContractError, subprocess.CalledProcessError)):
+        contract.cutover_0021_to_0022(bundle, root)
+    assert states == ([] if failure == "backup-dir" else ["pending"])
+
+
+def test_rollback_rejects_schema_downgrade_before_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(contract.os, "geteuid", lambda: 0, raising=False)
+    current_digest = "b" * 64
+    previous_digest = "a" * 64
+
+    @contextmanager
+    def unlocked(_root: Path) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(contract, "_exclusive_lock", unlocked)
+    monkeypatch.setattr(
+        contract,
+        "_state",
+        lambda _path: {
+            "status": "ready",
+            "operation": None,
+            "current": {"manifest_sha256": current_digest},
+            "previous": {"manifest_sha256": previous_digest},
+        },
+    )
+    monkeypatch.setattr(
+        contract,
+        "_release",
+        lambda _root, digest: (
+            {"migration_head": "0022" if digest == current_digest else "0021"},
+            tmp_path,
+        ),
+    )
+    monkeypatch.setattr(contract, "_preflight", lambda *_args: pytest.fail("preflight"))
+
+    with pytest.raises(contract.ContractError, match="cannot downgrade"):
+        contract.rollback(tmp_path)
+
+
+def test_cli_routes_only_the_five_explicit_contract_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     calls: list[str] = []
     bundle = _bundle(tmp_path)
     monkeypatch.setattr(contract, "build_bundle", lambda *_args: calls.append("build"))
     monkeypatch.setattr(contract, "activate", lambda *_args: calls.append("activate"))
+    monkeypatch.setattr(contract, "cutover_0021_to_0022", lambda *_args: calls.append("cutover"))
     monkeypatch.setattr(contract, "rollback", lambda *_args: calls.append("rollback"))
 
     assert (
@@ -724,7 +1214,8 @@ def test_cli_routes_only_the_four_explicit_contract_commands(
     )
     assert contract.main(["verify", str(bundle)]) == 0
     assert contract.main(["activate", str(bundle), "--root", str(tmp_path)]) == 0
+    assert contract.main(["cutover-0021-to-0022", str(bundle), "--root", str(tmp_path)]) == 0
     assert contract.main(["rollback", "--root", str(tmp_path)]) == 0
 
-    assert calls == ["build", "activate", "rollback"]
+    assert calls == ["build", "activate", "cutover", "rollback"]
     assert "ghcr.io/alexoxytocin/community_bot@sha256:" in capsys.readouterr().out

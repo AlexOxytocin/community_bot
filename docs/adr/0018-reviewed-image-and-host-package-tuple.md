@@ -77,6 +77,18 @@ manual-first publication и отдельный go-live CB-57.
 13. При ошибке state остаётся `pending`; automatic recovery отсутствует.
     Backup/restore fail-closed while pending. Operator выбирает exact rerun либо
     explicit rollback.
+13a. Отдельный owner-authorized schema cutover может быть добавлен только как
+    явный bounded path существующего activator для одной exact forward пары.
+    До process/DB mutation он пишет durable `pending`, останавливает все writers,
+    в заранее существующем root-owned `0700` directory создаёт fresh backup без
+    pruning через constant-prefix temp, `fsync(dump)`, atomic
+    rename и `fsync(backup directory)`, затем доказывает isolated restore. Durable proof
+    связывает current/target manifests и SHA-256 backup; затем native Compose
+    one-shot `migrate` обязан привести live DB ровно к target head. Exact rerun
+    принимает только source или target head и при target head требует exact
+    backup proof; mismatch остаётся `pending`. Previous с несовместимым schema
+    head не является rollback target. Downgrade, automatic recovery и generic
+    migration framework запрещены.
 14. Rollback использует только единственный saved previous manifest+package+
     image с тем же Alembic head, пишет `pending`, запускает тот же lifecycle и
     завершает `ready` с `previous=null`. Previous потребляется; второй rollback,
