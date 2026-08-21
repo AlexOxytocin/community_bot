@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -48,6 +49,9 @@ MANIFEST_KEYS = {
 }
 MAX_BUNDLE = 2_000_000
 MAX_PACKAGE = 1_000_000
+CUTOVER_FROM_HEAD = "0021"
+CUTOVER_TO_HEAD = "0022"
+CUTOVER_PROOF_VERSION = "community-mini-app-cutover-proof/v1"
 
 
 class ContractError(RuntimeError):
@@ -336,7 +340,7 @@ def _state(path: Path, *, optional: bool = False) -> dict[str, Any] | None:
         value["status"] != "pending"
         or not isinstance(operation, dict)
         or set(operation) != {"kind", "target_manifest_sha256"}
-        or operation["kind"] not in {"activate", "rollback"}
+        or operation["kind"] not in {"activate", "rollback", "cutover"}
         or operation["target_manifest_sha256"] != value["current"]["manifest_sha256"]
     ):
         raise ContractError("Active state status and operation are inconsistent.")
@@ -411,9 +415,7 @@ def _compose(
     ], env
 
 
-def _preflight(
-    root: Path, manifest: dict[str, Any], directory: Path, current: dict[str, Any] | None
-) -> tuple[list[str], dict[str, str]]:
+def _image_head(manifest: dict[str, Any]) -> str:
     try:
         inspected = json.loads(
             _run(
@@ -438,7 +440,7 @@ def _preflight(
         or labels.get("org.opencontainers.image.revision") != manifest["commit_sha"]
     ):
         raise ContractError("Local image identity does not match the manifest.")
-    image_head = _migration_output(
+    return _migration_output(
         _run(
             [
                 "docker",
@@ -454,9 +456,31 @@ def _preflight(
         ).stdout,
         "Image migration head",
     )
+
+
+def _preflight(
+    root: Path, manifest: dict[str, Any], directory: Path, current: dict[str, Any] | None
+) -> tuple[list[str], dict[str, str]]:
+    image_head = _image_head(manifest)
     compose, env = _compose(root, directory, manifest)
     _run([*compose, "config", "--quiet"], env=env)
-    live_head = _migration_output(
+    live_head = _live_head(compose, env)
+    current_head = (
+        manifest["migration_head"]
+        if current is None
+        else _release(root, current["current"]["manifest_sha256"])[0]["migration_head"]
+    )
+    if (
+        image_head != manifest["migration_head"]
+        or current_head != manifest["migration_head"]
+        or live_head != manifest["migration_head"]
+    ):
+        raise ContractError("Target, current, image, and live database migration heads must match.")
+    return compose, env
+
+
+def _live_head(compose: list[str], env: dict[str, str]) -> str:
+    return _migration_output(
         _run(
             [
                 *compose,
@@ -477,18 +501,199 @@ def _preflight(
         ).stdout,
         "Live database migration head",
     )
-    current_head = (
-        manifest["migration_head"]
-        if current is None
-        else _release(root, current["current"]["manifest_sha256"])[0]["migration_head"]
-    )
+
+
+def _cutover_preflight(
+    root: Path,
+    target_manifest: dict[str, Any],
+    target_directory: Path,
+    current_manifest: dict[str, Any],
+) -> tuple[list[str], dict[str, str], str]:
     if (
-        image_head != manifest["migration_head"]
-        or current_head != manifest["migration_head"]
-        or live_head != manifest["migration_head"]
+        current_manifest["migration_head"] != CUTOVER_FROM_HEAD
+        or target_manifest["migration_head"] != CUTOVER_TO_HEAD
     ):
-        raise ContractError("Target, current, image, and live database migration heads must match.")
-    return compose, env
+        raise ContractError("Cutover supports only migration 0021 to 0022.")
+    compose, env = _compose(root, target_directory, target_manifest)
+    _run([*compose, "config", "--quiet"], env=env)
+    image_head = _image_head(target_manifest)
+    if image_head != CUTOVER_TO_HEAD:
+        raise ContractError("Cutover target image migration head is invalid.")
+    live_head = _live_head(compose, env)
+    if live_head not in {CUTOVER_FROM_HEAD, CUTOVER_TO_HEAD}:
+        raise ContractError("Cutover live database head is neither source nor target.")
+    return compose, env, live_head
+
+
+def _file_digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _cutover_proof_path(root: Path, target_digest: str) -> Path:
+    return root / "shared" / "releases" / f"cutover-{target_digest}.json"
+
+
+def _cutover_backup_directory() -> Path:
+    path = Path(os.environ.get("COMMUNITY_BOT_BACKUP_DIR", "/var/backups/community-bot"))
+    _secure(path, 0o700, directory=True)
+    return path.resolve(strict=True)
+
+
+def _create_cutover_backup(
+    backup_dir: Path,
+    database: str,
+    postgres_user: str,
+    compose: list[str],
+    environment: dict[str, str],
+) -> Path:
+    _secure(backup_dir, 0o700, directory=True)
+    backup_dir = backup_dir.resolve(strict=True)
+    descriptor, name = tempfile.mkstemp(prefix=".cutover-", suffix=".dump.part", dir=backup_dir)
+    os.close(descriptor)
+    temporary = Path(name)
+    temporary.chmod(0o600)
+    target = Path(str(temporary).removesuffix(".part"))
+    try:
+        with temporary.open("wb") as output:
+            _run(
+                [
+                    *compose,
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_dump",
+                    "--username",
+                    postgres_user,
+                    "--dbname",
+                    database,
+                    "--format",
+                    "custom",
+                    "--no-owner",
+                    "--no-privileges",
+                ],
+                env=environment,
+                stdout=output,
+            )
+            output.flush()
+            os.fsync(output.fileno())
+        if temporary.stat().st_size == 0:
+            raise ContractError("Cutover backup is empty.")
+        temporary.replace(target)
+        _fsync_directory(backup_dir)
+        return target
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _verify_cutover_proof(
+    path: Path, current_digest: str, target_digest: str, backup_dir: Path
+) -> Path:
+    _secure(backup_dir, 0o700, directory=True)
+    _secure(path, 0o600)
+    proof = _json(path.read_bytes())
+    expected = {
+        "contract_version",
+        "from_head",
+        "to_head",
+        "current_manifest_sha256",
+        "target_manifest_sha256",
+        "backup_path",
+        "backup_sha256",
+    }
+    if not isinstance(proof, dict) or set(proof) != expected:
+        raise ContractError("Cutover proof fields are invalid.")
+    if (
+        proof["contract_version"] != CUTOVER_PROOF_VERSION
+        or proof["from_head"] != CUTOVER_FROM_HEAD
+        or proof["to_head"] != CUTOVER_TO_HEAD
+        or proof["current_manifest_sha256"] != current_digest
+        or proof["target_manifest_sha256"] != target_digest
+        or DIGEST_RE.fullmatch(proof["backup_sha256"] or "") is None
+        or not isinstance(proof["backup_path"], str)
+    ):
+        raise ContractError("Cutover proof identity is invalid.")
+    backup = Path(proof["backup_path"])
+    try:
+        resolved_directory = backup_dir.resolve(strict=True)
+        resolved_backup = backup.resolve(strict=True)
+        resolved_backup.relative_to(resolved_directory)
+    except (OSError, ValueError) as exc:
+        raise ContractError("Cutover backup is outside the configured backup directory.") from exc
+    _secure(resolved_backup, 0o600)
+    if _file_digest(resolved_backup) != proof["backup_sha256"]:
+        raise ContractError("Cutover backup digest does not match its proof.")
+    return resolved_backup
+
+
+def _create_cutover_proof(
+    root: Path,
+    current_manifest: dict[str, Any],
+    current_directory: Path,
+    current_digest: str,
+    target_digest: str,
+    *,
+    backup_dir: Path,
+) -> Path:
+    env_file = root / "shared" / ".env"
+    sys.path.insert(0, str(current_directory))
+    try:
+        try:
+            runtime_module = importlib.import_module("ops._runtime")
+            restore_module = importlib.import_module("ops.restore_drill")
+        except (AttributeError, ImportError) as exc:
+            raise ContractError("Cutover operations package cannot be loaded.") from exc
+        expected_ops = (current_directory / "ops").resolve(strict=True)
+        for module in (runtime_module, restore_module):
+            if Path(module.__file__).resolve(strict=True).parent != expected_ops:
+                raise ContractError(
+                    "Cutover operations package is not the current release package."
+                )
+        try:
+            values = runtime_module.require_env_values(
+                runtime_module.read_dotenv(env_file), "POSTGRES_DB", "POSTGRES_USER"
+            )
+            compose = runtime_module.compose_command(current_directory, env_file)
+            environment = runtime_module.operations_environment(
+                env_file, current_manifest["image"], current_manifest["commit_sha"]
+            )
+            backup = _create_cutover_backup(
+                backup_dir,
+                values["POSTGRES_DB"],
+                values["POSTGRES_USER"],
+                compose,
+                environment,
+            )
+            if (
+                restore_module._restore_selected(  # noqa: SLF001 - exclusive cutover lock is held
+                    backup,
+                    current_directory,
+                    env_file,
+                    current_manifest["image"],
+                    current_manifest["commit_sha"],
+                )
+                != 0
+            ):
+                raise ContractError("Cutover restore drill failed.")
+        except runtime_module.OpsError as exc:
+            raise ContractError(str(exc)) from exc
+    finally:
+        sys.path.remove(str(current_directory))
+    proof_path = _cutover_proof_path(root, target_digest)
+    _durable(
+        proof_path,
+        {
+            "contract_version": CUTOVER_PROOF_VERSION,
+            "from_head": CUTOVER_FROM_HEAD,
+            "to_head": CUTOVER_TO_HEAD,
+            "current_manifest_sha256": current_digest,
+            "target_manifest_sha256": target_digest,
+            "backup_path": str(backup),
+            "backup_sha256": _file_digest(backup),
+        },
+    )
+    return backup
 
 
 def _migration_output(raw: Any, name: str) -> str:
@@ -633,6 +838,88 @@ def activate(bundle: Path, root: Path) -> None:
         _durable(state_path, {**pending, "status": "ready", "operation": None})
 
 
+def cutover_0021_to_0022(bundle: Path, root: Path) -> None:  # noqa: C901
+    """Activate one exact forward schema cutover with backup and restore proof."""
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise ContractError("Cutover requires root.")
+    _secure(bundle, 0o600)
+    with _exclusive_lock(root):
+        _manifest, manifest_raw, files = verify_bundle(bundle)
+        target_digest = _digest(manifest_raw)
+        releases = root / "shared" / "releases"
+        target_directory = releases / target_digest
+        if not target_directory.exists():
+            _install_release(releases, target_directory, manifest_raw, files)
+        target_manifest, target_directory = _release(root, target_digest)
+        state_path = releases / "active.json"
+        state = _state(state_path)
+        if state is None:
+            raise ContractError("Cutover requires an existing ready source release.")
+        if state["status"] == "ready" and state["current"]["manifest_sha256"] == target_digest:
+            compose, env = _preflight(root, target_manifest, target_directory, state)
+            if state["previous"] is None:
+                raise ContractError("Completed cutover is missing its source release identity.")
+            _verify_cutover_proof(
+                _cutover_proof_path(root, target_digest),
+                state["previous"]["manifest_sha256"],
+                target_digest,
+                _cutover_backup_directory(),
+            )
+            _ready(compose, env)
+            return
+        if state["status"] == "pending":
+            if (
+                state["operation"] != {"kind": "cutover", "target_manifest_sha256": target_digest}
+                or state["previous"] is None
+            ):
+                raise ContractError("A different operation is pending.")
+            source_ref = state["previous"]
+        else:
+            source_ref = state["current"]
+        source_digest = source_ref["manifest_sha256"]
+        source_manifest, source_directory = _release(root, source_digest)
+        target_pair = (
+            target_manifest["release_run_number"],
+            target_manifest["release_run_attempt"],
+        )
+        source_pair = (
+            source_manifest["release_run_number"],
+            source_manifest["release_run_attempt"],
+        )
+        if target_pair <= source_pair:
+            raise ContractError("Cutover target release is stale or conflicting.")
+        compose, env, live_head = _cutover_preflight(
+            root, target_manifest, target_directory, source_manifest
+        )
+        backup_dir = _cutover_backup_directory()
+        pending = {
+            "status": "pending",
+            "operation": {"kind": "cutover", "target_manifest_sha256": target_digest},
+            "current": {"manifest_sha256": target_digest},
+            "previous": {"manifest_sha256": source_digest},
+        }
+        _durable(state_path, pending)
+        source_compose, source_env = _compose(root, source_directory, source_manifest)
+        _run([*source_compose, "stop", "web", "worker"], env=source_env)
+        proof_path = _cutover_proof_path(root, target_digest)
+        if live_head == CUTOVER_FROM_HEAD:
+            _create_cutover_proof(
+                root,
+                source_manifest,
+                source_directory,
+                source_digest,
+                target_digest,
+                backup_dir=backup_dir,
+            )
+            _run([*compose, "run", "--rm", "--no-deps", "migrate"], env=env)
+        else:
+            _verify_cutover_proof(proof_path, source_digest, target_digest, backup_dir)
+        if _live_head(compose, env) != CUTOVER_TO_HEAD:
+            raise ContractError("Cutover did not reach the exact target migration head.")
+        _lifecycle(compose, env, stop_old=None)
+        _durable(state_path, {**pending, "status": "ready", "operation": None})
+
+
 def rollback(root: Path) -> None:
     """Consume the single previous release and activate it without migrations."""
     if hasattr(os, "geteuid") and os.geteuid() != 0:
@@ -658,6 +945,10 @@ def rollback(root: Path) -> None:
                 raise ContractError("No previous release is available.")
             target_digest = state["previous"]["manifest_sha256"]
         manifest, directory = _release(root, target_digest)
+        if not pending:
+            current_manifest = _release(root, state["current"]["manifest_sha256"])[0]
+            if current_manifest["migration_head"] != manifest["migration_head"]:
+                raise ContractError("Rollback cannot downgrade the database schema.")
         compose, env = _preflight(root, manifest, directory, state)
         next_state = {
             "status": "pending",
@@ -692,6 +983,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     activation = commands.add_parser("activate")
     activation.add_argument("bundle")
     activation.add_argument("--root", default="/opt/community-bot")
+    cutover = commands.add_parser("cutover-0021-to-0022")
+    cutover.add_argument("bundle")
+    cutover.add_argument("--root", default="/opt/community-bot")
     reversal = commands.add_parser("rollback")
     reversal.add_argument("--root", default="/opt/community-bot")
     args = parser.parse_args(argv)
@@ -703,6 +997,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(_digest(raw), manifest["image"])
         elif args.command == "activate":
             activate(Path(args.bundle), Path(args.root))
+        elif args.command == "cutover-0021-to-0022":
+            cutover_0021_to_0022(Path(args.bundle), Path(args.root))
         else:
             rollback(Path(args.root))
     except (ContractError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
