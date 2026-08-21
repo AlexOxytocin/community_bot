@@ -27,6 +27,7 @@ from community_bot.application.reputation import (
     ReliabilityView,
     SafeProfile,
 )
+from community_bot.domain.registration import ProfileLink
 from community_bot.domain.reputation import KarmaStep, ReliabilityFacts
 from community_bot.infrastructure.db import conversations as conversation_store
 from community_bot.infrastructure.db.models import (
@@ -445,6 +446,10 @@ async def safe_profile(session: AsyncSession, member_id: UUID) -> SafeProfile | 
         city=member.city,
         short_bio=member.short_bio,
         skill_tags=tuple(member.skill_tags_json),
+        profile_links=tuple(
+            ProfileLink(uuid.UUID(item["id"]), item["label"], item["url"])
+            for item in member.profile_links_json
+        ),
         experience_total=experience,
         level_number=member.level_number,
         karma=aggregate,

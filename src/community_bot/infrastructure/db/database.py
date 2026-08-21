@@ -171,26 +171,43 @@ class Database:
         self,
         *,
         telegram_user_id: int,
+        telegram_username: str | None,
         token_digest: bytes,
         authenticated_at: datetime.datetime,
         expires_at: datetime.datetime,
     ) -> UUID | None:
         """Persist one session for an existing Telegram identity."""
         async with self._sessions.begin() as session:
-            member_id = await session.scalar(
-                select(MemberModel.id).where(MemberModel.telegram_user_id == telegram_user_id)
+            await registration_store.acquire_registration_identity_gate(session, telegram_user_id)
+            member = await session.scalar(
+                select(MemberModel)
+                .where(MemberModel.telegram_user_id == telegram_user_id)
+                .with_for_update()
             )
-            if member_id is None:
+            if member is None:
                 return None
+            if member.telegram_username != telegram_username:
+                member.telegram_username = telegram_username
+                session.add(
+                    AuditEventModel(
+                        actor_member_id=member.id,
+                        action="telegram_username_changed",
+                        entity_type="member",
+                        entity_id=str(member.id),
+                        before_json=None,
+                        after_json=None,
+                        reason="cleared" if telegram_username is None else "updated",
+                    )
+                )
             session.add(
                 WebSessionModel(
                     token_digest=token_digest,
-                    member_id=member_id,
+                    member_id=member.id,
                     authenticated_at=authenticated_at,
                     expires_at=expires_at,
                 )
             )
-        return member_id
+        return member.id
 
     async def web_session_member_id(
         self, *, token_digest: bytes, now: datetime.datetime
@@ -1172,6 +1189,12 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             member_id=member_id,
             field=field,
             value=value,
+        )
+
+    async def update_profile_links(self, *, member_id, command):  # noqa: ANN001, ANN201
+        """Mutate ordered profile links in the current transaction."""
+        return await registration_store.update_profile_links(
+            self._require_session(), member_id=member_id, command=command
         )
 
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None:

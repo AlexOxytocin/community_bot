@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import func, inspect, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from community_bot.application import assignments as assignment_app
@@ -68,11 +69,19 @@ CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v1.json"
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def proof(user_id: int, *, now: datetime.datetime) -> bytes:
+_USERNAME_ABSENT = object()
+
+
+def proof(
+    user_id: int, *, now: datetime.datetime, username: str | object | None = _USERNAME_ABSENT
+) -> bytes:
+    user = {"id": user_id, "first_name": "Web"}
+    if username is not _USERNAME_ABSENT:
+        user["username"] = username
     fields = {
         "auth_date": str(int(now.timestamp())),
         "query_id": "integration-query",
-        "user": json.dumps({"id": user_id, "first_name": "Web"}, separators=(",", ":")),
+        "user": json.dumps(user, separators=(",", ":")),
     }
     check_string = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
     secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
@@ -136,7 +145,6 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
         ).status_code == 204
-
         saved = await client.put(
             "/api/v1/me/profile", json={"field": "city", "value": " Rosario "}, headers=headers
         )
@@ -225,10 +233,99 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         assert set(member_list[0]).isdisjoint(legacy_fields)
         assert set(public_profile).isdisjoint(legacy_fields)
 
+        created = await client.put(
+            "/api/v1/me/profile",
+            json={
+                "field": "profile_links",
+                "action": "create",
+                "label": " GitHub ",
+                "url": "https://github.com/web",
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "8120"},
+        )
+        assert created.status_code == 200, created.text
+        first_link = created.json()["profile_links"][0]
+        assert first_link["label"] == "GitHub"
+        assert (
+            await client.put(
+                "/api/v1/me/profile",
+                json={
+                    "field": "profile_links",
+                    "action": "create",
+                    "label": " GitHub ",
+                    "url": "https://github.com/web",
+                },
+                headers={"origin": ORIGIN, "idempotency-key": "8120"},
+            )
+        ).json()["profile_links"] == [first_link]
+        conflicting_link = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "profile_links", "action": "delete", "link_id": first_link["id"]},
+            headers={"origin": ORIGIN, "idempotency-key": "8120"},
+        )
+        assert conflicting_link.status_code == 409
+        edited = await client.put(
+            "/api/v1/me/profile",
+            json={
+                "field": "profile_links",
+                "action": "update",
+                "link_id": first_link["id"],
+                "label": "Portfolio",
+                "url": "https://example.com/work",
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "8121"},
+        )
+        assert edited.json()["profile_links"][0]["id"] == first_link["id"]
+        deleted = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "profile_links", "action": "delete", "link_id": first_link["id"]},
+            headers={"origin": ORIGIN, "idempotency-key": "8122"},
+        )
+        assert deleted.json()["profile_links"] == []
+        for index in range(4):
+            response = await client.put(
+                "/api/v1/me/profile",
+                json={
+                    "field": "profile_links",
+                    "action": "create",
+                    "label": f"Link {index}",
+                    "url": f"https://example.com/{index}",
+                },
+                headers={"origin": ORIGIN, "idempotency-key": str(8130 + index)},
+            )
+            assert response.status_code == 200
+        contenders = await asyncio.gather(
+            *(
+                client.put(
+                    "/api/v1/me/profile",
+                    json={
+                        "field": "profile_links",
+                        "action": "create",
+                        "label": f"Last {index}",
+                        "url": f"https://example.com/last-{index}",
+                    },
+                    headers={"origin": ORIGIN, "idempotency-key": str(8140 + index)},
+                )
+                for index in range(2)
+            )
+        )
+        assert sorted(item.status_code for item in contenders) == [200, 422]
+        authoritative_links = (await client.get("/api/v1/me")).json()["profile_links"]
+        assert len(authoritative_links) == 5
+        public_links = (await client.get(f"/api/v1/members/{member.id}")).json()["profile_links"]
+        assert public_links == authoritative_links
+
         async with sessions.begin() as session:
             stored_member = await session.get(MemberModel, member.id)
             assert stored_member is not None
             assert stored_member.timezone == "UTC"
+            stored_member.telegram_username = "bad!"
+        malformed_public = await client.get(f"/api/v1/members/{member.id}")
+        assert malformed_public.status_code == 200
+        assert malformed_public.json()["telegram_username"] is None
+        async with sessions.begin() as session:
+            stored_member = await session.get(MemberModel, member.id)
+            assert stored_member is not None
             stored_member.status = MemberStatus.PAUSED.value
         paused_profile = await client.get("/api/v1/me")
         assert paused_profile.status_code == 200
@@ -261,7 +358,92 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
                 ProcessedTelegramUpdateModel.update_type == "profile_web_update",
             )
         )
-        assert profile_audits == web_receipts == 3
+        assert profile_audits == web_receipts == 11
+    await database.dispose()
+
+
+async def test_telegram_username_sync_is_serialized_audited_and_atomic(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await active_member(database, 52_082)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    now = datetime.datetime.now(datetime.UTC)
+
+    async def authenticate(username: str | object | None) -> Response:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+            return await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(member.telegram_user_id, now=now, username=username),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+
+    assert (await authenticate("Updated_Name")).status_code == 204
+    assert (await authenticate("Updated_Name")).status_code == 204
+    concurrent = await asyncio.gather(authenticate("Final_Name"), authenticate(_USERNAME_ABSENT))
+    assert [item.status_code for item in concurrent] == [204, 204]
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        stored = await session.get(MemberModel, member.id)
+        assert stored is not None
+        assert stored.telegram_username in {"Final_Name", None}
+        audits = (
+            await session.scalars(
+                select(AuditEventModel).where(
+                    AuditEventModel.actor_member_id == member.id,
+                    AuditEventModel.action == "telegram_username_changed",
+                )
+            )
+        ).all()
+        assert [item.reason for item in audits] == ["updated", "updated", "cleared"] or [
+            item.reason for item in audits
+        ] == ["updated", "cleared", "updated"]
+        assert all(item.before_json is None and item.after_json is None for item in audits)
+        current_username = stored.telegram_username
+    token_digest = hashlib.sha256(b"failing-session").digest()
+    assert (
+        await database.create_web_session(
+            telegram_user_id=member.telegram_user_id,
+            telegram_username=current_username,
+            token_digest=token_digest,
+            authenticated_at=now,
+            expires_at=now + datetime.timedelta(minutes=5),
+        )
+        == member.id
+    )
+    with pytest.raises(SQLAlchemyError):
+        await database.create_web_session(
+            telegram_user_id=member.telegram_user_id,
+            telegram_username="Rolled_Back",
+            token_digest=token_digest,
+            authenticated_at=now,
+            expires_at=now + datetime.timedelta(minutes=5),
+        )
+    async with sessions() as session:
+        stored = await session.get(MemberModel, member.id)
+        assert stored is not None
+        assert stored.telegram_username in {"Final_Name", None}
+        assert await session.get(WebSessionModel, token_digest) is not None
+        assert (
+            await session.scalar(
+                select(func.count(AuditEventModel.id)).where(
+                    AuditEventModel.actor_member_id == member.id,
+                    AuditEventModel.action == "telegram_username_changed",
+                )
+            )
+            == 3
+        )
+    unknown = await database.create_web_session(
+        telegram_user_id=9_999_999,
+        telegram_username="Unknown_User",
+        token_digest=hashlib.sha256(b"unknown-session").digest(),
+        authenticated_at=now,
+        expires_at=now + datetime.timedelta(minutes=5),
+    )
+    assert unknown is None
     await database.dispose()
 
 
@@ -286,6 +468,8 @@ async def test_karma_vote_api_is_actor_scoped_exact_and_authoritative(
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
         ).status_code == 204
+        assert (await client.get(f"/api/v1/members/{target.id}")).json()["can_rate_karma"] is True
+        assert (await client.get(f"/api/v1/members/{actor.id}")).json()["can_rate_karma"] is False
 
         async def action(
             key: str,
@@ -2682,3 +2866,75 @@ async def test_web_sessions_migration_preserves_existing_schema_and_data(
     assert downgraded_tables == before_tables
     assert downgraded_counts == before_counts
     await engine.dispose()
+
+
+async def test_profile_links_migration_round_trip_and_constraints(database_url: str) -> None:
+    await migrate(database_url, "downgrade 0021")
+    engine = create_async_engine(database_url)
+    member_id = uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO members (id, telegram_user_id, display_name, timezone, role, status, "
+                "level_number, credit_balance_cached, experience_total_cached) "
+                "VALUES (:id, 52999, 'Legacy links member', 'UTC', 'member', 'active', 1, 0, 0)"
+            ),
+            {"id": member_id},
+        )
+    await engine.dispose()
+    await migrate(database_url, "upgrade 0022")
+    engine = create_async_engine(database_url)
+    async with engine.connect() as connection:
+        column = (
+            await connection.execute(
+                text(
+                    "SELECT is_nullable, column_default FROM information_schema.columns "
+                    "WHERE table_name='members' AND column_name='profile_links_json'"
+                )
+            )
+        ).one()
+        constraints = set(
+            await connection.scalars(
+                text(
+                    "SELECT conname FROM pg_constraint WHERE conrelid='members'::regclass "
+                    "AND conname LIKE 'ck_members_profile_links_%'"
+                )
+            )
+        )
+        stored = await connection.scalar(
+            text("SELECT profile_links_json FROM members WHERE id=:id"), {"id": member_id}
+        )
+        assert stored == []
+    assert column == ("NO", "'[]'::jsonb")
+    assert constraints == {"ck_members_profile_links_array", "ck_members_profile_links_limit"}
+    valid = [
+        {"id": str(uuid4()), "label": str(index), "url": f"https://example.com/{index}"}
+        for index in range(5)
+    ]
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE members SET profile_links_json=CAST(:links AS jsonb) WHERE id=:id"),
+            {"links": json.dumps(valid), "id": member_id},
+        )
+    for invalid in ({"bad": True}, [*valid, valid[0]]):
+        with pytest.raises(SQLAlchemyError):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE members SET profile_links_json=CAST(:links AS jsonb) WHERE id=:id"
+                    ),
+                    {"links": json.dumps(invalid), "id": member_id},
+                )
+    await engine.dispose()
+    await migrate(database_url, "downgrade 0021")
+    engine = create_async_engine(database_url)
+    async with engine.connect() as connection:
+        count = await connection.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.columns WHERE table_name='members' "
+                "AND column_name='profile_links_json'"
+            )
+        )
+        assert count == 0
+    await engine.dispose()
+    await migrate(database_url, "upgrade 0022")

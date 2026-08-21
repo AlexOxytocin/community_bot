@@ -17,10 +17,13 @@ from community_bot.domain.registration import (
     InvitationError,
     ModerationDecision,
     ProfileField,
+    ProfileLink,
+    ProfileLinkCommand,
     RegistrationApplicationStatus,
     RegistrationError,
     RegistrationStep,
     StaleRegistrationStepError,
+    normalize_profile_link_command,
     normalize_profile_value,
     normalize_registration_answer,
     require_invitation_manager,
@@ -130,6 +133,7 @@ class ProfileData:
     """Persisted fields of an active member's own profile."""
 
     member_id: UUID
+    telegram_username: str | None
     display_name: str
     city: str | None
     timezone: str
@@ -137,6 +141,7 @@ class ProfileData:
     current_goal: str | None
     help_categories: tuple[str, ...]
     skill_tags: tuple[str, ...]
+    profile_links: tuple[ProfileLink, ...]
     availability: str | None
     credit_balance: int
     experience_total: int
@@ -308,6 +313,12 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         value: object,
     ) -> None:
         """Set one locked member profile field without a conversation flow."""
+        ...
+
+    async def update_profile_links(
+        self, *, member_id: UUID, command: ProfileLinkCommand
+    ) -> tuple[ProfileLink, ...]:
+        """Mutate one ordered public profile link."""
         ...
 
 
@@ -800,6 +811,7 @@ class RegistrationService:
             level = await unit_of_work.resolve_member_level(profile.member_id)
             return ProfileSnapshot(
                 member_id=profile.member_id,
+                telegram_username=profile.telegram_username,
                 display_name=profile.display_name,
                 city=profile.city,
                 timezone=profile.timezone,
@@ -807,6 +819,7 @@ class RegistrationService:
                 current_goal=profile.current_goal,
                 help_categories=profile.help_categories,
                 skill_tags=profile.skill_tags,
+                profile_links=profile.profile_links,
                 availability=profile.availability,
                 credit_balance=profile.credit_balance,
                 experience_total=profile.experience_total,
@@ -854,6 +867,53 @@ class RegistrationService:
                 entity_type="member",
                 entity_id=str(actor.id),
                 reason=field.value,
+            )
+            await unit_of_work.add_registration_receipt(
+                update_id=update_id,
+                update_type="profile_web_update",
+                actor_id=actor.id,
+                outcome_code=outcome,
+            )
+            await unit_of_work.commit()
+            return outcome
+
+    async def update_own_profile_link(
+        self,
+        *,
+        update_id: int,
+        actor_member_id: UUID,
+        command: ProfileLinkCommand,
+        replay_fingerprint: str,
+    ) -> str:
+        """Update ordered links through the existing locked receipt boundary."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            await unit_of_work.acquire_update_gate(update_id)
+            stored = await unit_of_work.get_receipt_outcome(update_id)
+            if stored is not None:
+                _require_web_profile_replay(
+                    stored,
+                    actor_member_id=actor_member_id,
+                    field="profile_links",
+                    replay_fingerprint=replay_fingerprint,
+                )
+                return stored
+            actor = await unit_of_work.get_member(actor_member_id)
+            if actor is None:
+                message = "Profile actor is not a registered member."
+                raise PermissionError(message)
+            await unit_of_work.acquire_registration_identity_gate(actor.telegram_user_id)
+            actor = (await unit_of_work.lock_members((actor.id,)))[actor.id]
+            require_profile_owner(actor, actor_member_id)
+            await unit_of_work.update_profile_links(
+                member_id=actor.id, command=normalize_profile_link_command(command)
+            )
+            outcome = f"web_profile_update:{actor.id}:profile_links:{replay_fingerprint}"
+            await unit_of_work.append_audit_event(
+                actor_member_id=actor.id,
+                action="profile_updated",
+                entity_type="member",
+                entity_id=str(actor.id),
+                reason="profile_links",
             )
             await unit_of_work.add_registration_receipt(
                 update_id=update_id,
@@ -965,7 +1025,7 @@ def _require_web_profile_replay(
     outcome: str,
     *,
     actor_member_id: UUID,
-    field: ProfileField,
+    field: ProfileField | str,
     replay_fingerprint: str,
 ) -> None:
     message = "Stored profile outcome does not match command."
@@ -977,7 +1037,7 @@ def _require_web_profile_replay(
     if (
         marker != "web_profile_update"
         or stored_actor_id != actor_member_id
-        or stored_field != field.value
+        or stored_field != (field.value if isinstance(field, ProfileField) else field)
         or stored_fingerprint != replay_fingerprint
     ):
         raise StaleRegistrationStepError(message)

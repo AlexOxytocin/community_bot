@@ -29,6 +29,7 @@ from community_bot.transport.web import (
     ConfirmSubmissionDraftRequest,
     SaveSubmissionDraftRequest,
     TaskFormRequest,
+    TelegramIdentity,
     _accept_update_id,
     _assignment_cursor,
     _member_query,
@@ -202,7 +203,18 @@ async def test_web_lifespan_disposes_database_after_application_failure() -> Non
 
 def test_frozen_proof_and_exact_failure_cases() -> None:
     now = datetime.datetime.fromtimestamp(1_700_000_100, datetime.UTC)
-    assert validate_telegram_init_data(FROZEN_PROOF, bot_token=BOT_TOKEN, now=now) == 123456789
+    assert validate_telegram_init_data(
+        FROZEN_PROOF, bot_token=BOT_TOKEN, now=now
+    ) == TelegramIdentity(123456789, None)
+    username_proof = _signed_fields(
+        {
+            "auth_date": str(int(now.timestamp())),
+            "user": json.dumps({"id": 123456789, "username": "Alex_53"}, separators=(",", ":")),
+        }
+    )
+    assert validate_telegram_init_data(
+        username_proof, bot_token=BOT_TOKEN, now=now
+    ) == TelegramIdentity(123456789, "Alex_53")
 
     failures = (
         (FROZEN_PROOF.replace(b"123456789", b"123456788"), now),
@@ -228,6 +240,9 @@ def test_frozen_proof_and_exact_failure_cases() -> None:
         _signed_fields({"auth_date": base["auth_date"], "user": '{"id":true}'}),
         _signed_fields({"auth_date": base["auth_date"], "user": '{"id":0}'}),
         _signed_fields({"auth_date": base["auth_date"], "user": f'{{"id":{2**63}}}'}),
+        _signed_fields(
+            {"auth_date": base["auth_date"], "user": '{"id":123456789,"username":"bad-name"}'}
+        ),
     )
     for proof in malformed:
         with pytest.raises(ValueError):
@@ -554,7 +569,7 @@ async def test_read_routes_map_application_denials_to_closed_errors(
     for owner, denial in (
         ("registration.RegistrationService.own_profile", PermissionError()),
         ("reputation.ReputationService.members", ProfileUnavailableError()),
-        ("reputation.ReputationService.profile", PermissionError()),
+        ("reputation.ReputationService.profile_detail", PermissionError()),
         ("tasks.TaskService.list_available", PermissionError()),
         ("reputation.ReputationService.leaderboard", ProfileUnavailableError()),
     ):
@@ -577,9 +592,11 @@ async def test_read_routes_map_application_denials_to_closed_errors(
     empty = dict.fromkeys(["city", "short_bio", "current_goal", "availability"])
     base = dict(
         member_id=database.member_id,
+        telegram_username=None,
         display_name="Alex",
         help_categories=(),
         skill_tags=(),
+        profile_links=(),
         experience_total=0,
         **empty,
     )
@@ -591,7 +608,6 @@ async def test_read_routes_map_application_denials_to_closed_errors(
     )
     safe_profile = SimpleNamespace(
         **base,
-        telegram_username=None,
         level_number=1,
         karma=SimpleNamespace(score=0, count=0),
         reliability=SimpleNamespace(accepted=0, approved_weight=Decimal(0), no_show=0, rate=None),
@@ -602,8 +618,8 @@ async def test_read_routes_map_application_denials_to_closed_errors(
         AsyncMock(return_value=own_profile),
     )
     monkeypatch.setattr(
-        "community_bot.application.reputation.ReputationService.profile",
-        AsyncMock(return_value=safe_profile),
+        "community_bot.application.reputation.ReputationService.profile_detail",
+        AsyncMock(return_value=(safe_profile, False)),
     )
     monkeypatch.setattr(
         "community_bot.application.reputation.ReputationService.own_statistics",

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from community_bot.application.member_foundation import UpdateReceipt
     from community_bot.domain.economy import ResolvedLevel
     from community_bot.domain.members import Member
+    from community_bot.domain.registration import ProfileLink
 
 _PROFILE_UNAVAILABLE = "Profile unavailable."
 LeaderboardPeriod = Literal["week", "month", "all"]
@@ -109,6 +110,7 @@ class SafeProfile:
     city: str | None
     short_bio: str | None
     skill_tags: tuple[str, ...]
+    profile_links: tuple[ProfileLink, ...]
     experience_total: int
     level_number: int
     karma: KarmaAggregate
@@ -507,6 +509,30 @@ class ReputationService:
                 raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
             level = await uow.resolve_member_level(target_id)
             return replace(profile, level_number=level.level_number)
+
+    async def profile_detail(
+        self, *, actor: ActorContext, target_id: UUID
+    ) -> tuple[SafeProfile, bool]:
+        """Return safe detail and the exact begin-vote eligibility snapshot."""
+        async with self._unit_of_work_factory() as uow:
+            member = await self._context_actor(uow, actor)
+            target = await uow.get_member(target_id)
+            require_profile_visible(member, target)
+            profile = await uow.safe_profile(target_id)
+            if profile is None or target is None:
+                raise ProfileUnavailableError(_PROFILE_UNAVAILABLE)
+            try:
+                require_karma_actor(
+                    member,
+                    target,
+                    eligible=await uow.karma_eligible(member.id, target.id),
+                )
+            except PermissionError:
+                can_rate_karma = False
+            else:
+                can_rate_karma = True
+            level = await uow.resolve_member_level(target_id)
+            return replace(profile, level_number=level.level_number), can_rate_karma
 
     async def statistics(self, telegram_user_id: int) -> PersonalStatistics:
         """Return personal contribution statistics for active or paused owner."""

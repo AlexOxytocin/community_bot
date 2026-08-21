@@ -1,4 +1,4 @@
-import { applyPlatformTheme } from "/mini-assets/platform.js";
+import { applyPlatformTheme, openExternalLink } from "/mini-assets/platform.js";
 
 applyPlatformTheme();
 
@@ -29,12 +29,22 @@ let returnFocusProfile = false;
 let returnFocusLeaderboardTab = false;
 let screenRevision = 0;
 let currentMemberId = null;
+let activeProfileState = null;
+let memberProfileHasInternalHistory = false;
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
   if (className) node.className = className;
   return node;
+};
+
+const trashIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>';
+  return svg;
 };
 
 const markTransition = (node, id, trigger) => {
@@ -832,163 +842,387 @@ async function openTaskCreation(forceEdit = false, recovery = null) {
   } catch { replaceContent(element("p", "Не удалось открыть создание задания.", "status")); }
 }
 
-const boundaryError = (heading, message, retry) => {
-  const node = element("section", undefined, "section profile-boundary");
-  node.append(element("h3", heading));
-  node.append(element("p", message, "status"));
-  node.append(retry);
-  return node;
-};
-
 const valueSection = (heading, value) => {
   const normalized = Array.isArray(value) ? value.join(", ") : value;
   return normalized == null || normalized === ""
     ? null
     : section(heading, String(normalized));
 };
-
-const reliabilityText = (value) => value == null ? "Недостаточно данных" : String(value);
-const reliabilityPercent = (value) => value == null ? "—" : `${Math.round(Number(value) * 100)}%`;
 const valueOrDash = (value) => value == null ? "—" : String(value);
 const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
-const editableProfileFields = [
-  ["display_name", "Имя"],
-  ["city", "Город"],
-  ["short_bio", "О себе"],
-  ["skill_tags", "Навыки"],
-];
+const pencilButton = (label, route, state, revision, key) => {
+  const button = element("button", "✎", "profile-pencil");
+  button.type = "button";
+  button.dataset.profileAction = key;
+  button.setAttribute("aria-label", `Редактировать ${label.toLowerCase()}`);
+  button.addEventListener("click", () => openProfileRoute(state, revision, route, true));
+  return button;
+};
 
-const profileValue = (me, field) => Array.isArray(me[field])
-  ? me[field].join(", ")
-  : (me[field] ?? "");
-
-function profileFields(me, state, revision) {
-  const section = element("section", undefined, "profile-section profile-fields");
-  section.append(element("h3", "Параметры профиля", "section-label"));
-  const list = element("div", undefined, "profile-field-list");
-  for (const [field, label] of editableProfileFields) {
-    const draft = state.profileEdit?.field === field ? state.profileEdit : null;
-    if (!draft) {
-      const row = element("button", undefined, "profile-field-row");
-      row.type = "button";
-      row.append(
-        element("span", label),
-        element("strong", profileValue(me, field) || "Не указано"),
-      );
-      row.addEventListener("click", () => {
-        state.profileEdit = {
-          field,
-          value: profileValue(me, field),
-          operationKey: null,
-          message: "",
-        };
-        showProfileState(state, revision);
-        content.querySelector(`[data-profile-field="${field}"]`)?.focus({ preventScroll: true });
-      });
-      list.append(row);
-      continue;
-    }
-    const form = element("form", undefined, "profile-field-editor");
-    const inputLabel = element("label", label, "visually-hidden");
-    const multiline = field === "short_bio";
-    const input = element(multiline ? "textarea" : "input");
-    input.dataset.profileField = field;
-    input.value = draft.value;
-    inputLabel.append(input);
-    input.addEventListener("input", () => {
-      draft.value = input.value;
-      draft.operationKey = null;
-      draft.message = "";
-    });
-    const actions = element("div", undefined, "profile-field-actions");
-    const save = element("button", "Сохранить", "primary");
-    save.type = "submit";
-    markTransition(save, "PE-063", "authoritative_profile_success");
-    const cancel = element("button", "Отмена", "secondary");
-    cancel.type = "button";
-    cancel.addEventListener("click", () => {
-      state.profileEdit = null;
-      showProfileState(state, revision);
-    });
-    actions.append(save, cancel);
-    const status = element("p", draft.message, draft.message ? "profile-field-status" : "hidden");
-    status.setAttribute("aria-live", "polite");
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      save.disabled = true;
-      cancel.disabled = true;
-      status.className = "profile-field-status";
-      status.textContent = "Сохраняем…";
-      draft.operationKey ||= newOperationKey();
-      try {
-        const updated = await submissionRequest(
-          "/api/v1/me/profile",
-          "PUT",
-          draft.operationKey,
-          { field, value: draft.value },
-        );
-        if (revision !== screenRevision) return;
-        state.profile = { me: updated, member: state.profile.member };
-        state.profileEdit = null;
-        showProfileState(state, revision);
-      } catch (error) {
-        if (revision !== screenRevision) return;
-        if (!retryableSubmissionError(error)) draft.operationKey = null;
-        draft.message = error?.status === 422
-          ? "Проверьте значение поля."
-          : error?.status === 409
-            ? "Значение уже изменилось. Повторите сохранение."
-            : "Не удалось сохранить. Повторите попытку — запрос останется тем же.";
-        status.textContent = draft.message;
-        save.disabled = false;
-        cancel.disabled = false;
-      }
-    });
-    form.append(inputLabel, actions, status);
-    list.append(form);
+const openPublicUrl = (url, options = {}) => {
+  if (!openExternalLink(url, options)) {
+    content.append(element("p", "Не удалось открыть ссылку.", "status"));
   }
-  section.append(list);
-  return section;
-}
+};
 
-function profileDetails(me, member, state, revision) {
-  const view = element("section", undefined, "profile-dashboard");
-  const identity = element("div", undefined, "profile-identity");
-  const identityCopy = element("div", undefined, "identity-copy");
+const publicLinkRow = (link) => {
+  const button = element("button", undefined, "public-link-row");
+  button.type = "button";
+  button.append(element("strong", link.label), element("span", link.url), element("span", "↗"));
+  button.addEventListener("click", () => openPublicUrl(link.url));
+  return button;
+};
+
+function ownProfileOverview(state, revision) {
+  const { me, member } = state.profile;
+  const view = element("section", undefined, "profile-overview");
+  const identity = element("section", undefined, "profile-card profile-identity-card");
+  const copy = element("div", undefined, "identity-copy");
+  copy.append(element("h2", me.display_name));
+  if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
+  copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
   identity.append(
     element("span", initialsFor(me.display_name), "avatar"),
-    identityCopy,
+    copy,
+    pencilButton("имя", "/profile/edit/name", state, revision, "name"),
   );
-  identityCopy.append(
-    element("h2", me.display_name),
-    element("p", me.level?.display_name ? `Уровень ${me.level.number} · ${me.level.display_name}` : "Профиль участника", "muted"),
-  );
+  const city = element("section", undefined, "profile-card profile-inline-card");
+  city.append(element("div", undefined, "profile-copy"), pencilButton("город", "/profile/edit/city", state, revision, "city"));
+  city.firstChild.append(element("span", "Город", "section-label"), element("strong", me.city || "Не указан"));
   const metrics = element("div", undefined, "metric-grid");
-  for (const [value, label] of [
-    [valueOrDash(me.credit_balance), "Кредиты"],
-    [valueOrDash(me.experience_total), "Опыт"],
-    [valueOrDash(member.karma?.score), "Карма"],
-  ]) {
+  for (const [value, label] of [[me.credit_balance, "Кредиты"], [me.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
     const metric = element("article", undefined, "metric-card");
-    metric.append(element("strong", value), element("span", label));
+    metric.append(element("strong", valueOrDash(value)), element("span", label));
     metrics.append(metric);
   }
-  const indicators = element("section", undefined, "profile-section");
-  const indicatorList = element("div", undefined, "indicator-list");
-  indicators.append(element("h3", "Мои показатели", "section-label"), indicatorList);
-  for (const [label, value] of [
-    ["Завершено заданий", me.statistics?.completed_tasks],
-    ["Создано заданий", me.statistics?.created_tasks],
-    ["Надёжность", reliabilityPercent(member.reliability?.rate)],
-  ]) {
-    const row = element("p", undefined, "indicator-row");
-    row.append(element("span", label), element("strong", valueOrDash(value)));
-    indicatorList.append(row);
+  view.append(identity, city, metrics);
+  const blocks = [
+    ["ОБО МНЕ", me.short_bio, "/profile/edit/bio", "bio", "Добавить описание", "Расскажите о себе"],
+    ["НАВЫКИ", me.skill_tags, "/profile/edit/skills", "skills", "Добавить навыки", "Добавьте навыки"],
+  ];
+  for (const [label, value, route, key, cta, emptyTitle] of blocks) {
+    const filled = Array.isArray(value) ? value.length > 0 : Boolean(value);
+    const block = element("section", undefined, filled ? "profile-card profile-content-card" : "profile-empty-card");
+    if (filled) {
+      block.append(element("h3", label, "section-label"), pencilButton(label, route, state, revision, key));
+      if (Array.isArray(value)) {
+        const chips = element("div", undefined, "profile-chips");
+        value.forEach((item) => chips.append(element("span", item)));
+        block.append(chips);
+      } else block.append(element("p", value));
+    } else {
+      block.append(element("strong", emptyTitle), element("p", key === "bio" ? "Пара строк поможет другим участникам понять, чем вы занимаетесь." : "Навыки помогут быстрее понять, с чем к вам можно обратиться.", "muted"));
+      const add = element("button", cta, "secondary");
+      add.type = "button";
+      add.dataset.profileAction = key;
+      add.addEventListener("click", () => openProfileRoute(state, revision, route, true));
+      block.append(add);
+    }
+    view.append(block);
   }
-  view.append(identity, metrics, indicators, profileFields(me, state, revision));
+  const links = me.profile_links || [];
+  const linksBlock = element("section", undefined, links.length ? "profile-links-block" : "profile-empty-card");
+  if (links.length) {
+    const header = element("div", undefined, "profile-section-heading");
+    header.append(element("h3", "Ссылки"), pencilButton("ссылки", "/profile/links", state, revision, "links"));
+    linksBlock.append(header);
+    links.forEach((link) => linksBlock.append(publicLinkRow(link)));
+  } else {
+    linksBlock.append(element("strong", "Добавьте ссылки"), element("p", "LinkedIn, GitHub, сайт или другие публичные страницы.", "muted"));
+    const add = element("button", "Добавить ссылки", "secondary");
+    add.type = "button";
+    add.dataset.profileAction = "links";
+    add.addEventListener("click", () => openProfileRoute(state, revision, "/profile/links", true));
+    linksBlock.append(add);
+  }
+  view.append(linksBlock);
   return view;
+}
+
+const editorConfigs = {
+  name: { title: "Имя", prompt: "Как к вам обращаться?", helper: "Это имя увидят другие участники в профиле и заданиях.", field: "display_name", min: 2, max: 80, multiline: false },
+  city: { title: "Город", prompt: "В каком городе вы живёте?", field: "city", min: 2, max: 80, multiline: false },
+  bio: { title: "О себе", label: "Описание", prompt: "Расскажите о себе", helper: "Чем вы занимаетесь и чем можете быть полезны сообществу.", field: "short_bio", min: 10, max: 500, multiline: true },
+};
+
+function profileTextEditor(state, revision, name) {
+  const config = editorConfigs[name];
+  const current = state.profile.me[config.field] || "";
+  const draft = state.draft?.route === state.route ? state.draft : { route: state.route, value: current, operationKey: null, message: "" };
+  state.draft = draft;
+  const form = element("form", undefined, "profile-editor");
+  form.append(element("h2", config.prompt));
+  if (config.helper) form.append(element("p", config.helper, "profile-helper"));
+  const label = element("label", config.label || config.title);
+  const input = element(config.multiline ? "textarea" : "input");
+  input.value = draft.value;
+  input.minLength = config.min;
+  input.maxLength = config.max;
+  input.required = true;
+  label.append(input);
+  const counter = element("p", `${input.value.length} / ${config.max}`, "profile-counter");
+  const status = element("p", draft.message, draft.message ? "status" : "status hidden");
+  status.setAttribute("aria-live", "polite");
+  input.addEventListener("input", () => {
+    if (draft.value !== input.value) draft.operationKey = null;
+    draft.value = input.value;
+    draft.message = "";
+    counter.textContent = `${input.value.length} / ${config.max}`;
+    status.className = "status hidden";
+  });
+  const save = element("button", "Сохранить", "primary");
+  save.type = "submit";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, `/profile`, `[data-profile-action="${name}"]`);
+  });
+  form.append(label, counter, status, save);
+  queueMicrotask(() => input.focus({ preventScroll: true }));
+  return form;
+}
+
+function profileSkillsEditor(state, revision) {
+  const draft = state.draft?.route === state.route ? state.draft : { route: state.route, items: [...state.profile.me.skill_tags], operationKey: null, message: "" };
+  state.draft = draft;
+  const form = element("form", undefined, "profile-editor");
+  form.append(
+    element("h2", "Что вы умеете?"),
+    element("p", "Добавляйте навыки по одному.", "profile-helper"),
+  );
+  const label = element("label", "Новый навык");
+  const row = element("div", undefined, "skill-input-row");
+  const input = element("input");
+  input.maxLength = 50;
+  const add = element("button", "+", "secondary");
+  add.type = "button";
+  add.setAttribute("aria-label", "Добавить навык");
+  row.append(input, add);
+  label.append(row);
+  const list = element("div", undefined, "skill-draft-list");
+  const status = element("p", draft.message, draft.message ? "status" : "status hidden");
+  const renderItems = () => {
+    list.replaceChildren();
+    draft.items.forEach((item, index) => {
+      const skill = element("div", undefined, "skill-draft-row");
+      const remove = element("button", "×", "skill-remove");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `Удалить навык ${item}`);
+      remove.addEventListener("click", () => { draft.items.splice(index, 1); draft.operationKey = null; renderItems(); });
+      skill.append(element("strong", item), remove);
+      list.append(skill);
+    });
+    counter.textContent = `${draft.items.length} / 20 навыков`;
+  };
+  add.addEventListener("click", () => {
+    const value = input.value.trim().replace(/\s+/g, " ");
+    if (!value || draft.items.length >= 20 || draft.items.some((item) => item.toLowerCase() === value.toLowerCase())) {
+      status.className = "status";
+      status.textContent = draft.items.some((item) => item.toLowerCase() === value.toLowerCase()) ? "Такой навык уже добавлен." : "Проверьте навык или лимит 20.";
+      input.focus();
+      return;
+    }
+    draft.items.push(value); draft.operationKey = null; input.value = ""; status.className = "status hidden"; renderItems(); input.focus();
+  });
+  const counter = element("p", `${draft.items.length} / 20 навыков`, "profile-counter");
+  const save = element("button", "Сохранить", "primary");
+  save.type = "submit";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveProfileCommand(state, revision, save, status, { field: "skill_tags", value: draft.items.join("\n") }, "/profile", '[data-profile-action="skills"]');
+  });
+  renderItems();
+  form.append(label, list, counter, status, save);
+  queueMicrotask(() => input.focus({ preventScroll: true }));
+  return form;
+}
+
+async function saveProfileCommand(state, revision, button, status, payload, destination, focusSelector) {
+  button.disabled = true;
+  status.className = "status";
+  status.textContent = "Сохраняем…";
+  state.draft.operationKey ||= newOperationKey();
+  try {
+    const updated = await submissionRequest("/api/v1/me/profile", "PUT", state.draft.operationKey, payload);
+    if (revision !== screenRevision) return;
+    state.profile.me = updated;
+    state.draft = null;
+    state.returnFocus = focusSelector;
+    openProfileRoute(state, revision, destination, false);
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    if (!retryableSubmissionError(error)) state.draft.operationKey = null;
+    status.textContent = error?.status === 422 ? "Проверьте введённые данные." : error?.status === 409 ? "Профиль уже изменился. Повторите сохранение." : "Не удалось сохранить. Повторите попытку.";
+    button.disabled = false;
+  }
+}
+
+function profileLinksList(state, revision) {
+  const links = state.profile.me.profile_links || [];
+  const view = element("section", undefined, "profile-links-manager");
+  const list = element("div", undefined, "managed-link-list");
+  links.forEach((link) => {
+    const row = element("div", undefined, "managed-link-row");
+    row.append(element("div", undefined, "managed-link-copy"));
+    row.firstChild.append(element("strong", link.label), element("span", link.url));
+    const edit = element("button", "✎", "profile-pencil");
+    edit.type = "button";
+    edit.dataset.linkId = link.id;
+    edit.setAttribute("aria-label", `Изменить ссылку ${link.label}`);
+    edit.addEventListener("click", () => openProfileRoute(state, revision, `/profile/links/${link.id}`, true));
+    const trash = element("button", undefined, "link-trash");
+    trash.type = "button";
+    trash.dataset.linkTrashId = link.id;
+    trash.setAttribute("aria-label", `Удалить ссылку ${link.label}`);
+    trash.append(trashIcon());
+    trash.addEventListener("click", () => {
+      state.deleteOrigin = "list";
+      history.replaceState(
+        { ...history.state, profileReturnFocus: `[data-link-trash-id="${link.id}"]` },
+        "",
+        location.href,
+      );
+      openProfileRoute(state, revision, `/profile/links/${link.id}/delete`, true);
+    });
+    row.append(edit, trash);
+    list.append(row);
+  });
+  view.append(list);
+  if (links.length < 5) {
+    const add = element("button", "+ Добавить ссылку", "secondary profile-add-link");
+    add.type = "button";
+    add.dataset.profileAddLink = "true";
+    add.addEventListener("click", () => openProfileRoute(state, revision, "/profile/links/new", true));
+    view.append(add);
+  }
+  view.append(element("p", `${links.length} / 5 ссылок`, "profile-counter"));
+  return view;
+}
+
+function profileLinkEditor(state, revision, linkId = null) {
+  const existing = linkId ? state.profile.me.profile_links.find((item) => item.id === linkId) : null;
+  if (linkId && !existing) return element("p", "Ссылка не найдена.", "status");
+  const draft = state.draft?.route === state.route ? state.draft : {
+    route: state.route,
+    label: existing?.label || "",
+    url: existing?.url || "",
+    operationKey: null,
+  };
+  state.draft = draft;
+  const form = element("form", undefined, "profile-editor link-editor");
+  form.append(element("h2", existing ? "Изменить ссылку" : "Добавьте публичную страницу"));
+  form.append(element("p", existing
+    ? "Исправьте название или адрес и сохраните изменения."
+    : "Название увидят люди, адрес откроется при нажатии.", "profile-helper"));
+  const label = element("label", "Название");
+  const labelInput = element("input");
+  labelInput.value = draft.label;
+  labelInput.maxLength = 32;
+  labelInput.required = true;
+  label.append(labelInput);
+  const counter = element("p", `${draft.label.length} / 32`, "profile-counter");
+  let presets = null;
+  if (!existing) {
+    presets = element("div", undefined, "link-presets");
+    ["LinkedIn", "GitHub", "Сайт", "YouTube"].forEach((value) => {
+      const preset = element("button", value, "link-preset");
+      preset.type = "button";
+      preset.addEventListener("click", () => {
+        labelInput.value = value;
+        labelInput.dispatchEvent(new Event("input", { bubbles: true }));
+        labelInput.focus();
+      });
+      presets.append(preset);
+    });
+  }
+  const urlLabel = element("label", "Ссылка");
+  const urlInput = element("input");
+  urlInput.type = "url";
+  urlInput.value = draft.url;
+  urlInput.maxLength = 2048;
+  urlInput.required = true;
+  urlInput.placeholder = "https://";
+  urlLabel.append(
+    urlInput,
+    element("small", "Только полный адрес, начинающийся с https://", "profile-helper"),
+  );
+  const status = element("p", "", "status hidden");
+  const changed = () => {
+    draft.label = labelInput.value;
+    draft.url = urlInput.value;
+    draft.operationKey = null;
+    counter.textContent = `${draft.label.length} / 32`;
+  };
+  labelInput.addEventListener("input", changed);
+  urlInput.addEventListener("input", changed);
+  const save = element("button", "Сохранить", "primary");
+  save.type = "submit";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const payload = existing
+      ? { field: "profile_links", action: "update", link_id: existing.id, label: draft.label, url: draft.url }
+      : { field: "profile_links", action: "create", label: draft.label, url: draft.url };
+    await saveProfileCommand(state, revision, save, status, payload, "/profile/links", existing ? `[data-link-id="${existing.id}"]` : "[data-profile-add-link]");
+  });
+  form.append(label, counter);
+  if (presets) form.append(presets);
+  form.append(urlLabel, status, save);
+  if (existing) {
+    const remove = element("button", "Удалить", "secondary danger profile-delete-large");
+    remove.type = "button";
+    remove.dataset.linkDeleteId = existing.id;
+    remove.addEventListener("click", () => {
+      state.deleteOrigin = "edit";
+      history.replaceState(
+        { ...history.state, profileReturnFocus: `[data-link-delete-id="${existing.id}"]` },
+        "",
+        location.href,
+      );
+      openProfileRoute(state, revision, `/profile/links/${existing.id}/delete`, true);
+    });
+    form.append(remove);
+  }
+  queueMicrotask(() => labelInput.focus({ preventScroll: true }));
+  return form;
+}
+
+function profileDeleteConfirm(state, revision, linkId) {
+  const link = state.profile.me.profile_links.find((item) => item.id === linkId);
+  if (!link) return element("p", "Ссылка уже удалена.", "status");
+  const backdrop = element("section", undefined, "profile-confirm-backdrop");
+  const dialog = element("div", undefined, "profile-confirm-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "delete-link-title");
+  const heading = element("h2", `Удалить ${link.label}?`);
+  heading.id = "delete-link-title";
+  const status = element("p", "Ссылка исчезнет из профиля. Сам аккаунт не изменится.", "status muted");
+  const remove = element("button", "Удалить", "secondary danger profile-delete-large");
+  remove.type = "button";
+  remove.addEventListener("click", async () => {
+    state.draft ||= { route: state.route, operationKey: null };
+    const index = state.profile.me.profile_links.findIndex((item) => item.id === link.id);
+    const next = state.profile.me.profile_links[index + 1];
+    await saveProfileCommand(state, revision, remove, status, { field: "profile_links", action: "delete", link_id: link.id }, "/profile/links", next ? `[data-link-id="${next.id}"]` : "[data-profile-add-link]");
+  });
+  dialog.append(element("span", "Подтверждение", "confirm-badge"), heading, status, remove);
+  backdrop.append(dialog);
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    remove.focus();
+  });
+  queueMicrotask(() => remove.focus({ preventScroll: true }));
+  return backdrop;
+}
+
+function openProfileRoute(state, revision, route, push) {
+  state.route = route;
+  state.draft = state.draft?.route === route ? state.draft : null;
+  if (push) history.pushState({ screen: "profile", route }, "", `#${route}`);
+  else history.replaceState({ screen: "profile", route }, "", `#${route}`);
+  showProfileState(state, revision);
 }
 
 function leaderboardDetails(items) {
@@ -1041,10 +1275,7 @@ function memberListDetails(items) {
     copy.append(identity);
     if (metadata) copy.append(element("span", metadata, "member-row-metadata"));
     const stats = element("span", undefined, "member-row-stats");
-    stats.append(
-      element("span", `Карма ${member.karma.score}`),
-      element("span", `Надёжность ${reliabilityPercent(member.reliability?.rate)}`),
-    );
+    stats.append(element("span", `Карма ${member.karma.score}`));
     copy.append(stats);
     button.append(
       element("span", initialsFor(member.display_name), "member-avatar"),
@@ -1249,21 +1480,39 @@ function loadParticipants(view = "members", period = "week") {
 }
 
 function safeMemberDetails(member) {
-  const card = element("article", undefined, "card detail");
-  card.append(element("h3", member.display_name));
-  const fields = [
-    ["Telegram", member.telegram_username ? "@" + member.telegram_username : null],
-    ["Город", member.city],
-    ["О себе", member.short_bio],
-    ["Навыки", member.skill_tags],
-    ["Опыт", member.experience_total],
-    ["Уровень", member.level_number],
-    ["Карма", String(member.karma.score) + " · оценок: " + String(member.karma.count)],
-    ["Надёжность", reliabilityText(member.reliability.rate)],
-  ];
-  for (const [heading, value] of fields) {
-    const item = valueSection(heading, value);
-    if (item) card.append(item);
+  const card = element("article", undefined, "foreign-profile");
+  const identity = element("section", undefined, "profile-card profile-identity-card");
+  const copy = element("div", undefined, "identity-copy");
+  copy.append(element("h2", member.display_name));
+  if (/^[A-Za-z0-9_]{5,32}$/.test(member.telegram_username || "")) {
+    const username = element("button", `@${member.telegram_username} ↗`, "foreign-username");
+    username.type = "button";
+    username.addEventListener("click", () => openPublicUrl(`https://t.me/${member.telegram_username}`, { telegram: true }));
+    copy.append(username);
+  }
+  copy.append(element("p", [member.city, `Уровень ${member.level_number}`].filter(Boolean).join(" · "), "muted"));
+  identity.append(element("span", initialsFor(member.display_name), "avatar"), copy);
+  const metrics = element("div", undefined, "metric-grid foreign-metrics");
+  for (const [value, label] of [[member.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
+    const metric = element("article", undefined, "metric-card");
+    metric.append(element("strong", valueOrDash(value)), element("span", label));
+    metrics.append(metric);
+  }
+  card.append(identity, metrics);
+  if (member.short_bio) card.append(valueSection("О ЧЕЛОВЕКЕ", member.short_bio));
+  if (member.skill_tags?.length) {
+    const skills = element("section", undefined, "profile-card profile-content-card");
+    skills.append(element("h3", "НАВЫКИ", "section-label"));
+    const chips = element("div", undefined, "profile-chips");
+    member.skill_tags.forEach((item) => chips.append(element("span", item)));
+    skills.append(chips);
+    card.append(skills);
+  }
+  if (member.profile_links?.length) {
+    const links = element("section", undefined, "profile-links-block");
+    links.append(element("h3", "Ссылки"));
+    member.profile_links.forEach((link) => links.append(publicLinkRow(link)));
+    card.append(links);
   }
   return card;
 }
@@ -1463,7 +1712,7 @@ function showMemberState(state, revision) {
   const details = safeMemberDetails(state.member);
   const nodes = [details];
   if (state.message) nodes.push(element("p", state.message, "status success"));
-  if (state.member.member_id !== currentMemberId) {
+  if (state.member.can_rate_karma) {
     const rate = element("button", "Оценить карму", "primary");
     rate.type = "button";
     rate.addEventListener("click", () => openKarmaEditor(state, revision));
@@ -1475,7 +1724,9 @@ function showMemberState(state, revision) {
 async function showMemberProfile(memberId, push = true) {
   const revision = ++screenRevision;
   const state = { member: null, error: false, karma: null, message: "" };
-  if (push) history.pushState({ screen: "member-profile", memberId }, "", presentationLocationFor("P02", memberId));
+  if (push) history.pushState({ screen: "member-profile", memberId }, "", `#/members/${encodeURIComponent(memberId)}`);
+  activeProfileState = null;
+  memberProfileHasInternalHistory = push;
   setNavigation("", true);
   title.textContent = "Профиль участника";
   back.classList.remove("hidden");
@@ -1491,16 +1742,50 @@ async function showMemberProfile(memberId, push = true) {
 
 function showProfileState(state, revision) {
   if (revision !== screenRevision) return;
-  const profileBoundary = state.profile
-    ? profileDetails(state.profile.me, state.profile.member, state, revision)
-    : state.profileError
-      ? boundaryError("Мои показатели", "Не удалось загрузить профиль.", state.profileRetry)
-      : element("p", "Загружаем профиль…", "status muted");
-  replaceContent(connectedBoundary(
-    "P06",
-    state.profile ? "content" : state.profileError ? "error" : "loading",
-    profileBoundary,
-  ));
+  setNavigation(state.route === "/profile" ? "profile" : "", state.route !== "/profile");
+  back.classList.toggle("hidden", state.route === "/profile");
+  if (!state.profile) {
+    replaceContent(element("p", state.profileError ? "Не удалось загрузить профиль." : "Загружаем профиль…", "status"));
+    return;
+  }
+  let node;
+  let headingText = "Профиль";
+  const editor = state.route.match(/^\/profile\/edit\/(name|city|bio|skills)$/);
+  const linkEdit = state.route.match(/^\/profile\/links\/([0-9a-f-]{36})$/i);
+  const linkDelete = state.route.match(/^\/profile\/links\/([0-9a-f-]{36})\/delete$/i);
+  const modalOpen = Boolean(linkDelete);
+  if (linkDelete && !state.deleteOrigin) {
+    sessionStorage.setItem("profileReturnFocus", `[data-link-id="${linkDelete[1]}"]`);
+  }
+  title.inert = modalOpen;
+  back.disabled = false;
+  if (editor) {
+    headingText = editor[1] === "skills" ? "Навыки" : editorConfigs[editor[1]].title;
+    node = editor[1] === "skills" ? profileSkillsEditor(state, revision) : profileTextEditor(state, revision, editor[1]);
+  } else if (state.route === "/profile/links") {
+    headingText = "Мои ссылки";
+    node = profileLinksList(state, revision);
+  } else if (state.route === "/profile/links/new") {
+    headingText = "Новая ссылка";
+    node = profileLinkEditor(state, revision);
+  } else if (linkDelete) {
+    const link = state.profile.me.profile_links.find((item) => item.id === linkDelete[1]);
+    headingText = link?.label || "Удалить ссылку";
+    node = profileDeleteConfirm(state, revision, linkDelete[1]);
+  } else if (linkEdit) {
+    const link = state.profile.me.profile_links.find((item) => item.id === linkEdit[1]);
+    headingText = link?.label || "Изменить ссылку";
+    node = profileLinkEditor(state, revision, linkEdit[1]);
+  } else {
+    state.route = "/profile";
+    node = ownProfileOverview(state, revision);
+  }
+  title.textContent = headingText;
+  replaceContent(node);
+  if (state.returnFocus) {
+    const selector = state.returnFocus;
+    queueMicrotask(() => content.querySelector(selector)?.focus({ preventScroll: true }));
+  }
 }
 
 async function loadOwnProfile(state, revision) {
@@ -1526,28 +1811,30 @@ async function loadOwnProfile(state, revision) {
     state.profileError = !state.profile;
   }
   showProfileState(state, revision);
+  queueMicrotask(() => { state.returnFocus = null; });
 }
 
 function loadProfile(push = true) {
   const revision = ++screenRevision;
+  const route = /^#\/profile(?:\/.*)?$/.test(location.hash) ? location.hash.slice(1) : "/profile";
   const cachedMe = cachedJson("/api/v1/me");
   const cachedMember = cachedMe
     ? cachedJson("/api/v1/members/" + encodeURIComponent(cachedMe.member_id))
     : null;
+  const storedReturnFocus = sessionStorage.getItem("profileReturnFocus");
+  sessionStorage.removeItem("profileReturnFocus");
   const state = {
     profile: cachedMe && cachedMember ? { me: cachedMe, member: cachedMember } : null,
     profileError: false,
+    route,
+    draft: null,
+    returnFocus: history.state?.profileReturnFocus || storedReturnFocus || null,
   };
-  state.profileRetry = element("button", "Повторить профиль", "secondary");
-  state.profileRetry.type = "button";
-  state.profileRetry.addEventListener("click", () => loadOwnProfile(state, revision));
+  activeProfileState = state;
   returnFocusProfile = true;
-  if (push) history.replaceState({ screen: "profile" }, "", presentationLocationFor("P06"));
-  setNavigation("profile", false);
-  title.textContent = "Профиль";
-  back.classList.add("hidden");
+  if (push) history.pushState({ screen: "profile", route: "/profile" }, "", "#/profile");
+  else history.replaceState({ screen: "profile", route }, "", `#${route}`);
   showProfileState(state, revision);
-  back.focus({ preventScroll: true });
   void loadOwnProfile(state, revision);
 }
 
@@ -2766,12 +3053,21 @@ async function bootstrap(authAttempted = false) {
     currentMemberId = profile.member_id;
     void configureRoleNavigation();
     tasks = page.items;
+    const initialHash = location.hash;
     const initialPresentation = presentationFromLocation();
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
     showCatalog();
     const presentationId = initialPresentation?.screen.id;
     const resourceId = initialPresentation?.resourceId;
-    if (presentationId === "T02") {
+    const directProfile = initialHash.match(/^#(\/profile(?:\/.*)?)$/);
+    const directMember = initialHash.match(/^#\/members\/([0-9a-f-]{36})$/i);
+    if (directProfile) {
+      history.replaceState({ screen: "profile", route: directProfile[1] }, "", initialHash);
+      loadProfile(false);
+    } else if (directMember) {
+      history.replaceState({ screen: "member-profile", memberId: directMember[1] }, "", initialHash);
+      showMemberProfile(directMember[1], false);
+    } else if (presentationId === "T02") {
       showCatalogFilters(false);
     } else if (presentationId === "T04B") {
       beginTaskCreationFlow(false);
@@ -2836,7 +3132,28 @@ participantsNav.addEventListener("click", () => loadParticipants("members"));
 profileNav.addEventListener("click", () => loadProfile());
 moderationNav.addEventListener("click", () => loadModeration());
 back.addEventListener("click", () => {
-  if (history.state?.screen === "participants" && history.state.view === "leaderboard") {
+  if (activeProfileState?.route && activeProfileState.route !== "/profile") {
+    const route = activeProfileState.route;
+    let destination = "/profile";
+    if (route === "/profile/links/new" || /^\/profile\/links\/[0-9a-f-]{36}$/i.test(route)) destination = "/profile/links";
+    if (route.endsWith("/delete")) {
+      destination = activeProfileState.deleteOrigin === "edit" ? route.replace(/\/delete$/, "") : "/profile/links";
+    }
+    const linkId = route.match(/^\/profile\/links\/([0-9a-f-]{36})/i)?.[1];
+    activeProfileState.returnFocus = destination === "/profile"
+      ? `[data-profile-action="${route.split("/").at(-1)}"]`
+      : activeProfileState.deleteOrigin === "edit"
+        ? `[data-link-delete-id="${linkId}"]`
+        : activeProfileState.deleteOrigin === "list" && linkId
+          ? `[data-link-trash-id="${linkId}"]`
+          : linkId
+            ? `[data-link-id="${linkId}"]`
+            : ".profile-pencil, [data-profile-add-link]";
+    activeProfileState.draft = null;
+    openProfileRoute(activeProfileState, screenRevision, destination, false);
+  } else if (history.state?.screen === "member-profile" && !memberProfileHasInternalHistory) {
+    loadParticipants("members");
+  } else if (history.state?.screen === "participants" && history.state.view === "leaderboard") {
     returnFocusLeaderboardTab = true;
     loadParticipants("members");
   } else {
@@ -2861,8 +3178,6 @@ globalThis.addEventListener("popstate", (event) => {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
     loadProfile(false);
-  } else if (event.state?.screen === "profile-settings") {
-    loadProfile(false);
   } else if (event.state?.screen === "member-profile") {
     showMemberProfile(event.state.memberId, false);
   } else if (event.state?.screen === "moderation") {
@@ -2880,7 +3195,7 @@ globalThis.addEventListener("popstate", (event) => {
   }
 });
 globalThis.addEventListener("hashchange", () => {
-  if (!presentationFromLocation()) {
+  if (!presentationFromLocation() && !/^#\/profile(?:\/.*)?$/.test(location.hash) && !/^#\/members\/[0-9a-f-]{36}$/i.test(location.hash)) {
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
     void loadCatalog(false);
   }
