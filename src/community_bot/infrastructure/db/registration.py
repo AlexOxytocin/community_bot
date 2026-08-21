@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from uuid import UUID
 
 from sqlalchemy import delete, select, text
 
@@ -17,6 +18,9 @@ from community_bot.domain.members import MemberStatus
 from community_bot.domain.registration import (
     ModerationDecision,
     ProfileField,
+    ProfileLink,
+    ProfileLinkAction,
+    ProfileLinkCommand,
     RegistrationApplicationStatus,
     RegistrationError,
     RegistrationStep,
@@ -31,11 +35,10 @@ from community_bot.infrastructure.db.models import (
 )
 
 if TYPE_CHECKING:
-    from uuid import UUID
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
 _IDENTITY_GATE_NAMESPACE = "registration_identity"
+_MAX_PROFILE_LINKS = 5
 _REQUIRED_PROFILE_FIELDS = {
     "consent",
     ProfileField.DISPLAY_NAME.value,
@@ -343,6 +346,7 @@ async def get_own_profile(
         return None
     return ProfileData(
         member_id=member.id,
+        telegram_username=member.telegram_username,
         display_name=member.display_name,
         city=member.city,
         timezone=member.timezone,
@@ -350,6 +354,10 @@ async def get_own_profile(
         current_goal=member.current_goal,
         help_categories=tuple(member.help_categories_json),
         skill_tags=tuple(member.skill_tags_json),
+        profile_links=tuple(
+            ProfileLink(UUID(item["id"]), item["label"], item["url"])
+            for item in member.profile_links_json
+        ),
         availability=member.availability,
         credit_balance=member.credit_balance_cached,
         experience_total=member.experience_total_cached,
@@ -480,6 +488,47 @@ async def update_profile_field(
         raise LookupError(message)
     _set_member_profile_field(member, field, value)
     await session.flush()
+
+
+async def update_profile_links(
+    session: AsyncSession, *, member_id: UUID, command: ProfileLinkCommand
+) -> tuple[ProfileLink, ...]:
+    """Mutate an ordered JSONB link list on an already locked owner row."""
+    member = await session.get(MemberModel, member_id)
+    if member is None:
+        message = "Profile member does not exist."
+        raise LookupError(message)
+    links = [dict(item) for item in member.profile_links_json]
+    if command.action is ProfileLinkAction.CREATE:
+        if len(links) >= _MAX_PROFILE_LINKS:
+            message = "Profile cannot contain more than five links."
+            raise RegistrationError(message)
+        links.append(
+            {
+                "id": str(uuid.uuid4()),
+                "label": cast("str", command.label),
+                "url": cast("str", command.url),
+            }
+        )
+    else:
+        index = next(
+            (index for index, item in enumerate(links) if item["id"] == str(command.link_id)),
+            None,
+        )
+        if index is None:
+            message = "Profile link does not exist."
+            raise RegistrationError(message)
+        if command.action is ProfileLinkAction.UPDATE:
+            links[index] = {
+                "id": links[index]["id"],
+                "label": cast("str", command.label),
+                "url": cast("str", command.url),
+            }
+        else:
+            links.pop(index)
+    member.profile_links_json = links
+    await session.flush()
+    return tuple(ProfileLink(UUID(item["id"]), item["label"], item["url"]) for item in links)
 
 
 async def _context_by_member(

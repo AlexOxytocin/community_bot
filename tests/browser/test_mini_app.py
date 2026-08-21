@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import re
 import threading
 from pathlib import Path
@@ -169,10 +170,10 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
 
         page.get_by_role("button", name="Профиль", exact=True).click()
-        page.get_by_role("button", name=re.compile("Город Rosario")).click()
-        page.get_by_label("Город").fill("Córdoba")
+        page.get_by_role("button", name="Редактировать город").click()
+        page.get_by_role("textbox", name="Город", exact=True).fill("Córdoba")
         page.get_by_role("button", name="Сохранить").click()
-        page.get_by_role("button", name=re.compile("Город Rosario")).wait_for()
+        page.get_by_role("button", name="Редактировать город").wait_for()
         page.locator("h2", has_text="Алекс").wait_for()
         catalog = page.get_by_role("button", name="Задания", exact=True)
         catalog.click()
@@ -200,6 +201,442 @@ def test_assignment_action_eligibility_is_server_projected() -> None:
     assert 'assignment.assignment_status === "accepted"' not in source
     assert "if (assignment.can_submit)" in source
     assert "if (assignment.can_cancel)" in source
+
+
+@pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
+def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: C901, PLR0915
+    mini_app_url: str,
+    viewport: tuple[int, int],
+) -> None:
+    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert not any(
+        token in source
+        for token in ("reliabilityText", "reliabilityPercent", "Надёжность", ".reliability")
+    )
+    owner_id = "00000000-0000-0000-0000-000000000107"
+    foreign_id = "00000000-0000-0000-0000-000000000108"
+    link_id = "00000000-0000-0000-0000-000000000109"
+    me: dict[str, Any] = {
+        "member_id": owner_id,
+        "telegram_username": "Alex_Test",
+        "display_name": "Alex Oxitocin",
+        "city": "Буэнос-Айрес",
+        "short_bio": "Я ИИ-инженер и помогаю командам проектировать понятные продукты.",
+        "skill_tags": ["AI agents", "Python", "Архитектура"],
+        "profile_links": [
+            {"id": link_id, "label": "LinkedIn", "url": "https://linkedin.com/in/alex"},
+        ],
+        "credit_balance": 4,
+        "experience_total": 12,
+        "level": {"number": 1, "display_name": "Первый шаг"},
+        "statistics": {"completed_tasks": 8, "created_tasks": 5},
+    }
+    owner = {
+        "member_id": owner_id,
+        "telegram_username": "Alex_Test",
+        "display_name": "Alex Oxitocin",
+        "city": "Буэнос-Айрес",
+        "short_bio": me["short_bio"],
+        "skill_tags": me["skill_tags"],
+        "profile_links": me["profile_links"],
+        "experience_total": 12,
+        "level_number": 1,
+        "karma": {"score": 3, "count": 4},
+        "reliability": {"accepted": 4, "approved_weight": "3", "no_show": 0, "rate": "0.75"},
+        "can_rate_karma": False,
+    }
+    foreign = {
+        **owner,
+        "member_id": foreign_id,
+        "telegram_username": "Foreign_User",
+        "display_name": "Мария Крылова",
+        "city": None,
+        "short_bio": "Помогаю запускать сообщества.",
+        "skill_tags": [],
+        "can_rate_karma": True,
+    }
+    mutation_requests: list[dict[str, Any]] = []
+    mutation_keys: list[str] = []
+    fail_next_profile = {"value": False}
+
+    def profile_update(route: Route) -> None:
+        body = route.request.post_data_json
+        assert isinstance(body, dict)
+        mutation_requests.append(body)
+        mutation_keys.append(route.request.headers["idempotency-key"])
+        if fail_next_profile["value"]:
+            fail_next_profile["value"] = False
+            route.fulfill(status=502, body="retry", content_type="text/plain")
+            return
+        field = body["field"]
+        if field == "profile_links":
+            action = body["action"]
+            if action == "delete":
+                me["profile_links"] = [
+                    item for item in me["profile_links"] if item["id"] != body["link_id"]
+                ]
+            elif action == "update":
+                me["profile_links"] = [
+                    {**item, "label": body["label"], "url": body["url"]}
+                    if item["id"] == body["link_id"]
+                    else item
+                    for item in me["profile_links"]
+                ]
+            else:
+                me["profile_links"] = [
+                    *me["profile_links"],
+                    {
+                        "id": "00000000-0000-0000-0000-000000000110",
+                        "label": body["label"],
+                        "url": body["url"],
+                    },
+                ]
+        elif field == "skill_tags":
+            me[field] = [item for item in body["value"].splitlines() if item]
+        else:
+            me[field] = body["value"].strip()
+        route.fulfill(json=me)
+
+    evidence_root = Path(__file__).parents[2] / "tasks/CB-107/evidence/browser"
+    viewport_name = f"{viewport[0]}x{viewport[1]}"
+    capture_dir = evidence_root / viewport_name
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    journey: list[dict[str, Any]] = []
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        bridge = (
+            "globalThis.nativeLinks=[];globalThis.Telegram={WebApp:{ready(){},expand(){},"
+            "openLink(url){nativeLinks.push(['openLink',url])},"
+            "openTelegramLink(url){nativeLinks.push(['openTelegramLink',url])}}};"
+        )
+        page = _new_page(browser, bridge=bridge)
+        page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/me/profile", profile_update)
+        page.route(f"**/api/v1/members/{owner_id}", lambda route: route.fulfill(json=owner))
+        page.route(f"**/api/v1/members/{foreign_id}", lambda route: route.fulfill(json=foreign))
+        page.route(
+            "**/api/v1/members?*",
+            lambda route: route.fulfill(json={"items": [foreign], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/tasks", lambda route: route.fulfill(json={"items": [], "next_cursor": None})
+        )
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+
+        def capture(number: int, slug: str, assertion: str, focus: str | None = None) -> None:
+            page.wait_for_timeout(30)
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert page.get_by_text("Надёжность", exact=True).count() == 0
+            if focus:
+                assert page.locator(focus).evaluate("node => node === document.activeElement")
+            path = capture_dir / f"{number:02d}-{slug}.png"
+            page.screenshot(path=str(path))
+            journey.append(
+                {
+                    "viewport": viewport_name,
+                    "screen": number,
+                    "route": page.url.split("#", 1)[-1],
+                    "assertion": assertion,
+                    "focus": focus,
+                    "pass": True,
+                }
+            )
+
+        page.goto(mini_app_url + "?case=own#/profile")
+        page.get_by_role("heading", name="Alex Oxitocin").wait_for()
+        assert page.get_by_text("@Alex_Test", exact=True).is_visible()
+        assert page.get_by_text("Кредиты", exact=True).is_visible()
+        assert page.get_by_text("Завершено заданий", exact=True).count() == 0
+        assert page.locator(".profile-pencil").count() == 5
+        capture(1, "own-filled", "PR-01")
+
+        page.goto(mini_app_url + f"?case=foreign#/members/{foreign_id}")
+        page.get_by_role("heading", name="Мария Крылова").wait_for()
+        assert page.get_by_text("Кредиты", exact=True).count() == 0
+        assert page.get_by_role("button", name="Оценить карму").is_visible()
+        page.get_by_role("button", name="@Foreign_User ↗").click()
+        assert page.evaluate("nativeLinks.at(-1)[0]") == "openTelegramLink"
+        page.evaluate(
+            "Telegram.WebApp.openTelegramLink=()=>{throw new Error('native')};"
+            "Telegram.WebApp.openLink=(url)=>nativeLinks.push(['openLink',url])"
+        )
+        page.get_by_role("button", name="@Foreign_User ↗").click()
+        assert page.evaluate("nativeLinks.at(-1)[0]") == "openLink"
+        page.evaluate(
+            "Telegram.WebApp.openLink=()=>{throw new Error('native')};"
+            "globalThis.open=(...args)=>{globalThis.fallbackArgs=args;return {}}"
+        )
+        page.locator(".public-link-row").click()
+        assert page.evaluate("fallbackArgs") == [
+            "https://linkedin.com/in/alex",
+            "_blank",
+            "noopener,noreferrer",
+        ]
+        page.evaluate(
+            "Telegram.WebApp.openLink=undefined;Telegram.WebApp.openTelegramLink=undefined;"
+            "globalThis.open=(...args)=>{globalThis.fallbackArgs=args;return {}}"
+        )
+        page.get_by_role("button", name="@Foreign_User ↗").click()
+        assert page.evaluate("fallbackArgs") == [
+            "https://t.me/Foreign_User",
+            "_blank",
+            "noopener,noreferrer",
+        ]
+        capture(2, "foreign", "PR-02")
+        foreign["telegram_username"] = "bad!"
+        page.reload()
+        page.get_by_role("heading", name="Мария Крылова").wait_for()
+        page.get_by_role("button", name=re.compile(r"^@")).wait_for(state="detached")
+        assert page.get_by_role("button", name=re.compile(r"^@")).count() == 0
+        foreign["telegram_username"] = None
+        page.reload()
+        page.get_by_role("heading", name="Мария Крылова").wait_for()
+        page.get_by_role("button", name=re.compile(r"^@")).wait_for(state="detached")
+        assert page.get_by_role("button", name=re.compile(r"^@")).count() == 0
+        foreign.update(telegram_username="Foreign_User", can_rate_karma=False)
+        page.reload()
+        page.get_by_role("heading", name="Мария Крылова").wait_for()
+        assert page.get_by_role("button", name="Оценить карму").count() == 0
+        foreign["can_rate_karma"] = True
+
+        me.update(short_bio=None, skill_tags=[], profile_links=[])
+        page.goto(mini_app_url + "?case=partial#/profile")
+        page.get_by_role("button", name="Добавить описание").wait_for()
+        for label in ("Добавить описание", "Добавить навыки", "Добавить ссылки"):
+            assert page.get_by_role("button", name=label).is_visible()
+        capture(3, "own-partial", "PR-03")
+        me.update(
+            short_bio="Я ИИ-инженер и помогаю командам проектировать понятные продукты.",
+            skill_tags=["AI agents", "Python", "Архитектура"],
+        )
+
+        before_back = len(mutation_requests)
+        page.goto(mini_app_url + "?case=name#/profile/edit/name")
+        page.get_by_role("textbox", name="Имя", exact=True).wait_for()
+        page.reload()
+        page.get_by_role("textbox", name="Имя", exact=True).wait_for()
+        assert page.get_by_text(
+            "Это имя увидят другие участники в профиле и заданиях.", exact=True
+        ).is_visible()
+        assert page.get_by_role("button", name="Отмена").count() == 0
+        capture(4, "name", "PR-04", "input[required]")
+        page.get_by_role("textbox", name="Имя", exact=True).fill("Несохранённое имя")
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Alex Oxitocin").wait_for()
+        assert len(mutation_requests) == before_back
+
+        page.goto(mini_app_url + "?case=city#/profile/edit/city")
+        page.get_by_role("textbox", name="Город", exact=True).wait_for()
+        capture(5, "city", "PR-05", "input[required]")
+
+        page.goto(mini_app_url + "?case=bio#/profile/edit/bio")
+        page.reload()
+        bio = page.get_by_role("textbox", name="Описание", exact=True)
+        bio.wait_for()
+        assert page.locator("#screen-title").text_content() == "О себе"  # noqa: RUF001
+        assert bio.input_value() == me["short_bio"]
+        assert page.get_by_text(
+            "Чем вы занимаетесь и чем можете быть полезны сообществу.", exact=True
+        ).is_visible()
+        capture(6, "bio", "PR-06", "textarea")
+
+        page.goto(mini_app_url + "?case=skills#/profile/edit/skills")
+        page.reload()
+        skill_input = page.locator('input[maxlength="50"]')
+        skill_input.wait_for()
+        assert page.locator(".skill-draft-row strong").all_text_contents() == [
+            "AI agents",
+            "Python",
+            "Архитектура",
+        ]
+        page.get_by_role("button", name="Удалить навык Архитектура").click()
+        assert page.get_by_text("2 / 20 навыков", exact=True).is_visible()
+        skill_input.fill("Архитектура")
+        page.get_by_role("button", name="Добавить навык").click()
+        assert page.get_by_text("3 / 20 навыков", exact=True).is_visible()
+        skill_input.fill("python")
+        page.get_by_role("button", name="Добавить навык").click()
+        assert page.get_by_text("Такой навык уже добавлен.", exact=True).is_visible()
+        assert page.evaluate(
+            "document.documentElement.scrollWidth === document.documentElement.clientWidth"
+        )
+        assert page.locator(".profile-editor").evaluate(
+            "node => node.scrollWidth === node.clientWidth"
+        )
+        assert page.get_by_role("button", name="Назад").evaluate(
+            "node => { const box=node.getBoundingClientRect();"
+            " return box.left >= 0 && box.right <= innerWidth }"
+        )
+        capture(7, "skills", "PR-07", 'input[maxlength="50"]')
+        for index in range(17):
+            skill_input.fill(f"Навык {index}")
+            page.get_by_role("button", name="Добавить навык").click()
+        assert page.get_by_text("20 / 20 навыков", exact=True).is_visible()
+        skill_input.fill("Лишний навык")
+        page.get_by_role("button", name="Добавить навык").click()
+        assert page.get_by_text("Проверьте навык или лимит 20.", exact=True).is_visible()
+        page.reload()
+        page.locator('input[maxlength="50"]').wait_for()
+        assert page.locator(".skill-draft-row strong").all_text_contents() == [
+            "AI agents",
+            "Python",
+            "Архитектура",
+        ]
+
+        me.update(
+            short_bio="Я ИИ-инженер и помогаю командам проектировать понятные продукты.",
+            skill_tags=["AI agents", "Python", "Архитектура"],
+            profile_links=[
+                {"id": link_id, "label": "LinkedIn", "url": "https://linkedin.com/in/alex"}
+            ],
+        )
+        page.goto(mini_app_url + "?case=links#/profile/links")
+        page.get_by_role("heading", name="Мои ссылки").wait_for()
+        assert page.locator(".link-trash").count() == 1
+        capture(8, "links", "PR-08")
+        page.get_by_role("button", name="Удалить ссылку LinkedIn").click()
+        dialog = page.get_by_role("dialog")
+        dialog.wait_for()
+        assert page.locator("#screen-title").evaluate("node => node.inert")
+        assert page.locator("#back").is_enabled()
+        page.keyboard.press("Tab")
+        assert dialog.get_by_role("button", name="Удалить", exact=True).evaluate(
+            "node => node === document.activeElement"
+        )
+        page.keyboard.press("Shift+Tab")
+        assert dialog.get_by_role("button", name="Удалить", exact=True).evaluate(
+            "node => node === document.activeElement"
+        )
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Мои ссылки").wait_for()
+        page.wait_for_function(f"document.activeElement?.dataset.linkTrashId === '{link_id}'")
+        assert page.get_by_role("button", name="Удалить ссылку LinkedIn").evaluate(
+            "node => node === document.activeElement"
+        )
+
+        page.goto(mini_app_url + "?case=link-new#/profile/links/new")
+        page.get_by_role("textbox", name="Название", exact=True).wait_for()
+        page.reload()
+        page.get_by_role("button", name="LinkedIn", exact=True).click()
+        page.locator('input[type="url"]').fill("https://linkedin.com/in/alex")
+        assert page.get_by_text(
+            "Только полный адрес, начинающийся с https://",  # noqa: RUF001
+            exact=True,
+        ).is_visible()
+        page.locator('input[maxlength="32"]').focus()
+        capture(9, "link-new", "PR-09", 'input[maxlength="32"]')
+
+        page.goto(mini_app_url + f"?case=link-edit#/profile/links/{link_id}")
+        page.get_by_role("button", name="Удалить", exact=True).wait_for()
+        page.reload()
+        page.get_by_role("button", name="Удалить", exact=True).wait_for()
+        assert page.get_by_role("button", name="Сохранить", exact=True).count() == 1
+        capture(10, "link-edit", "PR-10", 'input[maxlength="32"]')
+        page.get_by_role("button", name="Удалить", exact=True).click()
+        page.get_by_role("dialog").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("button", name="Удалить", exact=True).wait_for()
+        page.wait_for_function(f"document.activeElement?.dataset.linkDeleteId === '{link_id}'")
+        assert page.get_by_role("button", name="Удалить", exact=True).evaluate(
+            "node => node === document.activeElement"
+        )
+        page.goto(mini_app_url + f"?case=direct-confirm#/profile/links/{link_id}/delete")
+        page.get_by_role("dialog").wait_for()
+        page.reload()
+        page.get_by_role("dialog").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Мои ссылки").wait_for()
+        page.wait_for_function(f"document.activeElement?.dataset.linkId === '{link_id}'")
+        assert page.get_by_role("button", name="Изменить ссылку LinkedIn").evaluate(
+            "node => node === document.activeElement"
+        )
+        page.goto(mini_app_url + f"?case=direct-confirm-capture#/profile/links/{link_id}/delete")
+        page.get_by_role("dialog").wait_for()
+        page.reload()
+        page.get_by_role("dialog").wait_for()
+        capture(11, "link-delete-confirm", "PR-11", ".profile-confirm-sheet .profile-delete-large")
+        page.get_by_role("dialog").get_by_role("button", name="Удалить", exact=True).click()
+        page.get_by_role("heading", name="Мои ссылки").wait_for()
+        assert mutation_requests[-1] == {
+            "field": "profile_links",
+            "action": "delete",
+            "link_id": link_id,
+        }
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+        me["profile_links"] = [
+            {
+                "id": f"00000000-0000-0000-0000-{index:012d}",
+                "label": f"Link {index}",
+                "url": f"https://example.com/{index}",
+            }
+            for index in range(1, 6)
+        ]
+        page.goto(mini_app_url + "?case=max-five#/profile/links")
+        page.get_by_role("heading", name="Мои ссылки").wait_for()
+        assert page.locator(".managed-link-copy strong").all_text_contents() == [
+            "Link 1",
+            "Link 2",
+            "Link 3",
+            "Link 4",
+            "Link 5",
+        ]
+        assert page.get_by_role("button", name="Добавить ссылку").count() == 0
+
+        before_retry = len(mutation_requests)
+        page.goto(mini_app_url + "?case=retry#/profile/edit/name")
+        name_input = page.get_by_role("textbox", name="Имя", exact=True)
+        name_input.wait_for()
+        name_input.fill("Новое имя")
+        fail_next_profile["value"] = True
+        page.get_by_role("button", name="Сохранить", exact=True).click()
+        page.get_by_text(
+            "Не удалось сохранить. Повторите попытку.",  # noqa: RUF001
+            exact=True,
+        ).wait_for()
+        page.get_by_role("button", name="Сохранить", exact=True).click()
+        page.get_by_role("heading", name="Новое имя").wait_for()
+        assert len(mutation_requests) == before_retry + 2
+        assert mutation_keys[-2] == mutation_keys[-1]
+        page.goto(mini_app_url + "?case=new-key#/profile/edit/name")
+        page.get_by_role("textbox", name="Имя", exact=True).fill("Ещё одно имя")
+        page.get_by_role("button", name="Сохранить", exact=True).click()
+        page.get_by_role("heading", name="Ещё одно имя").wait_for()
+        assert mutation_keys[-1] != mutation_keys[-2]
+
+        pending_member: list[Route] = []
+
+        def hold_foreign(route: Route) -> None:
+            pending_member.append(route)
+
+        page.route(f"**/api/v1/members/{foreign_id}", hold_foreign)
+        page.goto(mini_app_url + f"?case=late#/members/{foreign_id}")
+        page.wait_for_timeout(50)
+        assert len(pending_member) == 1
+        page.goto(mini_app_url + "?case=late-own#/profile")
+        page.get_by_role("heading", name="Ещё одно имя").wait_for()
+        pending_member[0].fulfill(json=foreign)
+        page.wait_for_timeout(50)
+        assert page.get_by_role("heading", name="Ещё одно имя").is_visible()
+        assert page.get_by_role("heading", name="Мария Крылова").count() == 0
+        page.unroute(f"**/api/v1/members/{foreign_id}", hold_foreign)
+        page.goto(mini_app_url + f"?case=direct-member#/members/{foreign_id}")
+        page.get_by_role("heading", name="Мария Крылова").wait_for()
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Участники").wait_for()
+        browser.close()
+
+    journey_path = evidence_root / "journey.json"
+    existing = json.loads(journey_path.read_text(encoding="utf-8")) if journey_path.exists() else []
+    existing = [item for item in existing if item.get("viewport") != viewport_name]
+    journey_path.write_text(
+        json.dumps([*existing, *journey], ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
@@ -1460,25 +1897,18 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
 
         page.locator("h2", has_text=malicious).wait_for()
         assert page.get_by_role("heading", name="Лидерборд").count() == 0
-        for value in (
-            "7",
-            "12",
-            "3",
-            "8",
-            "5",
-            "96%",
-        ):
+        for value in ("7", "12", "3"):
             assert page.get_by_text(value, exact=True).count() >= 1
-        for label in (
-            "Кредиты",
-            "Опыт",
-            "Карма",
+        for label in ("Кредиты", "Опыт", "Карма"):
+            assert page.get_by_text(label, exact=True).count() == 1
+        for removed_label in (
             "Завершено заданий",
             "Создано заданий",
             "Надёжность",
+            "Принято заданий",
+            "Подтверждённый вес",
+            "Неявки",
         ):
-            assert page.get_by_text(label, exact=True).count() == 1
-        for removed_label in ("Принято заданий", "Подтверждённый вес", "Неявки"):
             assert page.get_by_text(removed_label, exact=True).count() == 0
         body = page.locator("body").inner_text()
         assert malicious in body
@@ -1506,46 +1936,40 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         ):
             assert page.get_by_text(legacy_label, exact=True).count() == 0
         assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
-        assert page.get_by_role("button", name="Редактировать профиль").count() == 0
-        assert page.locator(".profile-field-row").count() == 4
-        assert page.locator(".profile-field-row").evaluate_all(
-            "nodes => nodes.slice(0, 4).every(node => "
-            "node.getBoundingClientRect().bottom <= innerHeight)"
-        )
+        assert page.locator(".profile-overview").is_visible()
+        assert page.url.endswith("#/profile")
+        assert page.locator("[data-profile-action]").count() == 5
 
-        page.get_by_role("button", name=re.compile("Город Буэнос-Айрес")).click()
-        page.get_by_label("Город").fill("Rosario")
+        page.get_by_role("button", name="Редактировать город").click()
+        page.get_by_role("textbox", name="Город", exact=True).fill("Rosario")
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_text(
-            "Не удалось сохранить. Повторите попытку — запрос останется тем же."  # noqa: RUF001
+            "Не удалось сохранить. Повторите попытку."  # noqa: RUF001
         ).wait_for()
-        assert page.get_by_label("Город").input_value() == "Rosario"
+        assert page.get_by_role("textbox", name="Город", exact=True).input_value() == "Rosario"
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_text(
-            "Не удалось сохранить. Повторите попытку — запрос останется тем же."  # noqa: RUF001
+            "Не удалось сохранить. Повторите попытку."  # noqa: RUF001
         ).wait_for()
         profile_updates_before = len(profile_update_keys)
-        _connected_control(page, "PE-063", "authoritative_profile_success").click()
-        page.get_by_role("button", name=re.compile("Город Rosario")).click()
-        assert page.get_by_label("Город").input_value() == "Rosario"
+        page.get_by_role("button", name="Сохранить").click()
+        page.get_by_role("button", name="Редактировать город").click()
+        assert page.get_by_role("textbox", name="Город", exact=True).input_value() == "Rosario"
         assert len(profile_update_keys) == profile_updates_before + 1
         assert profile_update_keys[0] == profile_update_keys[1] == profile_update_keys[2]
         assert page.get_by_text("Не удалось сохранить.", exact=False).count() == 0  # noqa: RUF001
 
-        page.get_by_label("Город").fill("x")
+        invalid_city = page.get_by_role("textbox", name="Город", exact=True)
+        invalid_city.fill("x")
+        profile_updates_before_invalid = len(profile_update_keys)
         page.get_by_role("button", name="Сохранить").click()
-        page.get_by_text("Проверьте значение поля.").wait_for()
-        assert profile_update_keys[3] != profile_update_keys[2]
-        page.get_by_role("button", name="Отмена").click()
+        assert invalid_city.evaluate("node => !node.checkValidity()")
+        assert len(profile_update_keys) == profile_updates_before_invalid
+        page.get_by_role("button", name="Назад").click()
         updates_before_cancel = len(profile_update_keys)
-        page.get_by_role(
-            "button",
-            name=re.compile("О себе Помогаю"),  # noqa: RUF001
-        ).click()
-        page.get_by_label("О себе").fill(  # noqa: RUF001
-            "Несохранённое значение профиля"
-        )
-        page.get_by_role("button", name="Отмена").click()
+        page.get_by_role("button", name="Редактировать обо мне").click()  # noqa: RUF001
+        page.get_by_label("Описание").fill("Несохранённое значение профиля")
+        page.get_by_role("button", name="Назад").click()
         assert len(profile_update_keys) == updates_before_cancel
         assert page.get_by_text("Помогаю собирать ясные планы.", exact=True).count() == 1
 
@@ -1843,18 +2267,18 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
             page.get_by_role("button", name="Профиль", exact=True).click()
-            page.locator(".profile-dashboard").wait_for()
+            page.locator(".profile-overview").wait_for()
+            assert page.url.endswith("#/profile")
             heading_box = page.locator(".screen-heading").bounding_box()
             assert heading_box is not None
-            assert heading_box["width"] <= 1
-            assert heading_box["height"] <= 1
+            assert 0 < heading_box["width"] <= width
+            assert heading_box["height"] > 0
+            assert page.locator("#screen-title").text_content() == "Профиль"
             assert page.get_by_text("Карма", exact=True).count() == 1
-            assert page.get_by_text("Надёжность", exact=True).count() == 1
-            assert page.get_by_text("—", exact=True).count() >= 4
-            assert page.locator(".profile-field-row").count() == 4
-            assert page.get_by_role("button", name="Редактировать профиль").count() == 0
+            assert page.get_by_text("Надёжность", exact=True).count() == 0
+            assert page.get_by_text("—", exact=True).count() >= 2
+            assert page.locator("[data-profile-action]").count() == 5
             assert page.locator('[data-screen-id="P07"]').count() == 0
-            page.locator('[data-screen-id="P06"]').wait_for()
             page.close()
         browser.close()
 
@@ -1877,6 +2301,7 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
         "display_name": "Мария",
         "karma": {"score": 2, "count": 2},
         "reliability": {"rate": "1.0"},
+        "can_rate_karma": True,
     }
     actions: list[tuple[str, str]] = []
     target_reads = 0
@@ -2006,7 +2431,8 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
         actions_before = len(actions)
         _connected_control(page, "PE-059", "authoritative_karma_success").click()
         page.get_by_role("button", name="К профилю").click()  # noqa: RUF001
-        page.get_by_text("3 · оценок: 3", exact=True).wait_for()
+        karma_metric = page.locator(".metric-card", has_text="Карма")
+        karma_metric.locator("strong", has_text="3").wait_for()
         assert len(actions) == actions_before + 3
 
         value_keys = [key for action, key in actions if action == "save_value"]

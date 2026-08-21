@@ -7,10 +7,13 @@ import pytest
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.domain.registration import (
     ProfileField,
+    ProfileLinkAction,
+    ProfileLinkCommand,
     ProfileListItemLengthError,
     ProfileListSizeError,
     RegistrationError,
     RegistrationStep,
+    normalize_profile_link_command,
     normalize_profile_value,
     normalize_registration_answer,
     require_invitation_manager,
@@ -78,6 +81,42 @@ def test_profile_lists_are_trimmed_deduplicated_and_bounded() -> None:
         normalize_profile_value(ProfileField.HELP_CATEGORIES, "x" * 81)
     with pytest.raises(RegistrationError):
         normalize_profile_value(ProfileField.TIMEZONE, "Mars/Olympus")
+
+
+def test_profile_link_commands_normalize_and_reject_unsafe_shapes() -> None:
+    created = normalize_profile_link_command(
+        ProfileLinkCommand(
+            ProfileLinkAction.CREATE, label="  My   site ", url="https://example.com/a#b"
+        )
+    )
+    assert (created.label, created.url, created.link_id) == (
+        "My site",
+        "https://example.com/a#b",
+        None,
+    )
+    link_id = uuid4()
+    assert (
+        normalize_profile_link_command(
+            ProfileLinkCommand(ProfileLinkAction.DELETE, link_id=link_id)
+        ).link_id
+        == link_id
+    )
+    for command in (
+        ProfileLinkCommand(
+            ProfileLinkAction.CREATE, link_id=link_id, label="x", url="https://x.io"
+        ),
+        ProfileLinkCommand(ProfileLinkAction.UPDATE, label="x", url="https://x.io"),
+        ProfileLinkCommand(ProfileLinkAction.DELETE, link_id=link_id, label="x"),
+        ProfileLinkCommand(ProfileLinkAction.CREATE, label="x", url="http://example.com"),
+        ProfileLinkCommand(ProfileLinkAction.CREATE, label="x", url="https://u:p@example.com"),
+        ProfileLinkCommand(ProfileLinkAction.CREATE, label="x", url="https://example.com/\n"),
+        ProfileLinkCommand(ProfileLinkAction.CREATE, label="x" * 33, url="https://example.com"),
+        ProfileLinkCommand(
+            ProfileLinkAction.CREATE, label="x", url="https://example.com/" + "x" * 2040
+        ),
+    ):
+        with pytest.raises(RegistrationError):
+            normalize_profile_link_command(command)
 
 
 def test_help_categories_accept_human_sized_descriptions() -> None:

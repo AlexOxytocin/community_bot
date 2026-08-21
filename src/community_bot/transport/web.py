@@ -8,9 +8,11 @@ import datetime
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -21,7 +23,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Res
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
@@ -72,8 +74,11 @@ from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.moderation import ModerationError, ResolutionCode
 from community_bot.domain.registration import (
     ProfileField,
+    ProfileLinkAction,
+    ProfileLinkCommand,
     RegistrationError,
     StaleRegistrationStepError,
+    normalize_profile_link_command,
 )
 from community_bot.domain.reputation import ReputationError as ReputationDomainError
 from community_bot.domain.tasks import (
@@ -92,6 +97,7 @@ _PROOF_FUTURE_SKEW_SECONDS = 30
 _PROOF_MAX_BYTES = 8192
 _PROOF_MAX_FIELDS = 32
 _MAX_TELEGRAM_USER_ID = 2**63 - 1
+_TELEGRAM_USERNAME = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 _MAX_IDEMPOTENCY_KEY = 2**63 - 1
 _SUBMISSION_BODY_MAX_BYTES = 4096
 _STATIC_DIR = Path(__file__).with_name("static")
@@ -116,6 +122,14 @@ class _Dto(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+@dataclass(frozen=True, slots=True)
+class TelegramIdentity:
+    """Trusted identity extracted only from signed Telegram initData."""
+
+    user_id: int
+    username: str | None
+
+
 class LevelDto(_Dto):
     number: int
     display_name: str
@@ -126,12 +140,20 @@ class ProfileStatisticsDto(_Dto):
     created_tasks: int | None
 
 
+class ProfileLinkDto(_Dto):
+    id: UUID
+    label: str
+    url: str
+
+
 class MeDto(_Dto):
     member_id: UUID
+    telegram_username: str | None
     display_name: str
     city: str | None
     short_bio: str | None
     skill_tags: tuple[str, ...]
+    profile_links: tuple[ProfileLinkDto, ...]
     credit_balance: int
     experience_total: int
     level: LevelDto
@@ -141,8 +163,32 @@ class MeDto(_Dto):
 class ProfileUpdateRequest(_Dto):
     model_config = ConfigDict(extra="forbid")
 
-    field: Literal["display_name", "city", "short_bio", "skill_tags"]
-    value: str
+    field: Literal["display_name", "city", "short_bio", "skill_tags", "profile_links"]
+    value: str | None = None
+    action: Literal["create", "update", "delete"] | None = None
+    link_id: UUID | None = None
+    label: str | None = None
+    url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> ProfileUpdateRequest:
+        """Reject mixed text/link command shapes before application mutation."""
+        if self.field != "profile_links":
+            if self.value is None or any(
+                item is not None for item in (self.action, self.link_id, self.label, self.url)
+            ):
+                raise ValueError("Invalid text profile update shape.")
+            return self
+        command = ProfileLinkCommand(
+            action=ProfileLinkAction(self.action) if self.action else ProfileLinkAction.CREATE,
+            link_id=self.link_id,
+            label=self.label,
+            url=self.url,
+        )
+        if self.value is not None or self.action is None:
+            raise ValueError("Invalid profile link update shape.")
+        normalize_profile_link_command(command)
+        return self
 
 
 class KarmaDto(_Dto):
@@ -164,10 +210,15 @@ class MemberDto(_Dto):
     city: str | None
     short_bio: str | None
     skill_tags: tuple[str, ...]
+    profile_links: tuple[ProfileLinkDto, ...]
     experience_total: int
     level_number: int
     karma: KarmaDto
     reliability: ReliabilityDto
+
+
+class MemberDetailDto(MemberDto):
+    can_rate_karma: bool
 
 
 class KarmaActionRequest(_Dto):
@@ -501,7 +552,7 @@ def create_web_app(
         except OverflowError:
             return _error_response(413, "payload_too_large")
         try:
-            telegram_user_id = validate_telegram_init_data(raw, bot_token=bot_token)
+            identity = validate_telegram_init_data(raw, bot_token=bot_token)
         except (TypeError, ValueError):
             return _error_response(401, "unauthorized")
         raw_token = secrets.token_bytes(32)
@@ -509,7 +560,8 @@ def create_web_app(
         now = datetime.datetime.now(datetime.UTC)
         try:
             member_id = await database.create_web_session(
-                telegram_user_id=telegram_user_id,
+                telegram_user_id=identity.user_id,
+                telegram_username=identity.username,
                 token_digest=digest,
                 authenticated_at=now,
                 expires_at=now + datetime.timedelta(seconds=_SESSION_LIFETIME_SECONDS),
@@ -586,13 +638,26 @@ def create_web_app(
             namespace=b"profile-update-v1",
         )
         try:
-            await registration.update_own_profile_field(
-                update_id=update_id,
-                actor_member_id=actor.member_id,
-                field=ProfileField(command.field),
-                raw_value=command.value,
-                replay_fingerprint=fingerprint,
-            )
+            if command.field == "profile_links":
+                await registration.update_own_profile_link(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    command=ProfileLinkCommand(
+                        ProfileLinkAction(command.action),
+                        command.link_id,
+                        command.label,
+                        command.url,
+                    ),
+                    replay_fingerprint=fingerprint,
+                )
+            else:
+                await registration.update_own_profile_field(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    field=ProfileField(command.field),
+                    raw_value=command.value or "",
+                    replay_fingerprint=fingerprint,
+                )
             profile = await registration.own_profile(actor)
             statistics = await reputation.own_statistics(actor)
         except StaleRegistrationStepError:
@@ -616,15 +681,17 @@ def create_web_app(
             raise HTTPException(status_code=403, detail="profile_unavailable") from error
         return _json_response(MembersDto(items=tuple(_member_dto(item) for item in page.items)))
 
-    @app.get("/api/v1/members/{member_id}", response_model=MemberDto)
+    @app.get("/api/v1/members/{member_id}", response_model=MemberDetailDto)
     async def member_detail(
         member_id: UUID, actor: ActorContext = Depends(current_actor)
     ) -> JSONResponse:
         try:
-            profile = await reputation.profile(actor=actor, target_id=member_id)
+            profile, can_rate_karma = await reputation.profile_detail(
+                actor=actor, target_id=member_id
+            )
         except (PermissionError, ProfileUnavailableError) as error:
             raise HTTPException(status_code=404, detail="not_found") from error
-        dto = _member_dto(profile)
+        dto = MemberDetailDto(**_member_dto(profile).model_dump(), can_rate_karma=can_rate_karma)
         return _json_response(dto)
 
     @app.post(
@@ -1313,8 +1380,8 @@ def validate_telegram_init_data(
     *,
     bot_token: str,
     now: datetime.datetime | None = None,
-) -> int:
-    """Validate raw Telegram Mini App initData and return its trusted user ID."""
+) -> TelegramIdentity:
+    """Validate raw Telegram Mini App initData and return its trusted identity."""
     if not raw or len(raw) > _PROOF_MAX_BYTES:
         raise ValueError("Invalid Telegram proof.")
     try:
@@ -1348,11 +1415,17 @@ def validate_telegram_init_data(
         auth_date = int(fields["auth_date"])
         user = json.loads(fields["user"])
         telegram_user_id = user["id"]
+        telegram_username = user.get("username")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("Invalid Telegram proof.") from error
     if isinstance(telegram_user_id, bool) or not isinstance(telegram_user_id, int):
         raise ValueError("Invalid Telegram proof.")
     if telegram_user_id < 1 or telegram_user_id > _MAX_TELEGRAM_USER_ID:
+        raise ValueError("Invalid Telegram proof.")
+    if telegram_username is not None and (
+        not isinstance(telegram_username, str)
+        or _TELEGRAM_USERNAME.fullmatch(telegram_username) is None
+    ):
         raise ValueError("Invalid Telegram proof.")
     current = now or datetime.datetime.now(datetime.UTC)
     current_timestamp = int(current.timestamp())
@@ -1361,7 +1434,7 @@ def validate_telegram_init_data(
         or current_timestamp - auth_date > _PROOF_MAX_AGE_SECONDS
     ):
         raise ValueError("Invalid Telegram proof.")
-    return telegram_user_id
+    return TelegramIdentity(telegram_user_id, telegram_username)
 
 
 async def _bounded_body(request: Request, *, limit: int) -> bytes:
@@ -1610,13 +1683,23 @@ def _karma_confirm_dto(target_id: UUID, result: KarmaVoteResult) -> KarmaActionD
 
 
 def _member_dto(profile: SafeProfile) -> MemberDto:
+    public_username = (
+        profile.telegram_username
+        if profile.telegram_username is not None
+        and _TELEGRAM_USERNAME.fullmatch(profile.telegram_username) is not None
+        else None
+    )
     return MemberDto(
         member_id=profile.member_id,
-        telegram_username=profile.telegram_username,
+        telegram_username=public_username,
         display_name=profile.display_name,
         city=profile.city,
         short_bio=profile.short_bio,
         skill_tags=profile.skill_tags,
+        profile_links=tuple(
+            ProfileLinkDto(id=item.id, label=item.label, url=item.url)
+            for item in profile.profile_links
+        ),
         experience_total=profile.experience_total,
         level_number=profile.level_number,
         karma=KarmaDto(score=profile.karma.score, count=profile.karma.count),
@@ -1632,10 +1715,15 @@ def _member_dto(profile: SafeProfile) -> MemberDto:
 def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
     return MeDto(
         member_id=profile.member_id,
+        telegram_username=profile.telegram_username,
         display_name=profile.display_name,
         city=profile.city,
         short_bio=profile.short_bio,
         skill_tags=profile.skill_tags,
+        profile_links=tuple(
+            ProfileLinkDto(id=item.id, label=item.label, url=item.url)
+            for item in profile.profile_links
+        ),
         credit_balance=profile.credit_balance,
         experience_total=profile.experience_total,
         level=LevelDto(

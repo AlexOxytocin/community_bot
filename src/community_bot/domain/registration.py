@@ -6,9 +6,16 @@ import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
+from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from community_bot.domain.members import Member, MemberRole, MemberStatus
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+_MAX_PROFILE_LINK_URL_LENGTH = 2048
 
 
 class RegistrationError(ValueError):
@@ -102,6 +109,67 @@ class ProfileField(StrEnum):
     HELP_CATEGORIES = "help_categories"
     SKILL_TAGS = "skill_tags"
     AVAILABILITY = "availability"
+
+
+class ProfileLinkAction(StrEnum):
+    """Supported mutations of one ordered public profile link."""
+
+    CREATE = "create"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileLink:
+    """Validated public profile link."""
+
+    id: UUID
+    label: str
+    url: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileLinkCommand:
+    """Strict command for one profile-link mutation."""
+
+    action: ProfileLinkAction
+    link_id: UUID | None = None
+    label: str | None = None
+    url: str | None = None
+
+
+def normalize_profile_link_command(command: ProfileLinkCommand) -> ProfileLinkCommand:
+    """Validate action shape and normalize untrusted link text."""
+    if command.action is ProfileLinkAction.CREATE:
+        valid_shape = (
+            command.link_id is None and command.label is not None and command.url is not None
+        )
+    elif command.action is ProfileLinkAction.UPDATE:
+        valid_shape = (
+            command.link_id is not None and command.label is not None and command.url is not None
+        )
+    else:
+        valid_shape = command.link_id is not None and command.label is None and command.url is None
+    if not valid_shape:
+        message = "Invalid profile link command."
+        raise RegistrationError(message)
+    if command.action is ProfileLinkAction.DELETE:
+        return command
+    label = _bounded_text(command.label or "", minimum=1, maximum=32, label="link label")
+    url = command.url or ""
+    invalid_url = "Invalid profile link URL."
+    if len(url) > _MAX_PROFILE_LINK_URL_LENGTH or any(
+        unicodedata.category(char) == "Cc" for char in url
+    ):
+        raise RegistrationError(invalid_url)
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise RegistrationError(invalid_url)
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise RegistrationError(invalid_url) from error
+    return ProfileLinkCommand(command.action, command.link_id, label, url)
 
 
 @dataclass(frozen=True, slots=True)
