@@ -289,6 +289,9 @@ class OwnedTaskAssigneeDto(_Dto):
 class OwnedTaskDto(_Dto):
     id: UUID
     title: str
+    description: str
+    completion_criteria: str
+    materials: dict[str, object]
     status: str
     performer_slots: int
     deadline_at: datetime.datetime
@@ -1929,6 +1932,9 @@ def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
     return OwnedTaskDto(
         id=card.task.id,
         title=card.task.title,
+        description=card.task.description,
+        completion_criteria=card.task.completion_criteria,
+        materials=dict(card.task.materials),
         status=card.task.status.value,
         performer_slots=card.task.performer_slots,
         deadline_at=card.task.deadline_at,

@@ -426,6 +426,36 @@ async def test_freeform_task_publishes_without_template_and_reserves_full_budget
     await database.dispose()
 
 
+async def test_freeform_task_can_publish_with_zero_credit_reward(database_url: str) -> None:
+    """A zero reward is valid and never reduces the creator's balance below zero."""
+    database = Database(database_url)
+    member = await prepare_member(database, telegram_user_id=19_625)
+    service = TaskService(database.unit_of_work)
+    selected_category = await category_id(database, "evaluation_testing")
+
+    draft_id, revision = await complete_freeform_preview(
+        service,
+        member=member,
+        selected_category_id=selected_category,
+        update_base=21_000,
+        kind=TaskKind.SOLO,
+        time_size=TaskTimeSize.XS,
+        performer_slots=1,
+        reward=0,
+    )
+    task = await service.publish(
+        PublishTaskCommand(21_100, member.telegram_user_id, draft_id, revision)
+    )
+
+    assert task.credit_reward_per_performer == 0
+    assert task.reserved_credit_total == 0
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        persisted = await session.get(MemberModel, member.id)
+    assert persisted is not None
+    assert persisted.credit_balance_cached == 5
+    await database.dispose()
+
+
 async def test_template_draft_edits_return_directly_to_preview(database_url: str) -> None:
     database = Database(database_url)
     member = await prepare_member(database, telegram_user_id=19_650)

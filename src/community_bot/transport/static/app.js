@@ -44,6 +44,12 @@ let screenRevision = 0;
 let currentMemberId = null;
 let activeProfileState = null;
 let memberProfileHasInternalHistory = false;
+const taskDraftSessionKey = () => `community-task-draft:${currentMemberId || "anonymous"}`;
+const rememberSessionTaskDraft = (draftId) => {
+  if (draftId) sessionStorage.setItem(taskDraftSessionKey(), draftId);
+};
+const isSessionTaskDraft = (draftId) => sessionStorage.getItem(taskDraftSessionKey()) === draftId;
+const forgetSessionTaskDraft = () => sessionStorage.removeItem(taskDraftSessionKey());
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -71,48 +77,53 @@ const telegramAvatarUrl = () => {
   return typeof value === "string" && value.startsWith("https://") ? value : null;
 };
 
-const lucideIcon = (name) => {
+const interfaceIcon = (name) => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
   svg.innerHTML = {
-    "arrow-left": '<path d="M19 12H5m7 7-7-7 7-7"/>',
-    "arrow-up-right": '<path d="M7 17 17 7M7 7h10v10"/>',
-    "chevron-right": '<path d="m9 18 6-6-6-6"/>',
-    "circle-plus": '<circle cx="12" cy="12" r="10"/><path d="M12 8v8m-4-4h8"/>',
-    pencil: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
-    "refresh-cw": '<path d="M21 12a9 9 0 0 0-15.4-6.4L3 8m0-5v5h5m-5 4a9 9 0 0 0 15.4 6.4L21 16m0 5v-5h-5"/>',
-    "trash-2": '<path d="M3 6h18m-2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-6 5v6m4-6v6"/>',
-    x: '<path d="m18 6-12 12M6 6l12 12"/>',
+    "arrow-left": '<path d="M20 12H7m5-6-6 6 6 6"/><path d="M4 5v14"/>',
+    "arrow-up-right": '<path d="M6 18 18 6M9 6h9v9"/><path d="M6 6v3"/>',
+    "chevron-right": '<path d="m9 5 7 7-7 7"/><path d="M5 5v14"/>',
+    "circle-plus": '<path d="M12 3 21 12 12 21 3 12Z"/><path d="M12 8v8m-4-4h8"/>',
+    pencil: '<path d="m6 18 1-5L16 4l4 4-9 9-5 1Z"/><path d="m14 6 4 4"/>',
+    "refresh-cw": '<path d="M19 8V4l2 2"/><path d="M20 6a8 8 0 1 0 1 7"/><path d="M5 16v4l-2-2"/><path d="M4 18a8 8 0 0 0-1-7"/>',
+    "trash-2": '<path d="M5 7h14l-1 14H6L5 7Z"/><path d="M3 7h18M9 7V4h6v3m-4 4v6m4-6v6"/>',
+    x: '<path d="m6 6 12 12M18 6 6 18"/><path d="M5 5h2m10 0h2m0 12v2m-14-2v2"/>',
   }[name] || "";
   return svg;
 };
 
-const trashIcon = () => lucideIcon("trash-2");
+const trashIcon = () => interfaceIcon("trash-2");
 
 const setupCityAutocomplete = (input, results, onChoose) => {
   let timer = null;
   let requestVersion = 0;
-  let selectedByList = false;
+  let outsideAbort = null;
   const close = () => {
     requestVersion += 1;
     clearTimeout(timer);
+    outsideAbort?.abort();
+    outsideAbort = null;
     results.classList.add("hidden");
     input.setAttribute("aria-expanded", "false");
   };
+  const open = () => {
+    results.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    outsideAbort?.abort();
+    outsideAbort = new AbortController();
+    document.addEventListener("pointerdown", (event) => {
+      if (event.target !== input && !results.contains(event.target)) close();
+    }, { capture: true, signal: outsideAbort.signal });
+  };
   input.addEventListener("input", () => {
-    if (selectedByList) {
-      selectedByList = false;
-      close();
-      return;
-    }
     clearTimeout(timer);
     const query = input.value.trim();
     if (query.length < 2) return close();
     const currentRequest = ++requestVersion;
     results.replaceChildren(element("p", "Ищем города…", "city-loading"));
-    results.classList.remove("hidden");
-    input.setAttribute("aria-expanded", "true");
+    open();
     timer = setTimeout(async () => {
       try {
         const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
@@ -123,16 +134,16 @@ const setupCityAutocomplete = (input, results, onChoose) => {
           option.setAttribute("role", "option");
           option.addEventListener("pointerdown", (event) => event.preventDefault());
           option.addEventListener("click", () => {
-            onChoose(item);
-            selectedByList = true;
             input.value = item.label;
-            input.dispatchEvent(new Event("input", { bubbles: true }));
+            onChoose(item);
+            input.dispatchEvent(new CustomEvent("citychoice", { detail: item, bubbles: true }));
+            close();
             input.focus();
           });
           return option;
         }));
-        results.classList.toggle("hidden", !response.items.length);
-        input.setAttribute("aria-expanded", String(Boolean(response.items.length)));
+        if (response.items.length) open();
+        else close();
       } catch {
         if (currentRequest === requestVersion) close();
       }
@@ -145,7 +156,9 @@ const setupCityAutocomplete = (input, results, onChoose) => {
     }
     if (event.key === "Escape") close();
   });
-  input.addEventListener("blur", () => setTimeout(close, 120));
+  input.addEventListener("blur", () => setTimeout(() => {
+    if (document.activeElement !== input && !results.contains(document.activeElement)) close();
+  }, 0));
   return close;
 };
 
@@ -610,7 +623,7 @@ function taskListCard(task, { preview = false } = {}) {
   const label = element("div", undefined, "task-card-title");
   label.append(element("h3", task.title));
   if (!preview) {
-    const chevron = lucideIcon("chevron-right");
+    const chevron = interfaceIcon("chevron-right");
     chevron.classList.add("chevron");
     label.append(chevron);
   }
@@ -626,11 +639,31 @@ function showCatalogFilters(push = true) {
   title.textContent = "Фильтры заданий";
   back.classList.remove("hidden");
   const form = element("form", undefined, "task-form card");
-  const formatLabel = element("label", "Формат");
+  const formatLabel = element("fieldset", undefined, "choice-field");
+  formatLabel.append(element("legend", "Формат"));
   const format = element("select");
+  format.className = "visually-hidden";
+  format.setAttribute("aria-label", "Формат");
   format.append(new Option("Любой", ""), new Option("Онлайн", "online"), new Option("Офлайн", "offline"));
   format.value = catalogFilters.format;
-  formatLabel.append(format);
+  const formatChoices = element("div", undefined, "type-segmented format-segmented");
+  const syncFormatChoices = () => {
+    for (const choice of formatChoices.querySelectorAll("button")) {
+      choice.setAttribute("aria-pressed", String(choice.dataset.format === format.value));
+    }
+  };
+  for (const [value, label] of [["", "Любой"], ["online", "Онлайн"], ["offline", "Офлайн"]]) {
+    const choice = element("button", label);
+    choice.type = "button";
+    choice.dataset.format = value;
+    choice.addEventListener("click", () => {
+      format.value = value;
+      syncFormatChoices();
+      format.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    formatChoices.append(choice);
+  }
+  formatLabel.append(format, formatChoices);
   const rewardLabel = element("label", "Награда от");
   const reward = element("input");
   reward.type = "number";
@@ -666,10 +699,11 @@ function showCatalogFilters(push = true) {
     rewardLabel.after(cityLabel);
   };
   format.addEventListener("change", syncCityFilter);
-  syncCityFilter();
   const apply = element("button", "Применить", "primary");
   apply.type = "submit";
   form.append(formatLabel, rewardLabel, apply);
+  syncFormatChoices();
+  syncCityFilter();
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     catalogFilters = {
@@ -681,11 +715,14 @@ function showCatalogFilters(push = true) {
     void loadCatalog(false);
   });
   replaceContent(connectedBoundary("T02", "content", form));
-  format.focus({ preventScroll: true });
+  formatChoices.querySelector("button[aria-pressed=\"true\"]")?.focus({ preventScroll: true });
 }
 
 async function taskCreationCommand(body) {
-  pendingTaskCreation ||= { key: newOperationKey(), body: JSON.stringify(body) };
+  const serialized = JSON.stringify(body);
+  if (!pendingTaskCreation || pendingTaskCreation.body !== serialized) {
+    pendingTaskCreation = { key: newOperationKey(), body: serialized };
+  }
   const response = await apiFetch("/api/v1/task-creation", {
     method: "POST",
     headers: {
@@ -730,6 +767,7 @@ function showTaskCreation(state, forceEdit = false) {
       status.textContent = "Публикуем задание…";
       try {
         await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
+        forgetSessionTaskDraft();
         history.replaceState({ screen: "task-creation", draftId: draft.id }, "", presentationLocationFor("T08", draft.id));
         const home = element("button", "К заданиям", "primary");
         home.addEventListener("click", () => {
@@ -748,7 +786,7 @@ function showTaskCreation(state, forceEdit = false) {
   const values = draft.values;
   const form = element("form", undefined, "task-form");
   form.classList.add("creation-form");
-  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания *</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания *" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section">Число исполнителей *<input name="performer_slots" aria-label="Число исполнителей *" type="number" min="1" required></label><label class="section">Формат *<select name="format" aria-label="Формат *" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section">Категория *<select name="category_id" aria-label="Категория *" required></select></label><label class="section">Название *<input name="title" aria-label="Название *" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать *<textarea name="description" aria-label="Что нужно сделать *" required></textarea></label><label class="section">Критерии приёмки *<textarea name="completion_criteria" aria-label="Критерии приёмки *" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер *<select name="time_size" aria-label="Размер *" required></select></label><label class="section">Награда за исполнителя *<input name="credit_reward_per_performer" aria-label="Награда за исполнителя *" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок *<input name="deadline_at" aria-label="Срок *" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text" aria-label="Материалы"></textarea><small>Ссылка или короткий текст</small></label>';
+  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section"><span class="field-label">Число исполнителей</span><input name="performer_slots" aria-label="Число исполнителей" type="number" min="1" required></label><fieldset class="type-field choice-field"><legend>Формат</legend><select class="visually-hidden" name="format" aria-label="Формат" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select><div class="type-segmented format-segmented"><button type="button" data-task-format="online">Онлайн</button><button type="button" data-task-format="offline">Офлайн</button></div></fieldset></div><label class="section"><span class="field-label">Категория</span><select name="category_id" aria-label="Категория" required></select></label><label class="section"><span class="field-label">Название</span><input name="title" aria-label="Название" required></label><label class="section"><span class="field-label">Что нужно сделать</span><textarea name="description" aria-label="Что нужно сделать" required></textarea></label><label class="section"><span class="field-label">Критерии приёмки</span><textarea name="completion_criteria" aria-label="Критерии приёмки" required></textarea></label><div class="form-grid two-columns"><label class="section"><span class="field-label">Размер</span><select name="time_size" aria-label="Размер" required></select></label><label class="section"><span class="field-label">Награда за исполнителя</span><input name="credit_reward_per_performer" aria-label="Награда за исполнителя" type="number" min="0" step="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section"><span class="field-label">Срок</span><input name="deadline_at" aria-label="Срок" type="datetime-local" required></label><label class="section"><span class="field-label">Материалы</span><textarea name="material_text" aria-label="Материалы"></textarea></label>';
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
@@ -764,6 +802,11 @@ function showTaskCreation(state, forceEdit = false) {
     form.performer_slots.value = String(group ? groupSlots : 1);
     updateReserve();
   };
+  const syncTaskFormat = () => {
+    for (const button of form.querySelectorAll("[data-task-format]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.taskFormat === form.format.value));
+    }
+  };
   for (const button of form.querySelectorAll("[data-kind]")) {
     button.addEventListener("click", () => {
       if (form.task_kind.value === "group" && Number(form.performer_slots.value) >= 2) {
@@ -773,8 +816,15 @@ function showTaskCreation(state, forceEdit = false) {
       syncTaskKind();
     });
   }
+  for (const button of form.querySelectorAll("[data-task-format]")) {
+    button.addEventListener("click", () => {
+      form.format.value = button.dataset.taskFormat;
+      syncTaskFormat();
+      form.format.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
   for (const name of ["title", "description", "completion_criteria"]) form[name].value = values[name] || "";
-  form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
+  form.credit_reward_per_performer.value = values.credit_reward_per_performer ?? "";
   form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
   const deadlineMin = new Date(Date.now() + 60_000);
   deadlineMin.setSeconds(0, 0);
@@ -788,7 +838,7 @@ function showTaskCreation(state, forceEdit = false) {
   const updateReserve = () => {
     const slots = Number(form.performer_slots.value || 0);
     const reward = Number(form.credit_reward_per_performer.value || 0);
-    reserve.textContent = slots && reward ? `${slots * reward} кредитов` : "—";
+    reserve.textContent = slots && Number.isFinite(reward) ? `${slots * reward} кредитов` : "—";
   };
   form.performer_slots.addEventListener("input", updateReserve);
   form.performer_slots.addEventListener("input", () => {
@@ -822,7 +872,8 @@ function showTaskCreation(state, forceEdit = false) {
       return;
     }
     if (cityField) return;
-    cityField = element("label", "Город *", "section city-field");
+    cityField = element("label", undefined, "section city-field");
+    cityField.append(element("span", "Город", "field-label"));
     const input = element("input");
     input.name = "city";
     input.autocomplete = "off";
@@ -854,8 +905,19 @@ function showTaskCreation(state, forceEdit = false) {
   form.format.addEventListener("change", syncFormat);
   syncFormat();
   syncTaskKind();
+  syncTaskFormat();
   updateReserve();
   updateDeadlineValidity();
+  form.addEventListener("invalid", (event) => {
+    const control = event.target;
+    const field = control.closest("label, fieldset");
+    field?.classList.toggle("required-error", control.validity.valueMissing);
+  }, true);
+  form.addEventListener("input", (event) => {
+    const control = event.target;
+    const field = control.closest("label, fieldset");
+    if (control.validity.valid) field?.classList.remove("required-error");
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
@@ -874,6 +936,7 @@ function showTaskCreation(state, forceEdit = false) {
         if (!started.draft) throw new Error("task_draft_unavailable");
         draft = started.draft;
         target = draft;
+        rememberSessionTaskDraft(draft.id);
       }
       await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
       history.pushState(
@@ -950,6 +1013,7 @@ function showTaskRecovery(state) {
       await taskCreationCommand({ action: "start_new", draft_id: draft.id, expected_revision: draft.revision });
       created = true;
       const fresh = await getJson("/api/v1/task-creation");
+      rememberSessionTaskDraft(fresh.draft?.id);
       history.pushState(
         { screen: "task-creation", draftId: fresh.draft?.id || null },
         "",
@@ -987,7 +1051,7 @@ async function openTaskCreation(forceEdit = false, recovery = null) {
   try {
     const state = await getJson("/api/v1/task-creation");
     const draftId = state.draft?.id;
-    if (draftId && hasMeaningfulTaskDraft(state.draft)
+    if (draftId && hasMeaningfulTaskDraft(state.draft) && isSessionTaskDraft(draftId)
       && (recovery === "entry" || (recovery === "stale" && state.needs_edit))) {
       history.replaceState(
         { screen: "task-recovery", draftId },
@@ -1021,7 +1085,7 @@ const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
 
 const pencilButton = (label, route, state, revision, key) => {
   const button = element("button", undefined, "profile-pencil");
-  button.append(lucideIcon("pencil"));
+  button.append(interfaceIcon("pencil"));
   button.type = "button";
   button.dataset.profileAction = key;
   button.setAttribute("aria-label", `Редактировать ${label.toLowerCase()}`);
@@ -1038,7 +1102,7 @@ const openPublicUrl = (url, options = {}) => {
 const publicLinkRow = (link) => {
   const button = element("button", undefined, "public-link-row");
   button.type = "button";
-  button.append(element("strong", link.label), element("span", link.url), lucideIcon("arrow-up-right"));
+  button.append(element("strong", link.label), element("span", link.url), interfaceIcon("arrow-up-right"));
   button.addEventListener("click", () => openPublicUrl(link.url));
   return button;
 };
@@ -1204,13 +1268,15 @@ function profileTextEditor(state, revision, name) {
   const counter = element("p", `${input.value.length} / ${config.max}`, "profile-counter");
   const status = element("p", draft.message, draft.message ? "status" : "status hidden");
   status.setAttribute("aria-live", "polite");
-  input.addEventListener("input", () => {
+  const syncDraftValue = () => {
     if (draft.value !== input.value) draft.operationKey = null;
     draft.value = input.value;
     draft.message = "";
     counter.textContent = `${input.value.length} / ${config.max}`;
     status.className = "status hidden";
-  });
+  };
+  input.addEventListener("input", syncDraftValue);
+  input.addEventListener("citychoice", syncDraftValue);
   const save = element("button", "Сохранить", "primary");
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
@@ -1250,7 +1316,7 @@ function profileSkillsEditor(state, revision) {
     draft.items.forEach((item, index) => {
       const skill = element("div", undefined, "skill-draft-row");
       const remove = element("button", undefined, "skill-remove");
-      remove.append(lucideIcon("x"));
+      remove.append(interfaceIcon("x"));
       remove.type = "button";
       remove.setAttribute("aria-label", `Удалить навык ${item}`);
       remove.addEventListener("click", () => { draft.items.splice(index, 1); draft.operationKey = null; renderItems(); });
@@ -1320,7 +1386,7 @@ function profileLinksList(state, revision) {
     row.append(element("div", undefined, "managed-link-copy"));
     row.firstChild.append(element("strong", link.label), element("span", link.url));
     const edit = element("button", undefined, "profile-pencil");
-    edit.append(lucideIcon("pencil"));
+    edit.append(interfaceIcon("pencil"));
     edit.type = "button";
     edit.dataset.linkId = link.id;
     edit.setAttribute("aria-label", `Изменить ссылку ${link.label}`);
@@ -1534,7 +1600,7 @@ function memberListDetails(items) {
       avatar(member.display_name, member.avatar_url, "member-avatar"),
       copy,
       (() => {
-        const chevron = lucideIcon("chevron-right");
+        const chevron = interfaceIcon("chevron-right");
         chevron.classList.add("member-chevron");
         return chevron;
       })(),
@@ -2193,7 +2259,7 @@ async function acceptTask(task, button, status) {
 const ordersRefreshControl = (reload) => {
   const toolbar = element("div", undefined, "orders-toolbar");
   const refresh = element("button", undefined, "secondary orders-refresh");
-  refresh.append(lucideIcon("refresh-cw"), element("span", "Обновить"));
+  refresh.append(interfaceIcon("refresh-cw"), element("span", "Обновить"));
   refresh.type = "button";
   refresh.addEventListener("click", () => {
     refresh.disabled = true;
@@ -2207,7 +2273,7 @@ const ordersRefreshControl = (reload) => {
 function showAssignments(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const boundary = element("section", undefined, "state-view");
   boundary.dataset.screenId = "M01";
@@ -2271,7 +2337,7 @@ function showTakenAssignments() {
   screenRevision += 1;
   history.replaceState({ screen: "assignments-taken" }, "", presentationLocationFor("M02"));
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const boundary = connectedBoundary("M02", "content");
   const tabs = element("div", undefined, "segmented root-tabs");
@@ -2317,7 +2383,7 @@ async function loadAssignments(push = true) {
   const path = "/api/v1/assignments?status=all&limit=20";
   if (push) history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   replaceContent(element("p", "Загружаем заказы…", "status muted"));
   try {
@@ -2378,7 +2444,10 @@ function showOwnedTask(task, push = true) {
     element("h3", task.title),
     section("Статус", createdTaskStatus(task.status)),
     section("Слоты", `${task.assignees.length}/${task.performer_slots}`),
+    section("Описание", task.description),
+    section("Критерии выполнения", task.completion_criteria),
   );
+  for (const value of Object.values(task.materials || {})) detail.append(section("Материал", value));
   for (const assignee of task.assignees) {
     detail.append(section(assignee.display_name, assignmentStatus(assignee.status)));
   }
@@ -2448,7 +2517,7 @@ function confirmOwnedTaskCancellation(task) {
 function renderCreatedAssignments(revision) {
   if (revision !== screenRevision) return;
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const boundary = connectedBoundary("M09", "content");
   boundary.classList.add("owned-tasks-view");
@@ -2538,7 +2607,7 @@ async function loadCreatedReviews(push = true) {
     renderCreatedAssignments(revision);
   } else {
     setNavigation("assignments", false);
-    title.textContent = "Мои задания";
+  title.textContent = "Задания";
     back.classList.add("hidden");
     replaceContent(element("p", "Загружаем созданные задания…", "status muted"));
   }

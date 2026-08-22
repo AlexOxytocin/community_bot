@@ -1000,6 +1000,7 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
         for width, height in ((375, 812), (430, 932)):
             page = _new_page(browser)
             page.set_viewport_size({"width": width, "height": height})
+            page.set_default_timeout(5_000)
             page.route(
                 "**/api/v1/me",
                 lambda route: route.fulfill(
@@ -1106,12 +1107,17 @@ def test_catalog_actions_filters_and_list_density_are_compact(  # noqa: PLR0915
         for width, height in ((375, 812), (430, 932)):
             page = _new_page(browser)
             page.set_viewport_size({"width": width, "height": height})
+            page.set_default_timeout(5_000)
             page.route(
                 "**/api/v1/me",
                 lambda route: route.fulfill(json={"member_id": "me", "display_name": "Алекс"}),
             )
             page.route(
                 "**/api/v1/tasks",
+                lambda route: route.fulfill(json={"items": tasks, "next_cursor": None}),
+            )
+            page.route(
+                "**/api/v1/tasks?*",
                 lambda route: route.fulfill(json={"items": tasks, "next_cursor": None}),
             )
             page.goto(mini_app_url)
@@ -1155,7 +1161,7 @@ def test_catalog_actions_filters_and_list_density_are_compact(  # noqa: PLR0915
             page.get_by_role("button", name="Назад").click()
             catalog.wait_for()
             page.get_by_role("button", name="Фильтры", exact=True).click()
-            page.get_by_label("Формат").select_option("online")
+            page.get_by_role("button", name="Онлайн", exact=True).click()
             page.get_by_label("Награда от").fill("3")
             page.get_by_role("button", name="Применить").click()
             active_filters = page.get_by_role("button", name="Фильтры, выбрано: 2")
@@ -1186,6 +1192,27 @@ def test_catalog_actions_filters_and_list_density_are_compact(  # noqa: PLR0915
             catalog.wait_for()
             assert page.locator(".catalog-view .task-card").count() == 3
             assert page.get_by_role("button", name="Фильтры, выбрано: 2").is_visible()
+
+            page.get_by_role("button", name="Фильтры, выбрано: 2").click()
+            page.route(
+                "**/api/v1/task-cities**",
+                lambda route: route.fulfill(
+                    json={"items": [{"value": "Moscow, Russia", "label": "Moscow, Russia"}]}
+                ),
+            )
+            page.get_by_role("button", name="Офлайн", exact=True).click()
+            city = page.get_by_label("Город")
+            city.fill("Moscow")
+            page.locator(".city-loading").wait_for()
+            page.get_by_role("option", name="Moscow, Russia", exact=True).click()
+            assert page.locator(".city-results").evaluate(
+                "node => node.classList.contains('hidden')"
+            )
+            page.get_by_role("button", name="Применить").click()
+            page.get_by_role("button", name=re.compile(r"Фильтры, выбрано: [23]")).click()
+            offline = page.get_by_role("button", name="Офлайн", exact=True)
+            assert offline.get_attribute("aria-pressed") == "true"
+            assert page.get_by_label("Город").input_value() == "Moscow, Russia"
             page.close()
         browser.close()
 
@@ -3534,6 +3561,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
+        page.set_default_timeout(5_000)
         page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
         page.route(
             "**/api/v1/tasks", lambda route: route.fulfill(json={"items": [], "next_cursor": None})
@@ -3545,8 +3573,8 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
                 json={
                     "items": [
                         {
-                            "value": "Buenos Aires — Argentina",
-                            "label": "Buenos Aires — Argentina",
+                            "value": "Buenos Aires, Argentina",
+                            "label": "Buenos Aires, Argentina",
                         }
                     ]
                 }
@@ -3557,16 +3585,16 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert actions == []
         assert page.locator('[data-screen-id="T04B"]').count() == 0
         required_labels = (
-            "Тип задания *",
-            "Число исполнителей *",
-            "Формат *",
-            "Категория *",
-            "Название *",
-            "Что нужно сделать *",
-            "Критерии приёмки *",
-            "Размер *",
-            "Награда за исполнителя *",
-            "Срок *",
+            "Тип задания",
+            "Число исполнителей",
+            "Формат",
+            "Категория",
+            "Название",
+            "Что нужно сделать",
+            "Критерии приёмки",
+            "Размер",
+            "Награда за исполнителя",
+            "Срок",
         )
         required_controls = [page.get_by_label(label, exact=True) for label in required_labels]
         assert [control.count() for control in required_controls] == [1] * len(required_labels)
@@ -3577,10 +3605,10 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert page.locator('[name="material_url"]').count() == 0
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         assert actions == []
-        assert page.get_by_label("Название *", exact=True).evaluate(
+        assert page.get_by_label("Название", exact=True).evaluate(
             "node => node.matches(':invalid')"
         )
-        slots = page.get_by_label("Число исполнителей *", exact=True)
+        slots = page.get_by_label("Число исполнителей", exact=True)
         assert slots.input_value() == "1"
         assert slots.is_disabled()
         assert page.get_by_label("Город").count() == 0
@@ -3593,28 +3621,32 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert slots.is_disabled()
         page.get_by_role("button", name="Групповое", exact=True).click()
         assert slots.input_value() == "3"
-        page.get_by_label("Категория *", exact=True).select_option(task_id)
-        page.get_by_label("Размер *", exact=True).select_option("s")
-        page.get_by_label("Награда за исполнителя *", exact=True).fill("3")
-        page.get_by_label("Название *", exact=True).fill("<script>globalThis.pwned=true</script>")
-        page.get_by_label("Что нужно сделать *", exact=True).fill(
+        page.get_by_label("Категория", exact=True).select_option(task_id)
+        page.get_by_label("Размер", exact=True).select_option("s")
+        page.get_by_label("Награда за исполнителя", exact=True).fill("3")
+        page.get_by_label("Название", exact=True).fill("<script>globalThis.pwned=true</script>")
+        page.get_by_label("Что нужно сделать", exact=True).fill(
             "Проверить безопасный предпросмотр."
         )
-        page.get_by_label("Критерии приёмки *", exact=True).fill("Есть результат.")
-        page.get_by_label("Срок *", exact=True).fill("2026-08-21T20:00")
-        page.get_by_label("Число исполнителей *", exact=True).fill("2")
-        page.get_by_label("Формат *", exact=True).select_option("offline")
+        page.get_by_label("Критерии приёмки", exact=True).fill("Есть результат.")
+        page.get_by_label("Срок", exact=True).fill("2027-08-21T20:00")
+        page.get_by_label("Число исполнителей", exact=True).fill("2")
+        page.get_by_role("button", name="Офлайн", exact=True).click()
         city = page.get_by_label("Город")
         assert city.evaluate("node => node.required")
         city.fill("Buenos Aires")
-        page.get_by_role("option", name="Buenos Aires — Argentina").click()
+        page.get_by_role("option", name="Buenos Aires, Argentina").wait_for()
+        page.get_by_role("heading", name="Создать задание").click()
         page.locator(".city-results").wait_for(state="hidden")
-        page.get_by_label("Формат *", exact=True).select_option("online")
+        city.fill("Buenos Aires")
+        page.get_by_role("option", name="Buenos Aires, Argentina").click()
+        page.locator(".city-results").wait_for(state="hidden")
+        page.get_by_role("button", name="Онлайн", exact=True).click()
         assert page.get_by_label("Город").count() == 0
-        page.get_by_label("Формат *", exact=True).select_option("offline")
+        page.get_by_role("button", name="Офлайн", exact=True).click()
         city = page.get_by_label("Город")
         city.fill("Buenos Aires")
-        page.get_by_role("option", name="Buenos Aires — Argentina").click()
+        page.get_by_role("option", name="Buenos Aires, Argentina").click()
         page.locator(".city-results").wait_for(state="hidden")
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         page.get_by_text("Не удалось сохранить задание").wait_for()  # noqa: RUF001
@@ -3629,7 +3661,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         page.get_by_text("Предпросмотр устарел").wait_for()
         page.get_by_role("button", name="Редактировать черновик").click()
-        page.get_by_label("Срок *", exact=True).fill("2026-08-22T20:00")
+        page.get_by_label("Срок", exact=True).fill("2027-08-22T20:00")
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         commands_before = len(commands)
         page.locator('[data-screen-id="T06"]').wait_for()
@@ -3680,14 +3712,14 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
             "title",
         }
         assert saved_form["materials"] == {}
-        assert saved_form["city"] == "Buenos Aires — Argentina"
+        assert saved_form["city"] == "Buenos Aires, Argentina"
         assert commands[-2][1:] == commands[-1][1:]
         assert commands[4][2]["expected_revision"] == 1
         repaired_form = commands[4][2]["form"]
         assert isinstance(repaired_form, dict)
         repaired_deadline = repaired_form["deadline_at"]
         assert isinstance(repaired_deadline, str)
-        assert "2026-08-22" in repaired_deadline
+        assert "2027-08-22" in repaired_deadline
         assert len({key for _action, key, _body in commands[1:]}) == 5
         browser.close()
 
@@ -3760,6 +3792,7 @@ def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noq
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
+        page.set_default_timeout(5_000)
         page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
         page.route(
             "**/api/v1/tasks",
@@ -3767,6 +3800,9 @@ def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noq
         )
         page.route("**/api/v1/task-creation", creation)
         page.goto(mini_app_url)
+        page.evaluate(
+            "value => sessionStorage.setItem('community-task-draft:anonymous', value)", old_id
+        )
         page.get_by_role("button", name="+ Создать", exact=True).click()
         page.get_by_text("Сохранённое задание", exact=True).wait_for()
         assert page.get_by_text("Предпросмотр устарел", exact=False).count() == 1
@@ -3789,7 +3825,7 @@ def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noq
         assert page.get_by_label("Название").input_value() == ""
         assert page.url.endswith(f"#/compose/tasks/{new_id}?view_state=t05")
         page.get_by_role("button", name="Назад").click()
-        page.locator('[data-screen-id="T04B"]').wait_for()
+        page.locator('[data-screen-id="T05"]').wait_for()
         assert page.get_by_text("Предпросмотр устарел", exact=False).count() == 0
         browser.close()
 

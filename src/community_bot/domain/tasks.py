@@ -29,7 +29,6 @@ _MAX_URL_LENGTH = 700
 _MIN_FREEFORM_RESULT_LENGTH = 10
 _MAX_FREEFORM_ATTACHMENTS = 5
 _MAX_FREEFORM_ATTACHMENT_NAME_LENGTH = 120
-_XL_MIN_REWARD_EXCLUSIVE = 10
 _HTTP_URL = TypeAdapter(HttpUrl)
 _URI_SCHEME = re.compile(r"\b([a-z][a-z0-9+.-]*):\/\/", re.IGNORECASE)
 _HTTP_URI = re.compile(r"https?:\/\/[^\s]+", re.IGNORECASE)
@@ -197,18 +196,13 @@ def validate_freeform_slots(value: int, *, kind: TaskKind) -> int:
     return value
 
 
-def validate_freeform_reward(size: TaskTimeSize, value: int) -> int:
-    """Validate one creator-selected reward against the selected size bucket."""
+def validate_freeform_reward(_size: TaskTimeSize, value: int) -> int:
+    """Validate that a free-form reward is a non-negative whole credit amount."""
     if isinstance(value, bool) or not isinstance(value, int):
         message = "Task reward must be an integer."
         raise TaskError(message)
-    spec = TASK_TIME_SIZE_SPECS[size]
-    if spec.reward_options is not None:
-        if value not in spec.reward_options:
-            message = "Task reward is outside the selected size options."
-            raise TaskError(message)
-    elif value <= _XL_MIN_REWARD_EXCLUSIVE:
-        message = "XL task reward must be greater than 10."
+    if value < 0:
+        message = "Task reward cannot be negative."
         raise TaskError(message)
     return value
 

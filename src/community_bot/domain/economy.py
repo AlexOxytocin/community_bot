@@ -506,8 +506,8 @@ def _amount_command(
     task_id: UUID | None = None,
     assignment_id: UUID | None = None,
 ) -> EconomyCommand:
-    if amount <= 0:
-        message = "Operation amount must be positive."
+    if amount < 0:
+        message = "Operation amount cannot be negative."
         raise EconomyError(message)
     credit_delta = amount * spec.credit_sign
     command = EconomyCommand(
@@ -568,21 +568,21 @@ def _validate_starting_grant(command: EconomyCommand) -> None:
 
 def _validate_reservation(command: EconomyCommand) -> None:
     _require(
-        condition=command.credit_delta < 0 and command.experience_delta == 0,
+        condition=command.credit_delta <= 0 and command.experience_delta == 0,
         message="Invalid reward reservation.",
     )
 
 
 def _validate_reward(command: EconomyCommand) -> None:
     _require(
-        condition=command.credit_delta > 0 and command.experience_delta == command.credit_delta,
+        condition=command.credit_delta >= 0 and command.experience_delta == command.credit_delta,
         message="Invalid experience-bearing reward.",
     )
 
 
 def _validate_refund(command: EconomyCommand) -> None:
     _require(
-        condition=command.credit_delta > 0 and command.experience_delta == 0,
+        condition=command.credit_delta >= 0 and command.experience_delta == 0,
         message="Invalid reward refund.",
     )
 

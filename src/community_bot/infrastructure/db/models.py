@@ -461,7 +461,7 @@ class TaskModel(Base):
             "'completed', 'cancelled', 'closed_for_new_performers')",
             name="ck_tasks_status",
         ),
-        CheckConstraint("credit_reward_per_performer > 0", name="ck_tasks_reward"),
+        CheckConstraint("credit_reward_per_performer >= 0", name="ck_tasks_reward"),
         CheckConstraint("performer_slots > 0", name="ck_tasks_slots"),
         CheckConstraint("reserved_credit_total >= 0", name="ck_tasks_reserved_nonnegative"),
         CheckConstraint("minimum_level > 0", name="ck_tasks_minimum_level"),
@@ -1399,12 +1399,12 @@ class AccountTransactionModel(Base):
         CheckConstraint(
             "(transaction_type = 'starting_grant' AND credit_delta IN (5, 10) "
             "AND experience_delta = 0) OR "
-            "(transaction_type = 'task_reward_reserved' AND credit_delta < 0 "
+            "(transaction_type = 'task_reward_reserved' AND credit_delta <= 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type IN ('task_reward_earned', 'partial_task_reward', "
-            "'community_task_reward') AND credit_delta > 0 "
+            "'community_task_reward') AND credit_delta >= 0 "
             "AND experience_delta = credit_delta) OR "
-            "(transaction_type = 'task_reward_refunded' AND credit_delta > 0 "
+            "(transaction_type = 'task_reward_refunded' AND credit_delta >= 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'penalty' AND credit_delta < 0 "
             "AND experience_delta = 0) OR "

@@ -110,12 +110,9 @@ def test_freeform_size_reward_slots_and_text_boundaries() -> None:
     assert validate_freeform_slots(3, kind=TaskKind.GROUP) == 3
     with pytest.raises(TaskError):
         validate_freeform_slots(1, kind=TaskKind.GROUP)
-    assert validate_freeform_reward(TaskTimeSize.XS, 2) == 2
+    assert validate_freeform_reward(TaskTimeSize.XS, 0) == 0
+    assert validate_freeform_reward(TaskTimeSize.S, 5) == 5
     assert validate_freeform_reward(TaskTimeSize.XL, 11) == 11
-    with pytest.raises(TaskError):
-        validate_freeform_reward(TaskTimeSize.XL, 10)
-    with pytest.raises(TaskError):
-        validate_freeform_reward(TaskTimeSize.S, 5)
     assert validate_freeform_text("  Короткое название  ", field="title") == "Короткое название"
     with pytest.raises(TaskError):
         validate_freeform_text("x" * 81, field="title")
@@ -144,7 +141,7 @@ def test_freeform_validators_reject_invalid_shapes() -> None:
         with pytest.raises(TaskError):
             validate_freeform_reward(TaskTimeSize.S, cast("int", invalid_reward))
     with pytest.raises(TaskError):
-        validate_freeform_reward(TaskTimeSize.M, 8)
+        validate_freeform_reward(TaskTimeSize.M, -1)
 
     with pytest.raises(TaskError):
         validate_freeform_text("value", field="unknown")

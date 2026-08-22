@@ -794,12 +794,12 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         canonical_city = next(
             item["value"]
             for item in city_search.json()["items"]
-            if item["value"] == "Buenos Aires — Argentina"
+            if item["value"] == "Buenos Aires, Argentina"
         )
         collisions = await client.get("/api/v1/task-cities", params={"q": "Dondo", "limit": 10})
         collision_values = [item["value"] for item in collisions.json()["items"]]
         assert collisions.status_code == 200
-        assert collision_values.count("Dondo — Angola · 05") == 1
+        assert collision_values.count("Dondo, Angola, 05") == 1
         assert len(collision_values) == len(set(collision_values))
         form = {
             "category_id": state["categories"][0]["id"],
@@ -808,7 +808,7 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
             "title": "  Помочь с проверкой  ",  # noqa: RUF001
             "description": "  Проверить понятный результат и вернуть замечания.  ",
             "completion_criteria": "  Есть конкретный список замечаний.  ",
-            "credit_reward_per_performer": 3,
+            "credit_reward_per_performer": 2,
             "deadline_at": (now + datetime.timedelta(days=2)).isoformat(),
             "format": "online",
             "materials": {"url": "  https://example.com/task  "},
@@ -841,7 +841,7 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
             await client.post("/api/v1/task-creation", json=conflict, headers=save_headers)
         ).status_code == 409
         preview = (await client.get("/api/v1/task-creation")).json()
-        assert preview["preview"]["reward_total"] == 6
+        assert preview["preview"]["reward_total"] == 4
         assert preview["draft"]["values"]["title"] == "Помочь с проверкой"  # noqa: RUF001
         assert preview["draft"]["values"]["materials"] == {"url": "https://example.com/task"}
         assert preview["draft"]["values"]["city"] is None

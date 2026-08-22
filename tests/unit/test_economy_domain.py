@@ -79,9 +79,15 @@ def test_named_economy_factories_produce_exact_deltas_and_metadata() -> None:
     assert commands[-1].reason == "Correction"
 
 
-@pytest.mark.parametrize("amount", [0, -1])
-def test_amount_factories_reject_nonpositive_values(amount: int) -> None:
-    with pytest.raises(EconomyError, match="positive"):
+def test_zero_task_reward_factories_keep_a_zero_auditable_delta() -> None:
+    command = earn_reward(member_id=uuid4(), amount=0, idempotency_key="reward")
+
+    assert (command.credit_delta, command.experience_delta) == (0, 0)
+
+
+@pytest.mark.parametrize("amount", [-1])
+def test_amount_factories_reject_negative_values(amount: int) -> None:
+    with pytest.raises(EconomyError, match="negative"):
         earn_reward(member_id=uuid4(), amount=amount, idempotency_key="reward")
 
 

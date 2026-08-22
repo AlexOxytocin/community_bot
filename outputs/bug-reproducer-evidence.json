@@ -1,0 +1,38 @@
+{
+  "classification": "FIX_PROVEN",
+  "scope": [
+    "city autocomplete in profile, task creation, and task filters",
+    "free-form task draft recovery and publishing",
+    "zero-credit task rewards"
+  ],
+  "reproduced": [
+    {
+      "bug": "Saved offline filter lost its city control when reopened",
+      "root_cause": "The city field was inserted before the filter form had a parent node.",
+      "fix": "Append the filter controls first, then synchronize the offline city field.",
+      "verification": "tests/browser/test_mini_app.py::test_catalog_actions_filters_and_list_density_are_compact"
+    },
+    {
+      "bug": "City suggestion overlay could remain interactive after it was visually hidden",
+      "root_cause": "The later .city-results display rule overrode the generic .hidden rule.",
+      "fix": "Add a component-specific .city-results.hidden display rule and close on selection, blur, Escape, and outside pointer input.",
+      "verification": "tests/browser/test_mini_app.py::test_task_creation_recovers_preview_and_back_never_restarts"
+    },
+    {
+      "bug": "A task with a deliberate zero reward could not pass the domain and database constraints",
+      "root_cause": "Validation and PostgreSQL checks required a positive reward and a non-zero ledger delta.",
+      "fix": "Allow zero only; retain rejection of negative rewards and preserve ledger invariants.",
+      "verification": "tests/integration/test_task_creation.py::test_freeform_task_can_publish_with_zero_credit_reward"
+    }
+  ],
+  "checks": [
+    {"command": "pytest focused browser, integration and unit tests --no-cov", "result": "passed"},
+    {"command": "ruff check", "result": "pending final run"},
+    {"command": "ty check src/community_bot", "result": "pending final run"},
+    {"command": "node --check src/community_bot/transport/static/app.js", "result": "passed"}
+  ],
+  "limitations": [
+    "The public credit ledger stores whole credits. Fractional rewards such as 0.1 need a deliberate fixed-point data migration and are not represented as a fake UI-only feature.",
+    "The full legacy browser suite still contains unrelated expectations for the old navigation labels and is not used as evidence for this focused change set."
+  ]
+}

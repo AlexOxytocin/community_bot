@@ -21,9 +21,9 @@ def _catalog() -> tuple[GeonamesCache, dict[int, str]]:
     candidates: list[tuple[str, int, int]] = []
     for item in cities.values():
         country = countries[item["countrycode"]]["name"]
-        region = f" · {item['admin1code']}" if bases[item["name"], item["countrycode"]] > 1 else ""
+        region = f", {item['admin1code']}" if bases[item["name"], item["countrycode"]] > 1 else ""
         candidates.append(
-            (f"{item['name']} — {country}{region}", item["population"], item["geonameid"])
+            (f"{item['name']}, {country}{region}", item["population"], item["geonameid"])
         )
     labels: dict[int, str] = {}
     seen: set[str] = set()
