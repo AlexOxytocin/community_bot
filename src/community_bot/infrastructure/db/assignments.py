@@ -253,10 +253,14 @@ async def _cards(
     cards = []
     for assignment, task, display_name, case_id, case_status, case_revision, payload in rows:
         summary = None
+        attachments: tuple[dict[str, str], ...] = ()
         if isinstance(payload, dict):
             value = payload.get("result", payload.get("summary"))
             if isinstance(value, str):
                 summary = value
+            value = payload.get("attachments", [])
+            if isinstance(value, list):
+                attachments = tuple(item for item in value if isinstance(item, dict))
         cards.append(
             AssignmentCard(
                 assignment=_assignment(assignment),
@@ -267,6 +271,7 @@ async def _cards(
                 reviewer_admin_id=task.reviewer_admin_id,
                 performer_display_name=str(display_name),
                 result_summary=summary,
+                attachments=attachments,
                 case_id=case_id,
                 case_status=case_status,
                 case_revision=case_revision,

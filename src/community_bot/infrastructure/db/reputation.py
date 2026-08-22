@@ -442,6 +442,8 @@ async def safe_profile(session: AsyncSession, member_id: UUID) -> SafeProfile | 
     return SafeProfile(
         member_id=member.id,
         telegram_username=member.telegram_username,
+        show_telegram_username=member.show_telegram_username,
+        avatar_url=member.avatar_url,
         display_name=member.display_name,
         city=member.city,
         short_bio=member.short_bio,

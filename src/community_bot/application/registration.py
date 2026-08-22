@@ -134,6 +134,8 @@ class ProfileData:
 
     member_id: UUID
     telegram_username: str | None
+    show_telegram_username: bool
+    avatar_url: str | None
     display_name: str
     city: str | None
     timezone: str
@@ -812,6 +814,8 @@ class RegistrationService:
             return ProfileSnapshot(
                 member_id=profile.member_id,
                 telegram_username=profile.telegram_username,
+                show_telegram_username=profile.show_telegram_username,
+                avatar_url=profile.avatar_url,
                 display_name=profile.display_name,
                 city=profile.city,
                 timezone=profile.timezone,

@@ -1,4 +1,7 @@
-import { applyPlatformTheme, openExternalLink } from "/mini-assets/platform.js";
+import { applyPlatformTheme, openExternalLink } from "./platform.js";
+
+const miniAppBasePath = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const miniAppPath = (path) => (path.startsWith("/") ? `${miniAppBasePath}${path}` : path);
 
 applyPlatformTheme();
 
@@ -13,10 +16,20 @@ const participantsNav = document.getElementById("participants-nav");
 const moderationNav = document.getElementById("moderation-nav");
 const heading = title.parentElement;
 let tasks = [];
+let catalogNextCursor = null;
+let catalogLoadingMore = false;
 let assignments = [];
+let assignmentsNextCursor = null;
+let assignmentsLoadingMore = false;
+const acceptedTaskIds = new Set();
+try {
+  JSON.parse(sessionStorage.getItem("acceptedTaskIds") || "[]").forEach((id) => acceptedTaskIds.add(id));
+} catch {
+  sessionStorage.removeItem("acceptedTaskIds");
+}
 let ownedTasks = [];
 let ownedReviews = [];
-let catalogFilters = { format: "", minReward: "" };
+let catalogFilters = { format: "", minReward: "", city: "" };
 const pendingAcceptKeys = new Map();
 let pendingTaskCreation = null;
 let returnFocusTaskId = null;
@@ -39,12 +52,101 @@ const element = (tag, text, className) => {
   return node;
 };
 
-const trashIcon = () => {
+const avatar = (name, url, className = "avatar") => {
+  const node = element("span", undefined, className);
+  if (url) {
+    const image = document.createElement("img");
+    image.src = miniAppPath(url);
+    image.alt = "";
+    image.addEventListener("error", () => image.remove());
+    node.append(image);
+  } else {
+    node.textContent = initialsFor(name);
+  }
+  return node;
+};
+
+const telegramAvatarUrl = () => {
+  const value = globalThis.Telegram?.WebApp?.initDataUnsafe?.user?.photo_url;
+  return typeof value === "string" && value.startsWith("https://") ? value : null;
+};
+
+const lucideIcon = (name) => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
-  svg.innerHTML = '<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>';
+  svg.innerHTML = {
+    "arrow-left": '<path d="M19 12H5m7 7-7-7 7-7"/>',
+    "arrow-up-right": '<path d="M7 17 17 7M7 7h10v10"/>',
+    "chevron-right": '<path d="m9 18 6-6-6-6"/>',
+    "circle-plus": '<circle cx="12" cy="12" r="10"/><path d="M12 8v8m-4-4h8"/>',
+    pencil: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    "refresh-cw": '<path d="M21 12a9 9 0 0 0-15.4-6.4L3 8m0-5v5h5m-5 4a9 9 0 0 0 15.4 6.4L21 16m0 5v-5h-5"/>',
+    "trash-2": '<path d="M3 6h18m-2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-6 5v6m4-6v6"/>',
+    x: '<path d="m18 6-12 12M6 6l12 12"/>',
+  }[name] || "";
   return svg;
+};
+
+const trashIcon = () => lucideIcon("trash-2");
+
+const setupCityAutocomplete = (input, results, onChoose) => {
+  let timer = null;
+  let requestVersion = 0;
+  let selectedByList = false;
+  const close = () => {
+    requestVersion += 1;
+    clearTimeout(timer);
+    results.classList.add("hidden");
+    input.setAttribute("aria-expanded", "false");
+  };
+  input.addEventListener("input", () => {
+    if (selectedByList) {
+      selectedByList = false;
+      close();
+      return;
+    }
+    clearTimeout(timer);
+    const query = input.value.trim();
+    if (query.length < 2) return close();
+    const currentRequest = ++requestVersion;
+    results.replaceChildren(element("p", "Ищем города…", "city-loading"));
+    results.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    timer = setTimeout(async () => {
+      try {
+        const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
+        if (currentRequest !== requestVersion || document.activeElement !== input || input.value.trim() !== query) return;
+        results.replaceChildren(...response.items.map((item) => {
+          const option = element("button", item.label, "city-option");
+          option.type = "button";
+          option.setAttribute("role", "option");
+          option.addEventListener("pointerdown", (event) => event.preventDefault());
+          option.addEventListener("click", () => {
+            onChoose(item);
+            selectedByList = true;
+            input.value = item.label;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.focus();
+          });
+          return option;
+        }));
+        results.classList.toggle("hidden", !response.items.length);
+        input.setAttribute("aria-expanded", String(Boolean(response.items.length)));
+      } catch {
+        if (currentRequest === requestVersion) close();
+      }
+    }, 180);
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      results.querySelector("button")?.focus();
+    }
+    if (event.key === "Escape") close();
+  });
+  input.addEventListener("blur", () => setTimeout(close, 120));
+  return close;
 };
 
 const markTransition = (node, id, trigger) => {
@@ -63,6 +165,8 @@ const resetScrollPosition = () => {
 
 const replaceContent = (...nodes) => {
   content.replaceChildren(...nodes);
+  content.classList.remove("screen-content-enter");
+  requestAnimationFrame(() => content.classList.add("screen-content-enter"));
   resetScrollPosition();
   queueMicrotask(resetScrollPosition);
   requestAnimationFrame(resetScrollPosition);
@@ -223,6 +327,11 @@ const clearJsonCache = () => {
   jsonRequests.clear();
   jsonCacheGeneration += 1;
 };
+
+const rememberAcceptedTask = (taskId) => {
+  acceptedTaskIds.add(taskId);
+  sessionStorage.setItem("acceptedTaskIds", JSON.stringify([...acceptedTaskIds]));
+};
 const cachedJson = (path) => jsonCache.get(jsonCacheKey(path))?.data;
 const storeJson = (path, data) => {
   jsonCache.set(jsonCacheKey(path), { data, storedAt: Date.now() });
@@ -230,7 +339,7 @@ const storeJson = (path, data) => {
 };
 
 const apiFetch = async (path, options = {}) => {
-  const response = await fetch(path, options);
+  const response = await fetch(miniAppPath(path), options);
   const method = (options.method || "GET").toUpperCase();
   if (response.status === 401) clearJsonCache();
   else if (response.ok && method !== "GET") {
@@ -333,9 +442,14 @@ const assignmentError = (code, retry) => {
 const assignmentStatus = (value) => ({
   accepted: "Принято",
   submitted: "Результат отправлен",
+  approved: "Принято",
+  partially_approved: "Принято частично",
+  rejected: "Отклонено",
   rejected_pending_dispute: "Ожидает решения",
   disputed: "Открыт спор",
   reviewer_required: "Нужен проверяющий",
+  cancelled: "Отменено",
+  no_show: "Не выполнено",
 }[value] || value);
 
 const createdAssignmentsButton = element("button", "Созданные мной", "back");
@@ -364,6 +478,7 @@ function showCatalog(revision = ++screenRevision) {
   const visibleTasks = tasks.filter((task) => (
     (!catalogFilters.format || task.format === catalogFilters.format)
     && (!catalogFilters.minReward || task.credit_reward_per_performer >= Number(catalogFilters.minReward))
+    && (!catalogFilters.city || task.city === catalogFilters.city)
   ));
   boundary.dataset.state = visibleTasks.length ? "content" : "empty";
   const activeFilterCount = Object.values(catalogFilters).filter(Boolean).length;
@@ -402,6 +517,13 @@ function showCatalog(revision = ++screenRevision) {
     list.append(button);
   }
   boundary.append(list);
+  if (catalogNextCursor) {
+    const more = element("button", "Показать ещё", "secondary");
+    more.type = "button";
+    more.disabled = catalogLoadingMore;
+    more.addEventListener("click", () => void loadMoreCatalog(revision));
+    boundary.append(more);
+  }
   replaceContent(boundary);
   focusTarget?.focus({ preventScroll: true });
   returnFocusTaskId = null;
@@ -411,11 +533,14 @@ function showCatalog(revision = ++screenRevision) {
 
 async function loadCatalog(push = true) {
   const revision = ++screenRevision;
-  const path = "/api/v1/tasks";
+  const params = new URLSearchParams();
+  if (catalogFilters.city) params.set("city", catalogFilters.city);
+  const path = `/api/v1/tasks${params.size ? `?${params}` : ""}`;
   const cached = cachedJson(path);
   if (push) history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
   if (cached) {
     tasks = cached.items;
+    catalogNextCursor = cached.next_cursor;
     showCatalog(revision);
   } else {
     setNavigation("catalog", false);
@@ -427,15 +552,37 @@ async function loadCatalog(push = true) {
     const page = await getJson(path, (refreshed) => {
       if (revision !== screenRevision) return;
       tasks = refreshed.items;
+      catalogNextCursor = refreshed.next_cursor;
       showCatalog(revision);
     });
     if (revision !== screenRevision) return;
     if (cached) return;
     tasks = page.items;
+    catalogNextCursor = page.next_cursor;
     showCatalog(revision);
   } catch {
     if (revision !== screenRevision || cached) return;
     replaceContent(element("p", "Не удалось загрузить задания.", "status"));
+  }
+}
+
+async function loadMoreCatalog(revision) {
+  if (!catalogNextCursor || catalogLoadingMore) return;
+
+  catalogLoadingMore = true;
+  showCatalog(revision);
+  try {
+    const params = new URLSearchParams({ cursor: catalogNextCursor });
+    if (catalogFilters.city) params.set("city", catalogFilters.city);
+    const page = await getJson(`/api/v1/tasks?${params}`);
+    if (revision !== screenRevision) return;
+
+    const ids = new Set(tasks.map((task) => task.id));
+    tasks = [...tasks, ...page.items.filter((task) => !ids.has(task.id))];
+    catalogNextCursor = page.next_cursor;
+  } finally {
+    catalogLoadingMore = false;
+    if (revision === screenRevision) showCatalog(revision);
   }
 }
 
@@ -462,7 +609,11 @@ function taskListCard(task, { preview = false } = {}) {
   meta.append(deadline);
   const label = element("div", undefined, "task-card-title");
   label.append(element("h3", task.title));
-  if (!preview) label.append(element("span", "›", "chevron"));
+  if (!preview) {
+    const chevron = lucideIcon("chevron-right");
+    chevron.classList.add("chevron");
+    label.append(chevron);
+  }
   card.append(chips, label, element("p", task.description, "muted"), meta);
   return card;
 }
@@ -486,14 +637,48 @@ function showCatalogFilters(push = true) {
   reward.min = "1";
   reward.value = catalogFilters.minReward;
   rewardLabel.append(reward);
+  let selectedCity = catalogFilters.city;
+  let cityLabel = null;
+  const syncCityFilter = () => {
+    if (format.value !== "offline") {
+      selectedCity = "";
+      cityLabel?.remove();
+      cityLabel = null;
+      return;
+    }
+    if (cityLabel) return;
+    cityLabel = element("label", "Город", "city-field");
+    const city = element("input");
+    city.type = "search";
+    city.autocomplete = "off";
+    city.placeholder = "Начните вводить город";
+    city.value = selectedCity;
+    city.setAttribute("role", "combobox");
+    city.setAttribute("aria-autocomplete", "list");
+    city.setAttribute("aria-expanded", "false");
+    const results = element("div", undefined, "city-results hidden");
+    results.setAttribute("role", "listbox");
+    setupCityAutocomplete(city, results, (item) => { selectedCity = item.value; });
+    city.addEventListener("input", () => {
+      if (city.value !== selectedCity) selectedCity = "";
+    });
+    cityLabel.append(city, results);
+    rewardLabel.after(cityLabel);
+  };
+  format.addEventListener("change", syncCityFilter);
+  syncCityFilter();
   const apply = element("button", "Применить", "primary");
   apply.type = "submit";
   form.append(formatLabel, rewardLabel, apply);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    catalogFilters = { format: format.value, minReward: reward.value };
+    catalogFilters = {
+      format: format.value,
+      minReward: reward.value,
+      city: format.value === "offline" ? selectedCity : "",
+    };
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    showCatalog();
+    void loadCatalog(false);
   });
   replaceContent(connectedBoundary("T02", "content", form));
   format.focus({ preventScroll: true });
@@ -629,7 +814,6 @@ function showTaskCreation(state, forceEdit = false) {
   form.append(submit, saveStatus);
   let selectedCity = values.format === "offline" ? values.city || "" : "";
   let cityField = null;
-  let cityTimer = null;
   const syncFormat = () => {
     if (form.format.value !== "offline") {
       selectedCity = "";
@@ -652,43 +836,17 @@ function showTaskCreation(state, forceEdit = false) {
     results.id = "task-city-results";
     results.setAttribute("role", "listbox");
     input.setAttribute("aria-controls", results.id);
-    const choose = (item) => {
+    setupCityAutocomplete(input, results, (item) => {
       selectedCity = item.value;
-      input.value = item.label;
       input.setCustomValidity("");
-      input.setAttribute("aria-expanded", "false");
-      results.classList.add("hidden");
-    };
+    });
     input.addEventListener("input", () => {
-      selectedCity = "";
-      input.setCustomValidity("Выберите город из списка.");
-      clearTimeout(cityTimer);
-      const query = input.value.trim();
-      if (!query) {
-        results.classList.add("hidden");
-        input.setAttribute("aria-expanded", "false");
+      if (input.value === selectedCity) {
+        input.setCustomValidity("");
         return;
       }
-      cityTimer = setTimeout(async () => {
-        const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
-        if (!cityField?.isConnected || input.value.trim() !== query) return;
-        results.replaceChildren();
-        for (const item of response.items) {
-          const option = element("button", item.label, "city-option");
-          option.type = "button";
-          option.setAttribute("role", "option");
-          option.addEventListener("click", () => choose(item));
-          results.append(option);
-        }
-        results.classList.toggle("hidden", !response.items.length);
-        input.setAttribute("aria-expanded", String(Boolean(response.items.length)));
-      }, 200);
-    });
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        results.querySelector("button")?.focus();
-      }
+      selectedCity = "";
+      input.setCustomValidity("Выберите город из списка.");
     });
     cityField.append(input, results);
     form.querySelector("[data-format-row]").after(cityField);
@@ -732,13 +890,21 @@ function showTaskCreation(state, forceEdit = false) {
       }
       saveStatus.textContent = error.message === "invalid_task_city"
         ? "Выберите город из списка."
-        : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
+        : error.message === "insufficient_credits"
+          ? "Не хватает кредитов для этой награды. Уменьшите сумму или число исполнителей."
+          : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
     }
   });
   replaceContent(connectedBoundary("T05", "content", form));
 }
+
+const hasMeaningfulTaskDraft = (draft) => Boolean(
+  draft?.values && Object.values(draft.values).some((value) => (
+    typeof value === "string" ? value.trim() : value != null
+  )),
+);
 
 function showTaskRecovery(state) {
   const draft = state.draft;
@@ -821,7 +987,8 @@ async function openTaskCreation(forceEdit = false, recovery = null) {
   try {
     const state = await getJson("/api/v1/task-creation");
     const draftId = state.draft?.id;
-    if (draftId && (recovery === "entry" || (recovery === "stale" && state.needs_edit))) {
+    if (draftId && hasMeaningfulTaskDraft(state.draft)
+      && (recovery === "entry" || (recovery === "stale" && state.needs_edit))) {
       history.replaceState(
         { screen: "task-recovery", draftId },
         "",
@@ -853,7 +1020,8 @@ const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
 const pencilButton = (label, route, state, revision, key) => {
-  const button = element("button", "✎", "profile-pencil");
+  const button = element("button", undefined, "profile-pencil");
+  button.append(lucideIcon("pencil"));
   button.type = "button";
   button.dataset.profileAction = key;
   button.setAttribute("aria-label", `Редактировать ${label.toLowerCase()}`);
@@ -870,26 +1038,83 @@ const openPublicUrl = (url, options = {}) => {
 const publicLinkRow = (link) => {
   const button = element("button", undefined, "public-link-row");
   button.type = "button";
-  button.append(element("strong", link.label), element("span", link.url), element("span", "↗"));
+  button.append(element("strong", link.label), element("span", link.url), lucideIcon("arrow-up-right"));
   button.addEventListener("click", () => openPublicUrl(link.url));
   return button;
 };
 
 function ownProfileOverview(state, revision) {
   const { me, member } = state.profile;
+  const editing = state.route === "/profile/settings";
   const view = element("section", undefined, "profile-overview");
+  const settings = element("button", editing ? "Готово" : "Настройки профиля", "secondary");
+  settings.type = "button";
+  settings.addEventListener("click", () => openProfileRoute(
+    state,
+    revision,
+    editing ? "/profile" : "/profile/settings",
+    true,
+  ));
+  view.append(settings);
   const identity = element("section", undefined, "profile-card profile-identity-card");
   const copy = element("div", undefined, "identity-copy");
   copy.append(element("h2", me.display_name));
-  if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
+  if (me.telegram_username && me.show_telegram_username !== false) {
+    copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
+  }
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(
-    element("span", initialsFor(me.display_name), "avatar"),
-    copy,
-    pencilButton("имя", "/profile/edit/name", state, revision, "name"),
-  );
+  identity.append(avatar(me.display_name, me.avatar_url || telegramAvatarUrl()), copy);
+  if (editing) identity.append(pencilButton("имя", "/profile/edit/name", state, revision, "name"));
+  view.append(identity);
+  if (editing) {
+    const settingsCard = element("section", undefined, "profile-card identity-settings");
+    settingsCard.append(element("span", "Видимость и аватар", "section-label"));
+    const avatarInput = document.createElement("input");
+    avatarInput.type = "file";
+    avatarInput.accept = "image/jpeg,image/png,image/webp";
+    avatarInput.className = "visually-hidden";
+    const avatarLabel = element("label", undefined, "avatar-upload-control");
+    avatarLabel.htmlFor = "profile-avatar-input";
+    avatarInput.id = "profile-avatar-input";
+    avatarLabel.append(element("span", "Выбрать изображение"), avatarInput);
+    const avatarStatus = element("p", "", "status hidden");
+    avatarInput.addEventListener("change", async () => {
+      const file = avatarInput.files?.[0];
+      if (!file) return;
+      avatarInput.disabled = true;
+      avatarStatus.className = "status";
+      avatarStatus.textContent = "Загружаем аватар…";
+      try {
+        const uploaded = await uploadFile("/api/v1/me/avatar", file);
+        me.avatar_url = uploaded.avatar_url;
+        avatarStatus.className = "status success";
+        avatarStatus.textContent = "Аватар обновлён.";
+        showProfileState(state, revision);
+      } catch {
+        avatarStatus.textContent = "Не удалось загрузить аватар.";
+        avatarInput.disabled = false;
+      }
+    });
+    const visibility = element("label", undefined, "compact-switch");
+    const checkbox = element("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = me.show_telegram_username !== false;
+    checkbox.dataset.usernameVisibility = "true";
+    visibility.append(checkbox, element("span", "Показывать username другим участникам"));
+    const status = element("p", "", "status hidden");
+    const save = element("button", "Сохранить настройки", "primary");
+    save.type = "button";
+    save.addEventListener("click", () => void saveProfileCommand(
+      state, revision, save, status,
+      { field: "show_telegram_username", value: String(checkbox.checked) },
+      "/profile/settings", "[data-username-visibility]",
+    ));
+    settingsCard.append(avatarLabel, avatarStatus, visibility, status, save);
+    view.append(settingsCard);
+  }
   const city = element("section", undefined, "profile-card profile-inline-card");
-  city.append(element("div", undefined, "profile-copy"), pencilButton("город", "/profile/edit/city", state, revision, "city"));
+  city.append(element("div", undefined, "profile-copy"));
+  if (editing) city.append(pencilButton("город", "/profile/edit/city", state, revision, "city"));
   city.firstChild.append(element("span", "Город", "section-label"), element("strong", me.city || "Не указан"));
   const metrics = element("div", undefined, "metric-grid");
   for (const [value, label] of [[me.credit_balance, "Кредиты"], [me.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
@@ -897,7 +1122,7 @@ function ownProfileOverview(state, revision) {
     metric.append(element("strong", valueOrDash(value)), element("span", label));
     metrics.append(metric);
   }
-  view.append(identity, city, metrics);
+  view.append(city, metrics);
   const blocks = [
     ["ОБО МНЕ", me.short_bio, "/profile/edit/bio", "bio", "Добавить описание", "Расскажите о себе"],
     ["НАВЫКИ", me.skill_tags, "/profile/edit/skills", "skills", "Добавить навыки", "Добавьте навыки"],
@@ -906,7 +1131,8 @@ function ownProfileOverview(state, revision) {
     const filled = Array.isArray(value) ? value.length > 0 : Boolean(value);
     const block = element("section", undefined, filled ? "profile-card profile-content-card" : "profile-empty-card");
     if (filled) {
-      block.append(element("h3", label, "section-label"), pencilButton(label, route, state, revision, key));
+      block.append(element("h3", label, "section-label"));
+      if (editing) block.append(pencilButton(label, route, state, revision, key));
       if (Array.isArray(value)) {
         const chips = element("div", undefined, "profile-chips");
         value.forEach((item) => chips.append(element("span", item)));
@@ -926,7 +1152,8 @@ function ownProfileOverview(state, revision) {
   const linksBlock = element("section", undefined, links.length ? "profile-links-block" : "profile-empty-card");
   if (links.length) {
     const header = element("div", undefined, "profile-section-heading");
-    header.append(element("h3", "Ссылки"), pencilButton("ссылки", "/profile/links", state, revision, "links"));
+    header.append(element("h3", "Ссылки"));
+    if (editing) header.append(pencilButton("ссылки", "/profile/links", state, revision, "links"));
     linksBlock.append(header);
     links.forEach((link) => linksBlock.append(publicLinkRow(link)));
   } else {
@@ -962,6 +1189,18 @@ function profileTextEditor(state, revision, name) {
   input.maxLength = config.max;
   input.required = true;
   label.append(input);
+  if (name === "city") {
+    label.classList.add("city-field");
+    input.autocomplete = "off";
+    input.placeholder = "Начните вводить город";
+    const results = element("div", undefined, "city-results hidden");
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    results.setAttribute("role", "listbox");
+    setupCityAutocomplete(input, results, () => {});
+    label.append(results);
+  }
   const counter = element("p", `${input.value.length} / ${config.max}`, "profile-counter");
   const status = element("p", draft.message, draft.message ? "status" : "status hidden");
   status.setAttribute("aria-live", "polite");
@@ -976,7 +1215,11 @@ function profileTextEditor(state, revision, name) {
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, `/profile`, `[data-profile-action="${name}"]`);
+    if (draft.value === current) {
+      openProfileRoute(state, revision, state.editReturnRoute || "/profile", false);
+      return;
+    }
+    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, state.editReturnRoute || "/profile", `[data-profile-action="${name}"]`);
   });
   form.append(label, counter, status, save);
   queueMicrotask(() => input.focus({ preventScroll: true }));
@@ -1006,7 +1249,8 @@ function profileSkillsEditor(state, revision) {
     list.replaceChildren();
     draft.items.forEach((item, index) => {
       const skill = element("div", undefined, "skill-draft-row");
-      const remove = element("button", "×", "skill-remove");
+      const remove = element("button", undefined, "skill-remove");
+      remove.append(lucideIcon("x"));
       remove.type = "button";
       remove.setAttribute("aria-label", `Удалить навык ${item}`);
       remove.addEventListener("click", () => { draft.items.splice(index, 1); draft.operationKey = null; renderItems(); });
@@ -1030,6 +1274,14 @@ function profileSkillsEditor(state, revision) {
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const pending = input.value.trim().replace(/\s+/g, " ");
+    if (pending && !draft.items.some((item) => item.toLowerCase() === pending.toLowerCase())) {
+      draft.items.push(pending);
+      input.value = "";
+      status.className = "status";
+      status.textContent = "Сохраняем один навык. Чтобы добавить несколько, вводите их по одному через +.";
+      renderItems();
+    }
     await saveProfileCommand(state, revision, save, status, { field: "skill_tags", value: draft.items.join("\n") }, "/profile", '[data-profile-action="skills"]');
   });
   renderItems();
@@ -1042,6 +1294,7 @@ async function saveProfileCommand(state, revision, button, status, payload, dest
   button.disabled = true;
   status.className = "status";
   status.textContent = "Сохраняем…";
+  state.draft ||= { route: state.route, operationKey: null };
   state.draft.operationKey ||= newOperationKey();
   try {
     const updated = await submissionRequest("/api/v1/me/profile", "PUT", state.draft.operationKey, payload);
@@ -1066,7 +1319,8 @@ function profileLinksList(state, revision) {
     const row = element("div", undefined, "managed-link-row");
     row.append(element("div", undefined, "managed-link-copy"));
     row.firstChild.append(element("strong", link.label), element("span", link.url));
-    const edit = element("button", "✎", "profile-pencil");
+    const edit = element("button", undefined, "profile-pencil");
+    edit.append(lucideIcon("pencil"));
     edit.type = "button";
     edit.dataset.linkId = link.id;
     edit.setAttribute("aria-label", `Изменить ссылку ${link.label}`);
@@ -1125,7 +1379,7 @@ function profileLinkEditor(state, revision, linkId = null) {
   let presets = null;
   if (!existing) {
     presets = element("div", undefined, "link-presets");
-    ["LinkedIn", "GitHub", "Сайт", "YouTube"].forEach((value) => {
+    ["LinkedIn", "GitHub", "Instagram", "YouTube"].forEach((value) => {
       const preset = element("button", value, "link-preset");
       preset.type = "button";
       preset.addEventListener("click", () => {
@@ -1138,15 +1392,12 @@ function profileLinkEditor(state, revision, linkId = null) {
   }
   const urlLabel = element("label", "Ссылка");
   const urlInput = element("input");
-  urlInput.type = "url";
+  urlInput.type = "text";
   urlInput.value = draft.url;
   urlInput.maxLength = 2048;
   urlInput.required = true;
-  urlInput.placeholder = "https://";
-  urlLabel.append(
-    urlInput,
-    element("small", "Только полный адрес, начинающийся с https://", "profile-helper"),
-  );
+  urlInput.placeholder = "instagram.com/username";
+  urlLabel.append(urlInput);
   const status = element("p", "", "status hidden");
   const changed = () => {
     draft.label = labelInput.value;
@@ -1218,6 +1469,9 @@ function profileDeleteConfirm(state, revision, linkId) {
 }
 
 function openProfileRoute(state, revision, route, push) {
+  if (route.startsWith("/profile/edit/")) {
+    state.editReturnRoute = state.route === "/profile/settings" ? "/profile/settings" : "/profile";
+  }
   state.route = route;
   state.draft = state.draft?.route === route ? state.draft : null;
   if (push) history.pushState({ screen: "profile", route }, "", `#${route}`);
@@ -1270,17 +1524,20 @@ function memberListDetails(items) {
       element("strong", member.display_name, "member-row-name"),
       element("span", `Уровень ${member.level_number}`, "level-badge"),
     );
-    const metadata = [...(member.skill_tags || []).slice(0, 2), member.city]
-      .filter(Boolean).slice(0, 3).join(" · ");
+    const metadata = member.short_bio || member.city;
     copy.append(identity);
     if (metadata) copy.append(element("span", metadata, "member-row-metadata"));
     const stats = element("span", undefined, "member-row-stats");
     stats.append(element("span", `Карма ${member.karma.score}`));
     copy.append(stats);
     button.append(
-      element("span", initialsFor(member.display_name), "member-avatar"),
+      avatar(member.display_name, member.avatar_url, "member-avatar"),
       copy,
-      element("span", "›", "member-chevron"),
+      (() => {
+        const chevron = lucideIcon("chevron-right");
+        chevron.classList.add("member-chevron");
+        return chevron;
+      })(),
     );
     button.addEventListener("click", () => showMemberProfile(member.member_id));
     row.append(button);
@@ -1491,7 +1748,7 @@ function safeMemberDetails(member) {
     copy.append(username);
   }
   copy.append(element("p", [member.city, `Уровень ${member.level_number}`].filter(Boolean).join(" · "), "muted"));
-  identity.append(element("span", initialsFor(member.display_name), "avatar"), copy);
+  identity.append(avatar(member.display_name, member.avatar_url), copy);
   const metrics = element("div", undefined, "metric-grid foreign-metrics");
   for (const [value, label] of [[member.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
     const metric = element("article", undefined, "metric-card");
@@ -1777,7 +2034,8 @@ function showProfileState(state, revision) {
     headingText = link?.label || "Изменить ссылку";
     node = profileLinkEditor(state, revision, linkEdit[1]);
   } else {
-    state.route = "/profile";
+    if (state.route !== "/profile/settings") state.route = "/profile";
+    headingText = state.route === "/profile/settings" ? "Настройки профиля" : "Профиль";
     node = ownProfileOverview(state, revision);
   }
   title.textContent = headingText;
@@ -1888,7 +2146,9 @@ function showTaskDetail(task, push = true) {
       },
     });
   });
-  detail.append(status, accept, section("Описание", task.description));
+  detail.append(status);
+  if (!acceptedTaskIds.has(task.id)) detail.append(accept);
+  detail.append(section("Описание", task.description));
   detail.append(section("Критерии выполнения", task.completion_criteria));
   detail.append(section("Как выполнять", task.performer_instructions));
   for (const [key, value] of Object.entries(task.public_input)) {
@@ -1918,6 +2178,7 @@ async function acceptTask(task, button, status) {
     );
     const payload = await submissionResponse(response);
     pendingAcceptKeys.delete(task.id);
+    rememberAcceptedTask(task.id);
     history.replaceState({ screen: "assignment", assignmentId: payload.id }, "", presentationLocationFor("M03", payload.id));
     await showAssignmentDetail(payload.id, false);
   } catch (error) {
@@ -1929,6 +2190,20 @@ async function acceptTask(task, button, status) {
   }
 }
 
+const ordersRefreshControl = (reload) => {
+  const toolbar = element("div", undefined, "orders-toolbar");
+  const refresh = element("button", undefined, "secondary orders-refresh");
+  refresh.append(lucideIcon("refresh-cw"), element("span", "Обновить"));
+  refresh.type = "button";
+  refresh.addEventListener("click", () => {
+    refresh.disabled = true;
+    clearJsonCache();
+    void reload().finally(() => { refresh.disabled = false; });
+  });
+  toolbar.append(refresh);
+  return toolbar;
+};
+
 function showAssignments(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
   setNavigation("assignments", false);
@@ -1938,30 +2213,57 @@ function showAssignments(revision = ++screenRevision) {
   boundary.dataset.screenId = "M01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = assignments.length ? "content" : "empty";
-  boundary.append(element("p", "Работа и проверки в одном месте", "screen-subtitle"));
   const tabs = element("div", undefined, "segmented root-tabs");
-  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
+  const active = element("button", "Заказы", "active-tab");
   active.type = "button";
-  active.addEventListener("click", () => showTakenAssignments());
+  active.disabled = true;
   createdAssignmentsButton.classList.remove("active-tab");
   createdAssignmentsButton.disabled = false;
   tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
+  boundary.append(ordersRefreshControl(() => loadAssignments(false)), tabs);
   if (!assignments.length) {
-    boundary.append(element("p", "Активных заданий пока нет.", "compact-empty"));
+    boundary.append(element("p", "Пока нет заданий.", "compact-empty"));
     replaceContent(boundary);
     restoreModerationFocus();
     return;
   }
-  const summary = element("button", undefined, "card assignment-card");
-  summary.type = "button";
-  summary.append(
-    element("h3", "Взятые мной"),
-    element("p", `${assignments.length} активных назначений`, "muted"),
-  );
-  summary.addEventListener("click", () => showTakenAssignments());
-  boundary.append(summary);
+  const activeStatuses = new Set(["accepted", "submitted", "rejected_pending_dispute", "disputed", "reviewer_required"]);
+  const current = assignments.filter((assignment) => activeStatuses.has(assignment.assignment_status));
+  const finished = assignments.filter((assignment) => !activeStatuses.has(assignment.assignment_status));
+  let focusTarget = null;
+  const appendAssignments = (headingText, items) => {
+    if (!items.length) return;
+    boundary.append(element("h3", headingText));
+    const list = element("ul", undefined, "list");
+    for (const assignment of items) {
+      const button = element("button", undefined, "card assignment-card");
+      button.type = "button";
+      const chips = element("div", undefined, "card-chips");
+      chips.append(element("span", assignmentStatus(assignment.assignment_status), "chip"));
+      const deadline = element("p", "Срок: ", "meta");
+      deadline.append(time(assignment.task_deadline_at));
+      button.append(chips, element("h3", assignment.task_title), deadline);
+      if (assignment.result_summary) button.append(element("p", assignment.result_summary, "muted"));
+      button.addEventListener("click", () => showAssignmentDetail(assignment.id));
+      if (assignment.id === returnFocusAssignmentId) focusTarget = button;
+      const item = element("li");
+      item.append(button);
+      list.append(item);
+    }
+    boundary.append(list);
+  };
+  appendAssignments("Актуальные", current);
+  appendAssignments("Завершённые", finished);
+  if (assignmentsNextCursor) {
+    const more = element("button", "Показать ещё", "secondary");
+    more.type = "button";
+    more.disabled = assignmentsLoadingMore;
+    more.addEventListener("click", () => void loadMoreAssignments(revision));
+    boundary.append(more);
+  }
   replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
+  returnFocusAssignmentId = null;
   restoreModerationFocus();
 }
 
@@ -1972,15 +2274,14 @@ function showTakenAssignments() {
   title.textContent = "Мои задания";
   back.classList.add("hidden");
   const boundary = connectedBoundary("M02", "content");
-  boundary.append(element("p", "Взятые мной", "screen-subtitle"));
   const tabs = element("div", undefined, "segmented root-tabs");
-  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
+  const active = element("button", "Заказы", "active-tab");
   active.type = "button";
   active.disabled = true;
   createdAssignmentsButton.classList.remove("active-tab");
   createdAssignmentsButton.disabled = false;
   tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
+  boundary.append(ordersRefreshControl(() => loadAssignments(false)), tabs);
   const list = element("ul", undefined, "list");
   let focusTarget = null;
   for (const assignment of assignments) {
@@ -2013,34 +2314,44 @@ function showTakenAssignments() {
 
 async function loadAssignments(push = true) {
   const revision = ++screenRevision;
-  const path = "/api/v1/assignments?status=active&limit=20";
-  const cached = cachedJson(path);
+  const path = "/api/v1/assignments?status=all&limit=20";
   if (push) history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
-  if (cached) {
-    assignments = cached.items;
-    showAssignments(revision);
-  } else {
-    setNavigation("assignments", false);
-    title.textContent = "Мои задания";
-    back.classList.add("hidden");
-    replaceContent(element("p", "Загружаем активные назначения…", "status muted"));
-  }
+  setNavigation("assignments", false);
+  title.textContent = "Мои задания";
+  back.classList.add("hidden");
+  replaceContent(element("p", "Загружаем заказы…", "status muted"));
   try {
-    const page = await getJson(path, (refreshed) => {
-      if (revision !== screenRevision) return;
-      assignments = refreshed.items;
-      showAssignments(revision);
-    });
+    const page = await fetchJson(path);
     if (revision !== screenRevision) return;
-    if (cached) return;
     assignments = page.items;
+    assignmentsNextCursor = page.next_cursor;
     showAssignments(revision);
   } catch (error) {
-    if (revision !== screenRevision || cached) return;
+    if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadAssignments(false));
     replaceContent(...assignmentError(error.message, retry));
+  }
+}
+
+async function loadMoreAssignments(revision) {
+  if (!assignmentsNextCursor || assignmentsLoadingMore) return;
+
+  assignmentsLoadingMore = true;
+  showAssignments(revision);
+  try {
+    const page = await fetchJson(
+      `/api/v1/assignments?status=all&limit=20&cursor=${encodeURIComponent(assignmentsNextCursor)}`,
+    );
+    if (revision !== screenRevision) return;
+
+    const ids = new Set(assignments.map((assignment) => assignment.id));
+    assignments = [...assignments, ...page.items.filter((assignment) => !ids.has(assignment.id))];
+    assignmentsNextCursor = page.next_cursor;
+  } finally {
+    assignmentsLoadingMore = false;
+    if (revision === screenRevision) showAssignments(revision);
   }
 }
 
@@ -2143,13 +2454,13 @@ function renderCreatedAssignments(revision) {
   boundary.classList.add("owned-tasks-view");
   const tabs = element("div", undefined, "segmented root-tabs");
   let focusTarget = null;
-  const active = element("button", `В работе · ${assignments.length}`);
+  const active = element("button", "Заказы");
   active.type = "button";
-  active.addEventListener("click", () => showTakenAssignments());
+  active.addEventListener("click", () => void loadAssignments());
   createdAssignmentsButton.classList.add("active-tab");
   createdAssignmentsButton.disabled = true;
   tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
+  boundary.append(ordersRefreshControl(() => loadCreatedReviews(false)), tabs);
   if (!ownedTasks.length) {
     boundary.append(element("p", "Созданных заданий пока нет.", "compact-empty"));
   } else {
@@ -2269,6 +2580,19 @@ async function showCreatedReview(assignmentId, push = true) {
       section("Исполнитель", review.performer_display_name),
       section("Результат", review.result),
     );
+    if (review.attachments?.length) {
+      const files = element("section", undefined, "section");
+      files.append(element("h3", "Файлы"));
+      for (const item of review.attachments) {
+        const link = document.createElement("a");
+        link.href = miniAppPath(`/api/v1/media/attachments/${encodeURIComponent(item.id)}`);
+        link.textContent = item.name;
+        link.target = "_blank";
+        link.rel = "noopener";
+        files.append(link);
+      }
+      detail.append(files);
+    }
     if (review.review_deadline_at) {
       detail.append(dateSection("Срок решения", review.review_deadline_at));
     }
@@ -2380,6 +2704,16 @@ async function submissionRequest(path, method, operationKey, body) {
   return submissionResponse(response);
 }
 
+async function uploadFile(path, file) {
+  const response = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": file.type, "X-File-Name": file.name },
+    body: file,
+    credentials: "same-origin",
+  });
+  return submissionResponse(response);
+}
+
 function submissionPanel(assignment, draft) {
   const submissionRevision = screenRevision;
   const boundary = element("section", undefined, "submission");
@@ -2435,6 +2769,14 @@ function submissionPanel(assignment, draft) {
   label.append(input);
   const preview = element("button", "Предпросмотр", "primary");
   preview.type = "submit";
+  const attachmentInput = document.createElement("input");
+  attachmentInput.type = "file";
+  attachmentInput.accept = "image/jpeg,image/png,image/webp,application/pdf,text/plain";
+  attachmentInput.multiple = true;
+  const attachmentLabel = element("label", "Файлы и скриншоты", "section");
+  attachmentLabel.append(attachmentInput);
+  let attachments = Array.isArray(draft.attachments) ? [...draft.attachments] : [];
+  const attachmentList = element("p", attachments.map((item) => item.name).join(" · "), "profile-helper");
   let saveKey = null;
   let confirmKey = null;
 
@@ -2517,11 +2859,23 @@ function submissionPanel(assignment, draft) {
     status.textContent = "Сохраняем предпросмотр…";
     saveKey ||= newOperationKey();
     try {
+      const files = [...attachmentInput.files];
+      if (attachments.length + files.length > 5) {
+        status.textContent = "Можно прикрепить не больше 5 файлов.";
+        return;
+      }
+      if (files.length) {
+        status.textContent = "Загружаем файлы…";
+        const uploaded = await Promise.all(files.map((file) => uploadFile(
+          `/api/v1/assignments/${encodeURIComponent(assignment.id)}/attachments`, file,
+        )));
+        attachments = [...attachments, ...uploaded];
+      }
       const saved = await submissionRequest(
         "/api/v1/submission-drafts/" + encodeURIComponent(draft.id),
         "PUT",
         saveKey,
-        { expected_revision: draft.revision, payload: { result: input.value } },
+        { expected_revision: draft.revision, payload: { result: input.value, attachments } },
       );
       draft = saved;
       saveKey = null;
@@ -2535,7 +2889,11 @@ function submissionPanel(assignment, draft) {
       preview.disabled = false;
     }
   });
-  form.append(label, preview);
+  attachmentInput.addEventListener("change", () => {
+    const files = [...attachmentInput.files];
+    attachmentList.textContent = files.length ? files.map((file) => file.name).join(" · ") : attachments.map((item) => item.name).join(" · ");
+  });
+  form.append(label, attachmentLabel, attachmentList, preview);
   boundary.append(form, status);
   if (draft.result !== null) input.value = draft.result;
   return boundary;
@@ -3053,6 +3411,7 @@ async function bootstrap(authAttempted = false) {
     currentMemberId = profile.member_id;
     void configureRoleNavigation();
     tasks = page.items;
+    catalogNextCursor = page.next_cursor;
     const initialHash = location.hash;
     const initialPresentation = presentationFromLocation();
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
@@ -3135,6 +3494,7 @@ back.addEventListener("click", () => {
   if (activeProfileState?.route && activeProfileState.route !== "/profile") {
     const route = activeProfileState.route;
     let destination = "/profile";
+    if (route.startsWith("/profile/edit/")) destination = activeProfileState.editReturnRoute || "/profile";
     if (route === "/profile/links/new" || /^\/profile\/links\/[0-9a-f-]{36}$/i.test(route)) destination = "/profile/links";
     if (route.endsWith("/delete")) {
       destination = activeProfileState.deleteOrigin === "edit" ? route.replace(/\/delete$/, "") : "/profile/links";

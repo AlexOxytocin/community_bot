@@ -754,7 +754,7 @@ async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -
             )
         ).all()
     assert model is not None
-    assert model.credit_balance_cached == 10
+    assert model.credit_balance_cached == 5
     assert transactions[-1].experience_delta == 0
     assert await scalar_count(database, OutboxEventModel) == 2
     await database.dispose()
@@ -1022,7 +1022,7 @@ async def test_publish_business_retry_concurrent_cancel_and_private_listing(  # 
     assert len(refunds) == 1
     assert refunds[0].experience_delta == 0
     assert persisted_owner is not None
-    assert persisted_owner.credit_balance_cached == 10
+    assert persisted_owner.credit_balance_cached == 5
     audit_after_cancel = await scalar_count(database, AuditEventModel)
     outbox_after_cancel = await scalar_count(database, OutboxEventModel)
     receipts_after_cancel = await scalar_count(database, ProcessedTelegramUpdateModel)

@@ -30,9 +30,14 @@ class _AssetsHandler(http.server.SimpleHTTPRequestHandler):
 
     def translate_path(self, path: str) -> str:
         request_path = urlsplit(path).path
-        relative = (
-            "index.html" if request_path == "/" else request_path.removeprefix("/mini-assets/")
-        )
+        if request_path in {"/", "/community_bot/"}:
+            relative = "index.html"
+        else:
+            relative = (
+                request_path.removeprefix("/community_bot/")
+                .removeprefix("/mini-assets/")
+                .removeprefix("mini-assets/")
+            )
         return str(STATIC_DIR / relative)
 
 
@@ -193,6 +198,325 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         page.get_by_role("button", name="Задания", exact=True).click()
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
         assert task_requests == 5
+        browser.close()
+
+
+def test_catalog_exposes_the_next_page(mini_app_url: str) -> None:
+    first_task = {
+        "id": "00000000-0000-0000-0000-000000000091",
+        "origin": "member",
+        "author_display_name": "Мария",
+        "category_name": None,
+        "category_icon": None,
+        "task_kind": "solo",
+        "time_size": "s",
+        "title": "Первое задание",
+        "description": "Описание первого задания",
+        "completion_criteria": "Готовый результат",
+        "performer_instructions": "Выполнить работу",
+        "materials": {},
+        "public_input": {},
+        "credit_reward_per_performer": 3,
+        "performer_slots": 1,
+        "minimum_level": 1,
+        "format": "online",
+        "city": None,
+        "deadline_at": "2026-09-01T20:00:00Z",
+        "status": "published",
+    }
+    second_task = first_task | {
+        "id": "00000000-0000-0000-0000-000000000092",
+        "title": "Второе задание",
+    }
+
+    def tasks_route(route: Route) -> None:
+        query = parse_qs(urlsplit(route.request.url).query)
+        if "cursor" in query:
+            route.fulfill(json={"items": [second_task], "next_cursor": None})
+            return
+        route.fulfill(json={"items": [first_task], "next_cursor": first_task["id"]})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route("**/api/v1/tasks*", tasks_route)
+        page.goto(mini_app_url)
+
+        page.get_by_text("Первое задание", exact=True).wait_for()
+        more = page.get_by_role("button", name="Показать ещё")
+        assert more.count() == 1
+        more.click()
+        page.get_by_text("Второе задание", exact=True).wait_for()
+        browser.close()
+
+
+def test_orders_show_active_and_finished_assignments(mini_app_url: str) -> None:
+    active = {
+        "id": "00000000-0000-0000-0000-000000000093",
+        "task_id": "00000000-0000-0000-0000-000000000094",
+        "task_title": "Актуальный заказ",
+        "task_origin": "member",
+        "assignment_status": "accepted",
+        "accepted_at": "2026-08-20T20:00:00Z",
+        "submitted_at": None,
+        "review_deadline_at": None,
+        "reject_dispute_deadline_at": None,
+        "reviewed_at": None,
+        "task_deadline_at": "2026-09-01T20:00:00Z",
+        "result_summary": None,
+        "case_status": None,
+    }
+    rejected = active | {
+        "id": "00000000-0000-0000-0000-000000000095",
+        "task_title": "Старый заказ",
+        "assignment_status": "rejected",
+        "reviewed_at": "2026-08-21T20:00:00Z",
+    }
+    later = active | {
+        "id": "00000000-0000-0000-0000-000000000096",
+        "task_title": "Ещё один заказ",
+        "assignment_status": "completed",
+        "accepted_at": "2026-08-19T20:00:00Z",
+        "reviewed_at": "2026-08-20T20:00:00Z",
+    }
+    requested_urls: list[str] = []
+
+    def assignments_route(route: Route) -> None:
+        requested_urls.append(route.request.url)
+        if "cursor=" in route.request.url:
+            route.fulfill(json={"items": [later], "next_cursor": None})
+        else:
+            route.fulfill(json={"items": [active, rejected], "next_cursor": "next-page"})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route("**/api/v1/assignments?*", assignments_route)
+        page.goto(mini_app_url)
+
+        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_text("Актуальный заказ", exact=True).wait_for()
+        assert page.get_by_role("button", name="Заказы").count() == 1
+        page.get_by_text("Актуальный заказ", exact=True).wait_for()
+        page.get_by_text("Старый заказ", exact=True).wait_for()
+        assert page.get_by_text("Завершённые", exact=True).count() == 1
+        assert any("status=all" in url for url in requested_urls)
+        page.get_by_role("button", name="Показать ещё").click()
+        page.get_by_text("Ещё один заказ", exact=True).wait_for()
+        browser.close()
+
+
+def test_unchanged_profile_field_is_not_submitted(mini_app_url: str) -> None:
+    member_id = "00000000-0000-0000-0000-000000000096"
+    me = {
+        "member_id": member_id,
+        "display_name": "Алекс",
+        "city": "Буэнос-Айрес",
+        "short_bio": "Помогаю сообществу.",
+        "skill_tags": [],
+        "profile_links": [],
+        "credit_balance": 0,
+        "experience_total": 0,
+        "level": {"number": 1, "display_name": "Новичок"},
+    }
+    member = {
+        "member_id": member_id,
+        "display_name": "Алекс",
+        "karma": {"score": 0},
+    }
+    update_requests: list[Route] = []
+
+    def update_profile(route: Route) -> None:
+        update_requests.append(route)
+        route.fulfill(json=me)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_default_timeout(5_000)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route(f"**/api/v1/members/{member_id}", lambda route: route.fulfill(json=member))
+        page.route("**/api/v1/me/profile", update_profile)
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.get_by_role("button", name="Настройки профиля").click()
+        page.get_by_role("button", name="Редактировать имя").click()
+        page.get_by_role("button", name="Сохранить").click()
+        page.get_by_role("heading", name="Настройки профиля").wait_for()
+        assert page.get_by_role("button", name="Готово").count() == 1
+        assert update_requests == []
+        browser.close()
+
+
+def test_profile_editing_is_available_only_from_settings(mini_app_url: str) -> None:
+    me, member = _cache_profile("00000000-0000-0000-0000-000000000097")
+    me["avatar_url"] = "/api/v1/media/avatar/00000000-0000-0000-0000-000000000096"
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route(
+            "**/api/v1/media/avatar/*",
+            lambda route: route.fulfill(
+                body='<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
+                content_type="image/svg+xml",
+            ),
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+        page.goto(mini_app_url)
+
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.get_by_role("heading", name="Алекс").wait_for()
+        avatar_image = page.locator(".profile-identity-card .avatar img")
+        assert avatar_image.get_attribute("src") == me["avatar_url"]
+        assert page.get_by_role("button", name="Настройки профиля").count() == 1
+        assert page.locator(".profile-pencil[data-profile-action]").count() == 0
+        page.get_by_role("button", name="Настройки профиля").click()
+        assert page.get_by_label("Показывать username").is_checked()
+        browser.close()
+
+
+def test_mini_app_keeps_api_requests_under_its_mount_path(mini_app_url: str) -> None:
+    api_paths: list[str] = []
+    me_payload, member_payload = _cache_profile()
+
+    def me(route: Route) -> None:
+        api_paths.append(urlsplit(route.request.url).path)
+        route.fulfill(json=me_payload)
+
+    def tasks(route: Route) -> None:
+        api_paths.append(urlsplit(route.request.url).path)
+        route.fulfill(json={"items": [], "next_cursor": None})
+
+    def member(route: Route) -> None:
+        api_paths.append(urlsplit(route.request.url).path)
+        route.fulfill(json=member_payload)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_default_timeout(5_000)
+        page.route("**/community_bot/api/v1/me", me)
+        page.route("**/community_bot/api/v1/tasks", tasks)
+        page.route("**/community_bot/api/v1/members/*", member)
+        page.goto(f"{mini_app_url}community_bot/")
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.get_by_role("heading", name="Алекс").wait_for()
+        assert api_paths == [
+            "/community_bot/api/v1/me",
+            "/community_bot/api/v1/tasks",
+            f"/community_bot/api/v1/members/{me_payload['member_id']}",
+        ]
+        browser.close()
+
+
+def test_orders_have_an_explicit_refresh_control(mini_app_url: str) -> None:
+    assignment = {
+        "id": "00000000-0000-0000-0000-000000000098",
+        "task_id": "00000000-0000-0000-0000-000000000099",
+        "task_title": "Заказ для обновления",
+        "task_origin": "member",
+        "assignment_status": "accepted",
+        "accepted_at": "2026-08-20T20:00:00Z",
+        "submitted_at": None,
+        "review_deadline_at": None,
+        "reject_dispute_deadline_at": None,
+        "reviewed_at": None,
+        "task_deadline_at": "2026-09-01T20:00:00Z",
+        "result_summary": None,
+        "case_status": None,
+    }
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"display_name": "Алекс"}))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/assignments?*",
+            lambda route: route.fulfill(json={"items": [assignment], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+
+        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_text("Заказ для обновления", exact=True).wait_for()
+        assert page.get_by_role("button", name="Обновить").count() == 1
+        browser.close()
+
+
+def test_profile_settings_are_compact_and_links_use_clean_input(mini_app_url: str) -> None:
+    me, member = _cache_profile("00000000-0000-0000-0000-000000000101")
+    me.update(
+        telegram_username="private_user",
+        show_telegram_username=True,
+        profile_links=[],
+    )
+    updates: list[dict[str, object]] = []
+
+    def update_profile(route: Route) -> None:
+        body = route.request.post_data_json
+        assert body == {"field": "show_telegram_username", "value": "false"}
+        updates.append(body)
+        me["show_telegram_username"] = False
+        route.fulfill(json=me)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_default_timeout(5_000)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/me/profile", update_profile)
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="Профиль", exact=True).click()
+        page.get_by_role("heading", name="Алекс").wait_for()
+        assert page.get_by_text("@private_user", exact=True).count() == 1
+        page.get_by_role("button", name="Настройки профиля").click()
+        switch = page.get_by_label("Показывать username другим участникам")
+        assert switch.is_visible()
+        assert switch.is_checked()
+        assert page.locator(".avatar-upload-control").all_text_contents() == ["Выбрать изображение"]
+        switch.uncheck()
+        page.get_by_role("button", name="Сохранить настройки").click()
+        page.get_by_role("button", name="Готово").wait_for()
+        assert updates == [{"field": "show_telegram_username", "value": "false"}]
+        assert not page.get_by_label("Показывать username другим участникам").is_checked()
+
+        page.get_by_role("button", name="Готово").click()
+        page.get_by_role("button", name="Добавить ссылки").click()
+        page.get_by_role("button", name="+ Добавить ссылку").click()
+        url_input = page.get_by_role("textbox", name="Ссылка")
+        url_input.wait_for()
+        assert url_input.get_attribute("placeholder") == "instagram.com/username"
+        assert page.get_by_role("button", name="Instagram").count() == 1
+        assert page.get_by_text("Можно без https", exact=False).count() == 0
         browser.close()
 
 
@@ -1457,11 +1781,11 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         assert accepted_tasks == [task_id, other_task_id, task_id]
         assert accept_keys[0] == accept_keys[2]
         assert accept_keys[1] != accept_keys[0]
+        page.get_by_role("button", name="Назад").click()
+        page.locator('[data-screen-id="T03"]').wait_for()
         assert page.get_by_role("button", name="Принять задание").count() == 0
         assert not any(url.startswith("javascript:") for url in requests)
 
-        page.get_by_role("button", name="Назад").click()
-        page.locator('[data-screen-id="T03"]').wait_for()
         page.get_by_role("button", name="Назад").click()
         catalog_trigger = page.get_by_role("button", name=malicious)
         catalog_trigger.wait_for()
@@ -1469,7 +1793,6 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
 
         page.get_by_role("button", name="Мои задания").click()
         page.get_by_role("heading", name="Мои задания").wait_for()
-        page.get_by_role("button", name=re.compile("В работе · ")).click()  # noqa: RUF001
         page.get_by_role("button", name=re.compile(assignment_title)).click()
         page.get_by_text("План отправлен").wait_for()
         assert page.get_by_role("button", name="Принять задание").count() == 0
@@ -2069,7 +2392,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             "telegram_username": f"member{index}",
             "display_name": name,
             "city": None if index == 0 else ("Buenos Aires" if index % 2 else "Córdoba"),
-            "short_bio": None,
+            "short_bio": f"Описание профиля {index}",
             "current_goal": None,
             "help_categories": [],
             "skill_tags": [] if index == 0 else ["Дизайн", "Исследования"],
@@ -2164,6 +2487,8 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             page.get_by_role("button", name="Участники", exact=True).click()
             page.locator(".member-row").nth(5).wait_for()
             assert page.get_by_text("LEGACY_AVAILABILITY_VALUE", exact=True).count() == 0
+            assert page.get_by_text("Описание профиля 1", exact=True).is_visible()
+            assert page.get_by_text("Дизайн · Исследования", exact=True).count() == 0
 
             geometry = page.evaluate(
                 """() => {
@@ -2277,7 +2602,8 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("Карма", exact=True).count() == 1
             assert page.get_by_text("Надёжность", exact=True).count() == 0
             assert page.get_by_text("—", exact=True).count() >= 2
-            assert page.locator("[data-profile-action]").count() == 5
+            assert page.get_by_role("button", name="Настройки профиля").count() == 1
+            assert page.locator("[data-profile-action]").count() == 0
             assert page.locator('[data-screen-id="P07"]').count() == 0
             page.close()
         browser.close()
@@ -2530,19 +2856,19 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.goto(mini_app_url)
 
         page.get_by_role("button", name="Мои задания").click()
-        page.get_by_text("Активных заданий пока нет.").wait_for()
+        page.get_by_text("Пока нет заданий.").wait_for()
 
         list_mode["status"] = 503
         page.evaluate("advanceCacheClock(60001)")
         with page.expect_response(lambda response: response.status == 503):
             page.get_by_role("button", name="Мои задания").click()
-        page.get_by_text("Активных заданий пока нет.").wait_for()
+        page.get_by_text("Пока нет заданий.").wait_for()
         assert page.get_by_text("Не удалось загрузить активные назначения.").count() == 0  # noqa: RUF001
 
         list_mode["status"] = 401
         with page.expect_response(lambda response: response.status == 401):
             page.get_by_role("button", name="Мои задания").click()
-        page.get_by_text("Активных заданий пока нет.").wait_for()
+        page.get_by_text("Пока нет заданий.").wait_for()
         page.get_by_role("button", name="Мои задания").click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0
@@ -2554,7 +2880,6 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
 
         list_mode.update(status=200, items=[assignment])
         page.get_by_role("button", name="Мои задания").click()
-        page.get_by_role("button", name="В работе · 1").click()  # noqa: RUF001
         row = page.get_by_role("button", name=re.compile("Собрать план"))
         row.wait_for()
         assert page.get_by_role("list").count() == 1
@@ -2709,7 +3034,6 @@ def test_assignment_cancellation_returns_to_active_list(mini_app_url: str) -> No
         page.goto(mini_app_url)
 
         page.get_by_role("button", name="Мои задания").click()
-        page.get_by_role("button", name="В работе · 1").click()  # noqa: RUF001
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.locator('[data-screen-id="M03"]').wait_for()
         assert page.get_by_label("Причина отказа").count() == 0
@@ -2718,7 +3042,7 @@ def test_assignment_cancellation_returns_to_active_list(mini_app_url: str) -> No
         cancellations_before = len(operation_keys)
         _connected_control(page, "PE-036", "withdrawal_outcome").click()
         _connected_control(page, "PE-036", "withdrawal_outcome").click()
-        page.get_by_text("Активных заданий пока нет.").wait_for()
+        page.get_by_text("Пока нет заданий.").wait_for()
         assert len(operation_keys) == cancellations_before + 1
         assert page.url.endswith("/#/work?view_state=m01")
         assert page.evaluate("history.state") == {"screen": "assignments"}
@@ -2733,6 +3057,7 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
     current_detail: dict[str, Any] = {"value": detail}
     result_text = "<script>globalThis.pwned=true</script> " + "Подробный результат. " * 80
     begin_keys: list[str] = []
+    attachment_uploads: list[str] = []
     confirm_keys: list[str] = []
     review_keys: list[str] = []
     review_pending = {"value": True}
@@ -2761,6 +3086,7 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         "performer_display_name": "Участник",
         "review_deadline_at": "2026-08-20T20:30:00Z",
         "result": "<script>globalThis.pwned=true</script>",
+        "attachments": [{"id": "00000000-0000-0000-0000-000000000083", "name": "proof.png"}],
         "available_decisions": ["full", "partial", "reject"],
     }
 
@@ -2772,7 +3098,24 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         assert isinstance(body, dict)
         assert body["expected_revision"] == 0
         assert body["payload"]["result"] == result_text
-        route.fulfill(json={"id": draft_id, "revision": 1, "result": body["payload"]["result"]})
+        assert body["payload"]["attachments"] == [
+            {"id": "00000000-0000-0000-0000-000000000083", "name": "proof.png"}
+        ]
+        route.fulfill(
+            json={
+                "id": draft_id,
+                "revision": 1,
+                "result": body["payload"]["result"],
+                "attachments": body["payload"]["attachments"],
+            }
+        )
+
+    def upload_attachment(route: Route) -> None:
+        assert route.request.method == "POST"
+        assert route.request.headers["content-type"] == "image/png"
+        assert route.request.headers["x-file-name"] == "proof.png"
+        attachment_uploads.append(route.request.post_data or "")
+        route.fulfill(json={"id": "00000000-0000-0000-0000-000000000083", "name": "proof.png"})
 
     def begin(route: Route) -> None:
         assert route.request.method == "POST"
@@ -2817,6 +3160,7 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
             f"**/api/v1/assignments/{assignment_id}",
             lambda route: route.fulfill(json=current_detail["value"]),
         )
+        page.route(f"**/api/v1/assignments/{assignment_id}/attachments", upload_attachment)
         page.route(
             f"**/api/v1/assignments/{assignment_id}/submission-drafts",
             begin,
@@ -2852,7 +3196,6 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         page.route(f"**/api/v1/assignment-reviews/{assignment_id}/decision", decide)
         page.goto(mini_app_url)
         page.get_by_role("button", name="Мои задания").click()
-        page.get_by_role("button", name="В работе · 1").click()  # noqa: RUF001
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.locator('[data-screen-id="M03"]').wait_for()
         assert page.get_by_role("textbox", name="Результат").count() == 0
@@ -2868,10 +3211,14 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         assert result.evaluate("node => node === document.activeElement")
         assert begin_keys[0] == begin_keys[1]
         result.fill(result_text)
+        page.locator('input[type="file"]').set_input_files(
+            {"name": "proof.png", "mimeType": "image/png", "buffer": b"proof"}
+        )
         page.locator(".screen").evaluate("node => { node.scrollTop = node.scrollHeight; }")
         page.get_by_role("button", name="Предпросмотр").click()
         page.locator('[data-screen-id="M05"]').wait_for()
         page.get_by_text(result_text, exact=True).wait_for()
+        assert attachment_uploads == ["proof"]
         assert page.evaluate("globalThis.pwned") is None
         assert page.locator(".screen").evaluate("node => node.scrollTop") == 0
         page.locator(".screen").evaluate("node => { node.scrollTop = node.scrollHeight; }")
@@ -3261,12 +3608,14 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert city.evaluate("node => node.required")
         city.fill("Buenos Aires")
         page.get_by_role("option", name="Buenos Aires — Argentina").click()
+        page.locator(".city-results").wait_for(state="hidden")
         page.get_by_label("Формат *", exact=True).select_option("online")
         assert page.get_by_label("Город").count() == 0
         page.get_by_label("Формат *", exact=True).select_option("offline")
         city = page.get_by_label("Город")
         city.fill("Buenos Aires")
         page.get_by_role("option", name="Buenos Aires — Argentina").click()
+        page.locator(".city-results").wait_for(state="hidden")
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         page.get_by_text("Не удалось сохранить задание").wait_for()  # noqa: RUF001
         with page.expect_request(

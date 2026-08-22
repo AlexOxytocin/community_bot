@@ -178,4 +178,23 @@ def test_freeform_materials_and_result_payload_boundaries() -> None:
     assert validate_freeform_result_payload({"result": "  useful result text  "}) == {
         "result": "useful result text"
     }
+    attachment_id = str(uuid4())
+    assert validate_freeform_result_payload(
+        {
+            "result": "useful result text",
+            "attachments": [{"id": attachment_id, "name": "  result.pdf  "}],
+        }
+    ) == {
+        "result": "useful result text",
+        "attachments": [{"id": attachment_id, "name": "result.pdf"}],
+    }
+    for attachments in (
+        [{"id": "not-a-uuid", "name": "result.pdf"}],
+        [{"id": attachment_id, "name": "result.pdf"}] * 2,
+        [{"id": attachment_id, "name": " "}],
+    ):
+        with pytest.raises(TaskError):
+            validate_freeform_result_payload(
+                {"result": "useful result text", "attachments": attachments}
+            )
     validate_public_text_uris(["https://example.com/path", ("plain text",)])

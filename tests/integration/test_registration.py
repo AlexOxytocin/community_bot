@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -529,14 +530,14 @@ async def test_concurrent_moderation_creates_one_grant_and_active_profile(
         conversation = await session.get(ConversationStateModel, target_id)
     assert target is not None
     assert target.status == MemberStatus.ACTIVE.value
-    assert target.credit_balance_cached == 10
+    assert target.credit_balance_cached == 5
     assert target.experience_total_cached == 0
     assert target.level_config_version_id == active_config.id
     assert application is not None
     assert application.status == RegistrationApplicationStatus.APPROVED.value
     assert conversation is None
     assert len(transactions) == 1
-    assert transactions[0].credit_delta == 10
+    assert transactions[0].credit_delta == 5
     assert transactions[0].experience_delta == 0
     await database.dispose()
 
@@ -638,7 +639,7 @@ async def test_reject_resubmit_approve_and_edit_own_profile(database_url: str) -
     assert profile.help_categories == ("Продукт", "Исследования")
     assert profile.skill_tags == ("Python", "Интервью")
     assert profile.availability == "Три часа в неделю"
-    assert profile.credit_balance == 10
+    assert profile.credit_balance == 5
     assert profile.experience_total == 0
     assert profile.level.level_number == 1
     assert await count(database, AccountTransactionModel) == 1
@@ -868,7 +869,7 @@ async def test_migration_backfills_missing_active_starting_grants(
     assert active_missing_model is not None
     assert active_missing_model.credit_balance_cached == 10
     assert active_existing_model is not None
-    assert active_existing_model.credit_balance_cached == 10
+    assert active_existing_model.credit_balance_cached == 5
     assert pending_missing_model is not None
     assert pending_missing_model.credit_balance_cached == 0
     assert set(grants_by_member) == {active_missing.id, active_existing.id}
@@ -877,7 +878,7 @@ async def test_migration_backfills_missing_active_starting_grants(
         f"starting_grant:{active_missing.id}"
     )
     assert grants_by_member[active_missing.id].payload_hash == economy_payload_hash(
-        starting_grant(active_missing.id)
+        replace(starting_grant(active_missing.id), credit_delta=10)
     )
     await repaired.dispose()
 

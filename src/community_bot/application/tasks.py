@@ -403,7 +403,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         payload: dict[str, object],
         business_key: str,
     ) -> None: ...
-    async def list_available_tasks(
+    async def list_available_tasks(  # noqa: PLR0913 - discovery filters stay explicit.
         self,
         *,
         performer_id: UUID,
@@ -411,6 +411,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         limit: int,
         cursor_task_id: UUID | None,
         now: datetime.datetime,
+        city: str | None = None,
     ) -> tuple[PublishedTask, ...]: ...
     async def ensure_task_test_access(
         self, *, member_id: UUID, task_id: UUID | None = None, draft_id: UUID | None = None
@@ -1376,6 +1377,7 @@ class TaskService:
         *,
         actor: ActorContext,
         cursor_task_id: UUID | None = None,
+        city: str | None = None,
         limit: int = _MAX_AVAILABLE_TASKS,
     ) -> AvailableTaskPage:
         """Return tasks the actor may attempt to accept right now."""
@@ -1388,13 +1390,23 @@ class TaskService:
                 return AvailableTaskPage(items=(), next_cursor_task_id=None)
             level = await uow.resolve_member_level(member.id)
             page_limit = max(1, min(limit, 50))
-            tasks = await uow.list_available_tasks(
-                performer_id=member.id,
-                level=level.level_number,
-                limit=page_limit + 1,
-                cursor_task_id=cursor_task_id,
-                now=datetime.datetime.now(datetime.UTC),
-            )
+            if city:
+                tasks = await uow.list_available_tasks(
+                    performer_id=member.id,
+                    level=level.level_number,
+                    limit=page_limit + 1,
+                    cursor_task_id=cursor_task_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                    city=city,
+                )
+            else:
+                tasks = await uow.list_available_tasks(
+                    performer_id=member.id,
+                    level=level.level_number,
+                    limit=page_limit + 1,
+                    cursor_task_id=cursor_task_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                )
         items = tasks[:page_limit]
         return AvailableTaskPage(
             items=items,

@@ -209,7 +209,7 @@ async def test_starting_grant_is_persistent_replay_safe_and_singleton(database_u
     async with sessions() as session:
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
-        assert persisted.credit_balance_cached == 10
+        assert persisted.credit_balance_cached == 5
     await database.dispose()
 
 

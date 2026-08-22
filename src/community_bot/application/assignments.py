@@ -126,6 +126,7 @@ class AssignmentCard:
     reviewer_admin_id: UUID | None
     performer_display_name: str
     result_summary: str | None
+    attachments: tuple[dict[str, str], ...]
     case_id: UUID | None
     case_status: str | None
     case_revision: int | None
@@ -499,8 +500,9 @@ class AssignmentService:
         actor: ActorContext,
         limit: int = 20,
         cursor: tuple[datetime.datetime, UUID] | None = None,
+        include_history: bool = False,
     ) -> AssignmentCardPage:
-        """Return a stable page of the active performer's own assignments."""
+        """Return a stable page of the performer's own assignments."""
         if not 1 <= limit <= _MAX_ASSIGNMENT_CARDS:
             raise AssignmentError("Assignment card page size must be between 1 and 50.")
         async with self._unit_of_work_factory() as uow:
@@ -508,7 +510,11 @@ class AssignmentService:
             rows = await uow.list_assignment_cards(
                 member.id,
                 limit=limit + 1,
-                statuses=tuple(sorted(status.value for status in ACTIVE_ASSIGNMENT_STATUSES)),
+                statuses=(
+                    None
+                    if include_history
+                    else tuple(sorted(status.value for status in ACTIVE_ASSIGNMENT_STATUSES))
+                ),
                 before_order_at=None if cursor is None else cursor[0],
                 before_id=None if cursor is None else cursor[1],
             )
@@ -521,12 +527,12 @@ class AssignmentService:
         )
 
     async def active_card(self, *, actor: ActorContext, assignment_id: UUID) -> AssignmentCard:
-        """Return one active performer-owned assignment without exposing history."""
+        """Return one performer-owned assignment."""
         async with self._unit_of_work_factory() as uow:
             member = await _context_actor(uow, actor)
             card = await uow.get_assignment_card(member.id, assignment_id)
-            if card is None or card.assignment.status not in ACTIVE_ASSIGNMENT_STATUSES:
-                raise LookupError("Active assignment is not visible to this member.")
+            if card is None:
+                raise LookupError("Assignment is not visible to this member.")
             return card
 
     async def begin_dispute(

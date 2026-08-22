@@ -1,0 +1,78 @@
+name: community-bot-test
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  migrate:
+    image: ${COMMUNITY_BOT_IMAGE:?COMMUNITY_BOT_IMAGE is required}
+    command: community-migrate
+    restart: "no"
+    env_file: ${COMMUNITY_BOT_ENV_FILE:?COMMUNITY_BOT_ENV_FILE is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  worker:
+    image: ${COMMUNITY_BOT_IMAGE:?COMMUNITY_BOT_IMAGE is required}
+    command: community-worker
+    init: true
+    restart: unless-stopped
+    env_file: ${COMMUNITY_BOT_ENV_FILE:?COMMUNITY_BOT_ENV_FILE is required}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "community-health", "--process", "community-worker"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [internal, egress]
+
+  web:
+    image: ${COMMUNITY_BOT_IMAGE:?COMMUNITY_BOT_IMAGE is required}
+    command: community-web
+    init: true
+    restart: unless-stopped
+    env_file: ${COMMUNITY_BOT_ENV_FILE:?COMMUNITY_BOT_ENV_FILE is required}
+    depends_on:
+      worker:
+        condition: service_healthy
+    expose: ["8000"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [internal, proxy]
+
+volumes:
+  postgres-data:
+
+networks:
+  internal:
+    internal: true
+  egress: {}
+  proxy:
+    external: true
+    name: community-mini-app-core_internal

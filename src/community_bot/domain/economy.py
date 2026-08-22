@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from uuid import UUID
 
-_STARTING_GRANT_AMOUNT = 10
+_STARTING_GRANT_AMOUNT = 5
 _MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 

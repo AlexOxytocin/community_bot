@@ -24,7 +24,7 @@ from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.domain.notifications import DeliveryWindow
-from community_bot.infrastructure.db.database import Database
+from community_bot.infrastructure.db.database import AttachmentLimitError, Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
     AssignmentDisputeModel,
@@ -37,6 +37,7 @@ from community_bot.infrastructure.db.models import (
     DisputeResolutionModel,
     KarmaVoteHistoryModel,
     KarmaVoteModel,
+    MediaAssetModel,
     MemberModel,
     MemberSanctionModel,
     ModerationCaseModel,
@@ -113,6 +114,76 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
         reason="Web API integration config.",
     )
     return member
+
+
+async def test_uploaded_avatar_survives_telegram_session_and_media_is_bounded(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await active_member(database, 52_080)
+    first_avatar_id = await database.save_media_asset(
+        owner_member_id=member.id,
+        assignment_id=None,
+        kind="avatar",
+        file_name="first.png",
+        content_type="image/png",
+        content=b"first",
+    )
+    avatar_id = await database.save_media_asset(
+        owner_member_id=member.id,
+        assignment_id=None,
+        kind="avatar",
+        file_name="second.png",
+        content_type="image/png",
+        content=b"second",
+    )
+    assert first_avatar_id != avatar_id
+
+    now = datetime.datetime.now(datetime.UTC)
+    session_id = await database.create_web_session(
+        telegram_user_id=member.telegram_user_id,
+        telegram_username="web_member",
+        telegram_avatar_url="https://t.me/i/userpic/320/avatar.jpg",
+        proof_digest=b"a" * 32,
+        proof_expires_at=now + datetime.timedelta(minutes=5),
+        token_digest=b"b" * 32,
+        authenticated_at=now,
+        expires_at=now + datetime.timedelta(days=1),
+    )
+    assert session_id == member.id
+
+    for index in range(5):
+        await database.save_media_asset(
+            owner_member_id=member.id,
+            assignment_id=None,
+            kind="submission",
+            file_name=f"result-{index}.txt",
+            content_type="text/plain",
+            content=b"proof",
+        )
+    with pytest.raises(AttachmentLimitError):
+        await database.save_media_asset(
+            owner_member_id=member.id,
+            assignment_id=None,
+            kind="submission",
+            file_name="overflow.txt",
+            content_type="text/plain",
+            content=b"proof",
+        )
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        persisted = await session.get(MemberModel, member.id)
+        avatar_count = await session.scalar(
+            select(func.count(MediaAssetModel.id)).where(
+                MediaAssetModel.owner_member_id == member.id,
+                MediaAssetModel.kind == "avatar",
+            )
+        )
+    assert persisted is not None
+    assert persisted.avatar_url == f"/api/v1/media/avatar/{avatar_id}"
+    assert avatar_count == 1
+    await database.dispose()
 
 
 async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
@@ -2358,7 +2429,7 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         )
         session.add_all((terminal, foreign_assignment, invisible))
         await session.flush()
-        hidden_ids = (terminal.id, foreign_assignment.id, invisible.id, uuid4())
+        hidden_ids = (foreign_assignment.id, invisible.id, uuid4())
 
     settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url)
     app = create_web_app(settings=settings, database=database)
@@ -2444,13 +2515,27 @@ async def test_active_assignment_api_paginates_privately_without_effects(
                 "PRIVATE_EVIDENCE",
             )
         )
+        terminal_detail = await client.get(f"/api/v1/assignments/{terminal.id}")
+        assert terminal_detail.status_code == 200, terminal_detail.text
+        assert terminal_detail.json()["assignment_status"] == "approved"
         hidden = [await client.get(f"/api/v1/assignments/{item}") for item in hidden_ids]
         assert {(response.status_code, response.text) for response in hidden} == {
             (404, '{"code":"not_found"}')
         }
-        invalid_status = await client.get("/api/v1/assignments", params={"status": "all"})
+        history = await client.get("/api/v1/assignments", params={"status": "all", "limit": 50})
+        assert history.status_code == 200, history.text
+        history_next = await client.get(
+            "/api/v1/assignments",
+            params={"status": "all", "limit": 50, "cursor": history.json()["next_cursor"]},
+        )
+        assert history_next.status_code == 200, history_next.text
+        history_ids = [
+            UUID(item["id"])
+            for page in (history, history_next)
+            for item in page.json()["items"]
+        ]
+        assert set(history_ids) == {*active_ids, terminal.id}
         invalid_cursor = await client.get("/api/v1/assignments", params={"cursor": "invalid"})
-        assert invalid_status.status_code == 422
         assert invalid_cursor.status_code == 422
 
         after_schema = await schema_snapshot(database.engine)

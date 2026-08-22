@@ -106,6 +106,8 @@ class SafeProfile:
 
     member_id: UUID
     telegram_username: str | None
+    show_telegram_username: bool
+    avatar_url: str | None
     display_name: str
     city: str | None
     short_bio: str | None

@@ -107,6 +107,8 @@ class MemberModel(Base):
     )
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     telegram_username: Mapped[str | None] = mapped_column(Text)
+    show_telegram_username: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     city: Mapped[str | None] = mapped_column(Text)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
@@ -146,6 +148,32 @@ class MemberModel(Base):
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MediaAssetModel(Base):
+    """Bounded binary uploaded by a member for an avatar or assignment result."""
+
+    __tablename__ = "media_assets"
+    __table_args__ = (
+        CheckConstraint("kind IN ('avatar', 'submission')", name="ck_media_assets_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
+    )
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("assignments.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    file_name: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 
@@ -1339,6 +1367,21 @@ class WebSessionModel(Base):
     )
     expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramAuthProofModel(Base):
+    """One consumed, short-lived Telegram Mini App authentication proof."""
+
+    __tablename__ = "telegram_auth_proofs"
+    __table_args__ = (
+        CheckConstraint("octet_length(proof_digest) = 32", name="ck_telegram_auth_proofs_digest"),
+    )
+
+    proof_digest: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class AccountTransactionModel(Base):
