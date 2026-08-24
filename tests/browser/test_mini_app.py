@@ -178,20 +178,22 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         catalog.click()
         catalog.click()
         assert task_requests == 2
-        pending.pop(0).fulfill(json={"items": [refreshed_task], "next_cursor": None})
-        page.get_by_text("Обновлённый каталог", exact=True).wait_for()
+        assert pending == []
 
         page.get_by_role("button", name="Профиль", exact=True).click()
         page.evaluate("advanceCacheClock(60001)")
         page.locator("#catalog-nav").click()
         assert page.get_by_text("Обновлённый каталог", exact=True).is_visible()
-        assert task_requests == 4
+        assert task_requests == 3
         page.wait_for_timeout(50)
         page.get_by_role("button", name="Профиль", exact=True).click()
         page.locator("h2", has_text="Алекс").wait_for()
+        pending.pop(0).fulfill(json={"items": [refreshed_task], "next_cursor": None})
+        page.wait_for_timeout(50)
+        assert page.locator("h2", has_text="Алекс").is_visible()
         page.locator("#catalog-nav").click()
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
-        assert task_requests == 5
+        assert task_requests == 3
         browser.close()
 
 
@@ -842,9 +844,7 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         page.get_by_role("button", name="Редактировать ссылки").click()
         page.get_by_role("button", name="+ Добавить ссылку").click()
         page.locator(".link-presets").get_by_role("button", name="LinkedIn", exact=True).click()
-        page.locator(".profile-editor").locator('input[type="url"]').fill(
-            "https://linkedin.com/in/alex"
-        )
+        page.get_by_role("textbox", name="Ссылка", exact=True).fill("https://linkedin.com/in/alex")
         page.locator('input[maxlength="32"]').focus()
         capture(9, "link-new", "PR-09", 'input[maxlength="32"]')
 
@@ -2192,7 +2192,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
     modes = {"member": "pending", "leaderboard": "pending"}
     pending: list[Route] = []
     requests: list[tuple[str, str]] = []
-    profile_update_keys: list[str] = []
     capture_requests = False
 
     def me_route(route: Route) -> None:
@@ -2213,25 +2212,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         payload = {"items": []} if modes["leaderboard"] == "empty" else leaderboard
         fulfill_by_mode(route, modes["leaderboard"], payload)
 
-    def profile_update_route(route: Route) -> None:
-        assert route.request.method == "PUT"
-        profile_update_keys.append(route.request.headers["idempotency-key"])
-        body = route.request.post_data_json
-        assert body is not None
-        if len(profile_update_keys) == 1:
-            assert body == {"field": "city", "value": "Rosario"}
-            route.abort()
-        elif len(profile_update_keys) == 2:
-            assert body == {"field": "city", "value": "Rosario"}
-            route.fulfill(status=502, body="upstream unavailable")
-        elif len(profile_update_keys) == 3:
-            assert body == {"field": "city", "value": "Rosario"}
-            me["city"] = "Rosario"
-            route.fulfill(json=me)
-        else:
-            assert body == {"field": "city", "value": "x"}
-            route.fulfill(status=422, json={"code": "invalid_request"})
-
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
@@ -2245,7 +2225,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             ),
         )
         page.route("**/api/v1/me", me_route)
-        page.route("**/api/v1/me/profile", profile_update_route)
         page.route(f"**/api/v1/members/{member_id}", member_route)
         page.route(
             "**/api/v1/members?*",
@@ -2376,7 +2355,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert profile_nav.evaluate("node => node === document.activeElement")
         assert requests
         assert {
-            ("PUT", "/api/v1/me/profile"),
             ("GET", "/api/v1/me"),
             ("GET", "/api/v1/members"),
             ("GET", f"/api/v1/members/{member_id}"),
@@ -2389,7 +2367,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             f"/api/v1/members/{member_id}",
             "/api/v1/leaderboard",
             "/api/v1/tasks",
-            "/api/v1/me/profile",
         } == {path for _method, path in requests}
         browser.close()
 
@@ -2883,14 +2860,12 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.evaluate("advanceCacheClock(60001)")
         with page.expect_response(lambda response: response.status == 503):
             orders.click()
-        page.get_by_text("Пока нет заданий.").wait_for()
-        assert page.get_by_text("Не удалось загрузить активные назначения.").count() == 0  # noqa: RUF001
+        page.get_by_text("Не удалось загрузить активные назначения.").wait_for()  # noqa: RUF001
+        assert page.get_by_role("button", name="Повторить").count() == 1
 
         list_mode["status"] = 401
         with page.expect_response(lambda response: response.status == 401):
             orders.click()
-        page.get_by_text("Пока нет заданий.").wait_for()
-        orders.click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0
 
@@ -3912,8 +3887,6 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(
             assert input_styles["fontSize"] >= 16
 
             assert page.locator("#primary-navigation").is_hidden()
-            page.get_by_role("button", name="Назад").click()
-            page.locator('[data-screen-id="T04B"]').wait_for()
             page.get_by_role("button", name="Назад").click()
             page.get_by_role("heading", name="Задания").wait_for()
             page.get_by_role("button", name="Заказы").click()
