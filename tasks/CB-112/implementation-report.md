@@ -5,6 +5,7 @@
 - PR CI сокращён до обязательного `Quality`; DB, browser и auth/ledger запускаются только по changed paths.
 - Удалены verified merge tree, release bundle, provenance и post-merge повторная image publication.
 - `/readyz` публикует exact non-secret `release`.
+- Canonical `allo` nginx vhost маршрутизирует `/readyz` к именованному web-контейнеру в существующей compose-сети.
 - Один forced-command Python entrypoint применяет cached native build, проверяет target/live Alembic head, health web-контейнера и public `/readyz`, затем при ошибке выполняет rollback.
 - Durable rollback хранит ровно предыдущий успешный runtime Docker tag `community-bot-dev:previous`; legacy `active.json` не является state fast dev path.
 - SLA использует timestamp current GitHub push event.
