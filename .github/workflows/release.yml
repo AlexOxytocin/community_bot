@@ -1,8 +1,7 @@
-name: Deploy dev server
+name: Deploy dev server (manual)
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: canonical-dev-deploy

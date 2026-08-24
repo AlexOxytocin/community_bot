@@ -76,8 +76,8 @@ def test_backup_and_restore_keep_database_safety_contract() -> None:
     assert "mode 0600" in runtime
 
 
-def test_ci_and_deploy_use_one_bounded_dev_path() -> None:
-    """Ordinary dev delivery has one fast required path and one bounded trigger."""
+def test_ci_and_deploy_use_one_bounded_manual_dev_path() -> None:
+    """Dev delivery keeps one bounded path without deploying every main push."""
     root = Path(__file__).parents[2]
     ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     release = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -90,7 +90,8 @@ def test_ci_and_deploy_use_one_bounded_dev_path() -> None:
     assert "image-contract" not in ci
     assert "release-bundle" not in release
     publication = yaml.safe_load(release)
-    assert publication[True]["push"]["branches"] == ["main"]
+    assert publication[True] == {"workflow_dispatch": None}
+    assert "push:" not in release
     assert publication["concurrency"]["cancel-in-progress"] is False
     assert set(publication["jobs"]) == {"deploy"}
     assert "DEV_DEPLOY_SSH_PRIVATE_KEY" in release
