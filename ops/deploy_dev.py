@@ -60,7 +60,10 @@ def prove(sha: str, deadline: float) -> None:
         )
         if state == f"healthy {sha}":
             try:
-                with urllib.request.urlopen(PUBLIC_READY_URL, timeout=5) as response:
+                request = urllib.request.Request(
+                    PUBLIC_READY_URL, headers={"User-Agent": "community-bot-deploy"}
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
                     if response.status == 200 and json.load(response)["release"] == sha:
                         return
             except (OSError, json.JSONDecodeError, KeyError):
