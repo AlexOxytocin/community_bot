@@ -295,26 +295,20 @@ def test_post_merge_delivery_gate_is_exact() -> None:
         "any_runtime_diff",
     ]
     assert _mapping(workflow["post_merge_delivery"]) == {
-        "decision": "ADR-0019",
+        "decision": "ADR-0020",
         "delivery_when_any": [
             "product_task",
             "any_runtime_diff",
         ],
         "skip_only_when": "process_or_docs_only_task_without_runtime_diff",
-        "sequence": [
-            "merge_and_green_main_ci",
-            "new_exact_immutable_release_artifact",
-            "manual_first_single_pilot_production_activation",
-            "public_url_smoke",
-            "privacy_safe_jira_evidence",
-        ],
+        "sequence": ["merge", "automatic_exact_sha_deploy", "public_readyz_smoke"],
         "migration_change_requires_owner_gate": True,
         "done_requires": "successful_public_smoke",
         "done_without_public_smoke": "forbidden",
         "compatible_rollback_tuples": 1,
         "delivery_is_serialized": True,
         "supersession_requires_monotonic_artifact_and_both_smoke_scopes": True,
-        "automatic_cd_or_ssh_framework": "forbidden",
+        "automatic_cd_or_ssh_framework": "bounded_for_canonical_dev_only",
     }
 
 
