@@ -3254,7 +3254,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
             "Проверить безопасный предпросмотр."
         )
         page.get_by_label("Критерии приёмки *", exact=True).fill("Есть результат.")
-        page.get_by_label("Срок *", exact=True).fill("2026-08-21T20:00")
+        page.get_by_label("Срок *", exact=True).fill("2099-08-21T20:00")
         page.get_by_label("Число исполнителей *", exact=True).fill("2")
         page.get_by_label("Формат *", exact=True).select_option("offline")
         city = page.get_by_label("Город")
@@ -3280,7 +3280,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         page.get_by_text("Предпросмотр устарел").wait_for()
         page.get_by_role("button", name="Редактировать черновик").click()
-        page.get_by_label("Срок *", exact=True).fill("2026-08-22T20:00")
+        page.get_by_label("Срок *", exact=True).fill("2099-08-22T20:00")
         page.get_by_role("button", name="Предварительный просмотр", exact=True).click()
         commands_before = len(commands)
         page.locator('[data-screen-id="T06"]').wait_for()
@@ -3338,7 +3338,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert isinstance(repaired_form, dict)
         repaired_deadline = repaired_form["deadline_at"]
         assert isinstance(repaired_deadline, str)
-        assert "2026-08-22" in repaired_deadline
+        assert "2099-08-22" in repaired_deadline
         assert len({key for _action, key, _body in commands[1:]}) == 5
         browser.close()
 
