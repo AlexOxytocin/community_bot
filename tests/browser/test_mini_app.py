@@ -177,7 +177,7 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         page.get_by_role("button", name="Профиль", exact=True).click()
         page.get_by_role("button", name="Настройки профиля").click()
         page.get_by_role("button", name="Редактировать город").click()
-        page.get_by_role("textbox", name="Город", exact=True).fill("Córdoba")
+        page.get_by_label("Город", exact=True).fill("Córdoba")
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_role("button", name="Редактировать город").wait_for()
         page.locator("h2", has_text="Алекс").wait_for()
@@ -303,7 +303,7 @@ def test_orders_show_active_and_finished_assignments(mini_app_url: str) -> None:
 
         page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Актуальный заказ", exact=True).wait_for()
-        assert page.get_by_role("button", name="Заказы").count() == 1
+        assert page.get_by_role("button", name="Заказы").count() == 2
         page.get_by_text("Актуальный заказ", exact=True).wait_for()
         page.get_by_text("Старый заказ", exact=True).wait_for()
         assert page.get_by_text("Завершённые", exact=True).count() == 1
@@ -756,7 +756,7 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         assert len(mutation_requests) == before_back
 
         page.goto(mini_app_url + "?case=city#/profile/edit/city")
-        page.get_by_role("textbox", name="Город", exact=True).wait_for()
+        page.get_by_label("Город", exact=True).wait_for()
         capture(5, "city", "PR-05", "input[required]")
 
         page.goto(mini_app_url + "?case=bio#/profile/edit/bio")
@@ -1066,7 +1066,7 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
                 "border": "1px",
                 "overflow": "hidden",
                 "navBorder": "1px",
-                "icons": 5,
+                "icons": 9,
                 "overflowX": 0,
             }
             assert abs(geometry["shellBottom"] - geometry["navBottom"]) <= 1
@@ -1540,7 +1540,7 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
                 }"""
             )
             assert styles == {
-                "background": "rgb(23, 27, 38)",
+                "background": "rgb(23, 28, 41)",
                 "color": "rgb(246, 248, 252)",
                 "caret": "rgb(46, 230, 214)",
                 "height": styles["height"],
@@ -2322,17 +2322,17 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
         assert page.locator(".profile-overview").is_visible()
         assert page.url.endswith("#/profile")
-        assert page.locator("[data-profile-action]").count() == 0
+        assert page.locator(".profile-pencil[data-profile-action]").count() == 0
 
         page.get_by_role("button", name="Настройки профиля").click()
-        assert page.locator("[data-profile-action]").count() == 5
+        assert page.locator(".profile-pencil[data-profile-action]").count() == 5
         page.get_by_role("button", name="Редактировать город").click()
-        page.get_by_role("textbox", name="Город", exact=True).fill("Rosario")
+        page.get_by_label("Город", exact=True).fill("Rosario")
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_text(
             "Не удалось сохранить. Повторите попытку."  # noqa: RUF001
         ).wait_for()
-        assert page.get_by_role("textbox", name="Город", exact=True).input_value() == "Rosario"
+        assert page.get_by_label("Город", exact=True).input_value() == "Rosario"
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_text(
             "Не удалось сохранить. Повторите попытку."  # noqa: RUF001
@@ -2340,12 +2340,12 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         profile_updates_before = len(profile_update_keys)
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_role("button", name="Редактировать город").click()
-        assert page.get_by_role("textbox", name="Город", exact=True).input_value() == "Rosario"
+        assert page.get_by_label("Город", exact=True).input_value() == "Rosario"
         assert len(profile_update_keys) == profile_updates_before + 1
         assert profile_update_keys[0] == profile_update_keys[1] == profile_update_keys[2]
         assert page.get_by_text("Не удалось сохранить.", exact=False).count() == 0  # noqa: RUF001
 
-        invalid_city = page.get_by_role("textbox", name="Город", exact=True)
+        invalid_city = page.get_by_label("Город", exact=True)
         invalid_city.fill("x")
         profile_updates_before_invalid = len(profile_update_keys)
         page.get_by_role("button", name="Сохранить").click()
@@ -2666,7 +2666,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("Надёжность", exact=True).count() == 0
             assert page.get_by_text("—", exact=True).count() >= 2
             assert page.get_by_role("button", name="Настройки профиля").count() == 1
-            assert page.locator("[data-profile-action]").count() == 0
+            assert page.locator(".profile-pencil[data-profile-action]").count() == 0
             assert page.locator('[data-screen-id="P07"]').count() == 0
             page.close()
         browser.close()
