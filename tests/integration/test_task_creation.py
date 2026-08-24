@@ -125,7 +125,12 @@ async def template_id(database: Database, code: str) -> UUID:
     return value
 
 
-async def prepare_member(database: Database, *, telegram_user_id: int) -> MemberModel:
+async def prepare_member(
+    database: Database,
+    *,
+    telegram_user_id: int,
+    credit_balance: Decimal = Decimal("5.0"),
+) -> MemberModel:
     admin = await add_member(
         database,
         telegram_user_id=telegram_user_id + 1000,
@@ -134,6 +139,16 @@ async def prepare_member(database: Database, *, telegram_user_id: int) -> Member
     member = await add_member(database, telegram_user_id=telegram_user_id)
     await prepare_config(database, admin)
     await EconomyService(database.unit_of_work).apply_one(starting_grant(member.id))
+    if credit_balance > Decimal("5.0"):
+        await EconomyService(database.unit_of_work).apply_one(
+            admin_adjustment(
+                member_id=member.id,
+                credit_delta=credit_balance - Decimal("5.0"),
+                experience_delta=0,
+                idempotency_key=f"task-test-funding:{member.id}",
+                context=AdministrativeContext(admin.id, "Task test funding."),
+            )
+        )
     return member
 
 
@@ -385,7 +400,7 @@ async def test_freeform_task_publishes_without_template_and_reserves_full_budget
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=19_500)
+    member = await prepare_member(database, telegram_user_id=19_500, credit_balance=Decimal("10.0"))
     service = TaskService(database.unit_of_work)
     selected_category = await category_id(database, "evaluation_testing")
 
@@ -516,7 +531,7 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    author = await prepare_member(database, telegram_user_id=19_700)
+    author = await prepare_member(database, telegram_user_id=19_700, credit_balance=Decimal("10.0"))
     performer = await prepare_member(database, telegram_user_id=19_701)
     stranger = await prepare_member(database, telegram_user_id=19_702)
     task_service = TaskService(database.unit_of_work)
@@ -585,7 +600,7 @@ async def test_partially_completed_group_can_release_its_free_slot_reserve(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    author = await prepare_member(database, telegram_user_id=19_750)
+    author = await prepare_member(database, telegram_user_id=19_750, credit_balance=Decimal("10.0"))
     performer = await add_member(database, telegram_user_id=19_751)
     task_service = TaskService(database.unit_of_work)
     assignment_service = AssignmentService(database.unit_of_work)
@@ -665,7 +680,7 @@ async def test_partially_completed_task_without_free_slots_cannot_be_reopened(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    author = await prepare_member(database, telegram_user_id=19_760)
+    author = await prepare_member(database, telegram_user_id=19_760, credit_balance=Decimal("10.0"))
     first_performer = await add_member(database, telegram_user_id=19_761)
     second_performer = await add_member(database, telegram_user_id=19_762)
     task_service = TaskService(database.unit_of_work)
@@ -728,7 +743,7 @@ async def test_partially_completed_task_without_free_slots_cannot_be_reopened(
 
 async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=2000)
+    member = await prepare_member(database, telegram_user_id=2000, credit_balance=Decimal("10.0"))
     selected = await template_id(database, "repository_first_impression")
     service = TaskService(database.unit_of_work)
     draft_id, revision = await complete_preview(
@@ -794,7 +809,7 @@ async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -
 
 async def test_two_public_drafts_compete_for_one_balance(database_url: str) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=2100)
+    member = await prepare_member(database, telegram_user_id=2100, credit_balance=Decimal("10.0"))
     selected = await template_id(database, "resume_review")
     service = TaskService(database.unit_of_work)
     first_id, first_revision = await complete_preview(

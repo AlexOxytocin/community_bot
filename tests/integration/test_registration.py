@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -25,7 +26,7 @@ from community_bot.application.registration import (
     RegistrationStartCommand,
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
-from community_bot.domain.economy import economy_payload_hash, starting_grant
+from community_bot.domain.economy import starting_grant
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.domain.registration import (
     InvitationError,
@@ -877,8 +878,24 @@ async def test_migration_backfills_missing_active_starting_grants(
     assert grants_by_member[active_missing.id].idempotency_key == (
         f"starting_grant:{active_missing.id}"
     )
-    assert grants_by_member[active_missing.id].payload_hash == economy_payload_hash(
-        replace(starting_grant(active_missing.id), credit_delta=10)
+    legacy_payload = {
+        "schema_version": 1,
+        "transaction_type": "starting_grant",
+        "member_id": str(active_missing.id),
+        "credit_delta": 10,
+        "experience_delta": 0,
+        "actor_member_id": None,
+        "reason": None,
+        "comment": None,
+        "reversed_transaction_id": None,
+    }
+    assert (
+        grants_by_member[active_missing.id].payload_hash
+        == hashlib.sha256(
+            json.dumps(
+                legacy_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
     )
     await repaired.dispose()
 

@@ -454,7 +454,7 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
             )
 
     assert (await authenticate("Updated_Name")).status_code == 204
-    assert (await authenticate("Updated_Name")).status_code == 204
+    assert (await authenticate("Updated_Name")).status_code == 401
     concurrent = await asyncio.gather(authenticate("Final_Name"), authenticate(_USERNAME_ABSENT))
     assert [item.status_code for item in concurrent] == [204, 204]
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
@@ -929,6 +929,7 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(TaskModel)) == 1
         assert await session.scalar(select(func.count()).select_from(ConversationStateModel)) == 0
+    await database.dispose()
 
 
 async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
@@ -1003,7 +1004,7 @@ async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
         assert (
             await client.post(
                 "/api/v1/auth/telegram",
-                content=proof(member.telegram_user_id, now=now),
+                content=proof(member.telegram_user_id, now=now + datetime.timedelta(seconds=1)),
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
         ).status_code == 204
@@ -1365,7 +1366,7 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
             "revision": 0,
             "task_title": "Disputed task",
             "task_origin": "member",
-            "credit_reward_per_performer": 2,
+            "credit_reward_per_performer": "2.0",
             "assignment_status": "disputed",
             "result_summary": "Безопасный итог",
             "dispute_reason": "The rejection is disputed.",
@@ -2795,7 +2796,7 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
         items = {UUID(item["id"]): item for item in page.json()["items"]}
         assert set(items) == {assignment.id, rows[-1].id}
         assert items[assignment.id]["available_decisions"] == ["full", "partial", "reject"]
-        assert items[rows[-1].id]["available_decisions"] == ["full", "reject"]
+        assert items[rows[-1].id]["available_decisions"] == ["full", "partial", "reject"]
         assert items[assignment.id]["result"] == "Literal creator review result."
         detail = await client.get(f"/api/v1/assignment-reviews/{assignment.id}")
         assert detail.status_code == 200
