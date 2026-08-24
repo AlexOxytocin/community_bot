@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
@@ -71,7 +72,7 @@ class TaskDraft:
     title: str | None
     description: str | None
     completion_criteria: str | None
-    credit_reward_per_performer: int | None
+    credit_reward_per_performer: Decimal | None
     estimated_minutes: int | None
     input_payload: dict[str, object] | None
     deadline_at: datetime.datetime | None
@@ -101,8 +102,8 @@ class TaskPreview:
     performer_instructions: str
     public_input_keys: tuple[str, ...]
     completion_criteria: str
-    credit_reward_per_performer: int
-    reserved_credit_total: int
+    credit_reward_per_performer: Decimal
+    reserved_credit_total: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,9 +129,9 @@ class PublishedTask:
     completion_criteria: str
     input_payload: dict[str, object]
     materials: dict[str, object]
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     performer_slots: int
-    reserved_credit_total: int
+    reserved_credit_total: Decimal
     minimum_level: int
     format: TaskFormat
     city: str | None
@@ -268,7 +269,7 @@ class SaveWebTaskDraftCommand:
     title: str
     description: str
     completion_criteria: str
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     deadline_at: datetime.datetime
     format: TaskFormat
     city: str | None
@@ -403,7 +404,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         payload: dict[str, object],
         business_key: str,
     ) -> None: ...
-    async def list_available_tasks(
+    async def list_available_tasks(  # noqa: PLR0913 - discovery filters stay explicit.
         self,
         *,
         performer_id: UUID,
@@ -411,6 +412,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         limit: int,
         cursor_task_id: UUID | None,
         now: datetime.datetime,
+        city: str | None = None,
     ) -> tuple[PublishedTask, ...]: ...
     async def ensure_task_test_access(
         self, *, member_id: UUID, task_id: UUID | None = None, draft_id: UUID | None = None
@@ -1013,10 +1015,10 @@ class TaskService:
                 template.performer_instructions,
                 _schema_property_keys(template.input_schema),
                 template.completion_criteria,
-                template.credit_reward,
-                0
+                Decimal(str(template.credit_reward)),
+                Decimal("0.0")
                 if draft.origin == "community"
-                else template.credit_reward * draft.performer_slots,
+                else Decimal(str(template.credit_reward)) * draft.performer_slots,
             )
 
     async def publish(self, command: PublishTaskCommand) -> PublishedTask | TaskDraft:  # noqa: PLR0915
@@ -1376,6 +1378,7 @@ class TaskService:
         *,
         actor: ActorContext,
         cursor_task_id: UUID | None = None,
+        city: str | None = None,
         limit: int = _MAX_AVAILABLE_TASKS,
     ) -> AvailableTaskPage:
         """Return tasks the actor may attempt to accept right now."""
@@ -1388,13 +1391,23 @@ class TaskService:
                 return AvailableTaskPage(items=(), next_cursor_task_id=None)
             level = await uow.resolve_member_level(member.id)
             page_limit = max(1, min(limit, 50))
-            tasks = await uow.list_available_tasks(
-                performer_id=member.id,
-                level=level.level_number,
-                limit=page_limit + 1,
-                cursor_task_id=cursor_task_id,
-                now=datetime.datetime.now(datetime.UTC),
-            )
+            if city:
+                tasks = await uow.list_available_tasks(
+                    performer_id=member.id,
+                    level=level.level_number,
+                    limit=page_limit + 1,
+                    cursor_task_id=cursor_task_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                    city=city,
+                )
+            else:
+                tasks = await uow.list_available_tasks(
+                    performer_id=member.id,
+                    level=level.level_number,
+                    limit=page_limit + 1,
+                    cursor_task_id=cursor_task_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                )
         items = tasks[:page_limit]
         return AvailableTaskPage(
             items=items,
@@ -2147,8 +2160,8 @@ async def _freeform_preview(
         "Следуйте описанию задания и критериям результата.",
         ("description",),
         cast("str", draft.completion_criteria),
-        cast("int", draft.credit_reward_per_performer),
-        cast("int", draft.credit_reward_per_performer) * cast("int", draft.performer_slots),
+        cast("Decimal", draft.credit_reward_per_performer),
+        cast("Decimal", draft.credit_reward_per_performer) * cast("int", draft.performer_slots),
     )
 
 

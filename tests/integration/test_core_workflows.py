@@ -410,9 +410,9 @@ async def test_full_exchange_reconciles_ledger_exactly_once(database_url: str) -
                 OutboxEventModel.aggregate_id == assignment.id
             )
         )
-    assert author_row is not None and author_row.credit_balance_cached == author_ledger == 8
+    assert author_row is not None and author_row.credit_balance_cached == author_ledger == 3
     assert (
-        performer_row is not None and performer_row.credit_balance_cached == performer_ledger == 12
+        performer_row is not None and performer_row.credit_balance_cached == performer_ledger == 7
     )
     assert performer_row.experience_total_cached == 2
     assert assignment_row is not None and assignment_row.status == "approved"

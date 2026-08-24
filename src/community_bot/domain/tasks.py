@@ -6,9 +6,11 @@ import datetime
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import HttpUrl, TypeAdapter, ValidationError
 
@@ -16,8 +18,6 @@ from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.members import Member, MemberStatus
 
 if TYPE_CHECKING:
-    from uuid import UUID
-
     from community_bot.domain.economy import ResolvedLevel
 
 
@@ -28,7 +28,8 @@ class TaskError(ValueError):
 _MAX_MATERIAL_LENGTH = 2000
 _MAX_URL_LENGTH = 700
 _MIN_FREEFORM_RESULT_LENGTH = 10
-_XL_MIN_REWARD_EXCLUSIVE = 10
+_MAX_FREEFORM_ATTACHMENTS = 5
+_MAX_FREEFORM_ATTACHMENT_NAME_LENGTH = 120
 _HTTP_URL = TypeAdapter(HttpUrl)
 _URI_SCHEME = re.compile(r"\b([a-z][a-z0-9+.-]*):\/\/", re.IGNORECASE)
 _HTTP_URI = re.compile(r"https?:\/\/[^\s]+", re.IGNORECASE)
@@ -196,20 +197,23 @@ def validate_freeform_slots(value: int, *, kind: TaskKind) -> int:
     return value
 
 
-def validate_freeform_reward(size: TaskTimeSize, value: int) -> int:
-    """Validate one creator-selected reward against the selected size bucket."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        message = "Task reward must be an integer."
+def validate_freeform_reward(_size: TaskTimeSize, value: object) -> Decimal:
+    """Validate a non-negative credit reward with one decimal place at most."""
+    numeric_message = "Task reward must be a number."
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int)):
+        raise TaskError(numeric_message)
+    try:
+        normalized = Decimal(str(value))
+    except (InvalidOperation, ValueError) as error:
+        raise TaskError(numeric_message) from error
+    exponent = normalized.as_tuple().exponent
+    if not normalized.is_finite() or not isinstance(exponent, int) or exponent < -1:
+        message = "Task reward may have at most one decimal place."
         raise TaskError(message)
-    spec = TASK_TIME_SIZE_SPECS[size]
-    if spec.reward_options is not None:
-        if value not in spec.reward_options:
-            message = "Task reward is outside the selected size options."
-            raise TaskError(message)
-    elif value <= _XL_MIN_REWARD_EXCLUSIVE:
-        message = "XL task reward must be greater than 10."
+    if normalized < 0:
+        message = "Task reward cannot be negative."
         raise TaskError(message)
-    return value
+    return normalized.quantize(Decimal("0.1"))
 
 
 def validate_freeform_text(value: object, *, field: str) -> str:
@@ -250,8 +254,8 @@ def validate_freeform_materials(value: Mapping[str, object]) -> dict[str, object
 
 def validate_freeform_result_payload(payload: Mapping[str, object]) -> dict[str, object]:
     """Validate the standard result payload used by free-form tasks."""
-    if set(payload) != {"result"}:
-        message = "Free-form task result must contain only result."
+    if set(payload) - {"result", "attachments"}:
+        message = "Free-form task result contains an unsupported field."
         raise TaskError(message)
     result = payload.get("result")
     if not isinstance(result, str):
@@ -262,7 +266,44 @@ def validate_freeform_result_payload(payload: Mapping[str, object]) -> dict[str,
         message = "Free-form task result length is invalid."
         raise TaskError(message)
     validate_public_text_uris(normalized)
-    return {"result": normalized}
+    normalized_attachments = _normalize_freeform_attachments(payload.get("attachments", []))
+    normalized_payload: dict[str, object] = {"result": normalized}
+    if normalized_attachments:
+        normalized_payload["attachments"] = normalized_attachments
+    return normalized_payload
+
+
+def _normalize_freeform_attachments(value: object) -> list[dict[str, str]]:
+    """Validate a bounded, unique set of server-issued attachment identifiers."""
+    if not isinstance(value, list) or len(value) > _MAX_FREEFORM_ATTACHMENTS:
+        message = "Free-form task attachments are invalid."
+        raise TaskError(message)
+    normalized_attachments: list[dict[str, str]] = []
+    seen_attachment_ids: set[UUID] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "name"}:
+            message = "Free-form task attachments are invalid."
+            raise TaskError(message)
+        raw_id, raw_name = item.get("id"), item.get("name")
+        if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+            message = "Free-form task attachments are invalid."
+            raise TaskError(message)
+        try:
+            attachment_id = UUID(raw_id)
+        except ValueError as error:
+            message = "Free-form task attachments are invalid."
+            raise TaskError(message) from error
+        name = raw_name.strip()
+        if (
+            attachment_id in seen_attachment_ids
+            or not name
+            or len(name) > _MAX_FREEFORM_ATTACHMENT_NAME_LENGTH
+        ):
+            message = "Free-form task attachments are invalid."
+            raise TaskError(message)
+        seen_attachment_ids.add(attachment_id)
+        normalized_attachments.append({"id": str(attachment_id), "name": name})
+    return normalized_attachments
 
 
 def task_time_size_label(size: TaskTimeSize) -> str:

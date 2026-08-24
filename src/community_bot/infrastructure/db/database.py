@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
 
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -37,15 +38,26 @@ from community_bot.infrastructure.db.initial_admin import (
     SqlAlchemyInitialAdministratorUnitOfWork,
 )
 from community_bot.infrastructure.db.models import (
+    AssignmentModel,
+    AssignmentSubmissionDraftModel,
     AuditEventModel,
+    MediaAssetModel,
     MemberModel,
     ProcessedTelegramUpdateModel,
+    TaskModel,
+    TelegramAuthProofModel,
     TestRunParticipantModel,
     WebSessionModel,
 )
 from community_bot.infrastructure.db.moderation import SqlAlchemyModerationMutation
 
 _UPDATE_LOCK_NAMESPACE = "telegram_update"
+_MAX_SUBMISSION_ATTACHMENTS = 5
+
+
+class AttachmentLimitError(ValueError):
+    """Raised when one assignment already has the allowed number of uploads."""
+
 
 if TYPE_CHECKING:
     import datetime
@@ -113,7 +125,9 @@ class Database:
 
     def __init__(self, database_url: str) -> None:
         """Create an engine without opening a connection eagerly."""
-        self.engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+        self.engine: AsyncEngine = create_async_engine(
+            database_url, pool_pre_ping=True, pool_size=5, max_overflow=5, pool_recycle=1800
+        )
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     def unit_of_work(  # noqa: PLR0913 - explicit fault checkpoints stay independently injectable.
@@ -167,17 +181,33 @@ class Database:
         """Release all engine resources."""
         await self.engine.dispose()
 
-    async def create_web_session(
+    async def create_web_session(  # noqa: PLR0913 - session security attributes must remain explicit.
         self,
         *,
         telegram_user_id: int,
         telegram_username: str | None,
+        telegram_avatar_url: str | None,
+        proof_digest: bytes,
+        proof_expires_at: datetime.datetime,
         token_digest: bytes,
         authenticated_at: datetime.datetime,
         expires_at: datetime.datetime,
     ) -> UUID | None:
-        """Persist one session for an existing Telegram identity."""
+        """Consume a proof once and persist a session for its existing identity."""
         async with self._sessions.begin() as session:
+            await session.execute(
+                delete(TelegramAuthProofModel).where(
+                    TelegramAuthProofModel.expires_at <= authenticated_at
+                )
+            )
+            consumed = await session.scalar(
+                insert(TelegramAuthProofModel)
+                .values(proof_digest=proof_digest, expires_at=proof_expires_at)
+                .on_conflict_do_nothing(index_elements=("proof_digest",))
+                .returning(TelegramAuthProofModel.proof_digest)
+            )
+            if consumed is None:
+                return None
             await registration_store.acquire_registration_identity_gate(session, telegram_user_id)
             member = await session.scalar(
                 select(MemberModel)
@@ -199,6 +229,12 @@ class Database:
                         reason="cleared" if telegram_username is None else "updated",
                     )
                 )
+            if (
+                telegram_avatar_url is not None
+                and not (member.avatar_url or "").startswith("/api/v1/media/avatar/")
+                and member.avatar_url != telegram_avatar_url
+            ):
+                member.avatar_url = telegram_avatar_url
             session.add(
                 WebSessionModel(
                     token_digest=token_digest,
@@ -239,6 +275,109 @@ class Database:
                 )
                 .values(revoked_at=now)
             )
+
+    async def save_media_asset(  # noqa: PLR0913 - media metadata is intentionally explicit.
+        self,
+        *,
+        owner_member_id: UUID,
+        assignment_id: UUID | None,
+        kind: str,
+        file_name: str,
+        content_type: str,
+        content: bytes,
+    ) -> UUID:
+        """Store one capped browser upload in the primary transaction store."""
+        async with self._sessions.begin() as session:
+            if kind == "submission":
+                count = await session.scalar(
+                    select(func.count(MediaAssetModel.id)).where(
+                        MediaAssetModel.owner_member_id == owner_member_id,
+                        MediaAssetModel.assignment_id == assignment_id,
+                        MediaAssetModel.kind == "submission",
+                    )
+                )
+                if (count or 0) >= _MAX_SUBMISSION_ATTACHMENTS:
+                    raise AttachmentLimitError
+            if kind == "avatar":
+                await session.execute(
+                    delete(MediaAssetModel).where(
+                        MediaAssetModel.owner_member_id == owner_member_id,
+                        MediaAssetModel.kind == "avatar",
+                    )
+                )
+            asset = MediaAssetModel(
+                owner_member_id=owner_member_id,
+                assignment_id=assignment_id,
+                kind=kind,
+                file_name=file_name,
+                content_type=content_type,
+                content=content,
+            )
+            session.add(asset)
+            await session.flush()
+            if kind == "avatar":
+                member = await session.get(MemberModel, owner_member_id, with_for_update=True)
+                if member is None:
+                    message = "Member does not exist."
+                    raise LookupError(message)
+                member.avatar_url = f"/api/v1/media/avatar/{asset.id}"
+        return asset.id
+
+    async def avatar_media(self, asset_id: UUID) -> tuple[bytes, str] | None:
+        """Read a public avatar by its unguessable UUID."""
+        async with self._sessions() as session:
+            asset = await session.get(MediaAssetModel, asset_id)
+            if asset is None or asset.kind != "avatar":
+                return None
+            return asset.content, asset.content_type
+
+    async def owns_submission_assets(
+        self, *, asset_ids: tuple[UUID, ...], owner_member_id: UUID, draft_id: UUID
+    ) -> bool:
+        """Confirm that every result attachment belongs to this performer and draft assignment."""
+        if not asset_ids:
+            return True
+        async with self._sessions() as session:
+            count = await session.scalar(
+                select(func.count(MediaAssetModel.id))
+                .where(
+                    MediaAssetModel.id.in_(asset_ids),
+                    MediaAssetModel.owner_member_id == owner_member_id,
+                    MediaAssetModel.kind == "submission",
+                )
+                .join(
+                    AssignmentSubmissionDraftModel,
+                    AssignmentSubmissionDraftModel.assignment_id == MediaAssetModel.assignment_id,
+                )
+                .where(
+                    AssignmentSubmissionDraftModel.id == draft_id,
+                    AssignmentSubmissionDraftModel.performer_id == owner_member_id,
+                )
+            )
+        return count == len(asset_ids)
+
+    async def assignment_media(
+        self, *, asset_id: UUID, actor_member_id: UUID
+    ) -> tuple[bytes, str] | None:
+        """Read one result attachment only for a participant entitled to inspect it."""
+        async with self._sessions() as session:
+            row = (
+                await session.execute(
+                    select(MediaAssetModel.content, MediaAssetModel.content_type)
+                    .join(AssignmentModel, AssignmentModel.id == MediaAssetModel.assignment_id)
+                    .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
+                    .where(
+                        MediaAssetModel.id == asset_id,
+                        MediaAssetModel.kind == "submission",
+                        (
+                            (MediaAssetModel.owner_member_id == actor_member_id)
+                            | (TaskModel.creator_id == actor_member_id)
+                            | (TaskModel.reviewer_admin_id == actor_member_id)
+                        ),
+                    )
+                )
+            ).one_or_none()
+            return None if row is None else (row[0], row[1])
 
 
 class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
@@ -938,7 +1077,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             business_key=business_key,
         )
 
-    async def list_available_tasks(
+    async def list_available_tasks(  # noqa: PLR0913 - discovery filters stay explicit.
         self,
         *,
         performer_id: UUID,
@@ -946,6 +1085,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         limit: int,
         cursor_task_id: UUID | None,
         now: datetime.datetime,
+        city: str | None = None,
     ) -> tuple[PublishedTask, ...]:
         """Return the stable discovery page for one performer."""
         return await task_store.list_available_tasks(
@@ -955,6 +1095,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             limit=limit,
             cursor_task_id=cursor_task_id,
             now=now,
+            city=city,
         )
 
     async def ensure_task_test_access(

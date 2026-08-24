@@ -78,7 +78,7 @@ def test_leaderboard_cursor_encodes_every_total_order_tie_breaker() -> None:
     """Every leaderboard tie-breaker and zero/sentinel boundary is strict."""
     reached = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
     base = LeaderboardCursor(
-        experience=0,
+        experience=Decimal(0),
         recipients=0,
         sufficient_sample=False,
         reliability=Decimal(0),

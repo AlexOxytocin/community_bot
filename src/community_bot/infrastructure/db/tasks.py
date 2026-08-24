@@ -515,6 +515,7 @@ async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inp
     limit: int,
     cursor_task_id: uuid.UUID | None,
     now: datetime.datetime,
+    city: str | None = None,
 ) -> tuple[PublishedTask, ...]:
     """Return discoverable tasks while leaving final authorization to acceptance."""
     occupied = (
@@ -544,10 +545,11 @@ async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inp
         ~already_assigned,
         test_scope,
     )
-    statement = select(TaskModel).where(*availability)
+    city_condition = () if not city else (TaskModel.city == city,)
+    statement = select(TaskModel).where(*availability, *city_condition)
     if cursor_task_id is not None:
         cursor = await session.scalar(
-            select(TaskModel).where(TaskModel.id == cursor_task_id, *availability)
+            select(TaskModel).where(TaskModel.id == cursor_task_id, *availability, *city_condition)
         )
         if cursor is not None:
             statement = statement.where(

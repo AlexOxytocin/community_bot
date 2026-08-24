@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import datetime
     from collections.abc import Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
+    from decimal import Decimal
     from pathlib import Path
     from uuid import UUID
 
@@ -82,8 +83,8 @@ class LedgerHistoryItem:
     transaction_id: UUID
     member_id: UUID
     transaction_type: str
-    credit_delta: int
-    experience_delta: int
+    credit_delta: Decimal
+    experience_delta: Decimal
     comment: str | None
     created_at: datetime.datetime
 
@@ -101,10 +102,10 @@ class ReconciliationMismatch:
     """One member whose caches differ from immutable ledger sums."""
 
     member_id: UUID
-    expected_credit_balance: int
-    actual_credit_balance: int
-    expected_experience_total: int
-    actual_experience_total: int
+    expected_credit_balance: Decimal
+    actual_credit_balance: Decimal
+    expected_experience_total: Decimal
+    actual_experience_total: Decimal
 
 
 class EconomyMutationPort(Protocol):

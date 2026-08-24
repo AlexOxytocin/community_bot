@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from decimal import Decimal
 from typing import cast
 from uuid import uuid4
 
@@ -110,12 +111,10 @@ def test_freeform_size_reward_slots_and_text_boundaries() -> None:
     assert validate_freeform_slots(3, kind=TaskKind.GROUP) == 3
     with pytest.raises(TaskError):
         validate_freeform_slots(1, kind=TaskKind.GROUP)
-    assert validate_freeform_reward(TaskTimeSize.XS, 2) == 2
+    assert validate_freeform_reward(TaskTimeSize.XS, 0) == 0
+    assert validate_freeform_reward(TaskTimeSize.XS, Decimal("0.1")) == Decimal("0.1")
+    assert validate_freeform_reward(TaskTimeSize.S, 5) == 5
     assert validate_freeform_reward(TaskTimeSize.XL, 11) == 11
-    with pytest.raises(TaskError):
-        validate_freeform_reward(TaskTimeSize.XL, 10)
-    with pytest.raises(TaskError):
-        validate_freeform_reward(TaskTimeSize.S, 5)
     assert validate_freeform_text("  Короткое название  ", field="title") == "Короткое название"
     with pytest.raises(TaskError):
         validate_freeform_text("x" * 81, field="title")
@@ -144,7 +143,9 @@ def test_freeform_validators_reject_invalid_shapes() -> None:
         with pytest.raises(TaskError):
             validate_freeform_reward(TaskTimeSize.S, cast("int", invalid_reward))
     with pytest.raises(TaskError):
-        validate_freeform_reward(TaskTimeSize.M, 8)
+        validate_freeform_reward(TaskTimeSize.M, -1)
+    with pytest.raises(TaskError):
+        validate_freeform_reward(TaskTimeSize.M, Decimal("0.01"))
 
     with pytest.raises(TaskError):
         validate_freeform_text("value", field="unknown")
@@ -178,4 +179,23 @@ def test_freeform_materials_and_result_payload_boundaries() -> None:
     assert validate_freeform_result_payload({"result": "  useful result text  "}) == {
         "result": "useful result text"
     }
+    attachment_id = str(uuid4())
+    assert validate_freeform_result_payload(
+        {
+            "result": "useful result text",
+            "attachments": [{"id": attachment_id, "name": "  result.pdf  "}],
+        }
+    ) == {
+        "result": "useful result text",
+        "attachments": [{"id": attachment_id, "name": "result.pdf"}],
+    }
+    for attachments in (
+        [{"id": "not-a-uuid", "name": "result.pdf"}],
+        [{"id": attachment_id, "name": "result.pdf"}] * 2,
+        [{"id": attachment_id, "name": " "}],
+    ):
+        with pytest.raises(TaskError):
+            validate_freeform_result_payload(
+                {"result": "useful result text", "attachments": attachments}
+            )
     validate_public_text_uris(["https://example.com/path", ("plain text",)])

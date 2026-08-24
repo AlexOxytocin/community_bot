@@ -32,6 +32,7 @@ from community_bot.transport.web import (
     TelegramIdentity,
     _accept_update_id,
     _assignment_cursor,
+    _member_dto,
     _member_query,
     _parse_assignment_cursor,
     _session_digest,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 
     from starlette.routing import Route
 
+    from community_bot.application.reputation import SafeProfile
     from community_bot.application.tasks import PublishedTask
     from community_bot.infrastructure.db.database import Database
 
@@ -67,6 +69,7 @@ class FakeDatabase:
         self.member_id = uuid4()
         self.created_digest: bytes | None = None
         self.created_sessions: list[dict[str, object]] = []
+        self.consumed_proofs: set[bytes] = set()
         self.fail_create = False
         self.resolve_member = False
         self.return_member = True
@@ -78,6 +81,11 @@ class FakeDatabase:
     async def create_web_session(self, **values: object) -> object:
         if self.fail_create:
             raise SQLAlchemyError
+        proof_digest = values["proof_digest"]
+        assert isinstance(proof_digest, bytes)
+        if proof_digest in self.consumed_proofs:
+            return None
+        self.consumed_proofs.add(proof_digest)
         digest = values["token_digest"]
         assert isinstance(digest, bytes)
         self.created_digest = digest
@@ -205,7 +213,7 @@ def test_frozen_proof_and_exact_failure_cases() -> None:
     now = datetime.datetime.fromtimestamp(1_700_000_100, datetime.UTC)
     assert validate_telegram_init_data(
         FROZEN_PROOF, bot_token=BOT_TOKEN, now=now
-    ) == TelegramIdentity(123456789, None)
+    ) == TelegramIdentity(123456789, None, None)
     username_proof = _signed_fields(
         {
             "auth_date": str(int(now.timestamp())),
@@ -214,7 +222,19 @@ def test_frozen_proof_and_exact_failure_cases() -> None:
     )
     assert validate_telegram_init_data(
         username_proof, bot_token=BOT_TOKEN, now=now
-    ) == TelegramIdentity(123456789, "Alex_53")
+    ) == TelegramIdentity(123456789, "Alex_53", None)
+    avatar_proof = _signed_fields(
+        {
+            "auth_date": str(int(now.timestamp())),
+            "user": json.dumps(
+                {"id": 123456789, "photo_url": "https://t.me/i/userpic/320/example.jpg"},
+                separators=(",", ":"),
+            ),
+        }
+    )
+    assert validate_telegram_init_data(
+        avatar_proof, bot_token=BOT_TOKEN, now=now
+    ) == TelegramIdentity(123456789, None, "https://t.me/i/userpic/320/example.jpg")
 
     failures = (
         (FROZEN_PROOF.replace(b"123456789", b"123456788"), now),
@@ -269,6 +289,25 @@ def test_member_query_and_session_token_contract() -> None:
     assert _session_digest("A" * 42 + "B") is None
 
 
+def test_member_dto_hides_username_when_profile_visibility_is_disabled() -> None:
+    profile = SimpleNamespace(
+        member_id=uuid4(),
+        telegram_username="Private_User",
+        show_telegram_username=False,
+        display_name="Алекс",
+        city=None,
+        short_bio=None,
+        skill_tags=(),
+        profile_links=(),
+        experience_total=0,
+        level_number=1,
+        karma=SimpleNamespace(score=0, count=0),
+        reliability=SimpleNamespace(accepted=0, approved_weight=Decimal(0), no_show=0, rate=None),
+    )
+
+    assert _member_dto(cast("SafeProfile", profile)).telegram_username is None
+
+
 def test_web_config_and_route_set_are_closed() -> None:
     database = FakeDatabase()
     app = _app(database)
@@ -288,6 +327,9 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/session", ("DELETE",)),
         ("/api/v1/me", ("GET",)),
         ("/api/v1/me/profile", ("PUT",)),
+        ("/api/v1/me/avatar", ("POST",)),
+        ("/api/v1/media/avatar/{asset_id}", ("GET",)),
+        ("/api/v1/media/attachments/{asset_id}", ("GET",)),
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/members/{member_id}/karma-vote", ("POST",)),
@@ -302,6 +344,7 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/assignments/{assignment_id}", ("GET",)),
         ("/api/v1/assignments/{assignment_id}/cancellation", ("POST",)),
         ("/api/v1/assignments/{assignment_id}/disputes", ("POST",)),
+        ("/api/v1/assignments/{assignment_id}/attachments", ("POST",)),
         ("/api/v1/assignment-reviews", ("GET",)),
         ("/api/v1/assignment-reviews/{assignment_id}", ("GET",)),
         ("/api/v1/assignment-reviews/{assignment_id}/decision", ("POST",)),
@@ -368,7 +411,7 @@ def test_task_form_normalizes_before_fingerprinting() -> None:
         title="  title  ",
         description="  description  ",
         completion_criteria="  complete  ",
-        credit_reward_per_performer=3,
+        credit_reward_per_performer="0.1",
         deadline_at=source_deadline,
         format=TaskFormat.ONLINE,
         city="  City  ",
@@ -381,6 +424,7 @@ def test_task_form_normalizes_before_fingerprinting() -> None:
     assert form.city == "City"
     assert form.materials == {"url": "https://example.com/item"}
     assert form.deadline_at == source_deadline.astimezone(datetime.UTC)
+    assert form.credit_reward_per_performer == Decimal("0.1")
 
 
 def test_submission_operation_identity_binds_resource_and_command() -> None:
@@ -405,6 +449,7 @@ def test_submission_draft_projection_is_allowlisted_and_revisions_are_strict() -
         "id": draft.id,
         "revision": 3,
         "result": "safe",
+        "attachments": (),
     }
     for model in (SaveSubmissionDraftRequest, ConfirmSubmissionDraftRequest):
         with pytest.raises(ValueError):
@@ -481,10 +526,10 @@ async def test_auth_issues_exact_cookie_without_exposing_raw_token(
     assert "__Host-community_session=" in cookie
     assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
     assert "Path=/" in cookie and "Max-Age=2592000" in cookie and "Domain=" not in cookie
-    assert response.headers["set-cookie"] != repeated.headers["set-cookie"]
+    assert repeated.status_code == 401
+    assert "set-cookie" not in repeated.headers
     assert [session["token_digest"] for session in database.created_sessions] == [
-        hashlib.sha256(b"x" * 32).digest(),
-        hashlib.sha256(b"y" * 32).digest(),
+        hashlib.sha256(b"x" * 32).digest()
     ]
     assert all(
         cast("datetime.datetime", session["expires_at"])
@@ -832,10 +877,10 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     assert "script-src 'self' https://telegram.org" in index.headers["content-security-policy"]
     bridge = b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
     assert index.content.index(bridge) < index.content.index(b"</head>")
-    assert index.content.index(bridge) < index.content.index(b"/mini-assets/app.js")
+    assert index.content.index(bridge) < index.content.index(b"mini-assets/app.js")
     assert b"__RELEASE__" not in index.content
-    assert b"/mini-assets/app.js?release=local" in index.content
-    assert b"/mini-assets/styles.css?release=local" in index.content
+    assert b"mini-assets/app.js?release=local" in index.content
+    assert b"mini-assets/styles.css?release=local" in index.content
     assert index.headers["x-content-type-options"] == "nosniff"
     design_font = (
         Path(__file__).parents[2] / "docs/release-2/design/assets/Manrope[wght].ttf"

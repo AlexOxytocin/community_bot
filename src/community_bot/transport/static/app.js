@@ -1,6 +1,11 @@
-import { applyPlatformTheme, openExternalLink } from "/mini-assets/platform.js";
+import { applyPlatformTheme, openExternalLink } from "./platform.js";
+
+const miniAppBasePath = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const miniAppPath = (path) => (path.startsWith("/") ? `${miniAppBasePath}${path}` : path);
 
 applyPlatformTheme();
+
+const creditText = (value) => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(Number(value));
 
 const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
@@ -13,10 +18,20 @@ const participantsNav = document.getElementById("participants-nav");
 const moderationNav = document.getElementById("moderation-nav");
 const heading = title.parentElement;
 let tasks = [];
+let catalogNextCursor = null;
+let catalogLoadingMore = false;
 let assignments = [];
+let assignmentsNextCursor = null;
+let assignmentsLoadingMore = false;
+const acceptedTaskIds = new Set();
+try {
+  JSON.parse(sessionStorage.getItem("acceptedTaskIds") || "[]").forEach((id) => acceptedTaskIds.add(id));
+} catch {
+  sessionStorage.removeItem("acceptedTaskIds");
+}
 let ownedTasks = [];
 let ownedReviews = [];
-let catalogFilters = { format: "", minReward: "" };
+let catalogFilters = { format: "", minReward: "", city: "" };
 const pendingAcceptKeys = new Map();
 let pendingTaskCreation = null;
 let returnFocusTaskId = null;
@@ -31,6 +46,12 @@ let screenRevision = 0;
 let currentMemberId = null;
 let activeProfileState = null;
 let memberProfileHasInternalHistory = false;
+const taskDraftSessionKey = () => `community-task-draft:${currentMemberId || "anonymous"}`;
+const rememberSessionTaskDraft = (draftId) => {
+  if (draftId) sessionStorage.setItem(taskDraftSessionKey(), draftId);
+};
+const isSessionTaskDraft = (draftId) => sessionStorage.getItem(taskDraftSessionKey()) === draftId;
+const forgetSessionTaskDraft = () => sessionStorage.removeItem(taskDraftSessionKey());
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -39,12 +60,108 @@ const element = (tag, text, className) => {
   return node;
 };
 
-const trashIcon = () => {
+const avatar = (name, url, className = "avatar") => {
+  const node = element("span", undefined, className);
+  if (url) {
+    const image = document.createElement("img");
+    image.src = miniAppPath(url);
+    image.alt = "";
+    image.addEventListener("error", () => image.remove());
+    node.append(image);
+  } else {
+    node.textContent = initialsFor(name);
+  }
+  return node;
+};
+
+const telegramAvatarUrl = () => {
+  const value = globalThis.Telegram?.WebApp?.initDataUnsafe?.user?.photo_url;
+  return typeof value === "string" && value.startsWith("https://") ? value : null;
+};
+
+const interfaceIcon = (name) => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
-  svg.innerHTML = '<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>';
+  svg.innerHTML = {
+    "arrow-left": '<path d="M20 12H7m5-6-6 6 6 6"/><path d="M4 5v14"/>',
+    "arrow-up-right": '<path d="M6 18 18 6M9 6h9v9"/><path d="M6 6v3"/>',
+    "chevron-right": '<path d="m9 5 7 7-7 7"/><path d="M5 5v14"/>',
+    "circle-plus": '<path d="M12 3 21 12 12 21 3 12Z"/><path d="M12 8v8m-4-4h8"/>',
+    pencil: '<path d="m6 18 1-5L16 4l4 4-9 9-5 1Z"/><path d="m14 6 4 4"/>',
+    "refresh-cw": '<path d="M19 8V4l2 2"/><path d="M20 6a8 8 0 1 0 1 7"/><path d="M5 16v4l-2-2"/><path d="M4 18a8 8 0 0 0-1-7"/>',
+    "trash-2": '<path d="M5 7h14l-1 14H6L5 7Z"/><path d="M3 7h18M9 7V4h6v3m-4 4v6m4-6v6"/>',
+    x: '<path d="m6 6 12 12M18 6 6 18"/><path d="M5 5h2m10 0h2m0 12v2m-14-2v2"/>',
+  }[name] || "";
   return svg;
+};
+
+const trashIcon = () => interfaceIcon("trash-2");
+
+const setupCityAutocomplete = (input, results, onChoose) => {
+  let timer = null;
+  let requestVersion = 0;
+  let outsideAbort = null;
+  const close = () => {
+    requestVersion += 1;
+    clearTimeout(timer);
+    outsideAbort?.abort();
+    outsideAbort = null;
+    results.classList.add("hidden");
+    input.setAttribute("aria-expanded", "false");
+  };
+  const open = () => {
+    results.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    outsideAbort?.abort();
+    outsideAbort = new AbortController();
+    document.addEventListener("pointerdown", (event) => {
+      if (event.target !== input && !results.contains(event.target)) close();
+    }, { capture: true, signal: outsideAbort.signal });
+  };
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const query = input.value.trim();
+    if (query.length < 2) return close();
+    const currentRequest = ++requestVersion;
+    results.replaceChildren(element("p", "Ищем города…", "city-loading"));
+    open();
+    timer = setTimeout(async () => {
+      try {
+        const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
+        if (currentRequest !== requestVersion || document.activeElement !== input || input.value.trim() !== query) return;
+        results.replaceChildren(...response.items.map((item) => {
+          const option = element("button", item.label, "city-option");
+          option.type = "button";
+          option.setAttribute("role", "option");
+          option.addEventListener("pointerdown", (event) => event.preventDefault());
+          option.addEventListener("click", () => {
+            input.value = item.label;
+            onChoose(item);
+            input.dispatchEvent(new CustomEvent("citychoice", { detail: item, bubbles: true }));
+            close();
+            input.focus();
+          });
+          return option;
+        }));
+        if (response.items.length) open();
+        else close();
+      } catch {
+        if (currentRequest === requestVersion) close();
+      }
+    }, 180);
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      results.querySelector("button")?.focus();
+    }
+    if (event.key === "Escape") close();
+  });
+  input.addEventListener("blur", () => setTimeout(() => {
+    if (document.activeElement !== input && !results.contains(document.activeElement)) close();
+  }, 0));
+  return close;
 };
 
 const markTransition = (node, id, trigger) => {
@@ -63,6 +180,8 @@ const resetScrollPosition = () => {
 
 const replaceContent = (...nodes) => {
   content.replaceChildren(...nodes);
+  content.classList.remove("screen-content-enter");
+  requestAnimationFrame(() => content.classList.add("screen-content-enter"));
   resetScrollPosition();
   queueMicrotask(resetScrollPosition);
   requestAnimationFrame(resetScrollPosition);
@@ -223,6 +342,11 @@ const clearJsonCache = () => {
   jsonRequests.clear();
   jsonCacheGeneration += 1;
 };
+
+const rememberAcceptedTask = (taskId) => {
+  acceptedTaskIds.add(taskId);
+  sessionStorage.setItem("acceptedTaskIds", JSON.stringify([...acceptedTaskIds]));
+};
 const cachedJson = (path) => jsonCache.get(jsonCacheKey(path))?.data;
 const storeJson = (path, data) => {
   jsonCache.set(jsonCacheKey(path), { data, storedAt: Date.now() });
@@ -230,7 +354,7 @@ const storeJson = (path, data) => {
 };
 
 const apiFetch = async (path, options = {}) => {
-  const response = await fetch(path, options);
+  const response = await fetch(miniAppPath(path), options);
   const method = (options.method || "GET").toUpperCase();
   if (response.status === 401) clearJsonCache();
   else if (response.ok && method !== "GET") {
@@ -333,9 +457,14 @@ const assignmentError = (code, retry) => {
 const assignmentStatus = (value) => ({
   accepted: "Принято",
   submitted: "Результат отправлен",
+  approved: "Принято",
+  partially_approved: "Принято частично",
+  rejected: "Отклонено",
   rejected_pending_dispute: "Ожидает решения",
   disputed: "Открыт спор",
   reviewer_required: "Нужен проверяющий",
+  cancelled: "Отменено",
+  no_show: "Не выполнено",
 }[value] || value);
 
 const createdAssignmentsButton = element("button", "Созданные мной", "back");
@@ -364,6 +493,7 @@ function showCatalog(revision = ++screenRevision) {
   const visibleTasks = tasks.filter((task) => (
     (!catalogFilters.format || task.format === catalogFilters.format)
     && (!catalogFilters.minReward || task.credit_reward_per_performer >= Number(catalogFilters.minReward))
+    && (!catalogFilters.city || task.city === catalogFilters.city)
   ));
   boundary.dataset.state = visibleTasks.length ? "content" : "empty";
   const activeFilterCount = Object.values(catalogFilters).filter(Boolean).length;
@@ -402,6 +532,13 @@ function showCatalog(revision = ++screenRevision) {
     list.append(button);
   }
   boundary.append(list);
+  if (catalogNextCursor) {
+    const more = element("button", "Показать ещё", "secondary");
+    more.type = "button";
+    more.disabled = catalogLoadingMore;
+    more.addEventListener("click", () => void loadMoreCatalog(revision));
+    boundary.append(more);
+  }
   replaceContent(boundary);
   focusTarget?.focus({ preventScroll: true });
   returnFocusTaskId = null;
@@ -411,11 +548,14 @@ function showCatalog(revision = ++screenRevision) {
 
 async function loadCatalog(push = true) {
   const revision = ++screenRevision;
-  const path = "/api/v1/tasks";
+  const params = new URLSearchParams();
+  if (catalogFilters.city) params.set("city", catalogFilters.city);
+  const path = `/api/v1/tasks${params.size ? `?${params}` : ""}`;
   const cached = cachedJson(path);
   if (push) history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
   if (cached) {
     tasks = cached.items;
+    catalogNextCursor = cached.next_cursor;
     showCatalog(revision);
   } else {
     setNavigation("catalog", false);
@@ -427,15 +567,37 @@ async function loadCatalog(push = true) {
     const page = await getJson(path, (refreshed) => {
       if (revision !== screenRevision) return;
       tasks = refreshed.items;
+      catalogNextCursor = refreshed.next_cursor;
       showCatalog(revision);
     });
     if (revision !== screenRevision) return;
     if (cached) return;
     tasks = page.items;
+    catalogNextCursor = page.next_cursor;
     showCatalog(revision);
   } catch {
     if (revision !== screenRevision || cached) return;
     replaceContent(element("p", "Не удалось загрузить задания.", "status"));
+  }
+}
+
+async function loadMoreCatalog(revision) {
+  if (!catalogNextCursor || catalogLoadingMore) return;
+
+  catalogLoadingMore = true;
+  showCatalog(revision);
+  try {
+    const params = new URLSearchParams({ cursor: catalogNextCursor });
+    if (catalogFilters.city) params.set("city", catalogFilters.city);
+    const page = await getJson(`/api/v1/tasks?${params}`);
+    if (revision !== screenRevision) return;
+
+    const ids = new Set(tasks.map((task) => task.id));
+    tasks = [...tasks, ...page.items.filter((task) => !ids.has(task.id))];
+    catalogNextCursor = page.next_cursor;
+  } finally {
+    catalogLoadingMore = false;
+    if (revision === screenRevision) showCatalog(revision);
   }
 }
 
@@ -449,7 +611,7 @@ function taskListCard(task, { preview = false } = {}) {
   if (category) chips.append(element("span", category, "chip muted-chip"));
   const meta = element("div", undefined, "task-meta");
   meta.append(
-    element("span", `✦ ${task.credit_reward_per_performer} кред.`),
+    element("span", `${creditText(task.credit_reward_per_performer)} кред.`),
     element("span", `${task.performer_slots} ${task.performer_slots === 1 ? "место" : "места"}`),
   );
   const deadline = element(
@@ -462,7 +624,11 @@ function taskListCard(task, { preview = false } = {}) {
   meta.append(deadline);
   const label = element("div", undefined, "task-card-title");
   label.append(element("h3", task.title));
-  if (!preview) label.append(element("span", "›", "chevron"));
+  if (!preview) {
+    const chevron = interfaceIcon("chevron-right");
+    chevron.classList.add("chevron");
+    label.append(chevron);
+  }
   card.append(chips, label, element("p", task.description, "muted"), meta);
   return card;
 }
@@ -475,32 +641,90 @@ function showCatalogFilters(push = true) {
   title.textContent = "Фильтры заданий";
   back.classList.remove("hidden");
   const form = element("form", undefined, "task-form card");
-  const formatLabel = element("label", "Формат");
+  const formatLabel = element("fieldset", undefined, "choice-field");
+  formatLabel.append(element("legend", "Формат"));
   const format = element("select");
+  format.className = "visually-hidden";
+  format.setAttribute("aria-label", "Формат");
   format.append(new Option("Любой", ""), new Option("Онлайн", "online"), new Option("Офлайн", "offline"));
   format.value = catalogFilters.format;
-  formatLabel.append(format);
+  const formatChoices = element("div", undefined, "type-segmented format-segmented");
+  const syncFormatChoices = () => {
+    for (const choice of formatChoices.querySelectorAll("button")) {
+      choice.setAttribute("aria-pressed", String(choice.dataset.format === format.value));
+    }
+  };
+  for (const [value, label] of [["", "Любой"], ["online", "Онлайн"], ["offline", "Офлайн"]]) {
+    const choice = element("button", label);
+    choice.type = "button";
+    choice.dataset.format = value;
+    choice.addEventListener("click", () => {
+      format.value = value;
+      syncFormatChoices();
+      format.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    formatChoices.append(choice);
+  }
+  formatLabel.append(format, formatChoices);
   const rewardLabel = element("label", "Награда от");
   const reward = element("input");
   reward.type = "number";
   reward.min = "1";
   reward.value = catalogFilters.minReward;
   rewardLabel.append(reward);
+  let selectedCity = catalogFilters.city;
+  let cityLabel = null;
+  const syncCityFilter = () => {
+    if (format.value !== "offline") {
+      selectedCity = "";
+      cityLabel?.remove();
+      cityLabel = null;
+      return;
+    }
+    if (cityLabel) return;
+    cityLabel = element("label", "Город", "city-field");
+    const city = element("input");
+    city.type = "search";
+    city.autocomplete = "off";
+    city.placeholder = "Начните вводить город";
+    city.value = selectedCity;
+    city.setAttribute("role", "combobox");
+    city.setAttribute("aria-autocomplete", "list");
+    city.setAttribute("aria-expanded", "false");
+    const results = element("div", undefined, "city-results hidden");
+    results.setAttribute("role", "listbox");
+    setupCityAutocomplete(city, results, (item) => { selectedCity = item.value; });
+    city.addEventListener("input", () => {
+      if (city.value !== selectedCity) selectedCity = "";
+    });
+    cityLabel.append(city, results);
+    rewardLabel.after(cityLabel);
+  };
+  format.addEventListener("change", syncCityFilter);
   const apply = element("button", "Применить", "primary");
   apply.type = "submit";
   form.append(formatLabel, rewardLabel, apply);
+  syncFormatChoices();
+  syncCityFilter();
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    catalogFilters = { format: format.value, minReward: reward.value };
+    catalogFilters = {
+      format: format.value,
+      minReward: reward.value,
+      city: format.value === "offline" ? selectedCity : "",
+    };
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    showCatalog();
+    void loadCatalog(false);
   });
   replaceContent(connectedBoundary("T02", "content", form));
-  format.focus({ preventScroll: true });
+  formatChoices.querySelector("button[aria-pressed=\"true\"]")?.focus({ preventScroll: true });
 }
 
 async function taskCreationCommand(body) {
-  pendingTaskCreation ||= { key: newOperationKey(), body: JSON.stringify(body) };
+  const serialized = JSON.stringify(body);
+  if (!pendingTaskCreation || pendingTaskCreation.body !== serialized) {
+    pendingTaskCreation = { key: newOperationKey(), body: serialized };
+  }
   const response = await apiFetch("/api/v1/task-creation", {
     method: "POST",
     headers: {
@@ -545,6 +769,7 @@ function showTaskCreation(state, forceEdit = false) {
       status.textContent = "Публикуем задание…";
       try {
         await taskCreationCommand({ action: "publish", draft_id: draft.id, expected_revision: draft.revision });
+        forgetSessionTaskDraft();
         history.replaceState({ screen: "task-creation", draftId: draft.id }, "", presentationLocationFor("T08", draft.id));
         const home = element("button", "К заданиям", "primary");
         home.addEventListener("click", () => {
@@ -563,7 +788,8 @@ function showTaskCreation(state, forceEdit = false) {
   const values = draft.values;
   const form = element("form", undefined, "task-form");
   form.classList.add("creation-form");
-  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания *</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания *" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section">Число исполнителей *<input name="performer_slots" aria-label="Число исполнителей *" type="number" min="1" required></label><label class="section">Формат *<select name="format" aria-label="Формат *" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section">Категория *<select name="category_id" aria-label="Категория *" required></select></label><label class="section">Название *<input name="title" aria-label="Название *" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать *<textarea name="description" aria-label="Что нужно сделать *" required></textarea></label><label class="section">Критерии приёмки *<textarea name="completion_criteria" aria-label="Критерии приёмки *" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер *<select name="time_size" aria-label="Размер *" required></select></label><label class="section">Награда за исполнителя *<input name="credit_reward_per_performer" aria-label="Награда за исполнителя *" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок *<input name="deadline_at" aria-label="Срок *" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text" aria-label="Материалы"></textarea><small>Ссылка или короткий текст</small></label>';
+  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section"><span class="field-label">Число исполнителей</span><input name="performer_slots" aria-label="Число исполнителей" type="number" min="1" required></label><fieldset class="type-field choice-field"><legend>Формат</legend><select class="visually-hidden" name="format" aria-label="Формат" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select><div class="type-segmented format-segmented"><button type="button" data-task-format="online">Онлайн</button><button type="button" data-task-format="offline">Офлайн</button></div></fieldset></div><label class="section"><span class="field-label">Категория</span><select name="category_id" aria-label="Категория" required></select></label><label class="section"><span class="field-label">Название</span><input name="title" aria-label="Название" required></label><label class="section"><span class="field-label">Что нужно сделать</span><textarea name="description" aria-label="Что нужно сделать" required></textarea></label><label class="section"><span class="field-label">Критерии приёмки</span><textarea name="completion_criteria" aria-label="Критерии приёмки" required></textarea></label><div class="form-grid two-columns"><label class="section"><span class="field-label">Размер</span><select name="time_size" aria-label="Размер" required></select></label><label class="section"><span class="field-label">Награда за исполнителя</span><input name="credit_reward_per_performer" aria-label="Награда за исполнителя" type="number" min="0" step="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section"><span class="field-label">Срок</span><input name="deadline_at" aria-label="Срок" type="datetime-local" required></label><label class="section"><span class="field-label">Материалы</span><textarea name="material_text" aria-label="Материалы"></textarea></label>';
+  form.credit_reward_per_performer.step = "0.1";
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
@@ -579,6 +805,11 @@ function showTaskCreation(state, forceEdit = false) {
     form.performer_slots.value = String(group ? groupSlots : 1);
     updateReserve();
   };
+  const syncTaskFormat = () => {
+    for (const button of form.querySelectorAll("[data-task-format]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.taskFormat === form.format.value));
+    }
+  };
   for (const button of form.querySelectorAll("[data-kind]")) {
     button.addEventListener("click", () => {
       if (form.task_kind.value === "group" && Number(form.performer_slots.value) >= 2) {
@@ -588,8 +819,15 @@ function showTaskCreation(state, forceEdit = false) {
       syncTaskKind();
     });
   }
+  for (const button of form.querySelectorAll("[data-task-format]")) {
+    button.addEventListener("click", () => {
+      form.format.value = button.dataset.taskFormat;
+      syncTaskFormat();
+      form.format.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
   for (const name of ["title", "description", "completion_criteria"]) form[name].value = values[name] || "";
-  form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
+  form.credit_reward_per_performer.value = values.credit_reward_per_performer ?? "";
   form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
   const deadlineMin = new Date(Date.now() + 60_000);
   deadlineMin.setSeconds(0, 0);
@@ -603,7 +841,8 @@ function showTaskCreation(state, forceEdit = false) {
   const updateReserve = () => {
     const slots = Number(form.performer_slots.value || 0);
     const reward = Number(form.credit_reward_per_performer.value || 0);
-    reserve.textContent = slots && reward ? `${slots * reward} кредитов` : "—";
+    reserve.textContent = slots && Number.isFinite(reward)
+      ? `${creditText(Math.round(slots * reward * 10) / 10)} кредитов` : "—";
   };
   form.performer_slots.addEventListener("input", updateReserve);
   form.performer_slots.addEventListener("input", () => {
@@ -629,7 +868,6 @@ function showTaskCreation(state, forceEdit = false) {
   form.append(submit, saveStatus);
   let selectedCity = values.format === "offline" ? values.city || "" : "";
   let cityField = null;
-  let cityTimer = null;
   const syncFormat = () => {
     if (form.format.value !== "offline") {
       selectedCity = "";
@@ -638,7 +876,8 @@ function showTaskCreation(state, forceEdit = false) {
       return;
     }
     if (cityField) return;
-    cityField = element("label", "Город *", "section city-field");
+    cityField = element("label", undefined, "section city-field");
+    cityField.append(element("span", "Город", "field-label"));
     const input = element("input");
     input.name = "city";
     input.autocomplete = "off";
@@ -652,43 +891,17 @@ function showTaskCreation(state, forceEdit = false) {
     results.id = "task-city-results";
     results.setAttribute("role", "listbox");
     input.setAttribute("aria-controls", results.id);
-    const choose = (item) => {
+    setupCityAutocomplete(input, results, (item) => {
       selectedCity = item.value;
-      input.value = item.label;
       input.setCustomValidity("");
-      input.setAttribute("aria-expanded", "false");
-      results.classList.add("hidden");
-    };
+    });
     input.addEventListener("input", () => {
-      selectedCity = "";
-      input.setCustomValidity("Выберите город из списка.");
-      clearTimeout(cityTimer);
-      const query = input.value.trim();
-      if (!query) {
-        results.classList.add("hidden");
-        input.setAttribute("aria-expanded", "false");
+      if (input.value === selectedCity) {
+        input.setCustomValidity("");
         return;
       }
-      cityTimer = setTimeout(async () => {
-        const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
-        if (!cityField?.isConnected || input.value.trim() !== query) return;
-        results.replaceChildren();
-        for (const item of response.items) {
-          const option = element("button", item.label, "city-option");
-          option.type = "button";
-          option.setAttribute("role", "option");
-          option.addEventListener("click", () => choose(item));
-          results.append(option);
-        }
-        results.classList.toggle("hidden", !response.items.length);
-        input.setAttribute("aria-expanded", String(Boolean(response.items.length)));
-      }, 200);
-    });
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        results.querySelector("button")?.focus();
-      }
+      selectedCity = "";
+      input.setCustomValidity("Выберите город из списка.");
     });
     cityField.append(input, results);
     form.querySelector("[data-format-row]").after(cityField);
@@ -696,8 +909,19 @@ function showTaskCreation(state, forceEdit = false) {
   form.format.addEventListener("change", syncFormat);
   syncFormat();
   syncTaskKind();
+  syncTaskFormat();
   updateReserve();
   updateDeadlineValidity();
+  form.addEventListener("invalid", (event) => {
+    const control = event.target;
+    const field = control.closest("label, fieldset");
+    field?.classList.toggle("required-error", control.validity.valueMissing);
+  }, true);
+  form.addEventListener("input", (event) => {
+    const control = event.target;
+    const field = control.closest("label, fieldset");
+    if (control.validity.valid) field?.classList.remove("required-error");
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
@@ -716,8 +940,9 @@ function showTaskCreation(state, forceEdit = false) {
         if (!started.draft) throw new Error("task_draft_unavailable");
         draft = started.draft;
         target = draft;
+        rememberSessionTaskDraft(draft.id);
       }
-      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
+      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: value.credit_reward_per_performer, performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
       history.pushState(
         { screen: "task-preview", draftId: target.id },
         "",
@@ -732,13 +957,21 @@ function showTaskCreation(state, forceEdit = false) {
       }
       saveStatus.textContent = error.message === "invalid_task_city"
         ? "Выберите город из списка."
-        : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
+        : error.message === "insufficient_credits"
+          ? "Не хватает кредитов для этой награды. Уменьшите сумму или число исполнителей."
+          : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
     }
   });
   replaceContent(connectedBoundary("T05", "content", form));
 }
+
+const hasMeaningfulTaskDraft = (draft) => Boolean(
+  draft?.values && Object.values(draft.values).some((value) => (
+    typeof value === "string" ? value.trim() : value != null
+  )),
+);
 
 function showTaskRecovery(state) {
   const draft = state.draft;
@@ -784,6 +1017,7 @@ function showTaskRecovery(state) {
       await taskCreationCommand({ action: "start_new", draft_id: draft.id, expected_revision: draft.revision });
       created = true;
       const fresh = await getJson("/api/v1/task-creation");
+      rememberSessionTaskDraft(fresh.draft?.id);
       history.pushState(
         { screen: "task-creation", draftId: fresh.draft?.id || null },
         "",
@@ -821,7 +1055,8 @@ async function openTaskCreation(forceEdit = false, recovery = null) {
   try {
     const state = await getJson("/api/v1/task-creation");
     const draftId = state.draft?.id;
-    if (draftId && (recovery === "entry" || (recovery === "stale" && state.needs_edit))) {
+    if (draftId && hasMeaningfulTaskDraft(state.draft) && isSessionTaskDraft(draftId)
+      && (recovery === "entry" || (recovery === "stale" && state.needs_edit))) {
       history.replaceState(
         { screen: "task-recovery", draftId },
         "",
@@ -853,7 +1088,8 @@ const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
 const pencilButton = (label, route, state, revision, key) => {
-  const button = element("button", "✎", "profile-pencil");
+  const button = element("button", undefined, "profile-pencil");
+  button.append(interfaceIcon("pencil"));
   button.type = "button";
   button.dataset.profileAction = key;
   button.setAttribute("aria-label", `Редактировать ${label.toLowerCase()}`);
@@ -870,26 +1106,83 @@ const openPublicUrl = (url, options = {}) => {
 const publicLinkRow = (link) => {
   const button = element("button", undefined, "public-link-row");
   button.type = "button";
-  button.append(element("strong", link.label), element("span", link.url), element("span", "↗"));
+  button.append(element("strong", link.label), element("span", link.url), interfaceIcon("arrow-up-right"));
   button.addEventListener("click", () => openPublicUrl(link.url));
   return button;
 };
 
 function ownProfileOverview(state, revision) {
   const { me, member } = state.profile;
+  const editing = state.route === "/profile/settings";
   const view = element("section", undefined, "profile-overview");
+  const settings = element("button", editing ? "Готово" : "Настройки профиля", "secondary");
+  settings.type = "button";
+  settings.addEventListener("click", () => openProfileRoute(
+    state,
+    revision,
+    editing ? "/profile" : "/profile/settings",
+    true,
+  ));
+  view.append(settings);
   const identity = element("section", undefined, "profile-card profile-identity-card");
   const copy = element("div", undefined, "identity-copy");
   copy.append(element("h2", me.display_name));
-  if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
+  if (me.telegram_username && me.show_telegram_username !== false) {
+    copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
+  }
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(
-    element("span", initialsFor(me.display_name), "avatar"),
-    copy,
-    pencilButton("имя", "/profile/edit/name", state, revision, "name"),
-  );
+  identity.append(avatar(me.display_name, me.avatar_url || telegramAvatarUrl()), copy);
+  if (editing) identity.append(pencilButton("имя", "/profile/edit/name", state, revision, "name"));
+  view.append(identity);
+  if (editing) {
+    const settingsCard = element("section", undefined, "profile-card identity-settings");
+    settingsCard.append(element("span", "Видимость и аватар", "section-label"));
+    const avatarInput = document.createElement("input");
+    avatarInput.type = "file";
+    avatarInput.accept = "image/jpeg,image/png,image/webp";
+    avatarInput.className = "visually-hidden";
+    const avatarLabel = element("label", undefined, "avatar-upload-control");
+    avatarLabel.htmlFor = "profile-avatar-input";
+    avatarInput.id = "profile-avatar-input";
+    avatarLabel.append(element("span", "Выбрать изображение"), avatarInput);
+    const avatarStatus = element("p", "", "status hidden");
+    avatarInput.addEventListener("change", async () => {
+      const file = avatarInput.files?.[0];
+      if (!file) return;
+      avatarInput.disabled = true;
+      avatarStatus.className = "status";
+      avatarStatus.textContent = "Загружаем аватар…";
+      try {
+        const uploaded = await uploadFile("/api/v1/me/avatar", file);
+        me.avatar_url = uploaded.avatar_url;
+        avatarStatus.className = "status success";
+        avatarStatus.textContent = "Аватар обновлён.";
+        showProfileState(state, revision);
+      } catch {
+        avatarStatus.textContent = "Не удалось загрузить аватар.";
+        avatarInput.disabled = false;
+      }
+    });
+    const visibility = element("label", undefined, "compact-switch");
+    const checkbox = element("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = me.show_telegram_username !== false;
+    checkbox.dataset.usernameVisibility = "true";
+    visibility.append(checkbox, element("span", "Показывать username другим участникам"));
+    const status = element("p", "", "status hidden");
+    const save = element("button", "Сохранить настройки", "primary");
+    save.type = "button";
+    save.addEventListener("click", () => void saveProfileCommand(
+      state, revision, save, status,
+      { field: "show_telegram_username", value: String(checkbox.checked) },
+      "/profile/settings", "[data-username-visibility]",
+    ));
+    settingsCard.append(avatarLabel, avatarStatus, visibility, status, save);
+    view.append(settingsCard);
+  }
   const city = element("section", undefined, "profile-card profile-inline-card");
-  city.append(element("div", undefined, "profile-copy"), pencilButton("город", "/profile/edit/city", state, revision, "city"));
+  city.append(element("div", undefined, "profile-copy"));
+  if (editing) city.append(pencilButton("город", "/profile/edit/city", state, revision, "city"));
   city.firstChild.append(element("span", "Город", "section-label"), element("strong", me.city || "Не указан"));
   const metrics = element("div", undefined, "metric-grid");
   for (const [value, label] of [[me.credit_balance, "Кредиты"], [me.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
@@ -897,7 +1190,7 @@ function ownProfileOverview(state, revision) {
     metric.append(element("strong", valueOrDash(value)), element("span", label));
     metrics.append(metric);
   }
-  view.append(identity, city, metrics);
+  view.append(city, metrics);
   const blocks = [
     ["ОБО МНЕ", me.short_bio, "/profile/edit/bio", "bio", "Добавить описание", "Расскажите о себе"],
     ["НАВЫКИ", me.skill_tags, "/profile/edit/skills", "skills", "Добавить навыки", "Добавьте навыки"],
@@ -906,7 +1199,8 @@ function ownProfileOverview(state, revision) {
     const filled = Array.isArray(value) ? value.length > 0 : Boolean(value);
     const block = element("section", undefined, filled ? "profile-card profile-content-card" : "profile-empty-card");
     if (filled) {
-      block.append(element("h3", label, "section-label"), pencilButton(label, route, state, revision, key));
+      block.append(element("h3", label, "section-label"));
+      if (editing) block.append(pencilButton(label, route, state, revision, key));
       if (Array.isArray(value)) {
         const chips = element("div", undefined, "profile-chips");
         value.forEach((item) => chips.append(element("span", item)));
@@ -926,7 +1220,8 @@ function ownProfileOverview(state, revision) {
   const linksBlock = element("section", undefined, links.length ? "profile-links-block" : "profile-empty-card");
   if (links.length) {
     const header = element("div", undefined, "profile-section-heading");
-    header.append(element("h3", "Ссылки"), pencilButton("ссылки", "/profile/links", state, revision, "links"));
+    header.append(element("h3", "Ссылки"));
+    if (editing) header.append(pencilButton("ссылки", "/profile/links", state, revision, "links"));
     linksBlock.append(header);
     links.forEach((link) => linksBlock.append(publicLinkRow(link)));
   } else {
@@ -962,21 +1257,39 @@ function profileTextEditor(state, revision, name) {
   input.maxLength = config.max;
   input.required = true;
   label.append(input);
+  if (name === "city") {
+    label.classList.add("city-field");
+    input.autocomplete = "off";
+    input.placeholder = "Начните вводить город";
+    const results = element("div", undefined, "city-results hidden");
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    results.setAttribute("role", "listbox");
+    setupCityAutocomplete(input, results, () => {});
+    label.append(results);
+  }
   const counter = element("p", `${input.value.length} / ${config.max}`, "profile-counter");
   const status = element("p", draft.message, draft.message ? "status" : "status hidden");
   status.setAttribute("aria-live", "polite");
-  input.addEventListener("input", () => {
+  const syncDraftValue = () => {
     if (draft.value !== input.value) draft.operationKey = null;
     draft.value = input.value;
     draft.message = "";
     counter.textContent = `${input.value.length} / ${config.max}`;
     status.className = "status hidden";
-  });
+  };
+  input.addEventListener("input", syncDraftValue);
+  input.addEventListener("citychoice", syncDraftValue);
   const save = element("button", "Сохранить", "primary");
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, `/profile`, `[data-profile-action="${name}"]`);
+    if (draft.value === current) {
+      openProfileRoute(state, revision, state.editReturnRoute || "/profile", false);
+      return;
+    }
+    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, state.editReturnRoute || "/profile", `[data-profile-action="${name}"]`);
   });
   form.append(label, counter, status, save);
   queueMicrotask(() => input.focus({ preventScroll: true }));
@@ -1006,7 +1319,8 @@ function profileSkillsEditor(state, revision) {
     list.replaceChildren();
     draft.items.forEach((item, index) => {
       const skill = element("div", undefined, "skill-draft-row");
-      const remove = element("button", "×", "skill-remove");
+      const remove = element("button", undefined, "skill-remove");
+      remove.append(interfaceIcon("x"));
       remove.type = "button";
       remove.setAttribute("aria-label", `Удалить навык ${item}`);
       remove.addEventListener("click", () => { draft.items.splice(index, 1); draft.operationKey = null; renderItems(); });
@@ -1030,6 +1344,14 @@ function profileSkillsEditor(state, revision) {
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const pending = input.value.trim().replace(/\s+/g, " ");
+    if (pending && !draft.items.some((item) => item.toLowerCase() === pending.toLowerCase())) {
+      draft.items.push(pending);
+      input.value = "";
+      status.className = "status";
+      status.textContent = "Сохраняем один навык. Чтобы добавить несколько, вводите их по одному через +.";
+      renderItems();
+    }
     await saveProfileCommand(state, revision, save, status, { field: "skill_tags", value: draft.items.join("\n") }, "/profile", '[data-profile-action="skills"]');
   });
   renderItems();
@@ -1042,6 +1364,7 @@ async function saveProfileCommand(state, revision, button, status, payload, dest
   button.disabled = true;
   status.className = "status";
   status.textContent = "Сохраняем…";
+  state.draft ||= { route: state.route, operationKey: null };
   state.draft.operationKey ||= newOperationKey();
   try {
     const updated = await submissionRequest("/api/v1/me/profile", "PUT", state.draft.operationKey, payload);
@@ -1066,7 +1389,8 @@ function profileLinksList(state, revision) {
     const row = element("div", undefined, "managed-link-row");
     row.append(element("div", undefined, "managed-link-copy"));
     row.firstChild.append(element("strong", link.label), element("span", link.url));
-    const edit = element("button", "✎", "profile-pencil");
+    const edit = element("button", undefined, "profile-pencil");
+    edit.append(interfaceIcon("pencil"));
     edit.type = "button";
     edit.dataset.linkId = link.id;
     edit.setAttribute("aria-label", `Изменить ссылку ${link.label}`);
@@ -1125,7 +1449,7 @@ function profileLinkEditor(state, revision, linkId = null) {
   let presets = null;
   if (!existing) {
     presets = element("div", undefined, "link-presets");
-    ["LinkedIn", "GitHub", "Сайт", "YouTube"].forEach((value) => {
+    ["LinkedIn", "GitHub", "Instagram", "YouTube"].forEach((value) => {
       const preset = element("button", value, "link-preset");
       preset.type = "button";
       preset.addEventListener("click", () => {
@@ -1138,15 +1462,12 @@ function profileLinkEditor(state, revision, linkId = null) {
   }
   const urlLabel = element("label", "Ссылка");
   const urlInput = element("input");
-  urlInput.type = "url";
+  urlInput.type = "text";
   urlInput.value = draft.url;
   urlInput.maxLength = 2048;
   urlInput.required = true;
-  urlInput.placeholder = "https://";
-  urlLabel.append(
-    urlInput,
-    element("small", "Только полный адрес, начинающийся с https://", "profile-helper"),
-  );
+  urlInput.placeholder = "instagram.com/username";
+  urlLabel.append(urlInput);
   const status = element("p", "", "status hidden");
   const changed = () => {
     draft.label = labelInput.value;
@@ -1218,6 +1539,9 @@ function profileDeleteConfirm(state, revision, linkId) {
 }
 
 function openProfileRoute(state, revision, route, push) {
+  if (route.startsWith("/profile/edit/")) {
+    state.editReturnRoute = state.route === "/profile/settings" ? "/profile/settings" : "/profile";
+  }
   state.route = route;
   state.draft = state.draft?.route === route ? state.draft : null;
   if (push) history.pushState({ screen: "profile", route }, "", `#${route}`);
@@ -1270,17 +1594,20 @@ function memberListDetails(items) {
       element("strong", member.display_name, "member-row-name"),
       element("span", `Уровень ${member.level_number}`, "level-badge"),
     );
-    const metadata = [...(member.skill_tags || []).slice(0, 2), member.city]
-      .filter(Boolean).slice(0, 3).join(" · ");
+    const metadata = member.short_bio || member.city;
     copy.append(identity);
     if (metadata) copy.append(element("span", metadata, "member-row-metadata"));
     const stats = element("span", undefined, "member-row-stats");
     stats.append(element("span", `Карма ${member.karma.score}`));
     copy.append(stats);
     button.append(
-      element("span", initialsFor(member.display_name), "member-avatar"),
+      avatar(member.display_name, member.avatar_url, "member-avatar"),
       copy,
-      element("span", "›", "member-chevron"),
+      (() => {
+        const chevron = interfaceIcon("chevron-right");
+        chevron.classList.add("member-chevron");
+        return chevron;
+      })(),
     );
     button.addEventListener("click", () => showMemberProfile(member.member_id));
     row.append(button);
@@ -1491,7 +1818,7 @@ function safeMemberDetails(member) {
     copy.append(username);
   }
   copy.append(element("p", [member.city, `Уровень ${member.level_number}`].filter(Boolean).join(" · "), "muted"));
-  identity.append(element("span", initialsFor(member.display_name), "avatar"), copy);
+  identity.append(avatar(member.display_name, member.avatar_url), copy);
   const metrics = element("div", undefined, "metric-grid foreign-metrics");
   for (const [value, label] of [[member.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
     const metric = element("article", undefined, "metric-card");
@@ -1777,7 +2104,8 @@ function showProfileState(state, revision) {
     headingText = link?.label || "Изменить ссылку";
     node = profileLinkEditor(state, revision, linkEdit[1]);
   } else {
-    state.route = "/profile";
+    if (state.route !== "/profile/settings") state.route = "/profile";
+    headingText = state.route === "/profile/settings" ? "Настройки профиля" : "Профиль";
     node = ownProfileOverview(state, revision);
   }
   title.textContent = headingText;
@@ -1859,7 +2187,7 @@ function showTaskDetail(task, push = true) {
   };
   appendMeta("Автор", task.author_display_name);
   appendMeta("Срок", formatDate(task.deadline_at));
-  appendMeta("Награда", `${task.credit_reward_per_performer} кредитов`);
+  appendMeta("Награда", `${creditText(task.credit_reward_per_performer)} кредитов`);
   appendMeta("Мест", String(task.performer_slots));
   if (task.city) appendMeta("Город", task.city);
   detail.append(metadata);
@@ -1888,7 +2216,9 @@ function showTaskDetail(task, push = true) {
       },
     });
   });
-  detail.append(status, accept, section("Описание", task.description));
+  detail.append(status);
+  if (!acceptedTaskIds.has(task.id)) detail.append(accept);
+  detail.append(section("Описание", task.description));
   detail.append(section("Критерии выполнения", task.completion_criteria));
   detail.append(section("Как выполнять", task.performer_instructions));
   for (const [key, value] of Object.entries(task.public_input)) {
@@ -1918,6 +2248,7 @@ async function acceptTask(task, button, status) {
     );
     const payload = await submissionResponse(response);
     pendingAcceptKeys.delete(task.id);
+    rememberAcceptedTask(task.id);
     history.replaceState({ screen: "assignment", assignmentId: payload.id }, "", presentationLocationFor("M03", payload.id));
     await showAssignmentDetail(payload.id, false);
   } catch (error) {
@@ -1929,39 +2260,80 @@ async function acceptTask(task, button, status) {
   }
 }
 
+const ordersRefreshControl = (reload) => {
+  const toolbar = element("div", undefined, "orders-toolbar");
+  const refresh = element("button", undefined, "secondary orders-refresh");
+  refresh.append(interfaceIcon("refresh-cw"), element("span", "Обновить"));
+  refresh.type = "button";
+  refresh.addEventListener("click", () => {
+    refresh.disabled = true;
+    clearJsonCache();
+    void reload().finally(() => { refresh.disabled = false; });
+  });
+  toolbar.append(refresh);
+  return toolbar;
+};
+
 function showAssignments(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const boundary = element("section", undefined, "state-view");
   boundary.dataset.screenId = "M01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = assignments.length ? "content" : "empty";
-  boundary.append(element("p", "Работа и проверки в одном месте", "screen-subtitle"));
   const tabs = element("div", undefined, "segmented root-tabs");
-  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
+  const active = element("button", "Заказы", "active-tab");
   active.type = "button";
-  active.addEventListener("click", () => showTakenAssignments());
+  active.disabled = true;
   createdAssignmentsButton.classList.remove("active-tab");
   createdAssignmentsButton.disabled = false;
   tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
+  boundary.append(ordersRefreshControl(() => loadAssignments(false)), tabs);
   if (!assignments.length) {
-    boundary.append(element("p", "Активных заданий пока нет.", "compact-empty"));
+    boundary.append(element("p", "Пока нет заданий.", "compact-empty"));
     replaceContent(boundary);
     restoreModerationFocus();
     return;
   }
-  const summary = element("button", undefined, "card assignment-card");
-  summary.type = "button";
-  summary.append(
-    element("h3", "Взятые мной"),
-    element("p", `${assignments.length} активных назначений`, "muted"),
-  );
-  summary.addEventListener("click", () => showTakenAssignments());
-  boundary.append(summary);
+  const activeStatuses = new Set(["accepted", "submitted", "rejected_pending_dispute", "disputed", "reviewer_required"]);
+  const current = assignments.filter((assignment) => activeStatuses.has(assignment.assignment_status));
+  const finished = assignments.filter((assignment) => !activeStatuses.has(assignment.assignment_status));
+  let focusTarget = null;
+  const appendAssignments = (headingText, items) => {
+    if (!items.length) return;
+    boundary.append(element("h3", headingText));
+    const list = element("ul", undefined, "list");
+    for (const assignment of items) {
+      const button = element("button", undefined, "card assignment-card");
+      button.type = "button";
+      const chips = element("div", undefined, "card-chips");
+      chips.append(element("span", assignmentStatus(assignment.assignment_status), "chip"));
+      const deadline = element("p", "Срок: ", "meta");
+      deadline.append(time(assignment.task_deadline_at));
+      button.append(chips, element("h3", assignment.task_title), deadline);
+      if (assignment.result_summary) button.append(element("p", assignment.result_summary, "muted"));
+      button.addEventListener("click", () => showAssignmentDetail(assignment.id));
+      if (assignment.id === returnFocusAssignmentId) focusTarget = button;
+      const item = element("li");
+      item.append(button);
+      list.append(item);
+    }
+    boundary.append(list);
+  };
+  appendAssignments("Актуальные", current);
+  appendAssignments("Завершённые", finished);
+  if (assignmentsNextCursor) {
+    const more = element("button", "Показать ещё", "secondary");
+    more.type = "button";
+    more.disabled = assignmentsLoadingMore;
+    more.addEventListener("click", () => void loadMoreAssignments(revision));
+    boundary.append(more);
+  }
   replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
+  returnFocusAssignmentId = null;
   restoreModerationFocus();
 }
 
@@ -1969,18 +2341,17 @@ function showTakenAssignments() {
   screenRevision += 1;
   history.replaceState({ screen: "assignments-taken" }, "", presentationLocationFor("M02"));
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const boundary = connectedBoundary("M02", "content");
-  boundary.append(element("p", "Взятые мной", "screen-subtitle"));
   const tabs = element("div", undefined, "segmented root-tabs");
-  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
+  const active = element("button", "Заказы", "active-tab");
   active.type = "button";
   active.disabled = true;
   createdAssignmentsButton.classList.remove("active-tab");
   createdAssignmentsButton.disabled = false;
   tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
+  boundary.append(ordersRefreshControl(() => loadAssignments(false)), tabs);
   const list = element("ul", undefined, "list");
   let focusTarget = null;
   for (const assignment of assignments) {
@@ -2013,34 +2384,44 @@ function showTakenAssignments() {
 
 async function loadAssignments(push = true) {
   const revision = ++screenRevision;
-  const path = "/api/v1/assignments?status=active&limit=20";
-  const cached = cachedJson(path);
+  const path = "/api/v1/assignments?status=all&limit=20";
   if (push) history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
-  if (cached) {
-    assignments = cached.items;
-    showAssignments(revision);
-  } else {
-    setNavigation("assignments", false);
-    title.textContent = "Мои задания";
-    back.classList.add("hidden");
-    replaceContent(element("p", "Загружаем активные назначения…", "status muted"));
-  }
+  setNavigation("assignments", false);
+  title.textContent = "Задания";
+  back.classList.add("hidden");
+  replaceContent(element("p", "Загружаем заказы…", "status muted"));
   try {
-    const page = await getJson(path, (refreshed) => {
-      if (revision !== screenRevision) return;
-      assignments = refreshed.items;
-      showAssignments(revision);
-    });
+    const page = await fetchJson(path);
     if (revision !== screenRevision) return;
-    if (cached) return;
     assignments = page.items;
+    assignmentsNextCursor = page.next_cursor;
     showAssignments(revision);
   } catch (error) {
-    if (revision !== screenRevision || cached) return;
+    if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadAssignments(false));
     replaceContent(...assignmentError(error.message, retry));
+  }
+}
+
+async function loadMoreAssignments(revision) {
+  if (!assignmentsNextCursor || assignmentsLoadingMore) return;
+
+  assignmentsLoadingMore = true;
+  showAssignments(revision);
+  try {
+    const page = await fetchJson(
+      `/api/v1/assignments?status=all&limit=20&cursor=${encodeURIComponent(assignmentsNextCursor)}`,
+    );
+    if (revision !== screenRevision) return;
+
+    const ids = new Set(assignments.map((assignment) => assignment.id));
+    assignments = [...assignments, ...page.items.filter((assignment) => !ids.has(assignment.id))];
+    assignmentsNextCursor = page.next_cursor;
+  } finally {
+    assignmentsLoadingMore = false;
+    if (revision === screenRevision) showAssignments(revision);
   }
 }
 
@@ -2067,7 +2448,10 @@ function showOwnedTask(task, push = true) {
     element("h3", task.title),
     section("Статус", createdTaskStatus(task.status)),
     section("Слоты", `${task.assignees.length}/${task.performer_slots}`),
+    section("Описание", task.description),
+    section("Критерии выполнения", task.completion_criteria),
   );
+  for (const value of Object.values(task.materials || {})) detail.append(section("Материал", value));
   for (const assignee of task.assignees) {
     detail.append(section(assignee.display_name, assignmentStatus(assignee.status)));
   }
@@ -2137,19 +2521,19 @@ function confirmOwnedTaskCancellation(task) {
 function renderCreatedAssignments(revision) {
   if (revision !== screenRevision) return;
   setNavigation("assignments", false);
-  title.textContent = "Мои задания";
+  title.textContent = "Задания";
   back.classList.add("hidden");
   const boundary = connectedBoundary("M09", "content");
   boundary.classList.add("owned-tasks-view");
   const tabs = element("div", undefined, "segmented root-tabs");
   let focusTarget = null;
-  const active = element("button", `В работе · ${assignments.length}`);
+  const active = element("button", "Заказы");
   active.type = "button";
-  active.addEventListener("click", () => showTakenAssignments());
+  active.addEventListener("click", () => void loadAssignments());
   createdAssignmentsButton.classList.add("active-tab");
   createdAssignmentsButton.disabled = true;
   tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
+  boundary.append(ordersRefreshControl(() => loadCreatedReviews(false)), tabs);
   if (!ownedTasks.length) {
     boundary.append(element("p", "Созданных заданий пока нет.", "compact-empty"));
   } else {
@@ -2227,7 +2611,7 @@ async function loadCreatedReviews(push = true) {
     renderCreatedAssignments(revision);
   } else {
     setNavigation("assignments", false);
-    title.textContent = "Мои задания";
+  title.textContent = "Задания";
     back.classList.add("hidden");
     replaceContent(element("p", "Загружаем созданные задания…", "status muted"));
   }
@@ -2269,6 +2653,19 @@ async function showCreatedReview(assignmentId, push = true) {
       section("Исполнитель", review.performer_display_name),
       section("Результат", review.result),
     );
+    if (review.attachments?.length) {
+      const files = element("section", undefined, "section");
+      files.append(element("h3", "Файлы"));
+      for (const item of review.attachments) {
+        const link = document.createElement("a");
+        link.href = miniAppPath(`/api/v1/media/attachments/${encodeURIComponent(item.id)}`);
+        link.textContent = item.name;
+        link.target = "_blank";
+        link.rel = "noopener";
+        files.append(link);
+      }
+      detail.append(files);
+    }
     if (review.review_deadline_at) {
       detail.append(dateSection("Срок решения", review.review_deadline_at));
     }
@@ -2380,6 +2777,16 @@ async function submissionRequest(path, method, operationKey, body) {
   return submissionResponse(response);
 }
 
+async function uploadFile(path, file) {
+  const response = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": file.type, "X-File-Name": file.name },
+    body: file,
+    credentials: "same-origin",
+  });
+  return submissionResponse(response);
+}
+
 function submissionPanel(assignment, draft) {
   const submissionRevision = screenRevision;
   const boundary = element("section", undefined, "submission");
@@ -2435,6 +2842,14 @@ function submissionPanel(assignment, draft) {
   label.append(input);
   const preview = element("button", "Предпросмотр", "primary");
   preview.type = "submit";
+  const attachmentInput = document.createElement("input");
+  attachmentInput.type = "file";
+  attachmentInput.accept = "image/jpeg,image/png,image/webp,application/pdf,text/plain";
+  attachmentInput.multiple = true;
+  const attachmentLabel = element("label", "Файлы и скриншоты", "section");
+  attachmentLabel.append(attachmentInput);
+  let attachments = Array.isArray(draft.attachments) ? [...draft.attachments] : [];
+  const attachmentList = element("p", attachments.map((item) => item.name).join(" · "), "profile-helper");
   let saveKey = null;
   let confirmKey = null;
 
@@ -2517,11 +2932,23 @@ function submissionPanel(assignment, draft) {
     status.textContent = "Сохраняем предпросмотр…";
     saveKey ||= newOperationKey();
     try {
+      const files = [...attachmentInput.files];
+      if (attachments.length + files.length > 5) {
+        status.textContent = "Можно прикрепить не больше 5 файлов.";
+        return;
+      }
+      if (files.length) {
+        status.textContent = "Загружаем файлы…";
+        const uploaded = await Promise.all(files.map((file) => uploadFile(
+          `/api/v1/assignments/${encodeURIComponent(assignment.id)}/attachments`, file,
+        )));
+        attachments = [...attachments, ...uploaded];
+      }
       const saved = await submissionRequest(
         "/api/v1/submission-drafts/" + encodeURIComponent(draft.id),
         "PUT",
         saveKey,
-        { expected_revision: draft.revision, payload: { result: input.value } },
+        { expected_revision: draft.revision, payload: { result: input.value, attachments } },
       );
       draft = saved;
       saveKey = null;
@@ -2535,7 +2962,11 @@ function submissionPanel(assignment, draft) {
       preview.disabled = false;
     }
   });
-  form.append(label, preview);
+  attachmentInput.addEventListener("change", () => {
+    const files = [...attachmentInput.files];
+    attachmentList.textContent = files.length ? files.map((file) => file.name).join(" · ") : attachments.map((item) => item.name).join(" · ");
+  });
+  form.append(label, attachmentLabel, attachmentList, preview);
   boundary.append(form, status);
   if (draft.result !== null) input.value = draft.result;
   return boundary;
@@ -2932,7 +3363,7 @@ async function showModerationCase(caseId, push = true) {
     detail.append(
       element("h3", dispute.task_title),
       section("Источник", dispute.task_origin === "community" ? "Сообщество" : "Участник"),
-      section("Награда", String(dispute.credit_reward_per_performer) + " кредитов"),
+      section("Награда", creditText(dispute.credit_reward_per_performer) + " кредитов"),
       section("Причина спора", dispute.dispute_reason),
     );
     if (dispute.result_summary) detail.append(section("Результат", dispute.result_summary));
@@ -3032,11 +3463,20 @@ async function showModerationCase(caseId, push = true) {
   }
 }
 
+async function telegramInitData() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const value = globalThis.Telegram?.WebApp?.initData;
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
 async function bootstrap(authAttempted = false) {
   try {
     const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
     if (me.status === 401 && !authAttempted) {
-      const initData = globalThis.Telegram?.WebApp?.initData;
+      const initData = await telegramInitData();
       if (!initData) throw new Error("telegram_init_data_missing");
       const auth = await apiFetch("/api/v1/auth/telegram", {
         method: "POST",
@@ -3053,6 +3493,7 @@ async function bootstrap(authAttempted = false) {
     currentMemberId = profile.member_id;
     void configureRoleNavigation();
     tasks = page.items;
+    catalogNextCursor = page.next_cursor;
     const initialHash = location.hash;
     const initialPresentation = presentationFromLocation();
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
@@ -3113,11 +3554,13 @@ async function bootstrap(authAttempted = false) {
       history.replaceState({ screen: "moderation-case", caseId: resourceId }, "", presentationLocationFor("S02", resourceId));
       showModerationCase(resourceId, false);
     }
-  } catch {
+  } catch (error) {
     replaceContent(
       element(
         "p",
-        "Не удалось загрузить задания. Откройте Mini App ещё раз.",
+        error.message === "telegram_init_data_missing"
+          ? "Telegram не передал данные входа. Обновите окно приложения."
+          : "Не удалось загрузить задания. Откройте Mini App ещё раз.",
         "status",
       ),
     );
@@ -3135,6 +3578,7 @@ back.addEventListener("click", () => {
   if (activeProfileState?.route && activeProfileState.route !== "/profile") {
     const route = activeProfileState.route;
     let destination = "/profile";
+    if (route.startsWith("/profile/edit/")) destination = activeProfileState.editReturnRoute || "/profile";
     if (route === "/profile/links/new" || /^\/profile\/links\/[0-9a-f-]{36}$/i.test(route)) destination = "/profile/links";
     if (route.endsWith("/delete")) {
       destination = activeProfileState.deleteOrigin === "edit" ? route.replace(/\/delete$/, "") : "/profile/links";

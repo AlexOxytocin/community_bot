@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -77,8 +78,8 @@ async def test_paid_fraud_reversal_is_admin_only_atomic_and_replayable(
         performer_row = await session.get(MemberModel, performer.id)
         assignment = await session.get(AssignmentModel, assignment_id)
         assert performer_row is not None and assignment is not None
-        performer_row.credit_balance_cached = 2
-        performer_row.experience_total_cached = 2
+        performer_row.credit_balance_cached = Decimal(2)
+        performer_row.experience_total_cached = Decimal(2)
         assignment.slot_ever_paid = True
     service = ModerationService(database.unit_of_work)
     open_command = OpenFraudCaseCommand(
@@ -426,8 +427,8 @@ async def test_insufficient_fraud_reversal_does_not_open_case_or_receipt(
         performer_row = await session.get(MemberModel, performer.id)
         assignment = await session.get(AssignmentModel, assignment_id)
         assert performer_row is not None and assignment is not None
-        performer_row.credit_balance_cached = 0
-        performer_row.experience_total_cached = 0
+        performer_row.credit_balance_cached = Decimal(0)
+        performer_row.experience_total_cached = Decimal(0)
         assignment.slot_ever_paid = True
     service = ModerationService(database.unit_of_work)
     with pytest.raises(InsufficientBalanceError):
@@ -728,7 +729,7 @@ async def test_alert_penalty_is_bounded_and_closes_the_episode(
     async with sessions.begin() as session:
         creator_row = await session.get(MemberModel, creator.id)
         assert creator_row is not None
-        creator_row.credit_balance_cached = 2
+        creator_row.credit_balance_cached = Decimal(2)
     async with database.unit_of_work() as uow:
         await uow.recompute_interaction_alert(assignment_ids[-1])
         await uow.commit()
