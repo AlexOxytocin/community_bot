@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     from starlette.routing import Route
 
+    from community_bot.application.reputation import SafeProfile
     from community_bot.application.tasks import PublishedTask
     from community_bot.infrastructure.db.database import Database
 
@@ -304,7 +305,7 @@ def test_member_dto_hides_username_when_profile_visibility_is_disabled() -> None
         reliability=SimpleNamespace(accepted=0, approved_weight=Decimal(0), no_show=0, rate=None),
     )
 
-    assert _member_dto(profile).telegram_username is None
+    assert _member_dto(cast("SafeProfile", profile)).telegram_username is None
 
 
 def test_web_config_and_route_set_are_closed() -> None:

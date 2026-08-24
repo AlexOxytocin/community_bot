@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import os
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from typing import TypeVar
 from uuid import UUID, uuid4
@@ -311,7 +312,7 @@ async def test_web_draft_scope_follows_public_active_and_stale_transitions(
         "Публичный черновик",
         "Описание публичного черновика для проверки изоляции.",
         "Есть проверяемый результат.",
-        3,
+        Decimal(3),
         datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2),
         TaskFormat.ONLINE,
         None,
@@ -447,6 +448,7 @@ async def test_freeform_task_can_publish_with_zero_credit_reward(database_url: s
         PublishTaskCommand(21_100, member.telegram_user_id, draft_id, revision)
     )
 
+    assert isinstance(task, PublishedTask)
     assert task.credit_reward_per_performer == 0
     assert task.reserved_credit_total == 0
     async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:

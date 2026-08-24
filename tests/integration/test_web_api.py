@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
@@ -479,6 +480,9 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
         await database.create_web_session(
             telegram_user_id=member.telegram_user_id,
             telegram_username=current_username,
+            telegram_avatar_url=None,
+            proof_digest=hashlib.sha256(b"failing-session-proof-1").digest(),
+            proof_expires_at=now + datetime.timedelta(minutes=5),
             token_digest=token_digest,
             authenticated_at=now,
             expires_at=now + datetime.timedelta(minutes=5),
@@ -489,6 +493,9 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
         await database.create_web_session(
             telegram_user_id=member.telegram_user_id,
             telegram_username="Rolled_Back",
+            telegram_avatar_url=None,
+            proof_digest=hashlib.sha256(b"failing-session-proof-2").digest(),
+            proof_expires_at=now + datetime.timedelta(minutes=5),
             token_digest=token_digest,
             authenticated_at=now,
             expires_at=now + datetime.timedelta(minutes=5),
@@ -510,6 +517,9 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
     unknown = await database.create_web_session(
         telegram_user_id=9_999_999,
         telegram_username="Unknown_User",
+        telegram_avatar_url=None,
+        proof_digest=hashlib.sha256(b"unknown-session-proof").digest(),
+        proof_expires_at=now + datetime.timedelta(minutes=5),
         token_digest=hashlib.sha256(b"unknown-session").digest(),
         authenticated_at=now,
         expires_at=now + datetime.timedelta(minutes=5),
@@ -2733,8 +2743,12 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
         community_tasks = [community]
         community_tasks.extend(clone(community) for _index in range(51))
         hidden = clone(hidden_source, creator_id=author.id, test_run_id=run.id)
-        low = clone(low_source, creator_id=author.id, credit_reward_per_performer=1)
-        low.reserved_credit_total = 1
+        low = clone(
+            low_source,
+            creator_id=author.id,
+            credit_reward_per_performer=Decimal(1),
+        )
+        low.reserved_credit_total = Decimal(1)
         session.add_all((*community_tasks, hidden, low))
         await session.flush()
         now = datetime.datetime.now(datetime.UTC)

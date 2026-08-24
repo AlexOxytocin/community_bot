@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -877,7 +878,7 @@ async def test_history_cursor_handles_equal_timestamps_without_gaps(database_url
         )
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
-        persisted.credit_balance_cached = 7
+        persisted.credit_balance_cached = Decimal(7)
     queries = EconomyQueryService(database.unit_of_work)
     transaction_ids: list[UUID] = []
     cursor = None
