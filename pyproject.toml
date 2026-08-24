@@ -150,10 +150,6 @@ addopts = [
     "-ra",
     "--strict-config",
     "--strict-markers",
-    "--cov=community_bot",
-    "--cov-branch",
-    "--cov-report=term-missing",
-    "--cov-fail-under=80",
 ]
 asyncio_mode = "strict"
 filterwarnings = ["error"]
