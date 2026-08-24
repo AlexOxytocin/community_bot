@@ -71,7 +71,6 @@ from community_bot.application.tasks import (
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import AssignmentDecision, AssignmentError, SubmissionDraft
 from community_bot.domain.catalog import TaskFormat
-from community_bot.domain.economy import InsufficientBalanceError
 from community_bot.domain.moderation import ModerationError, ResolutionCode
 from community_bot.domain.registration import (
     ProfileField,
@@ -88,7 +87,7 @@ from community_bot.domain.tasks import (
     TaskKind,
     TaskTimeSize,
 )
-from community_bot.infrastructure.db.database import AttachmentLimitError, Database
+from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
 
 _COOKIE_NAME = "__Host-community_session"
@@ -101,10 +100,6 @@ _MAX_TELEGRAM_USER_ID = 2**63 - 1
 _TELEGRAM_USERNAME = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 _MAX_IDEMPOTENCY_KEY = 2**63 - 1
 _SUBMISSION_BODY_MAX_BYTES = 4096
-_AVATAR_MAX_BYTES = 2 * 1024 * 1024
-_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
-_IMAGE_CONTENT_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
-_ATTACHMENT_CONTENT_TYPES = _IMAGE_CONTENT_TYPES | frozenset({"application/pdf", "text/plain"})
 _STATIC_DIR = Path(__file__).with_name("static")
 _PUBLIC_ERROR_CODES = frozenset(
     {
@@ -117,8 +112,6 @@ _PUBLIC_ERROR_CODES = frozenset(
         "not_found",
         "profile_unavailable",
         "assignment_unavailable",
-        "attachment_limit_reached",
-        "insufficient_credits",
         "task_catalog_unavailable",
         "unauthorized",
     }
@@ -135,7 +128,6 @@ class TelegramIdentity:
 
     user_id: int
     username: str | None
-    avatar_url: str | None
 
 
 class LevelDto(_Dto):
@@ -157,8 +149,6 @@ class ProfileLinkDto(_Dto):
 class MeDto(_Dto):
     member_id: UUID
     telegram_username: str | None
-    show_telegram_username: bool
-    avatar_url: str | None = None
     display_name: str
     city: str | None
     short_bio: str | None
@@ -173,9 +163,7 @@ class MeDto(_Dto):
 class ProfileUpdateRequest(_Dto):
     model_config = ConfigDict(extra="forbid")
 
-    field: Literal[
-        "display_name", "city", "short_bio", "skill_tags", "profile_links", "show_telegram_username"
-    ]
+    field: Literal["display_name", "city", "short_bio", "skill_tags", "profile_links"]
     value: str | None = None
     action: Literal["create", "update", "delete"] | None = None
     link_id: UUID | None = None
@@ -218,7 +206,6 @@ class ReliabilityDto(_Dto):
 class MemberDto(_Dto):
     member_id: UUID
     telegram_username: str | None
-    avatar_url: str | None = None
     display_name: str
     city: str | None
     short_bio: str | None
@@ -262,7 +249,7 @@ class TaskDto(_Dto):
     task_kind: str | None
     time_size: str | None
     title: str
-    credit_reward_per_performer: Decimal
+    credit_reward_per_performer: int
     performer_slots: int
     minimum_level: int
     format: str
@@ -289,9 +276,6 @@ class OwnedTaskAssigneeDto(_Dto):
 class OwnedTaskDto(_Dto):
     id: UUID
     title: str
-    description: str
-    completion_criteria: str
-    materials: dict[str, object]
     status: str
     performer_slots: int
     deadline_at: datetime.datetime
@@ -344,7 +328,6 @@ class AssignmentReviewDto(_Dto):
     submitted_at: datetime.datetime
     review_deadline_at: datetime.datetime | None
     result: str
-    attachments: tuple[dict[str, str], ...]
     available_decisions: tuple[AssignmentDecision, ...]
 
 
@@ -387,7 +370,7 @@ class ModerationCaseDetailDto(_Dto):
     revision: int
     task_title: str
     task_origin: Literal["member", "community"]
-    credit_reward_per_performer: Decimal
+    credit_reward_per_performer: int
     assignment_status: str
     result_summary: str | None
     dispute_reason: str
@@ -410,7 +393,7 @@ class AssignmentDetailDto(AssignmentCardDto):
     description: str
     performer_instructions: str
     completion_criteria: str
-    reward_per_performer: Decimal
+    reward_per_performer: int
     format: str
     city: str | None
     minimum_level: int
@@ -425,7 +408,6 @@ class SubmissionDraftDto(_Dto):
     id: UUID
     revision: int
     result: str | None
-    attachments: tuple[dict[str, str], ...] = ()
 
 
 class SaveSubmissionDraftRequest(_Dto):
@@ -446,7 +428,7 @@ class TaskFormRequest(_Dto):
     title: str
     description: str
     completion_criteria: str
-    credit_reward_per_performer: Decimal = Field(ge=0, max_digits=18, decimal_places=1)
+    credit_reward_per_performer: int = Field(strict=True)
     deadline_at: datetime.datetime
     format: TaskFormat
     city: str | None = None
@@ -514,25 +496,6 @@ def create_web_app(
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "alive"}, headers={"Cache-Control": "no-store"})
 
-    @app.get("/api/v1/media/avatar/{asset_id}")
-    async def avatar_media(asset_id: UUID) -> Response:
-        asset = await database.avatar_media(asset_id)
-        if asset is None:
-            raise HTTPException(status_code=404, detail="not_found")
-        content, content_type = asset
-        return Response(
-            content, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"}
-        )
-
-    @app.get("/api/v1/media/attachments/{asset_id}")
-    async def assignment_media(asset_id: UUID, request: Request) -> Response:
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
-        asset = await database.assignment_media(asset_id=asset_id, actor_member_id=actor.member_id)
-        if asset is None:
-            raise HTTPException(status_code=404, detail="not_found")
-        content, content_type = asset
-        return Response(content, media_type=content_type, headers={"Cache-Control": "no-store"})
-
     @app.get("/readyz")
     async def readyz() -> JSONResponse:
         report = await readiness_report(
@@ -594,15 +557,11 @@ def create_web_app(
             return _error_response(401, "unauthorized")
         raw_token = secrets.token_bytes(32)
         digest = hashlib.sha256(raw_token).digest()
-        proof_digest = hashlib.sha256(raw).digest()
         now = datetime.datetime.now(datetime.UTC)
         try:
             member_id = await database.create_web_session(
                 telegram_user_id=identity.user_id,
                 telegram_username=identity.username,
-                telegram_avatar_url=identity.avatar_url,
-                proof_digest=proof_digest,
-                proof_expires_at=now + datetime.timedelta(seconds=_PROOF_MAX_AGE_SECONDS),
                 token_digest=digest,
                 authenticated_at=now,
                 expires_at=now + datetime.timedelta(seconds=_SESSION_LIFETIME_SECONDS),
@@ -708,63 +667,6 @@ def create_web_app(
         except PermissionError:
             return _error_response(403, "profile_unavailable")
         return _json_response(_me_dto(profile, statistics))
-
-    @app.post("/api/v1/me/avatar")
-    async def upload_avatar(request: Request) -> JSONResponse:
-        _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
-        content_type = request.headers.get("content-type", "").lower()
-        if content_type not in _IMAGE_CONTENT_TYPES:
-            return _error_response(422, "invalid_request")
-        try:
-            content = await _bounded_body(request, limit=_AVATAR_MAX_BYTES)
-        except (OverflowError, ValueError):
-            return _error_response(413, "payload_too_large")
-        if not content:
-            return _error_response(422, "invalid_request")
-        try:
-            asset_id = await database.save_media_asset(
-                owner_member_id=actor.member_id,
-                assignment_id=None,
-                kind="avatar",
-                file_name=_upload_file_name(request.headers.get("x-file-name")),
-                content_type=content_type,
-                content=content,
-            )
-        except LookupError:
-            return _error_response(404, "not_found")
-        return _json_response({"avatar_url": f"/api/v1/media/avatar/{asset_id}"})
-
-    @app.post("/api/v1/assignments/{assignment_id}/attachments")
-    async def upload_assignment_attachment(assignment_id: UUID, request: Request) -> JSONResponse:
-        _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
-        content_type = request.headers.get("content-type", "").lower()
-        if content_type not in _ATTACHMENT_CONTENT_TYPES:
-            return _error_response(422, "invalid_request")
-        try:
-            card = await assignments.active_card(actor=actor, assignment_id=assignment_id)
-            content = await _bounded_body(request, limit=_ATTACHMENT_MAX_BYTES)
-        except (LookupError, PermissionError):
-            return _error_response(409, "assignment_unavailable")
-        except (OverflowError, ValueError):
-            return _error_response(413, "payload_too_large")
-        if not card.can_submit or not content:
-            return _error_response(409, "assignment_unavailable")
-        try:
-            asset_id = await database.save_media_asset(
-                owner_member_id=actor.member_id,
-                assignment_id=assignment_id,
-                kind="submission",
-                file_name=_upload_file_name(request.headers.get("x-file-name")),
-                content_type=content_type,
-                content=content,
-            )
-        except AttachmentLimitError:
-            return _error_response(409, "attachment_limit_reached")
-        return _json_response(
-            {"id": asset_id, "name": _upload_file_name(request.headers.get("x-file-name"))}
-        )
 
     @app.get("/api/v1/members", response_model=MembersDto)
     async def members(
@@ -884,16 +786,10 @@ def create_web_app(
     async def available_tasks(
         actor: ActorContext = Depends(current_actor),
         cursor: UUID | None = None,
-        city: Annotated[str | None, Query(max_length=200)] = None,
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
     ) -> JSONResponse:
         try:
-            page = await tasks.list_available(
-                actor=actor,
-                cursor_task_id=cursor,
-                city=city,
-                limit=limit,
-            )
+            page = await tasks.list_available(actor=actor, cursor_task_id=cursor, limit=limit)
         except PermissionError as error:
             raise HTTPException(status_code=403, detail="task_catalog_unavailable") from error
         return _json_response(
@@ -1016,8 +912,6 @@ def create_web_app(
                 return _json_response({"task_id": str(published.id)})
         except TaskCityError:
             return _error_response(422, "invalid_task_city")
-        except InsufficientBalanceError:
-            return _error_response(409, "insufficient_credits")
         except (TaskError, LookupError, PermissionError):
             return _error_response(409, "task_catalog_unavailable")
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
@@ -1087,16 +981,16 @@ def create_web_app(
     @app.get("/api/v1/assignments", response_model=AssignmentsDto)
     async def active_assignments(
         actor: ActorContext = Depends(current_actor),
-        status: Literal["active", "all"] = "active",
+        status: Literal["active"] = "active",
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
         cursor: str | None = None,
     ) -> JSONResponse:
+        del status
         try:
             page = await assignments.active_cards(
                 actor=actor,
                 limit=limit,
                 cursor=_parse_assignment_cursor(cursor),
-                include_history=status == "all",
             )
         except ValueError:
             return _error_response(422, "invalid_request")
@@ -1406,15 +1300,6 @@ def create_web_app(
         )
         if payload is None:
             return _error_response(422, "invalid_request")
-        attachment_ids = _submission_attachment_ids(payload.payload)
-        if attachment_ids is None:
-            return _error_response(422, "invalid_request")
-        if not await database.owns_submission_assets(
-            asset_ids=attachment_ids,
-            owner_member_id=actor.member_id,
-            draft_id=parsed_draft_id,
-        ):
-            return _error_response(422, "invalid_request")
         fingerprint = _submission_fingerprint(
             "save", payload.expected_revision, payload=payload.payload
         )
@@ -1477,8 +1362,7 @@ def create_web_app(
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (
                     "default-src 'self'; script-src 'self' https://telegram.org; "
-                    "style-src 'self'; font-src 'self'; "
-                    "img-src 'self' https://t.me https://*.telegram.org; object-src 'none'; "
+                    "style-src 'self'; font-src 'self'; img-src 'none'; object-src 'none'; "
                     "base-uri 'none'; frame-ancestors https://web.telegram.org "
                     "https://*.telegram.org"
                 ),
@@ -1532,7 +1416,6 @@ def validate_telegram_init_data(
         user = json.loads(fields["user"])
         telegram_user_id = user["id"]
         telegram_username = user.get("username")
-        avatar_url = user.get("photo_url")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("Invalid Telegram proof.") from error
     if isinstance(telegram_user_id, bool) or not isinstance(telegram_user_id, int):
@@ -1544,7 +1427,6 @@ def validate_telegram_init_data(
         or _TELEGRAM_USERNAME.fullmatch(telegram_username) is None
     ):
         raise ValueError("Invalid Telegram proof.")
-    avatar_url = _telegram_avatar_url(avatar_url)
     current = now or datetime.datetime.now(datetime.UTC)
     current_timestamp = int(current.timestamp())
     if (
@@ -1552,27 +1434,7 @@ def validate_telegram_init_data(
         or current_timestamp - auth_date > _PROOF_MAX_AGE_SECONDS
     ):
         raise ValueError("Invalid Telegram proof.")
-    return TelegramIdentity(telegram_user_id, telegram_username, avatar_url)
-
-
-def _telegram_avatar_url(value: object) -> str | None:
-    """Accept only signed image links served by Telegram hosts."""
-    if value is None:
-        return None
-    if not isinstance(value, str) or len(value) > 2048:
-        raise ValueError("Invalid Telegram proof.")
-    parsed = urlsplit(value)
-    if parsed.scheme != "https" or parsed.hostname not in {"t.me", "telegram.org"}:
-        raise ValueError("Invalid Telegram proof.")
-    return value
-
-
-def _upload_file_name(value: str | None) -> str:
-    """Return a display-safe browser filename without any path component."""
-    if value is None:
-        return "file"
-    name = value.replace("\\", "/").rsplit("/", maxsplit=1)[-1].strip()
-    return name[:120] or "file"
+    return TelegramIdentity(telegram_user_id, telegram_username)
 
 
 async def _bounded_body(request: Request, *, limit: int) -> bytes:
@@ -1718,22 +1580,6 @@ def _canonical_uuid(value: str) -> UUID | None:
     return parsed if str(parsed) == value else None
 
 
-def _submission_attachment_ids(payload: dict[str, object]) -> tuple[UUID, ...] | None:
-    """Extract attachment identifiers before checking their server-side ownership."""
-    raw_attachments = payload.get("attachments", [])
-    if not isinstance(raw_attachments, list):
-        return None
-    asset_ids: list[UUID] = []
-    for item in raw_attachments:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            return None
-        parsed = _canonical_uuid(item["id"])
-        if parsed is None:
-            return None
-        asset_ids.append(parsed)
-    return tuple(asset_ids)
-
-
 async def _submission_request(
     request: Request,
     model: type[
@@ -1839,15 +1685,13 @@ def _karma_confirm_dto(target_id: UUID, result: KarmaVoteResult) -> KarmaActionD
 def _member_dto(profile: SafeProfile) -> MemberDto:
     public_username = (
         profile.telegram_username
-        if getattr(profile, "show_telegram_username", True)
-        and profile.telegram_username is not None
+        if profile.telegram_username is not None
         and _TELEGRAM_USERNAME.fullmatch(profile.telegram_username) is not None
         else None
     )
     return MemberDto(
         member_id=profile.member_id,
         telegram_username=public_username,
-        avatar_url=getattr(profile, "avatar_url", None),
         display_name=profile.display_name,
         city=profile.city,
         short_bio=profile.short_bio,
@@ -1872,8 +1716,6 @@ def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
     return MeDto(
         member_id=profile.member_id,
         telegram_username=profile.telegram_username,
-        show_telegram_username=getattr(profile, "show_telegram_username", True),
-        avatar_url=getattr(profile, "avatar_url", None),
         display_name=profile.display_name,
         city=profile.city,
         short_bio=profile.short_bio,
@@ -1932,9 +1774,6 @@ def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
     return OwnedTaskDto(
         id=card.task.id,
         title=card.task.title,
-        description=card.task.description,
-        completion_criteria=card.task.completion_criteria,
-        materials=dict(card.task.materials),
         status=card.task.status.value,
         performer_slots=card.task.performer_slots,
         deadline_at=card.task.deadline_at,
@@ -2000,7 +1839,6 @@ def _assignment_review_dto(card: AssignmentCard) -> AssignmentReviewDto:
         submitted_at=card.assignment.submitted_at,
         review_deadline_at=card.assignment.review_deadline_at,
         result=card.result_summary,
-        attachments=card.attachments,
         available_decisions=card.available_decisions,
     )
 
@@ -2008,20 +1846,10 @@ def _assignment_review_dto(card: AssignmentCard) -> AssignmentReviewDto:
 def _submission_draft_dto(draft: SubmissionDraft) -> SubmissionDraftDto:
     value = None if draft.payload is None else draft.payload.get("result")
     result = value if isinstance(value, str) else None
-    raw_attachments = [] if draft.payload is None else draft.payload.get("attachments", [])
-    attachments: list[dict[str, str]] = []
-    if isinstance(raw_attachments, list):
-        for item in raw_attachments:
-            if not isinstance(item, dict):
-                continue
-            asset_id, name = item.get("id"), item.get("name")
-            if isinstance(asset_id, str) and isinstance(name, str):
-                attachments.append({"id": asset_id, "name": name})
     return SubmissionDraftDto(
         id=draft.id,
         revision=draft.revision,
         result=result,
-        attachments=tuple(attachments),
     )
 
 

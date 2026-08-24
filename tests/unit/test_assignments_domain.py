@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import replace
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -19,17 +18,11 @@ from community_bot.domain.assignments import (
 )
 
 
-def test_partial_reward_uses_supported_tenths() -> None:
-    """Partial settlement preserves a half reward to the nearest permitted tenth."""
-    assert [partial_reward(value) for value in (2, 3, 4, 5, 11)] == [
-        Decimal("1.0"),
-        Decimal("1.5"),
-        Decimal("2.0"),
-        Decimal("2.5"),
-        Decimal("5.5"),
-    ]
+def test_partial_reward_uses_approved_ceiling_rule() -> None:
+    """Partial settlement rounds one half upward and rejects reward one."""
+    assert [partial_reward(value) for value in (2, 3, 4, 5, 11)] == [1, 2, 2, 3, 6]
     with pytest.raises(AssignmentError):
-        partial_reward(Decimal("0.1"))
+        partial_reward(1)
 
 
 def test_dispute_window_is_half_open() -> None:

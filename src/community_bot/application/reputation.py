@@ -106,14 +106,12 @@ class SafeProfile:
 
     member_id: UUID
     telegram_username: str | None
-    show_telegram_username: bool
-    avatar_url: str | None
     display_name: str
     city: str | None
     short_bio: str | None
     skill_tags: tuple[str, ...]
     profile_links: tuple[ProfileLink, ...]
-    experience_total: Decimal
+    experience_total: int
     level_number: int
     karma: KarmaAggregate
     reliability: ReliabilityView
@@ -141,7 +139,7 @@ class PersonalStatistics:
 
     completed: int
     partially_completed: int
-    experience_earned: Decimal
+    experience_earned: int
     unique_recipients: int
     categories: tuple[str, ...]
     no_show: int
@@ -153,7 +151,7 @@ class PersonalStatistics:
 class LeaderboardCursor:
     """Complete stable keyset cursor for the main leaderboard."""
 
-    experience: Decimal
+    experience: int
     recipients: int
     sufficient_sample: bool
     reliability: Decimal
@@ -169,7 +167,7 @@ class LeaderboardEntry:
     rank: int
     member_id: UUID
     display_name: str
-    experience: Decimal
+    experience: int
     unique_recipients: int
     reliability: Decimal | None
     no_show: int

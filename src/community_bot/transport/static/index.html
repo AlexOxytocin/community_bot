@@ -6,25 +6,25 @@
     <meta name="color-scheme" content="dark light">
     <title>Community — Mini App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <link rel="stylesheet" href="mini-assets/styles.css?release=__RELEASE__">
+    <link rel="stylesheet" href="/mini-assets/styles.css?release=__RELEASE__">
   </head>
   <body>
     <main class="shell" id="app">
       <section class="screen" aria-labelledby="screen-title">
         <div class="screen-heading">
-          <button class="back hidden" id="back" type="button" aria-label="Назад"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12H7m5-6-6 6 6 6M4 5v14"/></svg></button>
+          <button class="back hidden" id="back" type="button" aria-label="Назад">←</button>
           <h1 id="screen-title">Задания</h1>
         </div>
         <div class="screen-content" id="content" aria-live="polite"></div>
       </section>
       <nav class="bottom-nav" id="primary-navigation" aria-label="Основное меню">
-        <button id="catalog-nav" type="button" aria-pressed="true"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>Задания</button>
-        <button id="assignments-nav" type="button" aria-label="Заказы" aria-pressed="false"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>Заказы</button>
-        <button id="participants-nav" type="button" aria-label="Участники" aria-pressed="false"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM3 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8M16 14a5 5 0 0 1 5 5"/></svg>Люди</button>
-        <button id="profile-nav" type="button" aria-pressed="false"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"/></svg>Профиль</button>
-        <button id="moderation-nav" type="button" aria-label="Модерация" aria-pressed="false" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 6v5c0 4.4-3 7.6-7 10-4-2.4-7-5.6-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg>Контроль</button>
+        <button id="catalog-nav" type="button" aria-pressed="true"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM8 9h8M8 13h5"/></svg>Задания</button>
+        <button id="assignments-nav" type="button" aria-label="Мои задания" aria-pressed="false"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4"/></svg>Мои</button>
+        <button id="participants-nav" type="button" aria-pressed="false"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM3 20a6 6 0 0 1 12 0M17 11a3 3 0 0 0 0-6M16 14a5 5 0 0 1 5 5"/></svg>Участники</button>
+        <button id="profile-nav" type="button" aria-pressed="false"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0"/></svg>Профиль</button>
+        <button id="moderation-nav" type="button" aria-pressed="false" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 6v5c0 4.4-3 7.6-7 10-4-2.4-7-5.6-7-10V6l7-3ZM9 12l2 2 4-4"/></svg>Модерация</button>
       </nav>
     </main>
-    <script type="module" src="mini-assets/app.js?release=__RELEASE__"></script>
+    <script type="module" src="/mini-assets/app.js?release=__RELEASE__"></script>
   </body>
 </html>

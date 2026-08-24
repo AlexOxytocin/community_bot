@@ -36,7 +36,6 @@ from community_bot.infrastructure.db.models import (
 )
 
 if TYPE_CHECKING:
-    from decimal import Decimal
     from uuid import UUID
 
     from community_bot.domain.economy import EconomyMutationCommand
@@ -50,10 +49,10 @@ CONFIG_PATH = Path(__file__).parents[2] / "config" / "product-config.v1.json"
 class EconomySnapshot:
     """Persisted economy state observed after one attempted command."""
 
-    credit_cache: Decimal
-    experience_cache: Decimal
-    credit_sum: Decimal
-    experience_sum: Decimal
+    credit_cache: int
+    experience_cache: int
+    credit_sum: int
+    experience_sum: int
     ledger_count: int
     audit_count: int
 
