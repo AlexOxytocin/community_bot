@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime  # noqa: TC003 - SQLAlchemy resolves mapped annotations at runtime.
 import uuid
+from decimal import Decimal  # noqa: TC003 - SQLAlchemy resolves mapped annotations at runtime.
 from typing import Any
 
 from sqlalchemy import (
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     Text,
     UniqueConstraint,
     func,
@@ -130,8 +132,12 @@ class MemberModel(Base):
     role: Mapped[str] = mapped_column(Text, nullable=False, default=MemberRole.MEMBER.value)
     status: Mapped[str] = mapped_column(Text, nullable=False, default=MemberStatus.PENDING.value)
     level_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    credit_balance_cached: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    experience_total_cached: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    credit_balance_cached: Mapped[Decimal] = mapped_column(
+        Numeric(18, 1), nullable=False, default=0
+    )
+    experience_total_cached: Mapped[Decimal] = mapped_column(
+        Numeric(18, 1), nullable=False, default=0
+    )
     level_config_version_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("product_config_versions.id")
     )
@@ -428,7 +434,7 @@ class TaskCreationDraftModel(Base):
     title: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
     completion_criteria: Mapped[str | None] = mapped_column(Text)
-    credit_reward_per_performer: Mapped[int | None] = mapped_column(Integer)
+    credit_reward_per_performer: Mapped[Decimal | None] = mapped_column(Numeric(18, 1))
     estimated_minutes: Mapped[int | None] = mapped_column(Integer)
     input_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     deadline_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -525,9 +531,9 @@ class TaskModel(Base):
     completion_criteria: Mapped[str] = mapped_column(Text, nullable=False)
     materials_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     input_payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    credit_reward_per_performer: Mapped[int] = mapped_column(Integer, nullable=False)
+    credit_reward_per_performer: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False)
     performer_slots: Mapped[int] = mapped_column(Integer, nullable=False)
-    reserved_credit_total: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reserved_credit_total: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False)
     estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     minimum_level: Mapped[int] = mapped_column(Integer, nullable=False)
     format: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1434,8 +1440,8 @@ class AccountTransactionModel(Base):
     member_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
-    credit_delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    experience_delta: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    credit_delta: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False)
+    experience_delta: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False, default=0)
     transaction_type: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     payload_hash: Mapped[str] = mapped_column(Text, nullable=False)

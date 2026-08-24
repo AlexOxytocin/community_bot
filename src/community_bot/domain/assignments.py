@@ -1,10 +1,10 @@
-# ruff: noqa: EM101, PLR2004, TRY003
+# ruff: noqa: EM101, TRY003
 """Task assignment lifecycle and deterministic settlement rules."""
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -99,11 +99,12 @@ class SubmissionDraft:
     submitted_result_id: UUID | None
 
 
-def partial_reward(full_reward: int) -> int:
-    """Return the approved half reward rounded upward."""
-    if full_reward < 2:
-        raise AssignmentError("Partial approval requires a reward of at least two credits.")
-    return math.ceil(full_reward / 2)
+def partial_reward(full_reward: Decimal | int) -> Decimal:
+    """Return half of a reward, rounded up to the supported tenth of a credit."""
+    reward = Decimal(str(full_reward))
+    if reward < Decimal("0.2"):
+        raise AssignmentError("Partial approval requires a reward of at least 0.2 credits.")
+    return (reward / 2).quantize(Decimal("0.1"), rounding=ROUND_CEILING)
 
 
 def require_submit_allowed(

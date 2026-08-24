@@ -19,6 +19,7 @@ from community_bot.domain.moderation import (
 )
 
 if TYPE_CHECKING:
+    from decimal import Decimal
     from types import TracebackType
 
     from community_bot.application.identity import ActorContext
@@ -45,7 +46,7 @@ class ModerationCaseDetail:
     case: ModerationCase
     task_title: str
     task_origin: str
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     assignment_status: str
     result_summary: str | None
     dispute_reason: str

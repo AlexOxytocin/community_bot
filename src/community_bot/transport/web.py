@@ -262,7 +262,7 @@ class TaskDto(_Dto):
     task_kind: str | None
     time_size: str | None
     title: str
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     performer_slots: int
     minimum_level: int
     format: str
@@ -387,7 +387,7 @@ class ModerationCaseDetailDto(_Dto):
     revision: int
     task_title: str
     task_origin: Literal["member", "community"]
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     assignment_status: str
     result_summary: str | None
     dispute_reason: str
@@ -410,7 +410,7 @@ class AssignmentDetailDto(AssignmentCardDto):
     description: str
     performer_instructions: str
     completion_criteria: str
-    reward_per_performer: int
+    reward_per_performer: Decimal
     format: str
     city: str | None
     minimum_level: int
@@ -446,7 +446,7 @@ class TaskFormRequest(_Dto):
     title: str
     description: str
     completion_criteria: str
-    credit_reward_per_performer: int = Field(strict=True)
+    credit_reward_per_performer: Decimal = Field(ge=0, max_digits=18, decimal_places=1)
     deadline_at: datetime.datetime
     format: TaskFormat
     city: str | None = None

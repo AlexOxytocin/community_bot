@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
@@ -71,7 +72,7 @@ class TaskDraft:
     title: str | None
     description: str | None
     completion_criteria: str | None
-    credit_reward_per_performer: int | None
+    credit_reward_per_performer: Decimal | None
     estimated_minutes: int | None
     input_payload: dict[str, object] | None
     deadline_at: datetime.datetime | None
@@ -101,8 +102,8 @@ class TaskPreview:
     performer_instructions: str
     public_input_keys: tuple[str, ...]
     completion_criteria: str
-    credit_reward_per_performer: int
-    reserved_credit_total: int
+    credit_reward_per_performer: Decimal
+    reserved_credit_total: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,9 +129,9 @@ class PublishedTask:
     completion_criteria: str
     input_payload: dict[str, object]
     materials: dict[str, object]
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     performer_slots: int
-    reserved_credit_total: int
+    reserved_credit_total: Decimal
     minimum_level: int
     format: TaskFormat
     city: str | None
@@ -268,7 +269,7 @@ class SaveWebTaskDraftCommand:
     title: str
     description: str
     completion_criteria: str
-    credit_reward_per_performer: int
+    credit_reward_per_performer: Decimal
     deadline_at: datetime.datetime
     format: TaskFormat
     city: str | None
@@ -1014,10 +1015,10 @@ class TaskService:
                 template.performer_instructions,
                 _schema_property_keys(template.input_schema),
                 template.completion_criteria,
-                template.credit_reward,
-                0
+                Decimal(str(template.credit_reward)),
+                Decimal("0.0")
                 if draft.origin == "community"
-                else template.credit_reward * draft.performer_slots,
+                else Decimal(str(template.credit_reward)) * draft.performer_slots,
             )
 
     async def publish(self, command: PublishTaskCommand) -> PublishedTask | TaskDraft:  # noqa: PLR0915
@@ -2159,8 +2160,8 @@ async def _freeform_preview(
         "Следуйте описанию задания и критериям результата.",
         ("description",),
         cast("str", draft.completion_criteria),
-        cast("int", draft.credit_reward_per_performer),
-        cast("int", draft.credit_reward_per_performer) * cast("int", draft.performer_slots),
+        cast("Decimal", draft.credit_reward_per_performer),
+        cast("Decimal", draft.credit_reward_per_performer) * cast("int", draft.performer_slots),
     )
 
 

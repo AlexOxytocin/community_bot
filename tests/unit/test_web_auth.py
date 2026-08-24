@@ -324,11 +324,11 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/readyz", ("GET",)),
         ("/api/v1/auth/telegram", ("POST",)),
         ("/api/v1/session", ("DELETE",)),
-            ("/api/v1/me", ("GET",)),
-            ("/api/v1/me/profile", ("PUT",)),
-            ("/api/v1/me/avatar", ("POST",)),
-            ("/api/v1/media/avatar/{asset_id}", ("GET",)),
-            ("/api/v1/media/attachments/{asset_id}", ("GET",)),
+        ("/api/v1/me", ("GET",)),
+        ("/api/v1/me/profile", ("PUT",)),
+        ("/api/v1/me/avatar", ("POST",)),
+        ("/api/v1/media/avatar/{asset_id}", ("GET",)),
+        ("/api/v1/media/attachments/{asset_id}", ("GET",)),
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/members/{member_id}/karma-vote", ("POST",)),
@@ -342,8 +342,8 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/assignments", ("GET",)),
         ("/api/v1/assignments/{assignment_id}", ("GET",)),
         ("/api/v1/assignments/{assignment_id}/cancellation", ("POST",)),
-            ("/api/v1/assignments/{assignment_id}/disputes", ("POST",)),
-            ("/api/v1/assignments/{assignment_id}/attachments", ("POST",)),
+        ("/api/v1/assignments/{assignment_id}/disputes", ("POST",)),
+        ("/api/v1/assignments/{assignment_id}/attachments", ("POST",)),
         ("/api/v1/assignment-reviews", ("GET",)),
         ("/api/v1/assignment-reviews/{assignment_id}", ("GET",)),
         ("/api/v1/assignment-reviews/{assignment_id}/decision", ("POST",)),
@@ -410,7 +410,7 @@ def test_task_form_normalizes_before_fingerprinting() -> None:
         title="  title  ",
         description="  description  ",
         completion_criteria="  complete  ",
-        credit_reward_per_performer=3,
+        credit_reward_per_performer="0.1",
         deadline_at=source_deadline,
         format=TaskFormat.ONLINE,
         city="  City  ",
@@ -423,6 +423,7 @@ def test_task_form_normalizes_before_fingerprinting() -> None:
     assert form.city == "City"
     assert form.materials == {"url": "https://example.com/item"}
     assert form.deadline_at == source_deadline.astimezone(datetime.UTC)
+    assert form.credit_reward_per_performer == Decimal("0.1")
 
 
 def test_submission_operation_identity_binds_resource_and_command() -> None:

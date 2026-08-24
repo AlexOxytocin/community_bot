@@ -602,7 +602,9 @@ async def leaderboard(
         "month": dt.datetime.now(dt.UTC) - dt.timedelta(days=30),
         "all": None,
     }[period]
-    ranked: list[tuple[tuple[Any, ...], int, MemberModel, int, ReliabilityView, int, datetime]] = []
+    ranked: list[
+        tuple[tuple[Any, ...], int, MemberModel, int, ReliabilityView, Decimal, datetime]
+    ] = []
     for member in members:
         experience, reached_at = await _experience_and_reached_at(session, member, cutoff=cutoff)
         recipients = await _unique_recipients(session, member.id)
@@ -663,8 +665,8 @@ async def leaderboard(
     return LeaderboardPage(entries, next_cursor)
 
 
-async def _experience_total(session: AsyncSession, member_id: UUID) -> int:
-    return int(
+async def _experience_total(session: AsyncSession, member_id: UUID) -> Decimal:
+    return Decimal(
         await session.scalar(
             select(func.coalesce(func.sum(AccountTransactionModel.experience_delta), 0)).where(
                 AccountTransactionModel.member_id == member_id
@@ -676,7 +678,7 @@ async def _experience_total(session: AsyncSession, member_id: UUID) -> int:
 
 async def _experience_and_reached_at(
     session: AsyncSession, member: MemberModel, *, cutoff: dt.datetime | None = None
-) -> tuple[int, datetime]:
+) -> tuple[Decimal, datetime]:
     statement = select(AccountTransactionModel).where(
         AccountTransactionModel.member_id == member.id
     )
@@ -689,8 +691,8 @@ async def _experience_and_reached_at(
     ).all()
     total = sum(item.experience_delta for item in transactions)
     if total == 0:
-        return 0, member.registered_at
-    running = 0
+        return Decimal("0.0"), member.registered_at
+    running = Decimal("0.0")
     reached_at = member.registered_at
     for item in transactions:
         running += item.experience_delta

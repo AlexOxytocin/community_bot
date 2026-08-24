@@ -5,6 +5,8 @@ const miniAppPath = (path) => (path.startsWith("/") ? `${miniAppBasePath}${path}
 
 applyPlatformTheme();
 
+const creditText = (value) => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(Number(value));
+
 const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
 const back = document.getElementById("back");
@@ -609,7 +611,7 @@ function taskListCard(task, { preview = false } = {}) {
   if (category) chips.append(element("span", category, "chip muted-chip"));
   const meta = element("div", undefined, "task-meta");
   meta.append(
-    element("span", `✦ ${task.credit_reward_per_performer} кред.`),
+    element("span", `${creditText(task.credit_reward_per_performer)} кред.`),
     element("span", `${task.performer_slots} ${task.performer_slots === 1 ? "место" : "места"}`),
   );
   const deadline = element(
@@ -787,6 +789,7 @@ function showTaskCreation(state, forceEdit = false) {
   const form = element("form", undefined, "task-form");
   form.classList.add("creation-form");
   form.innerHTML = '<fieldset class="type-field"><legend>Тип задания</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section"><span class="field-label">Число исполнителей</span><input name="performer_slots" aria-label="Число исполнителей" type="number" min="1" required></label><fieldset class="type-field choice-field"><legend>Формат</legend><select class="visually-hidden" name="format" aria-label="Формат" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select><div class="type-segmented format-segmented"><button type="button" data-task-format="online">Онлайн</button><button type="button" data-task-format="offline">Офлайн</button></div></fieldset></div><label class="section"><span class="field-label">Категория</span><select name="category_id" aria-label="Категория" required></select></label><label class="section"><span class="field-label">Название</span><input name="title" aria-label="Название" required></label><label class="section"><span class="field-label">Что нужно сделать</span><textarea name="description" aria-label="Что нужно сделать" required></textarea></label><label class="section"><span class="field-label">Критерии приёмки</span><textarea name="completion_criteria" aria-label="Критерии приёмки" required></textarea></label><div class="form-grid two-columns"><label class="section"><span class="field-label">Размер</span><select name="time_size" aria-label="Размер" required></select></label><label class="section"><span class="field-label">Награда за исполнителя</span><input name="credit_reward_per_performer" aria-label="Награда за исполнителя" type="number" min="0" step="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section"><span class="field-label">Срок</span><input name="deadline_at" aria-label="Срок" type="datetime-local" required></label><label class="section"><span class="field-label">Материалы</span><textarea name="material_text" aria-label="Материалы"></textarea></label>';
+  form.credit_reward_per_performer.step = "0.1";
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
@@ -838,7 +841,8 @@ function showTaskCreation(state, forceEdit = false) {
   const updateReserve = () => {
     const slots = Number(form.performer_slots.value || 0);
     const reward = Number(form.credit_reward_per_performer.value || 0);
-    reserve.textContent = slots && Number.isFinite(reward) ? `${slots * reward} кредитов` : "—";
+    reserve.textContent = slots && Number.isFinite(reward)
+      ? `${creditText(Math.round(slots * reward * 10) / 10)} кредитов` : "—";
   };
   form.performer_slots.addEventListener("input", updateReserve);
   form.performer_slots.addEventListener("input", () => {
@@ -938,7 +942,7 @@ function showTaskCreation(state, forceEdit = false) {
         target = draft;
         rememberSessionTaskDraft(draft.id);
       }
-      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
+      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: value.credit_reward_per_performer, performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
       history.pushState(
         { screen: "task-preview", draftId: target.id },
         "",
@@ -2183,7 +2187,7 @@ function showTaskDetail(task, push = true) {
   };
   appendMeta("Автор", task.author_display_name);
   appendMeta("Срок", formatDate(task.deadline_at));
-  appendMeta("Награда", `${task.credit_reward_per_performer} кредитов`);
+  appendMeta("Награда", `${creditText(task.credit_reward_per_performer)} кредитов`);
   appendMeta("Мест", String(task.performer_slots));
   if (task.city) appendMeta("Город", task.city);
   detail.append(metadata);
@@ -3359,7 +3363,7 @@ async function showModerationCase(caseId, push = true) {
     detail.append(
       element("h3", dispute.task_title),
       section("Источник", dispute.task_origin === "community" ? "Сообщество" : "Участник"),
-      section("Награда", String(dispute.credit_reward_per_performer) + " кредитов"),
+      section("Награда", creditText(dispute.credit_reward_per_performer) + " кредитов"),
       section("Причина спора", dispute.dispute_reason),
     );
     if (dispute.result_summary) detail.append(section("Результат", dispute.result_summary));
@@ -3459,11 +3463,20 @@ async function showModerationCase(caseId, push = true) {
   }
 }
 
+async function telegramInitData() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const value = globalThis.Telegram?.WebApp?.initData;
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
 async function bootstrap(authAttempted = false) {
   try {
     const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
     if (me.status === 401 && !authAttempted) {
-      const initData = globalThis.Telegram?.WebApp?.initData;
+      const initData = await telegramInitData();
       if (!initData) throw new Error("telegram_init_data_missing");
       const auth = await apiFetch("/api/v1/auth/telegram", {
         method: "POST",
@@ -3541,11 +3554,13 @@ async function bootstrap(authAttempted = false) {
       history.replaceState({ screen: "moderation-case", caseId: resourceId }, "", presentationLocationFor("S02", resourceId));
       showModerationCase(resourceId, false);
     }
-  } catch {
+  } catch (error) {
     replaceContent(
       element(
         "p",
-        "Не удалось загрузить задания. Откройте Mini App ещё раз.",
+        error.message === "telegram_init_data_missing"
+          ? "Telegram не передал данные входа. Обновите окно приложения."
+          : "Не удалось загрузить задания. Откройте Mini App ещё раз.",
         "status",
       ),
     );

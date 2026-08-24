@@ -34,6 +34,7 @@ from community_bot.domain.registration import (
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
+    from decimal import Decimal
 
     from community_bot.application.identity import ActorContext
 
@@ -145,8 +146,8 @@ class ProfileData:
     skill_tags: tuple[str, ...]
     profile_links: tuple[ProfileLink, ...]
     availability: str | None
-    credit_balance: int
-    experience_total: int
+    credit_balance: Decimal
+    experience_total: Decimal
 
 
 @dataclass(frozen=True, slots=True)

@@ -50,6 +50,7 @@ from community_bot.infrastructure.db.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from decimal import Decimal
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,7 +69,7 @@ class _ActiveConfigSnapshot:
 @dataclass(frozen=True, slots=True)
 class _StagedEconomyBatch:
     results: tuple[EconomyMutationResult, ...]
-    totals: dict[UUID, tuple[int, int]]
+    totals: dict[UUID, tuple[Decimal, Decimal]]
     experience_changed: set[UUID]
     persisted: tuple[tuple[EconomyCommand, UUID], ...]
 
@@ -260,7 +261,7 @@ def _stage_economy_batch(
     members: dict[UUID, MemberModel],
 ) -> _StagedEconomyBatch:
     results: list[EconomyMutationResult] = []
-    totals: dict[UUID, tuple[int, int]] = {}
+    totals: dict[UUID, tuple[Decimal, Decimal]] = {}
     experience_changed: set[UUID] = set()
     persisted: list[tuple[EconomyCommand, UUID]] = []
     for command in commands:

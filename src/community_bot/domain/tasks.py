@@ -6,6 +6,7 @@ import datetime
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -196,15 +197,23 @@ def validate_freeform_slots(value: int, *, kind: TaskKind) -> int:
     return value
 
 
-def validate_freeform_reward(_size: TaskTimeSize, value: int) -> int:
-    """Validate that a free-form reward is a non-negative whole credit amount."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        message = "Task reward must be an integer."
+def validate_freeform_reward(_size: TaskTimeSize, value: object) -> Decimal:
+    """Validate a non-negative credit reward with one decimal place at most."""
+    numeric_message = "Task reward must be a number."
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int)):
+        raise TaskError(numeric_message)
+    try:
+        normalized = Decimal(str(value))
+    except (InvalidOperation, ValueError) as error:
+        raise TaskError(numeric_message) from error
+    exponent = normalized.as_tuple().exponent
+    if not normalized.is_finite() or not isinstance(exponent, int) or exponent < -1:
+        message = "Task reward may have at most one decimal place."
         raise TaskError(message)
-    if value < 0:
+    if normalized < 0:
         message = "Task reward cannot be negative."
         raise TaskError(message)
-    return value
+    return normalized.quantize(Decimal("0.1"))
 
 
 def validate_freeform_text(value: object, *, field: str) -> str:

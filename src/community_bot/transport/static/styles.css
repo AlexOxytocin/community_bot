@@ -207,7 +207,7 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
   background: var(--app-surface);
 }
 .bottom-nav button { position: relative; display: grid; place-items: center; align-content: center; gap: 3px; min-width: 44px; min-height: 56px; padding: 5px 2px 3px; border: 0; background: transparent; color: var(--app-text-muted); cursor: pointer; font-size: 9px; font-weight: 700; }
-.nav-icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.nav-icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: square; stroke-linejoin: bevel; stroke-width: 1.45; }
 .bottom-nav button[aria-pressed="true"] { color: var(--app-text); background: color-mix(in srgb, var(--app-surface-raised) 78%, transparent); }
 .bottom-nav button[aria-pressed="true"] .nav-icon { color: var(--app-accent); filter: drop-shadow(0 0 6px color-mix(in srgb, var(--app-accent) 32%, transparent)); }
 .shell.context-screen .bottom-nav { display: none; }

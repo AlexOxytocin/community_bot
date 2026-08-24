@@ -1075,6 +1075,39 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
         browser.close()
 
 
+def test_bootstrap_waits_for_late_telegram_desktop_init_data(mini_app_url: str) -> None:
+    """Desktop may expose WebApp before it finishes populating initData."""
+    init_data = "query_id=desktop&user=%7B%22id%22%3A1%7D&hash=proof"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(
+            browser,
+            bridge=(
+                "globalThis.Telegram = {WebApp: {}};"
+                "setTimeout(() => { globalThis.Telegram.WebApp.initData = "
+                f'"{init_data}"; }}, 150);'
+            ),
+        )
+        calls = 0
+
+        def me(route: Route) -> None:
+            nonlocal calls
+            calls += 1
+            route.fulfill(status=401 if calls == 1 else 200, json={"member_id": "desktop"})
+
+        page.route("**/api/v1/me", me)
+        page.route("**/api/v1/auth/telegram", lambda route: route.fulfill(status=204))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.goto(mini_app_url)
+        page.wait_for_timeout(350)
+        assert calls == 2
+        page.close()
+        browser.close()
+
+
 def test_catalog_actions_filters_and_list_density_are_compact(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
@@ -1438,7 +1471,7 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
         outside.route("**/api/v1/auth/telegram", outside_auth)
         outside.route("**/api/v1/tasks", tasks)
         outside.goto(mini_app_url)
-        outside.get_by_text("Откройте Mini App ещё раз.").wait_for()
+        outside.get_by_text("Telegram не передал данные входа.").wait_for()
         assert outside_auth_calls == task_calls == 0
         browser.close()
 

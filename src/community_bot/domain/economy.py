@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +14,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from uuid import UUID
 
-_STARTING_GRANT_AMOUNT = 5
+_STARTING_GRANT_AMOUNT = Decimal("5.0")
+_AMOUNT_QUANTUM = Decimal("0.1")
 _MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 
@@ -55,8 +57,8 @@ class EconomyCommand:
     transaction_type: TransactionType
     member_id: UUID
     idempotency_key: str
-    credit_delta: int
-    experience_delta: int
+    credit_delta: Decimal
+    experience_delta: Decimal
     actor_member_id: UUID | None = None
     reason: str | None = None
     comment: str | None = None
@@ -87,8 +89,8 @@ class EconomyMutationResult:
     transaction_id: UUID
     member_id: UUID
     transaction_type: TransactionType
-    credit_delta: int
-    experience_delta: int
+    credit_delta: Decimal
+    experience_delta: Decimal
     replayed: bool
     task_id: UUID | None = None
     assignment_id: UUID | None = None
@@ -217,12 +219,12 @@ def starting_grant(member_id: UUID) -> EconomyCommand:
         member_id=member_id,
         idempotency_key=f"starting_grant:{member_id}",
         credit_delta=_STARTING_GRANT_AMOUNT,
-        experience_delta=0,
+        experience_delta=Decimal("0.0"),
     )
 
 
 def reserve_reward(
-    *, member_id: UUID, amount: int, idempotency_key: str, comment: str | None = None
+    *, member_id: UUID, amount: Decimal | int, idempotency_key: str, comment: str | None = None
 ) -> EconomyCommand:
     """Build a task reward reservation."""
     return _amount_command(
@@ -241,7 +243,7 @@ def reserve_reward(
 def earn_reward(
     *,
     member_id: UUID,
-    amount: int,
+    amount: Decimal | int,
     idempotency_key: str,
     comment: str | None = None,
     task_id: UUID | None = None,
@@ -266,7 +268,7 @@ def earn_reward(
 def refund_reward(
     *,
     member_id: UUID,
-    amount: int,
+    amount: Decimal | int,
     idempotency_key: str,
     comment: str | None = None,
     task_id: UUID | None = None,
@@ -291,7 +293,7 @@ def refund_reward(
 def earn_partial_reward(
     *,
     member_id: UUID,
-    amount: int,
+    amount: Decimal | int,
     idempotency_key: str,
     comment: str | None = None,
     task_id: UUID | None = None,
@@ -316,7 +318,7 @@ def earn_partial_reward(
 def earn_community_reward(
     *,
     member_id: UUID,
-    amount: int,
+    amount: Decimal | int,
     idempotency_key: str,
     comment: str | None = None,
     task_id: UUID | None = None,
@@ -341,7 +343,7 @@ def earn_community_reward(
 def apply_penalty(
     *,
     member_id: UUID,
-    amount: int,
+    amount: Decimal | int,
     idempotency_key: str,
     context: AdministrativeContext,
 ) -> EconomyCommand:
@@ -362,8 +364,8 @@ def apply_penalty(
 def admin_adjustment(
     *,
     member_id: UUID,
-    credit_delta: int,
-    experience_delta: int,
+    credit_delta: Decimal | int,
+    experience_delta: Decimal | int,
     idempotency_key: str,
     context: AdministrativeContext,
 ) -> EconomyCommand:
@@ -372,8 +374,8 @@ def admin_adjustment(
         transaction_type=TransactionType.ADMIN_ADJUSTMENT,
         member_id=member_id,
         idempotency_key=idempotency_key,
-        credit_delta=credit_delta,
-        experience_delta=experience_delta,
+        credit_delta=_normalize_amount(credit_delta),
+        experience_delta=_normalize_amount(experience_delta),
         actor_member_id=context.actor_member_id,
         reason=context.reason,
         comment=context.comment,
@@ -415,8 +417,8 @@ def normalize_economy_command(command: EconomyCommand) -> EconomyCommand:
         transaction_type=command.transaction_type,
         member_id=command.member_id,
         idempotency_key=command.idempotency_key.strip(),
-        credit_delta=command.credit_delta,
-        experience_delta=command.experience_delta,
+        credit_delta=_normalize_amount(command.credit_delta),
+        experience_delta=_normalize_amount(command.experience_delta),
         actor_member_id=command.actor_member_id,
         reason=None if command.reason is None else command.reason.strip(),
         comment=None if command.comment is None else command.comment.strip(),
@@ -433,8 +435,8 @@ def economy_payload_hash(command: EconomyCommand) -> str:
         "schema_version": 1,
         "transaction_type": normalized.transaction_type.value,
         "member_id": str(normalized.member_id),
-        "credit_delta": normalized.credit_delta,
-        "experience_delta": normalized.experience_delta,
+        "credit_delta": _amount_json(normalized.credit_delta),
+        "experience_delta": _amount_json(normalized.experience_delta),
         "actor_member_id": (
             None if normalized.actor_member_id is None else str(normalized.actor_member_id)
         ),
@@ -456,7 +458,7 @@ def economy_payload_hash(command: EconomyCommand) -> str:
 
 def resolve_level(
     *,
-    experience_total: int,
+    experience_total: Decimal | int,
     config_id: UUID,
     config_version: int,
     levels: Sequence[LevelDefinition],
@@ -500,12 +502,13 @@ def _amount_command(
     *,
     spec: _AmountCommandSpec,
     member_id: UUID,
-    amount: int,
+    amount: Decimal | int,
     idempotency_key: str,
     metadata: _CommandMetadata,
     task_id: UUID | None = None,
     assignment_id: UUID | None = None,
 ) -> EconomyCommand:
+    amount = _normalize_amount(amount)
     if amount < 0:
         message = "Operation amount cannot be negative."
         raise EconomyError(message)
@@ -515,7 +518,7 @@ def _amount_command(
         member_id=member_id,
         idempotency_key=idempotency_key,
         credit_delta=credit_delta,
-        experience_delta=amount if spec.gives_experience else 0,
+        experience_delta=amount if spec.gives_experience else Decimal("0.0"),
         actor_member_id=metadata.actor_member_id,
         reason=metadata.reason,
         comment=metadata.comment,
@@ -553,6 +556,26 @@ def _command_metadata(
             comment=context.comment,
         )
     return _CommandMetadata(comment=comment)
+
+
+def _normalize_amount(value: Decimal | int) -> Decimal:
+    """Keep ledger arithmetic exact and reject values smaller than one tenth."""
+    numeric_message = "Operation amount must be numeric."
+    if isinstance(value, bool):
+        raise EconomyError(numeric_message)
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError) as error:
+        raise EconomyError(numeric_message) from error
+    exponent = amount.as_tuple().exponent
+    if not amount.is_finite() or not isinstance(exponent, int) or exponent < -1:
+        message = "Operation amount may have at most one decimal place."
+        raise EconomyError(message)
+    return amount.quantize(_AMOUNT_QUANTUM)
+
+
+def _amount_json(value: Decimal) -> str:
+    return format(value, ".1f")
 
 
 def _validate_starting_grant(command: EconomyCommand) -> None:
