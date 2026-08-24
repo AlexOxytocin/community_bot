@@ -58,6 +58,7 @@ _MAX_SUBMISSION_ATTACHMENTS = 5
 class AttachmentLimitError(ValueError):
     """Raised when one assignment already has the allowed number of uploads."""
 
+
 if TYPE_CHECKING:
     import datetime
     from collections.abc import Callable, Sequence

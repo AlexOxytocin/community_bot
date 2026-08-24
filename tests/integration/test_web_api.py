@@ -2530,9 +2530,7 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         )
         assert history_next.status_code == 200, history_next.text
         history_ids = [
-            UUID(item["id"])
-            for page in (history, history_next)
-            for item in page.json()["items"]
+            UUID(item["id"]) for page in (history, history_next) for item in page.json()["items"]
         ]
         assert set(history_ids) == {*active_ids, terminal.id}
         invalid_cursor = await client.get("/api/v1/assignments", params={"cursor": "invalid"})
