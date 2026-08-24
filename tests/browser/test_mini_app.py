@@ -175,6 +175,7 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
 
         page.get_by_role("button", name="Профиль", exact=True).click()
+        page.get_by_role("button", name="Настройки профиля").click()
         page.get_by_role("button", name="Редактировать город").click()
         page.get_by_role("textbox", name="Город", exact=True).fill("Córdoba")
         page.get_by_role("button", name="Сохранить").click()
@@ -300,7 +301,7 @@ def test_orders_show_active_and_finished_assignments(mini_app_url: str) -> None:
         page.route("**/api/v1/assignments?*", assignments_route)
         page.goto(mini_app_url)
 
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Актуальный заказ", exact=True).wait_for()
         assert page.get_by_role("button", name="Заказы").count() == 1
         page.get_by_text("Актуальный заказ", exact=True).wait_for()
@@ -461,7 +462,7 @@ def test_orders_have_an_explicit_refresh_control(mini_app_url: str) -> None:
         )
         page.goto(mini_app_url)
 
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Заказ для обновления", exact=True).wait_for()
         assert page.get_by_role("button", name="Обновить").count() == 1
         browser.close()
@@ -676,7 +677,7 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         assert page.get_by_text("@Alex_Test", exact=True).is_visible()
         assert page.get_by_text("Кредиты", exact=True).is_visible()
         assert page.get_by_text("Завершено заданий", exact=True).count() == 0
-        assert page.locator(".profile-pencil").count() == 5
+        assert page.locator(".profile-pencil").count() == 0
         capture(1, "own-filled", "PR-01")
 
         page.goto(mini_app_url + f"?case=foreign#/members/{foreign_id}")
@@ -1035,10 +1036,10 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
                 "button"
             ).all_inner_texts() == [
                 "Задания",
-                "Мои",
-                "Участники",
+                "Заказы",
+                "Люди",
                 "Профиль",
-                "Модерация",
+                "Контроль",
             ]
             geometry = page.evaluate(
                 """() => {
@@ -1329,9 +1330,9 @@ def test_core_hash_routes_restore_authoritatively_and_fail_closed(
         page.get_by_role("button", name="Назад").click()
         page.get_by_role("heading", name="Задания").wait_for()
 
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.reload()
-        page.get_by_role("heading", name="Мои задания").wait_for()
+        page.get_by_role("heading", name="Задания").wait_for()
         page.get_by_role("button", name="Задания", exact=True).click()
         page.goto(mini_app_url + "?case=detail#/work/" + assignment_id + "?view_state=m03")
         page.get_by_text("SERVER-PROJECTION").wait_for()
@@ -1798,7 +1799,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                 "getComputedStyle(document.documentElement)"
                 ".getPropertyValue('--app-background').trim()"
             )
-            == "#05060a"
+            == "#07080d"
         )
 
         page.get_by_role("button", name="Принять задание").click()
@@ -1851,8 +1852,8 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         catalog_trigger.wait_for()
         assert catalog_trigger.evaluate("node => node === document.activeElement")
 
-        page.get_by_role("button", name="Мои задания").click()
-        page.get_by_role("heading", name="Мои задания").wait_for()
+        page.get_by_role("button", name="Заказы").click()
+        page.get_by_role("heading", name="Задания").wait_for()
         page.get_by_role("button", name=re.compile(assignment_title)).click()
         page.get_by_text("План отправлен").wait_for()
         assert page.get_by_role("button", name="Принять задание").count() == 0
@@ -1876,7 +1877,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                 "getComputedStyle(document.documentElement)"
                 ".getPropertyValue('--app-background').trim()"
             )
-            == "#05060a"
+            == "#07080d"
         )
         browser.close()
 
@@ -2321,8 +2322,10 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
         assert page.locator(".profile-overview").is_visible()
         assert page.url.endswith("#/profile")
-        assert page.locator("[data-profile-action]").count() == 5
+        assert page.locator("[data-profile-action]").count() == 0
 
+        page.get_by_role("button", name="Настройки профиля").click()
+        assert page.locator("[data-profile-action]").count() == 5
         page.get_by_role("button", name="Редактировать город").click()
         page.get_by_role("textbox", name="Город", exact=True).fill("Rosario")
         page.get_by_role("button", name="Сохранить").click()
@@ -2915,31 +2918,31 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.on("dialog", lambda dialog: dialog.accept())
         page.goto(mini_app_url)
 
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Пока нет заданий.").wait_for()
 
         list_mode["status"] = 503
         page.evaluate("advanceCacheClock(60001)")
         with page.expect_response(lambda response: response.status == 503):
-            page.get_by_role("button", name="Мои задания").click()
+            page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Пока нет заданий.").wait_for()
         assert page.get_by_text("Не удалось загрузить активные назначения.").count() == 0  # noqa: RUF001
 
         list_mode["status"] = 401
         with page.expect_response(lambda response: response.status == 401):
-            page.get_by_role("button", name="Мои задания").click()
+            page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Пока нет заданий.").wait_for()
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0
 
         list_mode["status"] = 403
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_text("Назначения недоступны для этого аккаунта.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0
 
         list_mode.update(status=200, items=[assignment])
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         row = page.get_by_role("button", name=re.compile("Собрать план"))
         row.wait_for()
         assert page.get_by_role("list").count() == 1
@@ -2973,7 +2976,7 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.get_by_text("Загружаем назначение…").wait_for()
         assert len(pending_routes) == 1
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("heading", name="Мои задания").wait_for()
+        page.get_by_role("heading", name="Задания").wait_for()
         pending_routes.pop().fulfill(status=200, json=detail)
         page.wait_for_timeout(50)
         assert page.get_by_text("Собрать понятный план").count() == 0
@@ -3093,7 +3096,7 @@ def test_assignment_cancellation_returns_to_active_list(mini_app_url: str) -> No
         page.on("dialog", lambda dialog: dialog.accept())
         page.goto(mini_app_url)
 
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.locator('[data-screen-id="M03"]').wait_for()
         assert page.get_by_label("Причина отказа").count() == 0
@@ -3255,7 +3258,7 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         )
         page.route(f"**/api/v1/assignment-reviews/{assignment_id}/decision", decide)
         page.goto(mini_app_url)
-        page.get_by_role("button", name="Мои задания").click()
+        page.get_by_role("button", name="Заказы").click()
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.locator('[data-screen-id="M03"]').wait_for()
         assert page.get_by_role("textbox", name="Результат").count() == 0
@@ -3297,16 +3300,16 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         page.get_by_role("button", name="Назад").click()
         page.locator('[data-screen-id="M03"]').wait_for()
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("heading", name="Мои задания").wait_for()
+        page.get_by_role("heading", name="Задания").wait_for()
         pending_confirm.pop().fulfill(status=204)
         page.wait_for_timeout(50)
-        assert page.get_by_role("heading", name="Мои задания").count() == 1
+        assert page.get_by_role("heading", name="Задания").count() == 1
         page.get_by_role("button", name=re.compile("Проверить форму")).click()
         page.get_by_text("Результат отправлен").first.wait_for()
         assert page.get_by_role("button", name="Отправить результат").count() == 1
         assert page.locator("#primary-navigation").is_hidden()
         page.get_by_role("button", name="Назад").click()
-        page.get_by_role("heading", name="Мои задания").wait_for()
+        page.get_by_role("heading", name="Задания").wait_for()
         page.get_by_role("button", name="Созданные мной").click()
         page.locator('[data-screen-id="M09"]').wait_for()
         assert page.get_by_role("button", name="Назад").is_hidden()
@@ -3955,7 +3958,7 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(
             page.locator('[data-screen-id="T04B"]').wait_for()
             page.get_by_role("button", name="Назад").click()
             page.get_by_role("heading", name="Задания").wait_for()
-            page.get_by_role("button", name="Мои задания").click()
+            page.get_by_role("button", name="Заказы").click()
             secondary = page.get_by_role("button", name="Созданные мной")
             styles = secondary.evaluate(
                 """node => {
