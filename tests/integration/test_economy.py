@@ -296,6 +296,17 @@ async def test_admin_mutations_require_active_admin_and_append_audit(database_ur
     )
     assert penalty.credit_delta == -2
     assert await model_count(database, AuditEventModel) == 1
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        audit = await session.scalar(select(AuditEventModel))
+        assert audit is not None
+        assert audit.after_json == {
+            "member_id": str(target.id),
+            "transaction_type": "penalty",
+            "credit_delta": "-2.0",
+            "experience_delta": "0.0",
+            "reversed_transaction_id": None,
+        }
     await database.dispose()
 
 

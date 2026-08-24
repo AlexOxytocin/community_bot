@@ -879,8 +879,8 @@ def _economy_audit(command: EconomyCommand, transaction_id: UUID) -> AuditEventM
         after_json={
             "member_id": str(command.member_id),
             "transaction_type": command.transaction_type.value,
-            "credit_delta": command.credit_delta,
-            "experience_delta": command.experience_delta,
+            "credit_delta": str(command.credit_delta),
+            "experience_delta": str(command.experience_delta),
             "reversed_transaction_id": (
                 None
                 if command.reversed_transaction_id is None
