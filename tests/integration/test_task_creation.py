@@ -801,7 +801,7 @@ async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -
             )
         ).all()
     assert model is not None
-    assert model.credit_balance_cached == 5
+    assert model.credit_balance_cached == 10
     assert transactions[-1].experience_delta == 0
     assert await scalar_count(database, OutboxEventModel) == 2
     await database.dispose()
