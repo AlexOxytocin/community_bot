@@ -1,6 +1,6 @@
 # ADR-0019 — Single-pilot post-task delivery gate
 
-**Статус:** Принято
+**Статус:** Заменено ADR-0021; release safety применяется только к явной release-задаче
 
 **Дата:** 2026-08-18
 

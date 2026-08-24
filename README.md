@@ -28,6 +28,15 @@ uv run alembic upgrade head
 uv run pytest
 ```
 
+Обычный локальный цикл собран в одну команду:
+
+```powershell
+.\scripts\dev.ps1
+```
+
+Описание режимов проверки находится в [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md),
+актуальный индекс документации — в [docs/README.md](docs/README.md).
+
 Безопасная проверка worker не обращается к Telegram:
 
 ```powershell
@@ -46,6 +55,9 @@ uv run pytest
 ```
 
 Integration-тесты используют реальный PostgreSQL: заданный `DATABASE_URL` либо Testcontainers.
+
+Для узкой проверки можно использовать `scripts/check.ps1` с путями pytest;
+полный gate запускается флагом `-Full` только когда этого требует риск.
 
 ## Архитектура
 
