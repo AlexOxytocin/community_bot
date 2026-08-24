@@ -175,7 +175,7 @@ async def test_operational_routes_are_private_safe_and_fail_closed(
     assert captured["expected_release"] == "a" * 40
     assert captured["heartbeat_not_before"] == started_at
     assert "database_url" not in ready.text
-    assert settings.release not in ready.text
+    assert ready.json()["release"] == settings.release
 
 
 @pytest.mark.asyncio

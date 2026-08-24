@@ -673,3 +673,11 @@ Parity-разработка может идти параллельно пило�
 ## Правило изменения решений
 
 Новое решение добавляется отдельной записью с датой и причиной. Если оно заменяет старое, старая запись не удаляется, а помечается `superseded`.
+
+## D-030 — Быстрый delivery canonical dev server
+
+**Дата:** 2026-08-24.
+
+**Выбрано:** обычный merge с неизменным Alembic head автоматически вызывает один ограниченный server entrypoint с exact SHA, cached build/restart и `/readyz`. PR содержит один быстрый обязательный путь; DB/Alembic, browser и auth/ledger запускаются лишь по изменённым путям. До появления fallback измеряется native cached build; slow migration path и single compatible rollback сохраняются.
+
+**Заменяет:** только dev-flow части D-025 и ADR-0018/ADR-0019, требовавшие manual bundle/provenance/activation.

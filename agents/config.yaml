@@ -109,8 +109,7 @@ orchestration_policy:
         - product_task
         - any_runtime_diff
       required_steps_after_main_merge:
-        - new_immutable_release
-        - production_activation
+        - automatic_exact_sha_deploy
         - public_smoke
       jira_done_requires_green_public_smoke: true
       process_or_docs_only_without_runtime_diff: skip

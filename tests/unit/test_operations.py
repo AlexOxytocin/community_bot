@@ -76,8 +76,8 @@ def test_backup_and_restore_keep_database_safety_contract() -> None:
     assert "mode 0600" in runtime
 
 
-def test_ci_and_publication_keep_legacy_runtime_out_of_scope() -> None:
-    """CI proof and publication do not regain deployment authority or R1 runtime."""
+def test_ci_and_deploy_use_one_bounded_dev_path() -> None:
+    """Ordinary dev delivery has one fast required path and one bounded trigger."""
     root = Path(__file__).parents[2]
     ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     release = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -86,15 +86,14 @@ def test_ci_and_publication_keep_legacy_runtime_out_of_scope() -> None:
     assert "push:" not in ci
     assert "uv run ty check src tests ops" in ci
     assert "uv run pytest" in ci
-    workflow = yaml.safe_load(ci)
-    assert "image-contract" in workflow["jobs"]["verified-merge-tree"]["needs"]
-    assert "verify_release_provenance.py" not in ci
+    assert "verified-merge-tree" not in ci
+    assert "image-contract" not in ci
+    assert "release-bundle" not in release
     publication = yaml.safe_load(release)
     assert publication[True]["push"]["branches"] == ["main"]
-    assert set(publication["jobs"]) == {"publish"}
-    assert "path: release-bundle.tar" in release
-    for forbidden in ("ssh", "deploy-key", "forced-command", "environment: production"):
-        assert forbidden not in release.lower()
+    assert publication["concurrency"]["cancel-in-progress"] is False
+    assert set(publication["jobs"]) == {"deploy"}
+    assert "DEV_DEPLOY_SSH_PRIVATE_KEY" in release
 
 
 def test_host_maintenance_surface_is_python_and_data_only() -> None:
@@ -104,6 +103,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "__init__.py",
         "_runtime.py",
         "backup_postgres.py",
+        "deploy_dev.py",
         "release_contract.py",
         "restore_drill.py",
     }

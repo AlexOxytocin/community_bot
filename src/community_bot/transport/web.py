@@ -506,7 +506,7 @@ def create_web_app(
             heartbeat_not_before=started_at,
         )
         return JSONResponse(
-            report.as_dict(),
+            {**report.as_dict(), "release": settings.release},
             status_code=200 if report.healthy else 503,
             headers={"Cache-Control": "no-store"},
         )

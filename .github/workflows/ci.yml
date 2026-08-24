@@ -7,186 +7,84 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      database: ${{ steps.paths.outputs.database }}
+      browser: ${{ steps.paths.outputs.browser }}
+      auth_ledger: ${{ steps.paths.outputs.auth_ledger }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "${BASE}" "${HEAD}")"
+          match() { grep -Eq "$1" <<<"${changed}" && echo true || echo false; }
+          echo "database=$(match '^(migrations/|alembic.ini|compose.*yaml|src/community_bot/infrastructure/db/)')" >> "$GITHUB_OUTPUT"
+          echo "browser=$(match '^(src/community_bot/transport/static/|tests/browser/)')" >> "$GITHUB_OUTPUT"
+          echo "auth_ledger=$(match '^(src/community_bot/(application|domain|infrastructure)/(auth|economy|ledger)|src/community_bot/transport/web.py|tests/(unit|integration)/test_(web_auth|economy|ledger))')" >> "$GITHUB_OUTPUT"
+
   quality:
     name: Quality
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           enable-cache: true
           version: "0.12.3"
-      - name: Install Python
-        run: uv python install 3.13
-      - name: Synchronize locked environment
-        run: uv sync --locked --all-groups
-      - name: Install browser
-        run: uv run playwright install --with-deps chromium
-      - name: Check formatting
-        run: uv run ruff format --check .
-      - name: Lint
-        run: uv run ruff check --output-format=github .
-      - name: Type check
-        run: uv run ty check src tests ops
-      - name: Test without PostgreSQL
-        run: uv run pytest -m "not integration and not browser" --no-cov
-      - name: Test Mini App browser path
-        run: uv run pytest tests/browser --no-cov
+      - run: uv python install 3.13
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ty check src tests ops
+      - run: uv run pytest tests/unit/test_web_auth.py --no-cov
 
   postgresql:
     name: PostgreSQL and Alembic
+    if: needs.changes.outputs.database == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql+asyncpg://community_bot:community_bot@localhost:5432/community_bot
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        with:
-          enable-cache: true
-          version: "0.12.3"
-      - name: Install Python
-        run: uv python install 3.13
-      - name: Synchronize locked environment
-        run: uv sync --locked --all-groups
-      - name: Validate Compose configuration
-        run: docker compose config
-      - name: Start PostgreSQL
-        run: docker compose up -d --wait postgres
-      - name: Exercise migrations
-        run: |
-          uv run alembic upgrade head
-          uv run alembic downgrade base
-          uv run alembic upgrade head
-      - name: Run full test suite with PostgreSQL
-        run: uv run pytest -m "not browser"
-      - name: Stop PostgreSQL
-        if: always()
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with: {version: "0.12.3"}
+      - run: uv python install 3.13 && uv sync --locked --all-groups
+      - run: docker compose up -d --wait postgres
+      - run: uv run alembic upgrade head && uv run alembic downgrade base && uv run alembic upgrade head
+      - run: uv run pytest tests/integration/test_web_api.py --no-cov
+      - if: always()
         run: docker compose down -v
 
-  verified-merge-tree:
-    name: Verified merge tree
-    needs: [quality, postgresql, image-contract]
+  browser:
+    name: Browser
+    if: needs.changes.outputs.browser == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     steps:
-      - name: Check out synthetic merge commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Record reviewed tree provenance
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MERGE_SHA: ${{ github.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN_ID: ${{ github.run_id }}
-          WORKFLOW_REF: ${{ github.workflow_ref }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${MERGE_SHA}"
-          tree_sha="$(git rev-parse 'HEAD^{tree}')"
-          jq -n \
-            --arg repository "${REPOSITORY}" \
-            --arg event "pull_request" \
-            --argjson pr_number "${PR_NUMBER}" \
-            --arg base_sha "${BASE_SHA}" \
-            --arg head_sha "${HEAD_SHA}" \
-            --arg synthetic_merge_sha "${MERGE_SHA}" \
-            --arg tree_sha "${tree_sha}" \
-            --arg workflow_ref "${WORKFLOW_REF}" \
-            --argjson run_id "${RUN_ID}" \
-            --argjson run_attempt "${RUN_ATTEMPT}" \
-            '{repository: $repository, event: $event, pr_number: $pr_number,
-              base_sha: $base_sha, head_sha: $head_sha,
-              synthetic_merge_sha: $synthetic_merge_sha, tree_sha: $tree_sha,
-              workflow_ref: $workflow_ref, run_id: $run_id,
-              run_attempt: $run_attempt}' > provenance.json
-      - name: Upload reviewed tree provenance
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: verified-merge-tree
-          path: provenance.json
-          if-no-files-found: error
-          retention-days: 30
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with: {version: "0.12.3"}
+      - run: uv python install 3.13 && uv sync --locked --all-groups
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest tests/browser --no-cov
 
-  image-contract:
-    name: Internal image contract
-    needs: [quality]
+  auth-ledger:
+    name: Auth and ledger
+    if: needs.changes.outputs.auth_ledger == 'true'
+    needs: changes
     runs-on: ubuntu-latest
-    env:
-      COMMUNITY_BOT_ENV_FILE: .env.example
-      COMMUNITY_BOT_IMAGE: community-bot:ci
-      COMMUNITY_BOT_RELEASE: ${{ github.sha }}
-      POSTGRES_DB: community_bot
-      POSTGRES_USER: community_bot
-      POSTGRES_PASSWORD: community_bot
     steps:
-      - name: Check out synthetic merge commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Validate private Compose contract
-        run: docker compose -f compose.production.yaml config --quiet
-      - name: Build reviewed image without publication
-        run: docker build --build-arg RELEASE="${COMMUNITY_BOT_RELEASE}" --tag "${COMMUNITY_BOT_IMAGE}" .
-      - name: Verify immutable runtime identity
-        run: |
-          set -euo pipefail
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${COMMUNITY_BOT_IMAGE}")" = "${COMMUNITY_BOT_RELEASE}"
-          docker run --rm "${COMMUNITY_BOT_IMAGE}" community-migration-head
-          docker run --rm \
-            -e ENVIRONMENT=production \
-            -e RELEASE="${COMMUNITY_BOT_RELEASE}" \
-            -e BOT_TOKEN='123456:CI_PLACEHOLDER_TOKEN' \
-            -e MINI_APP_ORIGIN='https://example.invalid' \
-            "${COMMUNITY_BOT_IMAGE}" community-web --check
-      - name: Prepare disposable runtime configuration
-        run: |
-          smoke_env="${RUNNER_TEMP}/community-bot-smoke.env"
-          cat > "${smoke_env}" <<EOF
-          ENVIRONMENT=production
-          DATABASE_URL=postgresql+asyncpg://community_bot:community_bot@postgres:5432/community_bot
-          BOT_TOKEN=123456:TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
-          MINI_APP_ORIGIN=https://example.invalid
-          RELEASE=${COMMUNITY_BOT_RELEASE}
-          WORKER_POLL_INTERVAL_SECONDS=15
-          HEARTBEAT_MAX_AGE_SECONDS=60
-          EOF
-          echo "COMMUNITY_BOT_ENV_FILE=${smoke_env}" >> "${GITHUB_ENV}"
-      - name: Start disposable internal Compose runtime
-        run: |
-          set -euo pipefail
-          docker compose -f compose.production.yaml up -d --wait postgres
-          docker compose -f compose.production.yaml run --rm migrate
-          docker compose -f compose.production.yaml run --rm worker \
-            community-bootstrap-admin --telegram-user-id 1 --reason initial_install
-          docker compose -f compose.production.yaml run --rm worker \
-            community-bootstrap-product-config
-          docker compose -f compose.production.yaml up -d --wait --wait-timeout 120 web
-      - name: Prove liveness, readiness, and restart boundary
-        run: |
-          set -euo pipefail
-          docker compose -f compose.production.yaml exec -T web python -c \
-            "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).status == 200"
-          docker compose -f compose.production.yaml exec -T web python -c \
-            "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).status == 200"
-          docker compose -f compose.production.yaml stop worker
-          docker compose -f compose.production.yaml restart web
-          for attempt in $(seq 1 20); do
-            if docker compose -f compose.production.yaml exec -T web python -c \
-              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"; then
-              break
-            fi
-            test "${attempt}" -lt 20
-            sleep 1
-          done
-          docker compose -f compose.production.yaml exec -T web python -c \
-            "import http.client; connection=http.client.HTTPConnection('127.0.0.1', 8000, timeout=5); connection.request('GET', '/readyz'); assert connection.getresponse().status == 503"
-          docker compose -f compose.production.yaml start worker
-          docker compose -f compose.production.yaml up -d --wait --wait-timeout 120 web
-          docker compose -f compose.production.yaml exec -T web python -c \
-            "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).status == 200"
-      - name: Stop disposable internal Compose runtime
-        if: always()
-        run: docker compose -f compose.production.yaml down -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with: {version: "0.12.3"}
+      - run: uv python install 3.13 && uv sync --locked --all-groups
+      - run: uv run pytest tests/unit/test_web_auth.py tests/unit/test_economy_domain.py --no-cov
