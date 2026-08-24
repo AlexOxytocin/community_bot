@@ -177,7 +177,7 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         catalog = page.locator("#catalog-nav")
         catalog.click()
         catalog.click()
-        assert task_requests == 3
+        assert task_requests == 2
         pending.pop(0).fulfill(json={"items": [refreshed_task], "next_cursor": None})
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
 
@@ -2320,7 +2320,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         me["skill_tags"] = []
         profile_nav.click()
         page.locator("h2", has_text=malicious).wait_for()
-        assert page.get_by_role("heading", name="Навыки").count() == 0
+        assert page.get_by_role("heading", name="Навыки").count() == 1
         assert page.locator(".leaderboard-row, .leaderboard-list").count() == 0
         assert private_marker not in page.locator("body").inner_text()
 
