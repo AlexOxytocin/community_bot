@@ -755,7 +755,6 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         capture(5, "city", "PR-05", "input[required]")
 
         page.goto(mini_app_url + "?case=bio#/profile/edit/bio")
-        page.reload()
         bio = page.get_by_role("textbox", name="Описание", exact=True)
         bio.wait_for()
         assert page.locator("#screen-title").text_content() == "О себе"  # noqa: RUF001
@@ -766,7 +765,6 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         capture(6, "bio", "PR-06", "textarea")
 
         page.goto(mini_app_url + "?case=skills#/profile/edit/skills")
-        page.reload()
         skill_input = page.locator('input[maxlength="50"]')
         skill_input.wait_for()
         assert page.locator(".skill-draft-row strong").all_text_contents() == [
