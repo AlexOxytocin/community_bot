@@ -181,7 +181,7 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         page.get_by_role("button", name="Сохранить").click()
         page.get_by_role("button", name="Редактировать город").wait_for()
         page.locator("h2", has_text="Алекс").wait_for()
-        catalog = page.get_by_role("button", name="Задания", exact=True)
+        catalog = page.locator("#catalog-nav")
         catalog.click()
         catalog.click()
         assert task_requests == 3
@@ -847,8 +847,10 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         page.goto(mini_app_url + "?case=link-new#/profile/links/new")
         page.get_by_role("textbox", name="Название", exact=True).wait_for()
         page.reload()
-        page.get_by_role("button", name="LinkedIn", exact=True).click()
-        page.locator('input[type="url"]').fill("https://linkedin.com/in/alex")
+        page.locator(".link-presets").get_by_role("button", name="LinkedIn", exact=True).click()
+        page.locator(".profile-editor").locator('input[type="url"]').fill(
+            "https://linkedin.com/in/alex"
+        )
         assert page.get_by_text(
             "Только полный адрес, начинающийся с https://",  # noqa: RUF001
             exact=True,
