@@ -4,7 +4,6 @@ import asyncio
 import datetime
 import os
 from dataclasses import replace
-from decimal import Decimal
 from pathlib import Path
 from typing import TypeVar
 from uuid import UUID, uuid4
@@ -125,12 +124,7 @@ async def template_id(database: Database, code: str) -> UUID:
     return value
 
 
-async def prepare_member(
-    database: Database,
-    *,
-    telegram_user_id: int,
-    credit_balance: Decimal = Decimal("5.0"),
-) -> MemberModel:
+async def prepare_member(database: Database, *, telegram_user_id: int) -> MemberModel:
     admin = await add_member(
         database,
         telegram_user_id=telegram_user_id + 1000,
@@ -139,16 +133,6 @@ async def prepare_member(
     member = await add_member(database, telegram_user_id=telegram_user_id)
     await prepare_config(database, admin)
     await EconomyService(database.unit_of_work).apply_one(starting_grant(member.id))
-    if credit_balance > Decimal("5.0"):
-        await EconomyService(database.unit_of_work).apply_one(
-            admin_adjustment(
-                member_id=member.id,
-                credit_delta=credit_balance - Decimal("5.0"),
-                experience_delta=0,
-                idempotency_key=f"task-test-funding:{member.id}",
-                context=AdministrativeContext(admin.id, "Task test funding."),
-            )
-        )
     return member
 
 
@@ -327,7 +311,7 @@ async def test_web_draft_scope_follows_public_active_and_stale_transitions(
         "Публичный черновик",
         "Описание публичного черновика для проверки изоляции.",
         "Есть проверяемый результат.",
-        Decimal(3),
+        3,
         datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2),
         TaskFormat.ONLINE,
         None,
@@ -400,7 +384,7 @@ async def test_freeform_task_publishes_without_template_and_reserves_full_budget
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=19_500, credit_balance=Decimal("10.0"))
+    member = await prepare_member(database, telegram_user_id=19_500)
     service = TaskService(database.unit_of_work)
     selected_category = await category_id(database, "evaluation_testing")
 
@@ -439,37 +423,6 @@ async def test_freeform_task_publishes_without_template_and_reserves_full_budget
         persisted = await session.get(MemberModel, member.id)
     assert persisted is not None
     assert persisted.credit_balance_cached == 2
-    await database.dispose()
-
-
-async def test_freeform_task_can_publish_with_zero_credit_reward(database_url: str) -> None:
-    """A zero reward is valid and never reduces the creator's balance below zero."""
-    database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=19_625)
-    service = TaskService(database.unit_of_work)
-    selected_category = await category_id(database, "evaluation_testing")
-
-    draft_id, revision = await complete_freeform_preview(
-        service,
-        member=member,
-        selected_category_id=selected_category,
-        update_base=21_000,
-        kind=TaskKind.SOLO,
-        time_size=TaskTimeSize.XS,
-        performer_slots=1,
-        reward=0,
-    )
-    task = await service.publish(
-        PublishTaskCommand(21_100, member.telegram_user_id, draft_id, revision)
-    )
-
-    assert isinstance(task, PublishedTask)
-    assert task.credit_reward_per_performer == 0
-    assert task.reserved_credit_total == 0
-    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
-        persisted = await session.get(MemberModel, member.id)
-    assert persisted is not None
-    assert persisted.credit_balance_cached == 5
     await database.dispose()
 
 
@@ -531,7 +484,7 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    author = await prepare_member(database, telegram_user_id=19_700, credit_balance=Decimal("10.0"))
+    author = await prepare_member(database, telegram_user_id=19_700)
     performer = await prepare_member(database, telegram_user_id=19_701)
     stranger = await prepare_member(database, telegram_user_id=19_702)
     task_service = TaskService(database.unit_of_work)
@@ -600,7 +553,7 @@ async def test_partially_completed_group_can_release_its_free_slot_reserve(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    author = await prepare_member(database, telegram_user_id=19_750, credit_balance=Decimal("10.0"))
+    author = await prepare_member(database, telegram_user_id=19_750)
     performer = await add_member(database, telegram_user_id=19_751)
     task_service = TaskService(database.unit_of_work)
     assignment_service = AssignmentService(database.unit_of_work)
@@ -680,7 +633,7 @@ async def test_partially_completed_task_without_free_slots_cannot_be_reopened(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    author = await prepare_member(database, telegram_user_id=19_760, credit_balance=Decimal("10.0"))
+    author = await prepare_member(database, telegram_user_id=19_760)
     first_performer = await add_member(database, telegram_user_id=19_761)
     second_performer = await add_member(database, telegram_user_id=19_762)
     task_service = TaskService(database.unit_of_work)
@@ -743,7 +696,7 @@ async def test_partially_completed_task_without_free_slots_cannot_be_reopened(
 
 async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=2000, credit_balance=Decimal("10.0"))
+    member = await prepare_member(database, telegram_user_id=2000)
     selected = await template_id(database, "repository_first_impression")
     service = TaskService(database.unit_of_work)
     draft_id, revision = await complete_preview(
@@ -809,7 +762,7 @@ async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -
 
 async def test_two_public_drafts_compete_for_one_balance(database_url: str) -> None:
     database = Database(database_url)
-    member = await prepare_member(database, telegram_user_id=2100, credit_balance=Decimal("10.0"))
+    member = await prepare_member(database, telegram_user_id=2100)
     selected = await template_id(database, "resume_review")
     service = TaskService(database.unit_of_work)
     first_id, first_revision = await complete_preview(
@@ -1069,7 +1022,7 @@ async def test_publish_business_retry_concurrent_cancel_and_private_listing(  # 
     assert len(refunds) == 1
     assert refunds[0].experience_delta == 0
     assert persisted_owner is not None
-    assert persisted_owner.credit_balance_cached == 5
+    assert persisted_owner.credit_balance_cached == 10
     audit_after_cancel = await scalar_count(database, AuditEventModel)
     outbox_after_cancel = await scalar_count(database, OutboxEventModel)
     receipts_after_cancel = await scalar_count(database, ProcessedTelegramUpdateModel)

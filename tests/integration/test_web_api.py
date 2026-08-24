@@ -8,7 +8,6 @@ import json
 import os
 import subprocess
 import sys
-from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
@@ -25,7 +24,7 @@ from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.domain.notifications import DeliveryWindow
-from community_bot.infrastructure.db.database import AttachmentLimitError, Database
+from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
     AssignmentDisputeModel,
@@ -38,7 +37,6 @@ from community_bot.infrastructure.db.models import (
     DisputeResolutionModel,
     KarmaVoteHistoryModel,
     KarmaVoteModel,
-    MediaAssetModel,
     MemberModel,
     MemberSanctionModel,
     ModerationCaseModel,
@@ -115,76 +113,6 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
         reason="Web API integration config.",
     )
     return member
-
-
-async def test_uploaded_avatar_survives_telegram_session_and_media_is_bounded(
-    database_url: str,
-) -> None:
-    database = Database(database_url)
-    member = await active_member(database, 52_080)
-    first_avatar_id = await database.save_media_asset(
-        owner_member_id=member.id,
-        assignment_id=None,
-        kind="avatar",
-        file_name="first.png",
-        content_type="image/png",
-        content=b"first",
-    )
-    avatar_id = await database.save_media_asset(
-        owner_member_id=member.id,
-        assignment_id=None,
-        kind="avatar",
-        file_name="second.png",
-        content_type="image/png",
-        content=b"second",
-    )
-    assert first_avatar_id != avatar_id
-
-    now = datetime.datetime.now(datetime.UTC)
-    session_id = await database.create_web_session(
-        telegram_user_id=member.telegram_user_id,
-        telegram_username="web_member",
-        telegram_avatar_url="https://t.me/i/userpic/320/avatar.jpg",
-        proof_digest=b"a" * 32,
-        proof_expires_at=now + datetime.timedelta(minutes=5),
-        token_digest=b"b" * 32,
-        authenticated_at=now,
-        expires_at=now + datetime.timedelta(days=1),
-    )
-    assert session_id == member.id
-
-    for index in range(5):
-        await database.save_media_asset(
-            owner_member_id=member.id,
-            assignment_id=None,
-            kind="submission",
-            file_name=f"result-{index}.txt",
-            content_type="text/plain",
-            content=b"proof",
-        )
-    with pytest.raises(AttachmentLimitError):
-        await database.save_media_asset(
-            owner_member_id=member.id,
-            assignment_id=None,
-            kind="submission",
-            file_name="overflow.txt",
-            content_type="text/plain",
-            content=b"proof",
-        )
-
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions() as session:
-        persisted = await session.get(MemberModel, member.id)
-        avatar_count = await session.scalar(
-            select(func.count(MediaAssetModel.id)).where(
-                MediaAssetModel.owner_member_id == member.id,
-                MediaAssetModel.kind == "avatar",
-            )
-        )
-    assert persisted is not None
-    assert persisted.avatar_url == f"/api/v1/media/avatar/{avatar_id}"
-    assert avatar_count == 1
-    await database.dispose()
 
 
 async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
@@ -454,7 +382,7 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
             )
 
     assert (await authenticate("Updated_Name")).status_code == 204
-    assert (await authenticate("Updated_Name")).status_code == 401
+    assert (await authenticate("Updated_Name")).status_code == 204
     concurrent = await asyncio.gather(authenticate("Final_Name"), authenticate(_USERNAME_ABSENT))
     assert [item.status_code for item in concurrent] == [204, 204]
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
@@ -480,9 +408,6 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
         await database.create_web_session(
             telegram_user_id=member.telegram_user_id,
             telegram_username=current_username,
-            telegram_avatar_url=None,
-            proof_digest=hashlib.sha256(b"failing-session-proof-1").digest(),
-            proof_expires_at=now + datetime.timedelta(minutes=5),
             token_digest=token_digest,
             authenticated_at=now,
             expires_at=now + datetime.timedelta(minutes=5),
@@ -493,9 +418,6 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
         await database.create_web_session(
             telegram_user_id=member.telegram_user_id,
             telegram_username="Rolled_Back",
-            telegram_avatar_url=None,
-            proof_digest=hashlib.sha256(b"failing-session-proof-2").digest(),
-            proof_expires_at=now + datetime.timedelta(minutes=5),
             token_digest=token_digest,
             authenticated_at=now,
             expires_at=now + datetime.timedelta(minutes=5),
@@ -517,9 +439,6 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
     unknown = await database.create_web_session(
         telegram_user_id=9_999_999,
         telegram_username="Unknown_User",
-        telegram_avatar_url=None,
-        proof_digest=hashlib.sha256(b"unknown-session-proof").digest(),
-        proof_expires_at=now + datetime.timedelta(minutes=5),
         token_digest=hashlib.sha256(b"unknown-session").digest(),
         authenticated_at=now,
         expires_at=now + datetime.timedelta(minutes=5),
@@ -804,12 +723,12 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         canonical_city = next(
             item["value"]
             for item in city_search.json()["items"]
-            if item["value"] == "Buenos Aires, Argentina"
+            if item["value"] == "Buenos Aires — Argentina"
         )
         collisions = await client.get("/api/v1/task-cities", params={"q": "Dondo", "limit": 10})
         collision_values = [item["value"] for item in collisions.json()["items"]]
         assert collisions.status_code == 200
-        assert collision_values.count("Dondo, Angola, 05") == 1
+        assert collision_values.count("Dondo — Angola · 05") == 1
         assert len(collision_values) == len(set(collision_values))
         form = {
             "category_id": state["categories"][0]["id"],
@@ -818,7 +737,7 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
             "title": "  Помочь с проверкой  ",  # noqa: RUF001
             "description": "  Проверить понятный результат и вернуть замечания.  ",
             "completion_criteria": "  Есть конкретный список замечаний.  ",
-            "credit_reward_per_performer": 2,
+            "credit_reward_per_performer": 3,
             "deadline_at": (now + datetime.timedelta(days=2)).isoformat(),
             "format": "online",
             "materials": {"url": "  https://example.com/task  "},
@@ -851,7 +770,7 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
             await client.post("/api/v1/task-creation", json=conflict, headers=save_headers)
         ).status_code == 409
         preview = (await client.get("/api/v1/task-creation")).json()
-        assert preview["preview"]["reward_total"] == 4
+        assert preview["preview"]["reward_total"] == 6
         assert preview["draft"]["values"]["title"] == "Помочь с проверкой"  # noqa: RUF001
         assert preview["draft"]["values"]["materials"] == {"url": "https://example.com/task"}
         assert preview["draft"]["values"]["city"] is None
@@ -929,7 +848,6 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(TaskModel)) == 1
         assert await session.scalar(select(func.count()).select_from(ConversationStateModel)) == 0
-    await database.dispose()
 
 
 async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
@@ -1004,7 +922,7 @@ async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
         assert (
             await client.post(
                 "/api/v1/auth/telegram",
-                content=proof(member.telegram_user_id, now=now + datetime.timedelta(seconds=1)),
+                content=proof(member.telegram_user_id, now=now),
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
         ).status_code == 204
@@ -1366,7 +1284,7 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
             "revision": 0,
             "task_title": "Disputed task",
             "task_origin": "member",
-            "credit_reward_per_performer": "2.0",
+            "credit_reward_per_performer": 2,
             "assignment_status": "disputed",
             "result_summary": "Безопасный итог",
             "dispute_reason": "The rejection is disputed.",
@@ -2440,7 +2358,7 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         )
         session.add_all((terminal, foreign_assignment, invisible))
         await session.flush()
-        hidden_ids = (foreign_assignment.id, invisible.id, uuid4())
+        hidden_ids = (terminal.id, foreign_assignment.id, invisible.id, uuid4())
 
     settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url)
     app = create_web_app(settings=settings, database=database)
@@ -2526,25 +2444,13 @@ async def test_active_assignment_api_paginates_privately_without_effects(
                 "PRIVATE_EVIDENCE",
             )
         )
-        terminal_detail = await client.get(f"/api/v1/assignments/{terminal.id}")
-        assert terminal_detail.status_code == 200, terminal_detail.text
-        assert terminal_detail.json()["assignment_status"] == "approved"
         hidden = [await client.get(f"/api/v1/assignments/{item}") for item in hidden_ids]
         assert {(response.status_code, response.text) for response in hidden} == {
             (404, '{"code":"not_found"}')
         }
-        history = await client.get("/api/v1/assignments", params={"status": "all", "limit": 50})
-        assert history.status_code == 200, history.text
-        history_next = await client.get(
-            "/api/v1/assignments",
-            params={"status": "all", "limit": 50, "cursor": history.json()["next_cursor"]},
-        )
-        assert history_next.status_code == 200, history_next.text
-        history_ids = [
-            UUID(item["id"]) for page in (history, history_next) for item in page.json()["items"]
-        ]
-        assert set(history_ids) == {*active_ids, terminal.id}
+        invalid_status = await client.get("/api/v1/assignments", params={"status": "all"})
         invalid_cursor = await client.get("/api/v1/assignments", params={"cursor": "invalid"})
+        assert invalid_status.status_code == 422
         assert invalid_cursor.status_code == 422
 
         after_schema = await schema_snapshot(database.engine)
@@ -2744,12 +2650,8 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
         community_tasks = [community]
         community_tasks.extend(clone(community) for _index in range(51))
         hidden = clone(hidden_source, creator_id=author.id, test_run_id=run.id)
-        low = clone(
-            low_source,
-            creator_id=author.id,
-            credit_reward_per_performer=Decimal(1),
-        )
-        low.reserved_credit_total = Decimal(1)
+        low = clone(low_source, creator_id=author.id, credit_reward_per_performer=1)
+        low.reserved_credit_total = 1
         session.add_all((*community_tasks, hidden, low))
         await session.flush()
         now = datetime.datetime.now(datetime.UTC)
@@ -2796,7 +2698,7 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
         items = {UUID(item["id"]): item for item in page.json()["items"]}
         assert set(items) == {assignment.id, rows[-1].id}
         assert items[assignment.id]["available_decisions"] == ["full", "partial", "reject"]
-        assert items[rows[-1].id]["available_decisions"] == ["full", "partial", "reject"]
+        assert items[rows[-1].id]["available_decisions"] == ["full", "reject"]
         assert items[assignment.id]["result"] == "Literal creator review result."
         detail = await client.get(f"/api/v1/assignment-reviews/{assignment.id}")
         assert detail.status_code == 200

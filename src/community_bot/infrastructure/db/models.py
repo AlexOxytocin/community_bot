@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime  # noqa: TC003 - SQLAlchemy resolves mapped annotations at runtime.
 import uuid
-from decimal import Decimal  # noqa: TC003 - SQLAlchemy resolves mapped annotations at runtime.
 from typing import Any
 
 from sqlalchemy import (
@@ -16,7 +15,6 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
-    Numeric,
     Text,
     UniqueConstraint,
     func,
@@ -109,8 +107,6 @@ class MemberModel(Base):
     )
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     telegram_username: Mapped[str | None] = mapped_column(Text)
-    show_telegram_username: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    avatar_url: Mapped[str | None] = mapped_column(Text)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     city: Mapped[str | None] = mapped_column(Text)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
@@ -132,12 +128,8 @@ class MemberModel(Base):
     role: Mapped[str] = mapped_column(Text, nullable=False, default=MemberRole.MEMBER.value)
     status: Mapped[str] = mapped_column(Text, nullable=False, default=MemberStatus.PENDING.value)
     level_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    credit_balance_cached: Mapped[Decimal] = mapped_column(
-        Numeric(18, 1), nullable=False, default=0
-    )
-    experience_total_cached: Mapped[Decimal] = mapped_column(
-        Numeric(18, 1), nullable=False, default=0
-    )
+    credit_balance_cached: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    experience_total_cached: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     level_config_version_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("product_config_versions.id")
     )
@@ -154,32 +146,6 @@ class MemberModel(Base):
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
-
-
-class MediaAssetModel(Base):
-    """Bounded binary uploaded by a member for an avatar or assignment result."""
-
-    __tablename__ = "media_assets"
-    __table_args__ = (
-        CheckConstraint("kind IN ('avatar', 'submission')", name="ck_media_assets_kind"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    owner_member_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=False
-    )
-    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("assignments.id", ondelete="CASCADE")
-    )
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    file_name: Mapped[str] = mapped_column(Text, nullable=False)
-    content_type: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 
@@ -434,7 +400,7 @@ class TaskCreationDraftModel(Base):
     title: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
     completion_criteria: Mapped[str | None] = mapped_column(Text)
-    credit_reward_per_performer: Mapped[Decimal | None] = mapped_column(Numeric(18, 1))
+    credit_reward_per_performer: Mapped[int | None] = mapped_column(Integer)
     estimated_minutes: Mapped[int | None] = mapped_column(Integer)
     input_payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     deadline_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -467,7 +433,7 @@ class TaskModel(Base):
             "'completed', 'cancelled', 'closed_for_new_performers')",
             name="ck_tasks_status",
         ),
-        CheckConstraint("credit_reward_per_performer >= 0", name="ck_tasks_reward"),
+        CheckConstraint("credit_reward_per_performer > 0", name="ck_tasks_reward"),
         CheckConstraint("performer_slots > 0", name="ck_tasks_slots"),
         CheckConstraint("reserved_credit_total >= 0", name="ck_tasks_reserved_nonnegative"),
         CheckConstraint("minimum_level > 0", name="ck_tasks_minimum_level"),
@@ -531,9 +497,9 @@ class TaskModel(Base):
     completion_criteria: Mapped[str] = mapped_column(Text, nullable=False)
     materials_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     input_payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    credit_reward_per_performer: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False)
+    credit_reward_per_performer: Mapped[int] = mapped_column(Integer, nullable=False)
     performer_slots: Mapped[int] = mapped_column(Integer, nullable=False)
-    reserved_credit_total: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False)
+    reserved_credit_total: Mapped[int] = mapped_column(BigInteger, nullable=False)
     estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     minimum_level: Mapped[int] = mapped_column(Integer, nullable=False)
     format: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1375,21 +1341,6 @@ class WebSessionModel(Base):
     revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class TelegramAuthProofModel(Base):
-    """One consumed, short-lived Telegram Mini App authentication proof."""
-
-    __tablename__ = "telegram_auth_proofs"
-    __table_args__ = (
-        CheckConstraint("octet_length(proof_digest) = 32", name="ck_telegram_auth_proofs_digest"),
-    )
-
-    proof_digest: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
-    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
 class AccountTransactionModel(Base):
     """Append-only source of truth for credits and experience."""
 
@@ -1405,12 +1356,12 @@ class AccountTransactionModel(Base):
         CheckConstraint(
             "(transaction_type = 'starting_grant' AND credit_delta IN (5, 10) "
             "AND experience_delta = 0) OR "
-            "(transaction_type = 'task_reward_reserved' AND credit_delta <= 0 "
+            "(transaction_type = 'task_reward_reserved' AND credit_delta < 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type IN ('task_reward_earned', 'partial_task_reward', "
-            "'community_task_reward') AND credit_delta >= 0 "
+            "'community_task_reward') AND credit_delta > 0 "
             "AND experience_delta = credit_delta) OR "
-            "(transaction_type = 'task_reward_refunded' AND credit_delta >= 0 "
+            "(transaction_type = 'task_reward_refunded' AND credit_delta > 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'penalty' AND credit_delta < 0 "
             "AND experience_delta = 0) OR "
@@ -1440,8 +1391,8 @@ class AccountTransactionModel(Base):
     member_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
-    credit_delta: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False)
-    experience_delta: Mapped[Decimal] = mapped_column(Numeric(18, 1), nullable=False, default=0)
+    credit_delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    experience_delta: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     transaction_type: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     payload_hash: Mapped[str] = mapped_column(Text, nullable=False)

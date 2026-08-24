@@ -50,7 +50,6 @@ from community_bot.infrastructure.db.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from decimal import Decimal
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,7 +68,7 @@ class _ActiveConfigSnapshot:
 @dataclass(frozen=True, slots=True)
 class _StagedEconomyBatch:
     results: tuple[EconomyMutationResult, ...]
-    totals: dict[UUID, tuple[Decimal, Decimal]]
+    totals: dict[UUID, tuple[int, int]]
     experience_changed: set[UUID]
     persisted: tuple[tuple[EconomyCommand, UUID], ...]
 
@@ -261,7 +260,7 @@ def _stage_economy_batch(
     members: dict[UUID, MemberModel],
 ) -> _StagedEconomyBatch:
     results: list[EconomyMutationResult] = []
-    totals: dict[UUID, tuple[Decimal, Decimal]] = {}
+    totals: dict[UUID, tuple[int, int]] = {}
     experience_changed: set[UUID] = set()
     persisted: list[tuple[EconomyCommand, UUID]] = []
     for command in commands:
@@ -879,8 +878,8 @@ def _economy_audit(command: EconomyCommand, transaction_id: UUID) -> AuditEventM
         after_json={
             "member_id": str(command.member_id),
             "transaction_type": command.transaction_type.value,
-            "credit_delta": str(command.credit_delta),
-            "experience_delta": str(command.experience_delta),
+            "credit_delta": command.credit_delta,
+            "experience_delta": command.experience_delta,
             "reversed_transaction_id": (
                 None
                 if command.reversed_transaction_id is None

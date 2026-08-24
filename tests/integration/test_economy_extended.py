@@ -5,7 +5,6 @@ import json
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -147,7 +146,7 @@ async def apply_composed_batch(
         await unit_of_work.commit()
 
 
-async def test_migration_uses_numeric_tenths_for_caches_and_ledger(database_url: str) -> None:
+async def test_migration_uses_bigint_for_caches_and_ledger(database_url: str) -> None:
     database = Database(database_url)
     admin = await add_member(database, telegram_user_id=201, role=MemberRole.ADMINISTRATOR)
     target = await add_member(database, telegram_user_id=202)
@@ -158,7 +157,7 @@ async def test_migration_uses_numeric_tenths_for_caches_and_ledger(database_url:
             credit_delta=large_value,
             experience_delta=0,
             idempotency_key="large-credit",
-            context=AdministrativeContext(admin.id, "Numeric boundary."),
+            context=AdministrativeContext(admin.id, "BIGINT boundary."),
         )
     )
     async with database.engine.connect() as connection:
@@ -177,8 +176,8 @@ async def test_migration_uses_numeric_tenths_for_caches_and_ledger(database_url:
         )
         total = await connection.scalar(select(func.sum(AccountTransactionModel.credit_delta)))
     assert types == {
-        "credit_balance_cached": "numeric",
-        "experience_total_cached": "numeric",
+        "credit_balance_cached": "bigint",
+        "experience_total_cached": "bigint",
     }
     assert persisted == total == large_value
     await database.dispose()
@@ -336,7 +335,7 @@ async def test_operation_matrix_keeps_cache_equal_to_ledger(database_url: str) -
                 ).where(AccountTransactionModel.member_id == member.id)
             )
         ).one()
-    assert cache == sums == (Decimal("22.0"), Decimal("8.0"))
+    assert cache == sums == (27, 8)
     await database.dispose()
 
 
@@ -465,7 +464,7 @@ async def test_concurrent_grant_and_reserve_never_lose_or_overdraw(database_url:
     )
     assert grants[0].transaction_id == grants[1].transaction_id
     await service.apply_one(
-        refund_reward(member_id=member.id, amount=10, idempotency_key="reserve:funding")
+        refund_reward(member_id=member.id, amount=5, idempotency_key="reserve:funding")
     )
 
     results = await asyncio.wait_for(
@@ -878,7 +877,7 @@ async def test_history_cursor_handles_equal_timestamps_without_gaps(database_url
         )
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
-        persisted.credit_balance_cached = Decimal(7)
+        persisted.credit_balance_cached = 7
     queries = EconomyQueryService(database.unit_of_work)
     transaction_ids: list[UUID] = []
     cursor = None

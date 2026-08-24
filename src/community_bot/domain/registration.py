@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
@@ -110,7 +109,6 @@ class ProfileField(StrEnum):
     HELP_CATEGORIES = "help_categories"
     SKILL_TAGS = "skill_tags"
     AVAILABILITY = "availability"
-    SHOW_TELEGRAM_USERNAME = "show_telegram_username"
 
 
 class ProfileLinkAction(StrEnum):
@@ -158,15 +156,12 @@ def normalize_profile_link_command(command: ProfileLinkCommand) -> ProfileLinkCo
     if command.action is ProfileLinkAction.DELETE:
         return command
     label = _bounded_text(command.label or "", minimum=1, maximum=32, label="link label")
-    raw_url = command.url or ""
+    url = command.url or ""
     invalid_url = "Invalid profile link URL."
-    if len(raw_url) > _MAX_PROFILE_LINK_URL_LENGTH or any(
-        unicodedata.category(char) == "Cc" for char in raw_url
+    if len(url) > _MAX_PROFILE_LINK_URL_LENGTH or any(
+        unicodedata.category(char) == "Cc" for char in url
     ):
         raise RegistrationError(invalid_url)
-    url = raw_url.strip()
-    if "://" not in url:
-        url = f"https://{url}"
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise RegistrationError(invalid_url)
@@ -237,10 +232,10 @@ def normalize_registration_answer(
     )
 
 
-def normalize_profile_value(  # noqa: C901, PLR0911 - explicit field rules stay readable.
+def normalize_profile_value(  # noqa: PLR0911 - explicit field rules stay readable.
     field: ProfileField,
     raw_value: str,
-) -> str | tuple[str, ...] | bool:
+) -> str | tuple[str, ...]:
     """Validate and normalize one editable profile value."""
     if field is ProfileField.DISPLAY_NAME:
         return _bounded_text(raw_value, minimum=2, maximum=80, label="display name")
@@ -261,13 +256,6 @@ def normalize_profile_value(  # noqa: C901, PLR0911 - explicit field rules stay 
         return _bounded_text(raw_value, minimum=2, maximum=200, label="availability")
     if field is ProfileField.HELP_CATEGORIES:
         return _normalized_list(raw_value, maximum_items=10, maximum_item_length=80)
-    if field is ProfileField.SHOW_TELEGRAM_USERNAME:
-        if raw_value == "true":
-            return True
-        if raw_value == "false":
-            return False
-        message = "Telegram username visibility must be true or false."
-        raise RegistrationError(message)
     return _normalized_list(raw_value, maximum_items=20, maximum_item_length=50)
 
 
@@ -352,7 +340,7 @@ def _normalized_list(
 ) -> tuple[str, ...]:
     items: list[str] = []
     seen: set[str] = set()
-    for raw_item in re.split(r"[,\n]+", raw_value):
+    for raw_item in raw_value.split(","):
         item = " ".join(raw_item.split())
         identity = item.casefold()
         if not item or identity in seen:

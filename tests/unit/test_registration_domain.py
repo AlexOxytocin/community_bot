@@ -94,14 +94,6 @@ def test_profile_link_commands_normalize_and_reject_unsafe_shapes() -> None:
         "https://example.com/a#b",
         None,
     )
-    bare_domain = normalize_profile_link_command(
-        ProfileLinkCommand(
-            ProfileLinkAction.CREATE,
-            label="YouTube",
-            url="youtube.com/channel/community",
-        )
-    )
-    assert bare_domain.url == "https://youtube.com/channel/community"
     link_id = uuid4()
     assert (
         normalize_profile_link_command(
