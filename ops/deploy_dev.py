@@ -48,22 +48,17 @@ def compose(active: Path, image: str, release: str) -> tuple[list[str], dict[str
     return ["docker", "compose", "-f", str(active / "compose.production.yaml")], environment
 
 
-def prove(
-    compose_command: list[str], environment: dict[str, str], sha: str, deadline: float
-) -> None:
+def prove(sha: str, deadline: float) -> None:
     """Poll container and public readiness until both expose the exact release."""
-    check = (
-        "import json,urllib.request; response=urllib.request.urlopen('http://127.0.0.1:8000/readyz',"
-        "timeout=5); body=json.load(response); assert response.status == 200 and "
-        "body['release'] == '" + sha + "'"
-    )
     while time.time() < deadline:
-        result = subprocess.run(
-            [*compose_command, "exec", "-T", "web", "python", "-c", check],
-            env=environment,
-            check=False,
+        state = run(
+            "docker",
+            "inspect",
+            "community-mini-app-core-web-1",
+            "--format",
+            '{{.State.Health.Status}} {{index .Config.Labels "org.opencontainers.image.revision"}}',
         )
-        if result.returncode == 0:
+        if state == f"healthy {sha}":
             try:
                 with urllib.request.urlopen(PUBLIC_READY_URL, timeout=5) as response:
                     if response.status == 200 and json.load(response)["release"] == sha:
@@ -156,7 +151,7 @@ def main() -> int:
         try:
             run(*deploy, "up", "-d", "--no-deps", "--force-recreate", "worker", env=environment)
             run(*deploy, "up", "-d", "--no-deps", "--force-recreate", "web", env=environment)
-            prove(deploy, environment, sha, deadline)
+            prove(sha, deadline)
         except Exception:
             rollback_release = run(
                 "docker",
@@ -179,7 +174,7 @@ def main() -> int:
                 "web",
                 env=old_environment,
             )
-            prove(rollback, old_environment, rollback_release, time.time() + 60)
+            prove(rollback_release, time.time() + 60)
             raise
     return 0
 
