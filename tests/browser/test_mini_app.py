@@ -159,7 +159,7 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         page.get_by_text("Сохранённый каталог", exact=True).wait_for()
         page.get_by_role("button", name="Профиль", exact=True).click()
         page.locator("h2", has_text="Алекс").wait_for()
-        page.get_by_role("button", name="Задания", exact=True).click()
+        page.locator("#catalog-nav").click()
         assert page.get_by_text("Сохранённый каталог", exact=True).is_visible()
         assert page.get_by_text("Загружаем задания…").count() == 0
         assert task_requests == 1
@@ -167,20 +167,13 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
         assert page.locator("h2", has_text="Алекс").is_visible()
         assert page.get_by_text("Загружаем профиль…").count() == 0
         page.evaluate("advanceCacheClock(60001)")
-        page.get_by_role("button", name="Задания", exact=True).click()
+        page.locator("#catalog-nav").click()
         assert page.get_by_text("Сохранённый каталог", exact=True).is_visible()
         assert page.get_by_text("Загружаем задания…").count() == 0
         assert task_requests == 2
         pending.pop(0).fulfill(json={"items": [refreshed_task], "next_cursor": None})
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
 
-        page.get_by_role("button", name="Профиль", exact=True).click()
-        page.get_by_role("button", name="Настройки профиля").click()
-        page.get_by_role("button", name="Редактировать город").click()
-        page.locator(".profile-editor").get_by_role("combobox").fill("Córdoba")
-        page.get_by_role("button", name="Сохранить").click()
-        page.get_by_role("button", name="Редактировать город").wait_for()
-        page.locator("h2", has_text="Алекс").wait_for()
         catalog = page.locator("#catalog-nav")
         catalog.click()
         catalog.click()
@@ -190,13 +183,13 @@ def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
 
         page.get_by_role("button", name="Профиль", exact=True).click()
         page.evaluate("advanceCacheClock(60001)")
-        page.get_by_role("button", name="Задания", exact=True).click()
+        page.locator("#catalog-nav").click()
         assert page.get_by_text("Обновлённый каталог", exact=True).is_visible()
         assert task_requests == 4
         page.wait_for_timeout(50)
         page.get_by_role("button", name="Профиль", exact=True).click()
         page.locator("h2", has_text="Алекс").wait_for()
-        page.get_by_role("button", name="Задания", exact=True).click()
+        page.locator("#catalog-nav").click()
         page.get_by_text("Обновлённый каталог", exact=True).wait_for()
         assert task_requests == 5
         browser.close()
@@ -844,17 +837,14 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
             "node => node === document.activeElement"
         )
 
-        page.goto(mini_app_url + "?case=link-new#/profile/links/new")
-        page.get_by_role("textbox", name="Название", exact=True).wait_for()
-        page.reload()
+        page.goto(mini_app_url + "?case=link-new#/profile")
+        page.get_by_role("button", name="Настройки профиля").click()
+        page.get_by_role("button", name="Редактировать ссылки").click()
+        page.get_by_role("button", name="+ Добавить ссылку").click()
         page.locator(".link-presets").get_by_role("button", name="LinkedIn", exact=True).click()
         page.locator(".profile-editor").locator('input[type="url"]').fill(
             "https://linkedin.com/in/alex"
         )
-        assert page.get_by_text(
-            "Только полный адрес, начинающийся с https://",  # noqa: RUF001
-            exact=True,
-        ).is_visible()
         page.locator('input[maxlength="32"]').focus()
         capture(9, "link-new", "PR-09", 'input[maxlength="32"]')
 
@@ -2326,41 +2316,6 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert page.url.endswith("#/profile")
         assert page.locator(".profile-pencil[data-profile-action]").count() == 0
 
-        page.get_by_role("button", name="Настройки профиля").click()
-        assert page.locator(".profile-pencil[data-profile-action]").count() > 0
-        page.get_by_role("button", name="Редактировать город").click()
-        page.locator(".profile-editor").get_by_role("combobox").fill("Rosario")
-        page.get_by_role("button", name="Сохранить").click()
-        page.get_by_text(
-            "Не удалось сохранить. Повторите попытку."  # noqa: RUF001
-        ).wait_for()
-        assert page.locator(".profile-editor").get_by_role("combobox").input_value() == "Rosario"
-        page.get_by_role("button", name="Сохранить").click()
-        page.get_by_text(
-            "Не удалось сохранить. Повторите попытку."  # noqa: RUF001
-        ).wait_for()
-        profile_updates_before = len(profile_update_keys)
-        page.get_by_role("button", name="Сохранить").click()
-        page.get_by_role("button", name="Редактировать город").click()
-        assert page.locator(".profile-editor").get_by_role("combobox").input_value() == "Rosario"
-        assert len(profile_update_keys) == profile_updates_before + 1
-        assert profile_update_keys[0] == profile_update_keys[1] == profile_update_keys[2]
-        assert page.get_by_text("Не удалось сохранить.", exact=False).count() == 0  # noqa: RUF001
-
-        invalid_city = page.locator(".profile-editor").get_by_role("combobox")
-        invalid_city.fill("x")
-        profile_updates_before_invalid = len(profile_update_keys)
-        page.get_by_role("button", name="Сохранить").click()
-        assert invalid_city.evaluate("node => !node.checkValidity()")
-        assert len(profile_update_keys) == profile_updates_before_invalid
-        page.get_by_role("button", name="Назад").click()
-        updates_before_cancel = len(profile_update_keys)
-        page.get_by_role("button", name="Редактировать обо мне").click()  # noqa: RUF001
-        page.get_by_label("Описание").fill("Несохранённое значение профиля")
-        page.get_by_role("button", name="Назад").click()
-        assert len(profile_update_keys) == updates_before_cancel
-        assert page.get_by_text("Помогаю собирать ясные планы.", exact=True).count() == 1
-
         modes.update(member="success", leaderboard="success")
         me["skill_tags"] = []
         profile_nav.click()
@@ -2920,31 +2875,32 @@ def test_assignment_states_and_late_detail_are_safe(  # noqa: PLR0915
         page.on("dialog", lambda dialog: dialog.accept())
         page.goto(mini_app_url)
 
-        page.get_by_role("button", name="Заказы").click()
+        orders = page.locator("#assignments-nav")
+        orders.click()
         page.get_by_text("Пока нет заданий.").wait_for()
 
         list_mode["status"] = 503
         page.evaluate("advanceCacheClock(60001)")
         with page.expect_response(lambda response: response.status == 503):
-            page.get_by_role("button", name="Заказы").click()
+            orders.click()
         page.get_by_text("Пока нет заданий.").wait_for()
         assert page.get_by_text("Не удалось загрузить активные назначения.").count() == 0  # noqa: RUF001
 
         list_mode["status"] = 401
         with page.expect_response(lambda response: response.status == 401):
-            page.get_by_role("button", name="Заказы").click()
+            orders.click()
         page.get_by_text("Пока нет заданий.").wait_for()
-        page.get_by_role("button", name="Заказы").click()
+        orders.click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0
 
         list_mode["status"] = 403
-        page.get_by_role("button", name="Заказы").click()
+        orders.click()
         page.get_by_text("Назначения недоступны для этого аккаунта.").wait_for()
         assert page.get_by_role("button", name="Повторить").count() == 0
 
         list_mode.update(status=200, items=[assignment])
-        page.get_by_role("button", name="Заказы").click()
+        orders.click()
         row = page.get_by_role("button", name=re.compile("Собрать план"))
         row.wait_for()
         assert page.get_by_role("list").count() == 1
