@@ -104,6 +104,53 @@ def _cache_profile(member_id: str = "member-cache") -> tuple[dict[str, Any], dic
 
 
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
+def test_ui_next_preview_gate_isolated_from_legacy_bootstrap(
+    mini_app_url: str,
+    viewport: tuple[int, int],
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        preview = _new_page(browser)
+        preview.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        api_requests: list[str] = []
+        preview.on(
+            "request",
+            lambda request: api_requests.append(request.url)
+            if "/api/v1/" in request.url
+            else None,
+        )
+        preview.goto(mini_app_url + "?ui=next")
+        gate = preview.locator('[data-screen-id="UX01"][data-ui-engine="next-preview"]')
+        gate.wait_for()
+        assert gate.get_by_text("Этап 1 из 7 · CB-115", exact=True).is_visible()
+        assert gate.get_by_text("As-is parity contract и preview gate", exact=True).is_visible()
+        assert preview.locator("#primary-navigation").is_hidden()
+        assert api_requests == []
+        assert preview.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+
+        legacy = _new_page(browser)
+        legacy.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        legacy.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(json={"display_name": "Алекс"}),
+        )
+        legacy.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        legacy.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+        legacy.goto(mini_app_url)
+        legacy.locator('[data-screen-id="T01"][data-ui-engine="concept-05"]').wait_for()
+        assert legacy.locator('[data-screen-id="UX01"]').count() == 0
+        browser.close()
+
+
+@pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
 def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
     mini_app_url: str,
     viewport: tuple[int, int],

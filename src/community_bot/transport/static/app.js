@@ -3124,6 +3124,64 @@ async function bootstrap(authAttempted = false) {
   }
 }
 
+function showUiNextPreviewGate() {
+  screenRevision += 1;
+  document.body.classList.add("ui-next-preview");
+  setNavigation("", true);
+  title.textContent = "UI vNext";
+  back.classList.add("hidden");
+
+  const boundary = connectedBoundary("UX01", "contract");
+  boundary.dataset.uiEngine = "next-preview";
+  boundary.classList.add("ui-next-gate");
+  boundary.append(
+    element("p", "Этап 1 из 7 · CB-115", "badge"),
+    element("h2", "Контракт интерфейса заданий", "ui-next-gate-title"),
+    element(
+      "p",
+      "Новый renderer изолирован. Рабочий интерфейс без параметра ui=next не изменён.",
+      "muted ui-next-gate-copy",
+    ),
+  );
+
+  const facts = element("dl", undefined, "ui-next-contract-facts");
+  for (const [label, value] of [
+    ["Task screens", "T01–T08"],
+    ["Work screens", "M01–M15"],
+    ["Источник действий", "Server-owned DTO"],
+    ["Preview URL", "?ui=next"],
+  ]) {
+    facts.append(element("dt", label), element("dd", value));
+  }
+  boundary.append(facts);
+
+  const stages = element("ol", undefined, "ui-next-stage-list");
+  for (const [name, status] of [
+    ["As-is parity contract и preview gate", "Готово к проверке"],
+    ["Theme foundation: system/light/dark", "Следующий этап"],
+    ["Главный экран заданий", "Запланировано"],
+    ["Каталог → карточка → принятие", "Запланировано"],
+    ["Создание задания", "Запланировано"],
+    ["Назначения → отправка → проверка", "Запланировано"],
+    ["Отмена, спор, архив и release-gate", "Запланировано"],
+  ]) {
+    const item = element("li", undefined, "ui-next-stage-item");
+    item.append(element("span", name), element("span", status));
+    stages.append(item);
+  }
+  boundary.append(stages);
+
+  const legacy = element("button", "Открыть рабочий интерфейс", "primary");
+  legacy.type = "button";
+  legacy.addEventListener("click", () => {
+    const url = new URL(location.href);
+    url.searchParams.delete("ui");
+    location.assign(url);
+  });
+  boundary.append(legacy);
+  replaceContent(boundary);
+}
+
 catalogNav.addEventListener("click", () => {
   void loadCatalog();
 });
@@ -3195,9 +3253,11 @@ globalThis.addEventListener("popstate", (event) => {
   }
 });
 globalThis.addEventListener("hashchange", () => {
+  if (new URLSearchParams(location.search).get("ui") === "next") return;
   if (!presentationFromLocation() && !/^#\/profile(?:\/.*)?$/.test(location.hash) && !/^#\/members\/[0-9a-f-]{36}$/i.test(location.hash)) {
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
     void loadCatalog(false);
   }
 });
-bootstrap();
+if (new URLSearchParams(location.search).get("ui") === "next") showUiNextPreviewGate();
+else bootstrap();

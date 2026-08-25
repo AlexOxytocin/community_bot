@@ -209,6 +209,57 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .hidden { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid var(--app-focus); outline-offset: 3px; }
 
+.ui-next-preview .screen { padding-top: 16px; }
+.ui-next-gate { gap: 14px; }
+.ui-next-gate-title { font-size: 24px; line-height: 1.15; }
+.ui-next-gate-copy { margin: -4px 0 0; font-size: 13px; line-height: 1.5; }
+.ui-next-contract-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+.ui-next-contract-facts dt, .ui-next-contract-facts dd {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--app-border);
+  font-size: 12px;
+}
+.ui-next-contract-facts dt { color: var(--app-text-muted); }
+.ui-next-contract-facts dd { font-weight: 800; text-align: right; }
+.ui-next-contract-facts dt:nth-last-of-type(1), .ui-next-contract-facts dd:last-child { border-bottom: 0; }
+.ui-next-stage-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-next-stage-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 9px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-surface);
+  font-size: 12px;
+}
+.ui-next-stage-item span:first-child { min-width: 0; font-weight: 700; }
+.ui-next-stage-item span:last-child { color: var(--app-text-muted); font-size: 10px; text-align: right; }
+.ui-next-stage-item:first-child {
+  border-color: color-mix(in srgb, var(--app-accent) 60%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent) 7%, var(--app-surface));
+}
+.ui-next-stage-item:first-child span:last-child { color: var(--app-accent); }
+
 .screen-subtitle { margin: -10px 0 2px; color: var(--app-text-muted); font-size: 12px; font-weight: 700; }
 .compact-create { min-height: 40px; padding: 7px 13px; border-color: color-mix(in srgb, var(--app-accent) 65%, var(--app-border)); color: var(--app-accent); }
 .queue-count { display: grid; width: 30px; height: 30px; place-items: center; margin-left: auto; border-radius: 10px; background: color-mix(in srgb, var(--app-danger) 17%, var(--app-surface)); color: var(--app-danger-pressed); font-size: 12px; font-weight: 800; }
