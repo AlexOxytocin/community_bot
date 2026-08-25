@@ -157,8 +157,6 @@ pilot без generic layer.
 ## Связанные материалы
 
 - Jira CB-65.
-- [План CB-65](../../tasks/CB-65/plan.md).
-- [Исходный контекст CB-65](../../tasks/CB-65/plan-source-context.md).
 - [ADR-0011](0011-protected-single-ci-release.md).
 - [ADR-0012](0012-python-ops-and-git-deploy.md).
 - [ADR-0016](0016-mini-app-only-runtime.md).

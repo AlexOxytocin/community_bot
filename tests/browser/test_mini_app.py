@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.browser
 
 STATIC_DIR = Path(__file__).parents[2] / "src/community_bot/transport/static"
-UI_CONTRACT = Path(__file__).parents[2] / "tasks/CB-96/ui-contract.json"
 TELEGRAM_BRIDGE_URL = "https://telegram.org/js/telegram-web-app.js"
 
 
@@ -207,6 +206,7 @@ def test_assignment_action_eligibility_is_server_projected() -> None:
 def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: C901, PLR0915
     mini_app_url: str,
     viewport: tuple[int, int],
+    tmp_path: Path,
 ) -> None:
     source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert not any(
@@ -297,7 +297,7 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
             me[field] = body["value"].strip()
         route.fulfill(json=me)
 
-    evidence_root = Path(__file__).parents[2] / "tasks/CB-107/evidence/browser"
+    evidence_root = tmp_path / "browser-evidence"
     viewport_name = f"{viewport[0]}x{viewport[1]}"
     capture_dir = evidence_root / viewport_name
     capture_dir.mkdir(parents=True, exist_ok=True)

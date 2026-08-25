@@ -105,6 +105,4 @@ availability.
 ## Связанные материалы
 
 - Jira CB-57.
-- [План CB-57](../../tasks/CB-57/plan.md).
-- [План ручной проверки](../../tasks/CB-57/test-plan.md).
 - [ADR-0018](0018-reviewed-image-and-host-package-tuple.md).

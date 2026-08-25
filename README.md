@@ -14,7 +14,7 @@
 - PostgreSQL-дедупликация, transactional outbox и worker;
 - Alembic-миграции, backup и restore drill.
 
-Старый Telegram chat UI, long-polling runtime и pilot/release-контур удалены. Telegram остаётся внешней платформой для запуска Mini App, проверки auth proof и коротких исходящих уведомлений без callback-навигации. HTTP API и frontend создаются задачами эпика `CB-48`.
+Старый Telegram chat UI, long-polling runtime и pilot/release-контур удалены. Telegram остаётся внешней платформой для запуска Mini App, проверки auth proof и коротких исходящих уведомлений без callback-навигации. HTTP API и frontend Mini App входят в текущий runtime и покрыты integration- и browser-тестами.
 
 ## Окружение
 

@@ -87,7 +87,7 @@ protocol, service, domain object, UoW method, DB adapter, отдельной т�
 - durable task/submission/moderation drafts сохраняют ownership, revision,
   restart/resume и exact-confirm semantics; исчезает только Telegram FSM cursor.
 
-`tasks/CB-64/parity-map.json` классифицирует все 43 legacy tables и фиксирует
+Инвентаризация CB-64 классифицировала все 43 legacy tables и зафиксировала
 new owner, DB constraint, transformation, exact planned scenario и oracle.
 Строка без passing exact case блокирует удаление соответствующего старого кода.
 
@@ -150,6 +150,4 @@ shape. Решение Mini App-only, PostgreSQL, безопасность, data 
 
 ## Связанные материалы
 
-- [CB-64 — план](../../tasks/CB-64/plan.md)
-- [CB-64 — исходный контекст](../../tasks/CB-64/plan-source-context.md)
 - [ADR-0016 — Mini App как единственный UI](0016-mini-app-only-runtime.md)
