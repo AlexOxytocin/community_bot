@@ -1313,6 +1313,21 @@ class ProcessedTelegramUpdateModel(Base):
     )
 
 
+class TelegramAuthProofModel(Base):
+    """Short-lived receipt preventing reuse of a signed Telegram auth proof."""
+
+    __tablename__ = "telegram_auth_proofs"
+    __table_args__ = (
+        CheckConstraint("octet_length(proof_digest) = 32", name="ck_telegram_auth_proofs_digest"),
+    )
+
+    proof_digest: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class WebSessionModel(Base):
     """Short-lived revocable Mini App session stored by token digest."""
 

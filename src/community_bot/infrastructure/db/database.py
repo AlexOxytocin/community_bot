@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
 
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -40,6 +41,7 @@ from community_bot.infrastructure.db.models import (
     AuditEventModel,
     MemberModel,
     ProcessedTelegramUpdateModel,
+    TelegramAuthProofModel,
     TestRunParticipantModel,
     WebSessionModel,
 )
@@ -167,17 +169,32 @@ class Database:
         """Release all engine resources."""
         await self.engine.dispose()
 
-    async def create_web_session(
+    async def create_web_session(  # noqa: PLR0913 - auth security fields stay explicit.
         self,
         *,
         telegram_user_id: int,
         telegram_username: str | None,
+        proof_digest: bytes,
+        proof_expires_at: datetime.datetime,
         token_digest: bytes,
         authenticated_at: datetime.datetime,
         expires_at: datetime.datetime,
     ) -> UUID | None:
-        """Persist one session for an existing Telegram identity."""
+        """Consume one signed proof and persist a session for its existing identity."""
         async with self._sessions.begin() as session:
+            await session.execute(
+                delete(TelegramAuthProofModel).where(
+                    TelegramAuthProofModel.expires_at <= authenticated_at
+                )
+            )
+            consumed = await session.scalar(
+                insert(TelegramAuthProofModel)
+                .values(proof_digest=proof_digest, expires_at=proof_expires_at)
+                .on_conflict_do_nothing(index_elements=("proof_digest",))
+                .returning(TelegramAuthProofModel.proof_digest)
+            )
+            if consumed is None:
+                return None
             await registration_store.acquire_registration_identity_gate(session, telegram_user_id)
             member = await session.scalar(
                 select(MemberModel)

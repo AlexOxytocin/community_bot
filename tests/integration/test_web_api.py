@@ -382,7 +382,7 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
             )
 
     assert (await authenticate("Updated_Name")).status_code == 204
-    assert (await authenticate("Updated_Name")).status_code == 204
+    assert (await authenticate("Updated_Name")).status_code == 401
     concurrent = await asyncio.gather(authenticate("Final_Name"), authenticate(_USERNAME_ABSENT))
     assert [item.status_code for item in concurrent] == [204, 204]
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
@@ -408,6 +408,8 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
         await database.create_web_session(
             telegram_user_id=member.telegram_user_id,
             telegram_username=current_username,
+            proof_digest=hashlib.sha256(b"first-proof").digest(),
+            proof_expires_at=now + datetime.timedelta(minutes=5),
             token_digest=token_digest,
             authenticated_at=now,
             expires_at=now + datetime.timedelta(minutes=5),
@@ -418,6 +420,8 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
         await database.create_web_session(
             telegram_user_id=member.telegram_user_id,
             telegram_username="Rolled_Back",
+            proof_digest=hashlib.sha256(b"second-proof").digest(),
+            proof_expires_at=now + datetime.timedelta(minutes=5),
             token_digest=token_digest,
             authenticated_at=now,
             expires_at=now + datetime.timedelta(minutes=5),
@@ -439,6 +443,8 @@ async def test_telegram_username_sync_is_serialized_audited_and_atomic(
     unknown = await database.create_web_session(
         telegram_user_id=9_999_999,
         telegram_username="Unknown_User",
+        proof_digest=hashlib.sha256(b"unknown-proof").digest(),
+        proof_expires_at=now + datetime.timedelta(minutes=5),
         token_digest=hashlib.sha256(b"unknown-session").digest(),
         authenticated_at=now,
         expires_at=now + datetime.timedelta(minutes=5),

@@ -567,14 +567,19 @@ def create_web_app(
         member_id, authenticated_at = resolved
         return ActorContext(member_id, "telegram", authenticated_at)
 
-    async def issue_session(identity: TelegramIdentity, response: Response) -> Response:
+    async def issue_session(
+        identity: TelegramIdentity, response: Response, *, proof: bytes | None = None
+    ) -> Response:
         raw_token = secrets.token_bytes(32)
         digest = hashlib.sha256(raw_token).digest()
         now = datetime.datetime.now(datetime.UTC)
+        proof_digest = hashlib.sha256(proof or raw_token).digest()
         try:
             member_id = await database.create_web_session(
                 telegram_user_id=identity.user_id,
                 telegram_username=identity.username,
+                proof_digest=proof_digest,
+                proof_expires_at=now + datetime.timedelta(seconds=_PROOF_MAX_AGE_SECONDS),
                 token_digest=digest,
                 authenticated_at=now,
                 expires_at=now + datetime.timedelta(seconds=_SESSION_LIFETIME_SECONDS),
@@ -613,6 +618,7 @@ def create_web_app(
         return await issue_session(
             identity,
             Response(status_code=204, headers={"Cache-Control": "no-store"}),
+            proof=raw,
         )
 
     local_review_user_id = settings.local_review_telegram_user_id

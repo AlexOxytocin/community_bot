@@ -201,6 +201,55 @@ def test_ui_next_preview_gate_isolated_from_legacy_bootstrap(
         browser.close()
 
 
+@pytest.mark.parametrize("query", ["", "?ui=next"])
+def test_bootstrap_waits_for_late_telegram_desktop_init_data(
+    mini_app_url: str,
+    query: str,
+) -> None:
+    """Both renderers tolerate Telegram Desktop populating initData asynchronously."""
+    init_data = "query_id=desktop&user=%7B%22id%22%3A1%7D&hash=proof"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(
+            browser,
+            bridge=(
+                "globalThis.Telegram = {WebApp: {}};"
+                "setTimeout(() => { globalThis.Telegram.WebApp.initData = "
+                f'"{init_data}"; }}, 150);'
+            ),
+        )
+        calls = 0
+
+        def me(route: Route) -> None:
+            nonlocal calls
+            calls += 1
+            route.fulfill(
+                status=401 if calls == 1 else 200,
+                json={"member_id": "desktop", "display_name": "Алекс"},
+            )
+
+        page.route("**/api/v1/me", me)
+        page.route("**/api/v1/auth/telegram", lambda route: route.fulfill(status=204))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+        )
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+
+        page.goto(mini_app_url + query)
+        expected_screen = "UX02" if query else "T01"
+        page.locator(f'[data-screen-id="{expected_screen}"]').wait_for()
+        assert calls == 2
+        browser.close()
+
+
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
 def test_ui_next_theme_switch_preserves_geometry_route_scroll_and_focus(
     mini_app_url: str,
