@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     )
     bot_token: SecretStr | None = None
     mini_app_origin: str | None = None
+    local_review_telegram_user_id: int | None = None
     invite_token_secret: SecretStr | None = None
     sentry_dsn: SecretStr | None = None
     release: str = "local"
@@ -52,6 +53,12 @@ class Settings(BaseSettings):
         """Reject ambiguous runtime identity in the production configuration."""
         if self.environment == "production" and re.fullmatch(r"[0-9a-f]{40}", self.release) is None:
             msg = "production RELEASE must be a full lowercase Git SHA"
+            raise ValueError(msg)
+        if self.local_review_telegram_user_id is not None and (
+            self.environment != "development"
+            or not 1 <= self.local_review_telegram_user_id <= 2**63 - 1
+        ):
+            msg = "local review identity requires development and a valid Telegram user ID"
             raise ValueError(msg)
         return self
 

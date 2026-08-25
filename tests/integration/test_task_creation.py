@@ -523,6 +523,10 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
     assert response_id is not None
     assert persisted_author is not None
     assert persisted_author.credit_balance_cached == 8
+    pending_responses = await task_service.pending_cancellation_responses(
+        actor=actor_context(performer)
+    )
+    assert [response.id for response in pending_responses] == [response_id]
 
     decline = await task_service.respond_cancellation(
         update_id=19_803,
@@ -532,6 +536,7 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
     )
     assert decline.status == "declined"
     assert decline.task.status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
+    assert not await task_service.pending_cancellation_responses(actor=actor_context(performer))
     result = await assignment_service.submit(
         SubmitResultCommand(
             19_804,

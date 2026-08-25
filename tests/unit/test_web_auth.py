@@ -292,6 +292,7 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/members/{member_id}/karma-vote", ("POST",)),
         ("/api/v1/tasks", ("GET",)),
+        ("/api/v1/task-home", ("GET",)),
         ("/api/v1/owned-tasks", ("GET",)),
         ("/api/v1/owned-tasks/{task_id}/cancellation", ("POST",)),
         ("/api/v1/task-cities", ("GET",)),
@@ -328,6 +329,63 @@ def test_web_config_and_route_set_are_closed() -> None:
                 settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=origin),
                 database=cast("Database", database),
             )
+
+    create_web_app(
+        settings=Settings(
+            environment="development",
+            bot_token=BOT_TOKEN,
+            mini_app_origin="http://127.0.0.1:8000",
+        ),
+        database=cast("Database", database),
+    )
+    with pytest.raises(ValueError):
+        create_web_app(
+            settings=Settings(
+                environment="production",
+                release="a" * 40,
+                bot_token=BOT_TOKEN,
+                mini_app_origin="http://127.0.0.1:8000",
+            ),
+            database=cast("Database", database),
+        )
+    with pytest.raises(ValueError):
+        Settings(
+            environment="production",
+            release="a" * 40,
+            local_review_telegram_user_id=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_development_auth_uses_non_host_cookie_only_on_loopback() -> None:
+    database = FakeDatabase()
+    origin = "http://127.0.0.1:8000"
+    app = create_web_app(
+        settings=Settings(
+            environment="development",
+            bot_token=BOT_TOKEN,
+            mini_app_origin=origin,
+            local_review_telegram_user_id=1,
+        ),
+        database=cast("Database", database),
+    )
+    now = datetime.datetime.now(datetime.UTC)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=origin) as client:
+        response = await _authenticate(
+            client,
+            _proof(1, now=now),
+            {"content-type": "text/plain; charset=utf-8", "origin": origin},
+        )
+        local_review = await client.get("/local-review", follow_redirects=False)
+
+    assert response.status_code == 204
+    cookie = response.headers["set-cookie"]
+    assert "community_session_local=" in cookie
+    assert "HttpOnly" in cookie and "SameSite=strict" in cookie
+    assert "Secure" not in cookie and "__Host-" not in cookie
+    assert local_review.status_code == 303
+    assert local_review.headers["location"] == "/"
+    assert "community_session_local=" in local_review.headers["set-cookie"]
 
 
 @pytest.mark.asyncio
@@ -826,8 +884,15 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
         index = await client.get("/")
         font = await client.get("/mini-assets/manrope.ttf")
         app_module = await client.get("/mini-assets/app.js")
+        theme_bootstrap = await client.get("/mini-assets/theme-bootstrap.js")
 
-    assert index.status_code == font.status_code == app_module.status_code == 200
+    assert (
+        index.status_code
+        == font.status_code
+        == app_module.status_code
+        == theme_bootstrap.status_code
+        == 200
+    )
     assert "default-src 'self'" in index.headers["content-security-policy"]
     assert "script-src 'self' https://telegram.org" in index.headers["content-security-policy"]
     bridge = b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
@@ -836,6 +901,10 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     assert b"__RELEASE__" not in index.content
     assert b"/mini-assets/app.js?release=local" in index.content
     assert b"/mini-assets/styles.css?release=local" in index.content
+    assert b"platform.js?release=${encodeURIComponent(assetRelease)}" in app_module.content
+    bootstrap_asset = b"/mini-assets/theme-bootstrap.js?release=local"
+    assert bootstrap_asset in index.content
+    assert index.content.index(bootstrap_asset) < index.content.index(b"/mini-assets/styles.css")
     assert index.headers["x-content-type-options"] == "nosniff"
     design_font = (
         Path(__file__).parents[2] / "docs/release-2/design/assets/Manrope[wght].ttf"

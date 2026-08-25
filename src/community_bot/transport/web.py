@@ -19,10 +19,10 @@ from typing import Annotated, Literal, cast
 from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import UUID
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -69,7 +69,12 @@ from community_bot.application.tasks import (
     TaskService,
 )
 from community_bot.bootstrap.settings import Settings
-from community_bot.domain.assignments import AssignmentDecision, AssignmentError, SubmissionDraft
+from community_bot.domain.assignments import (
+    AssignmentDecision,
+    AssignmentError,
+    AssignmentStatus,
+    SubmissionDraft,
+)
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.moderation import ModerationError, ResolutionCode
 from community_bot.domain.registration import (
@@ -85,12 +90,14 @@ from community_bot.domain.tasks import (
     TASK_TIME_SIZE_SPECS,
     TaskError,
     TaskKind,
+    TaskStatus,
     TaskTimeSize,
 )
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
 
 _COOKIE_NAME = "__Host-community_session"
+_LOCAL_COOKIE_NAME = "community_session_local"
 _SESSION_LIFETIME_SECONDS = 2_592_000
 _PROOF_MAX_AGE_SECONDS = 300
 _PROOF_FUTURE_SKEW_SECONDS = 30
@@ -266,6 +273,25 @@ class TaskDto(_Dto):
 class TasksDto(_Dto):
     items: tuple[TaskDto, ...]
     next_cursor: UUID | None
+
+
+class TaskHomeAttentionDto(_Dto):
+    action: Literal["submit_result", "review_work", "answer_cancellation"]
+    count: int = Field(ge=0)
+    target: Literal["taken", "created", "cancellations"]
+
+
+class TaskHomeDto(_Dto):
+    attention: tuple[TaskHomeAttentionDto, ...]
+    available_count: int | None = Field(default=None, ge=0)
+    available_has_more: bool = False
+    can_create: bool | None = None
+    has_draft: bool | None = None
+    active_count: int | None = Field(default=None, ge=0)
+    waiting_count: int | None = Field(default=None, ge=0)
+    archive_count: int | None = Field(default=None, ge=0)
+    new_tasks: tuple[TaskDto, ...]
+    errors: tuple[Literal["catalog", "creation", "work", "owned", "reviews", "cancellations"], ...]
 
 
 class OwnedTaskAssigneeDto(_Dto):
@@ -471,6 +497,8 @@ def create_web_app(
 ) -> FastAPI:
     """Build the web-only application after strict config validation."""
     bot_token, origin = _web_config(settings)
+    secure_cookie = origin.startswith("https://")
+    cookie_name = _COOKIE_NAME if secure_cookie else _LOCAL_COOKIE_NAME
     registration = RegistrationService(database.unit_of_work)
     reputation = ReputationService(database.unit_of_work)
     tasks = TaskService(database.unit_of_work)
@@ -527,9 +555,8 @@ def create_web_app(
     async def unexpected_error(_request: Request, _error: Exception) -> JSONResponse:
         return _error_response(500, "internal_error")
 
-    async def current_actor(
-        session_token: Annotated[str | None, Cookie(alias=_COOKIE_NAME)] = None,
-    ) -> ActorContext:
+    async def current_actor(request: Request) -> ActorContext:
+        session_token = request.cookies.get(cookie_name)
         digest = _session_digest(session_token)
         if digest is None:
             raise HTTPException(status_code=401, detail="unauthorized")
@@ -540,21 +567,7 @@ def create_web_app(
         member_id, authenticated_at = resolved
         return ActorContext(member_id, "telegram", authenticated_at)
 
-    @app.post("/api/v1/auth/telegram", status_code=204)
-    async def authenticate(request: Request) -> Response:
-        _require_origin(request, origin)
-        if request.headers.get("content-type", "").lower() != "text/plain; charset=utf-8":
-            return _error_response(422, "invalid_request")
-        try:
-            raw = await _bounded_body(request, limit=_PROOF_MAX_BYTES)
-        except ValueError:
-            return _error_response(422, "invalid_request")
-        except OverflowError:
-            return _error_response(413, "payload_too_large")
-        try:
-            identity = validate_telegram_init_data(raw, bot_token=bot_token)
-        except (TypeError, ValueError):
-            return _error_response(401, "unauthorized")
+    async def issue_session(identity: TelegramIdentity, response: Response) -> Response:
         raw_token = secrets.token_bytes(32)
         digest = hashlib.sha256(raw_token).digest()
         now = datetime.datetime.now(datetime.UTC)
@@ -571,24 +584,51 @@ def create_web_app(
         if member_id is None:
             return _error_response(401, "unauthorized")
         token = base64.urlsafe_b64encode(raw_token).rstrip(b"=").decode("ascii")
-        response = Response(status_code=204, headers={"Cache-Control": "no-store"})
         response.set_cookie(
-            _COOKIE_NAME,
+            cookie_name,
             token,
             max_age=_SESSION_LIFETIME_SECONDS,
-            secure=True,
+            secure=secure_cookie,
             httponly=True,
             samesite="strict",
             path="/",
         )
         return response
 
-    @app.delete("/api/v1/session", status_code=204)
-    async def logout(
-        request: Request,
-        session_token: Annotated[str | None, Cookie(alias=_COOKIE_NAME)] = None,
-    ) -> Response:
+    @app.post("/api/v1/auth/telegram", status_code=204)
+    async def authenticate(request: Request) -> Response:
         _require_origin(request, origin)
+        if request.headers.get("content-type", "").lower() != "text/plain; charset=utf-8":
+            return _error_response(422, "invalid_request")
+        try:
+            raw = await _bounded_body(request, limit=_PROOF_MAX_BYTES)
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        except OverflowError:
+            return _error_response(413, "payload_too_large")
+        try:
+            identity = validate_telegram_init_data(raw, bot_token=bot_token)
+        except (TypeError, ValueError):
+            return _error_response(401, "unauthorized")
+        return await issue_session(
+            identity,
+            Response(status_code=204, headers={"Cache-Control": "no-store"}),
+        )
+
+    local_review_user_id = settings.local_review_telegram_user_id
+    if not secure_cookie and local_review_user_id is not None:
+
+        @app.get("/local-review", include_in_schema=False)
+        async def local_review() -> Response:
+            return await issue_session(
+                TelegramIdentity(local_review_user_id, None),
+                RedirectResponse(url="/", status_code=303),
+            )
+
+    @app.delete("/api/v1/session", status_code=204)
+    async def logout(request: Request) -> Response:
+        _require_origin(request, origin)
+        session_token = request.cookies.get(cookie_name)
         digest = _session_digest(session_token)
         if digest is not None:
             await database.revoke_web_session(
@@ -596,11 +636,11 @@ def create_web_app(
             )
         response = Response(status_code=204, headers={"Cache-Control": "no-store"})
         response.set_cookie(
-            _COOKIE_NAME,
+            cookie_name,
             "",
             max_age=0,
             expires=0,
-            secure=True,
+            secure=secure_cookie,
             httponly=True,
             samesite="strict",
             path="/",
@@ -619,7 +659,7 @@ def create_web_app(
     @app.put("/api/v1/me/profile", response_model=MeDto)
     async def update_me(request: Request) -> JSONResponse:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         if request.headers.get("content-type", "").lower() != "application/json":
             return _error_response(422, "invalid_request")
@@ -700,7 +740,7 @@ def create_web_app(
     )
     async def change_karma_vote(member_id: UUID, request: Request) -> JSONResponse:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         if request.headers.get("content-type", "").lower() != "application/json":
             return _error_response(422, "invalid_request")
@@ -799,6 +839,97 @@ def create_web_app(
             )
         )
 
+    @app.get("/api/v1/task-home", response_model=TaskHomeDto)
+    async def task_home(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
+        errors: list[
+            Literal["catalog", "creation", "work", "owned", "reviews", "cancellations"]
+        ] = []
+        catalog = None
+        active = None
+        owned = None
+        reviews = None
+        cancellations = None
+        can_create: bool | None = None
+        has_draft: bool | None = None
+
+        try:
+            catalog = await tasks.list_available(actor=actor, limit=50)
+        except (PermissionError, TaskError, SQLAlchemyError):
+            errors.append("catalog")
+        try:
+            _categories, draft, preview, _needs_edit = await tasks.web_state(actor.member_id)
+            can_create = True
+            has_draft = draft is not None or preview is not None
+        except (PermissionError, TaskError, SQLAlchemyError):
+            errors.append("creation")
+        try:
+            active = await assignments.active_cards(actor=actor, limit=50)
+        except (AssignmentError, PermissionError, SQLAlchemyError):
+            errors.append("work")
+        try:
+            owned = await tasks.list_owned_cards(actor=actor, creator_only=True)
+        except (PermissionError, TaskError, SQLAlchemyError):
+            errors.append("owned")
+        try:
+            reviews = await assignments.creator_review_cards(actor=actor)
+        except (AssignmentError, PermissionError, SQLAlchemyError):
+            errors.append("reviews")
+        try:
+            cancellations = await tasks.pending_cancellation_responses(actor=actor)
+        except (PermissionError, TaskError, SQLAlchemyError):
+            errors.append("cancellations")
+
+        active_items = None if active is None else active.items
+        attention = (
+            TaskHomeAttentionDto(
+                action="submit_result",
+                count=0 if active_items is None else sum(card.can_submit for card in active_items),
+                target="taken",
+            ),
+            TaskHomeAttentionDto(
+                action="review_work",
+                count=0 if reviews is None else len(reviews),
+                target="created",
+            ),
+            TaskHomeAttentionDto(
+                action="answer_cancellation",
+                count=0 if cancellations is None else len(cancellations),
+                target="cancellations",
+            ),
+        )
+        in_progress = (
+            None
+            if active_items is None
+            else sum(card.assignment.status is AssignmentStatus.ACCEPTED for card in active_items)
+        )
+        waiting = (
+            None if active_items is None else len(active_items) - cast("int", in_progress)
+        )
+        archived_statuses = {
+            TaskStatus.EXPIRED,
+            TaskStatus.PARTIALLY_COMPLETED,
+            TaskStatus.COMPLETED,
+            TaskStatus.CANCELLED,
+        }
+        return _json_response(
+            TaskHomeDto(
+                attention=attention,
+                available_count=None if catalog is None else len(catalog.items),
+                available_has_more=catalog is not None and catalog.next_cursor_task_id is not None,
+                can_create=can_create,
+                has_draft=has_draft,
+                active_count=in_progress,
+                waiting_count=waiting,
+                archive_count=None
+                if owned is None
+                else sum(card.task.status in archived_statuses for card in owned),
+                new_tasks=()
+                if catalog is None
+                else tuple(_task_dto(item) for item in catalog.items[:6]),
+                errors=tuple(errors),
+            )
+        )
+
     @app.get("/api/v1/task-creation")
     async def task_creation(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
         try:
@@ -845,7 +976,7 @@ def create_web_app(
         _require_origin(request, origin)
         if request.headers.get("content-type", "").lower() != "application/json":
             return _error_response(422, "invalid_request")
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         key = _idempotency_key(request)
         try:
             raw = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
@@ -930,7 +1061,7 @@ def create_web_app(
     )
     async def cancel_owned_task(task_id: UUID, request: Request) -> JSONResponse:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         if await request.body():
             return _error_response(422, "invalid_request")
@@ -1020,7 +1151,7 @@ def create_web_app(
     @app.post("/api/v1/assignments/{assignment_id}/cancellation", status_code=204)
     async def cancel_assignment(assignment_id: str, request: Request) -> Response:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         parsed_assignment_id = _canonical_uuid(assignment_id)
         if parsed_assignment_id is None:
@@ -1055,7 +1186,7 @@ def create_web_app(
     @app.post("/api/v1/assignments/{assignment_id}/disputes", status_code=204)
     async def open_assignment_dispute(assignment_id: str, request: Request) -> Response:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         parsed_assignment_id = _canonical_uuid(assignment_id)
         if parsed_assignment_id is None:
@@ -1115,7 +1246,7 @@ def create_web_app(
     @app.post("/api/v1/assignment-reviews/{assignment_id}/decision", status_code=204)
     async def decide_assignment(assignment_id: UUID, request: Request) -> Response:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         payload = cast(
             "AssignmentDecisionRequest | None",
@@ -1171,7 +1302,7 @@ def create_web_app(
     @app.post("/api/v1/moderation/cases/{case_id}/resolution", status_code=204)
     async def resolve_moderation_case(case_id: UUID, request: Request) -> Response:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         payload = cast(
             "ModerationResolutionRequest | None",
@@ -1217,7 +1348,7 @@ def create_web_app(
     )
     async def accept_task(task_id: str, request: Request) -> JSONResponse:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         try:
             parsed_task_id = UUID(task_id)
@@ -1261,7 +1392,7 @@ def create_web_app(
     @app.post("/api/v1/assignments/{assignment_id}/submission-drafts")
     async def begin_submission_draft(assignment_id: str, request: Request) -> JSONResponse:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         parsed_assignment_id = _canonical_uuid(assignment_id)
         if parsed_assignment_id is None:
@@ -1289,7 +1420,7 @@ def create_web_app(
     @app.put("/api/v1/submission-drafts/{draft_id}")
     async def save_submission_draft(draft_id: str, request: Request) -> JSONResponse:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         parsed_draft_id = _canonical_uuid(draft_id)
         if parsed_draft_id is None:
@@ -1324,7 +1455,7 @@ def create_web_app(
     @app.post("/api/v1/submission-drafts/{draft_id}/confirm", status_code=204)
     async def confirm_submission_draft(draft_id: str, request: Request) -> Response:
         _require_origin(request, origin)
-        actor = await current_actor(request.cookies.get(_COOKIE_NAME))
+        actor = await current_actor(request)
         operation_key = _idempotency_key(request)
         parsed_draft_id = _canonical_uuid(draft_id)
         if parsed_draft_id is None:
@@ -1466,11 +1597,18 @@ def _web_config(settings: Settings) -> tuple[str, str]:
         port = parsed.port
     except ValueError as error:
         raise ValueError("Mini App origin is invalid.") from error
-    canonical = f"https://{parsed.hostname}{'' if port is None else f':{port}'}"
+    scheme = parsed.scheme
+    hostname = parsed.hostname
+    local_development = (
+        settings.environment == "development"
+        and scheme == "http"
+        and hostname in {"localhost", "127.0.0.1"}
+    )
+    canonical = f"{scheme}://{hostname}{'' if port is None else f':{port}'}"
     if (
-        parsed.scheme != "https"
-        or parsed.hostname is None
-        or "*" in parsed.hostname
+        (scheme != "https" and not local_development)
+        or hostname is None
+        or "*" in hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path

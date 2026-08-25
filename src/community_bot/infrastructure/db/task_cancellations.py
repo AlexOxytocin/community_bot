@@ -230,6 +230,51 @@ async def get_response(
     )
 
 
+async def list_pending_responses(
+    session: AsyncSession,
+    *,
+    performer_id: uuid.UUID,
+    limit: int,
+) -> tuple[TaskCancellationResponse, ...]:
+    """Return active cancellation requests that require this performer's decision."""
+    scope = await active_scope(session, performer_id)
+    test_scope = (
+        TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
+    )
+    rows = (
+        await session.execute(
+            select(TaskCancellationResponseModel, TaskCancellationRequestModel)
+            .join(
+                TaskCancellationRequestModel,
+                TaskCancellationRequestModel.id == TaskCancellationResponseModel.request_id,
+            )
+            .join(TaskModel, TaskModel.id == TaskCancellationRequestModel.task_id)
+            .where(
+                TaskCancellationResponseModel.performer_id == performer_id,
+                TaskCancellationResponseModel.status == "pending",
+                TaskCancellationRequestModel.status == "pending",
+                TaskModel.status.in_(("published", "closed_for_new_performers")),
+                test_scope,
+            )
+            .order_by(TaskCancellationResponseModel.id)
+            .limit(limit)
+        )
+    ).all()
+    return tuple(
+        TaskCancellationResponse(
+            id=response.id,
+            request_id=request.id,
+            task_id=request.task_id,
+            assignment_id=response.assignment_id,
+            performer_id=response.performer_id,
+            request_status=request.status,
+            request_resolution_reason=request.resolution_reason,
+            response_status=response.status,
+        )
+        for response, request in rows
+    )
+
+
 async def answer_response(
     session: AsyncSession,
     *,

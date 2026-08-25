@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from playwright.sync_api import Route
+    from playwright.sync_api import Page, Route
 
 pytestmark = pytest.mark.browser
 
@@ -103,6 +103,55 @@ def _cache_profile(member_id: str = "member-cache") -> tuple[dict[str, Any], dic
     return me, member
 
 
+def _task_home_task(task_id: str = "00000000-0000-0000-0000-000000000117") -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "origin": "community",
+        "author_display_name": "Сообщество",
+        "category_name": "Практическая помощь",
+        "category_icon": "⭐",
+        "task_kind": "solo",
+        "time_size": "m",
+        "title": "Проверить сценарий первого запуска с очень длинным русским названием",  # noqa: RUF001
+        "credit_reward_per_performer": 4,
+        "performer_slots": 1,
+        "minimum_level": 1,
+        "format": "online",
+        "city": None,
+        "deadline_at": "2026-08-27T20:00:00Z",
+        "status": "published",
+        "description": "Проверить новый сценарий и записать результат.",
+        "completion_criteria": "Сценарий проверен.",
+        "performer_instructions": "Пройти шаги по порядку.",
+        "materials": {},
+        "public_input": {},
+    }
+
+
+def _task_home_payload(*, empty: bool = False, partial: bool = False) -> dict[str, Any]:
+    task = _task_home_task()
+    return {
+        "attention": [
+            {"action": "submit_result", "count": 1 if not empty else 0, "target": "taken"},
+            {"action": "review_work", "count": 1 if not empty else 0, "target": "created"},
+            {
+                "action": "answer_cancellation",
+                "count": 1 if not empty else 0,
+                "target": "cancellations",
+            },
+        ],
+        "available_count": 6 if not empty else 0,
+        "available_has_more": False,
+        "can_create": True,
+        "has_draft": False,
+        "active_count": 2 if not empty else 0,
+        "waiting_count": 2 if not empty else 0,
+        "archive_count": 18 if not empty else 0,
+        "new_tasks": [] if empty else [task, {**task, "id": task["id"][:-1] + "8"}],
+        "errors": ["reviews"] if partial else [],
+    }
+
+
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
 def test_ui_next_preview_gate_isolated_from_legacy_bootstrap(
     mini_app_url: str,
@@ -119,11 +168,12 @@ def test_ui_next_preview_gate_isolated_from_legacy_bootstrap(
             if "/api/v1/" in request.url
             else None,
         )
-        preview.goto(mini_app_url + "?ui=next")
+        preview.goto(mini_app_url + "?ui=next#/theme")
         gate = preview.locator('[data-screen-id="UX01"][data-ui-engine="next-preview"]')
         gate.wait_for()
-        assert gate.get_by_text("Этап 1 из 7 · CB-115", exact=True).is_visible()
+        assert gate.get_by_text("Этап 2 из 7 · CB-116", exact=True).is_visible()
         assert gate.get_by_text("As-is parity contract и preview gate", exact=True).is_visible()
+        assert gate.get_by_role("button", name="Системная", exact=True).is_visible()
         assert preview.locator("#primary-navigation").is_hidden()
         assert api_requests == []
         assert preview.evaluate(
@@ -147,6 +197,247 @@ def test_ui_next_preview_gate_isolated_from_legacy_bootstrap(
         legacy.goto(mini_app_url)
         legacy.locator('[data-screen-id="T01"][data-ui-engine="concept-05"]').wait_for()
         assert legacy.locator('[data-screen-id="UX01"]').count() == 0
+        assert legacy.evaluate("document.documentElement.dataset.uiThemeScope") is None
+        browser.close()
+
+
+@pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
+def test_ui_next_theme_switch_preserves_geometry_route_scroll_and_focus(
+    mini_app_url: str,
+    viewport: tuple[int, int],
+) -> None:
+    selectors = [
+        '[data-screen-id="UX01"]',
+        ".ui-next-theme-setting",
+        ".ui-next-contract-facts",
+        ".ui-next-stage-list",
+        ".ui-next-gate > .primary",
+    ]
+
+    def boxes(page: Page) -> dict[str, dict[str, float]]:
+        return page.evaluate(
+            """selectors => Object.fromEntries(selectors.map(selector => {
+              const rect = document.querySelector(selector).getBoundingClientRect();
+              return [selector, Object.fromEntries(
+                ['x', 'y', 'width', 'height'].map(key => [key, Math.round(rect[key] * 100) / 100])
+              )];
+            }))""",
+            selectors,
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        page.goto(mini_app_url + "?ui=next&theme=dark#/theme-check")
+        page.locator('[data-screen-id="UX01"]').wait_for()
+        assert page.evaluate("document.documentElement.dataset.theme") == "dark"
+        assert page.evaluate(
+            "getComputedStyle(document.documentElement).getPropertyValue('--app-background').trim()"
+        ) == "#070807"
+        screen_scroll = page.locator(".screen").evaluate(
+            """node => {
+              node.scrollTop = Math.min(45, node.scrollHeight - node.clientHeight);
+              return node.scrollTop;
+            }"""
+        )
+        dark_boxes = boxes(page)
+
+        light = page.get_by_role("button", name="Светлая", exact=True)
+        light.evaluate("node => node.click()")
+        page.wait_for_function(
+            """expected => document.querySelector('.screen').scrollTop === expected
+              && document.activeElement?.dataset.themeChoice === 'light'""",
+            arg=screen_scroll,
+        )
+        assert page.evaluate("document.documentElement.dataset.theme") == "light"
+        assert page.evaluate("document.documentElement.dataset.themePreference") == "light"
+        assert page.evaluate("localStorage.getItem('community_bot_ui_theme')") == "light"
+        assert page.evaluate("location.hash") == "#/theme-check"
+        assert "theme=light" in page.url
+        assert page.locator(".screen").evaluate("node => node.scrollTop") == screen_scroll
+        assert light.evaluate("node => node === document.activeElement")
+        assert boxes(page) == dark_boxes
+        assert page.evaluate(
+            "getComputedStyle(document.documentElement).getPropertyValue('--app-background').trim()"
+        ) == "#fbf8f6"
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+
+        page.goto(mini_app_url + "?ui=next#/theme")
+        page.locator('[data-screen-id="UX01"]').wait_for()
+        assert page.evaluate("document.documentElement.dataset.theme") == "light"
+        assert page.get_by_role("button", name="Светлая", exact=True).get_attribute(
+            "aria-pressed"
+        ) == "true"
+        browser.close()
+
+
+def test_ui_next_system_theme_tracks_telegram_and_syncs_chrome(mini_app_url: str) -> None:
+    bridge = """
+    globalThis.themeHandlers = {};
+    globalThis.telegramChrome = [];
+    globalThis.Telegram = {WebApp: {
+      colorScheme: 'dark', ready() {}, expand() {},
+      onEvent(name, callback) { globalThis.themeHandlers[name] = callback; },
+      offEvent(name) { delete globalThis.themeHandlers[name]; },
+      setHeaderColor(color) { globalThis.telegramChrome.push(['header', color]); },
+      setBackgroundColor(color) { globalThis.telegramChrome.push(['background', color]); },
+      setBottomBarColor(color) { globalThis.telegramChrome.push(['bottom', color]); },
+    }};
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser, bridge=bridge)
+        page.goto(mini_app_url + "?ui=next&theme=system#/theme")
+        page.locator('[data-screen-id="UX01"]').wait_for()
+        assert page.evaluate("document.documentElement.dataset.themePreference") == "system"
+        assert page.evaluate("document.documentElement.dataset.theme") == "dark"
+        assert page.evaluate("typeof globalThis.themeHandlers.themeChanged") == "function"
+
+        page.evaluate(
+            """() => {
+              Telegram.WebApp.colorScheme = 'light';
+              globalThis.themeHandlers.themeChanged();
+            }"""
+        )
+        assert page.evaluate("document.documentElement.dataset.theme") == "light"
+        assert page.evaluate("globalThis.telegramChrome.slice(-3)") == [
+            ["header", "#fbf8f6"],
+            ["background", "#fbf8f6"],
+            ["bottom", "#ffffff"],
+        ]
+        browser.close()
+
+
+@pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
+def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(
+    mini_app_url: str,
+    viewport: tuple[int, int],
+) -> None:
+    home = _task_home_payload()
+    selectors = [
+        ".task-home-attention",
+        ".task-home-primary-actions",
+        ".task-home-work-grid",
+        ".task-home-archive",
+    ]
+
+    def boxes(page: Page) -> dict[str, dict[str, float]]:
+        return page.evaluate(
+            """selectors => Object.fromEntries(selectors.map(selector => {
+              const rect = document.querySelector(selector).getBoundingClientRect();
+              return [selector, Object.fromEntries(
+                ['x', 'y', 'width', 'height'].map(key => [key, Math.round(rect[key] * 100) / 100])
+              )];
+            }))""",
+            selectors,
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        requests: list[str] = []
+        page.on(
+            "request",
+            lambda request: requests.append(urlsplit(request.url).path)
+            if "/api/v1/" in request.url
+            else None,
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"member_id": "member"}))
+        page.route("**/api/v1/task-home", lambda route: route.fulfill(json=home))
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+
+        page.goto(mini_app_url + "?ui=next&theme=dark#/tasks")
+        boundary = page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]')
+        boundary.wait_for()
+        assert boundary.get_by_text("Требуют вашего действия", exact=True).is_visible()
+        assert boundary.get_by_text("Проверить сценарий первого запуска", exact=False).count() == 0
+        assert boundary.get_by_text("18", exact=True).is_visible()
+        assert page.locator("#assignments-nav").is_hidden()
+        assert page.locator("#primary-navigation button:visible").count() == 3
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+        assert page.locator(".task-home button").evaluate_all(
+            "nodes => nodes.every(node => node.getBoundingClientRect().width >= 44 "
+            "&& node.getBoundingClientRect().height >= 44)"
+        )
+        dark_boxes = boxes(page)
+
+        page.goto(mini_app_url + "?ui=next&theme=light#/tasks")
+        boundary.wait_for()
+        assert page.evaluate("document.documentElement.dataset.theme") == "light"
+        assert boxes(page) == dark_boxes
+        assert requests.count("/api/v1/task-home") == 2
+        browser.close()
+
+
+def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(
+    mini_app_url: str,
+) -> None:
+    mode = {"value": "empty"}
+    attempts = 0
+
+    def task_home(route: Route) -> None:
+        nonlocal attempts
+        attempts += 1
+        if mode["value"] == "error":
+            route.fulfill(status=503, json={"code": "request_failed"})
+        else:
+            route.fulfill(
+                json=_task_home_payload(
+                    empty=mode["value"] == "empty",
+                    partial=mode["value"] == "partial",
+                )
+            )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"member_id": "member"}))
+        page.route("**/api/v1/task-home", task_home)
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(
+                json={"items": [_task_home_task()], "next_cursor": None}
+            ),
+        )
+
+        page.goto(mini_app_url + "?ui=next&theme=dark#/tasks")
+        page.locator('[data-screen-id="UX02"][data-state="content"]').wait_for()
+        assert page.get_by_text("Всё под контролем", exact=True).is_visible()
+        assert page.locator(".task-home-new").count() == 0
+
+        mode["value"] = "partial"
+        page.evaluate("localStorage.clear()")
+        page.reload()
+        page.locator('[data-screen-id="UX02"][data-state="partial"]').wait_for()
+        assert page.get_by_text("Часть данных временно недоступна.", exact=True).is_visible()
+        page.locator('[data-home-action="find"]').click()
+        page.locator('[data-screen-id="T01"]').wait_for()
+        assert page.url.endswith("#/catalog?view_state=t01")
+        page.locator("#catalog-nav").click()
+        page.locator('[data-screen-id="UX02"]').wait_for()
+        assert page.url.endswith("#/tasks")
+
+        mode["value"] = "error"
+        page.evaluate("localStorage.clear()")
+        page.reload()
+        page.locator('[data-screen-id="UX02"][data-state="error"]').wait_for()
+        mode["value"] = "empty"
+        page.get_by_role("button", name="Повторить", exact=True).click()
+        page.locator('[data-screen-id="UX02"][data-state="content"]').wait_for()
+        assert attempts >= 4
         browser.close()
 
 
@@ -1454,7 +1745,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         assert page.locator("body").inner_text().count(malicious) >= 4
         assert javascript_url in page.locator("body").inner_text()
         assert page.locator("img, a, [onerror], [onclick], [href^='javascript:']").count() == 0
-        assert page.locator("script").count() == 2
+        assert page.locator("script").count() == 3
         assert page.evaluate("globalThis.pwned") is None
         assert (
             page.evaluate(
@@ -1649,7 +1940,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         assert "PRIVATE_REASON" not in page.locator("body").inner_text()
         assert "PRIVATE_EVIDENCE" not in page.locator("body").inner_text()
         assert page.locator("img, [onerror], [onclick]").count() == 0
-        assert page.locator("script").count() == 2
+        assert page.locator("script").count() == 3
 
         page.get_by_role("button", name="Спор по заданию").click()
         page.get_by_role("heading", name="Решение по спору").wait_for()
@@ -1961,7 +2252,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         assert malicious in body
         assert private_marker not in body
         assert page.locator("img, [onerror], [onclick]").count() == 0
-        assert page.locator("script").count() == 2
+        assert page.locator("script").count() == 3
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         for editable_value in ("Буэнос-Айрес", "Помогаю собирать ясные планы."):
             assert page.get_by_text(editable_value, exact=True).count() == 1

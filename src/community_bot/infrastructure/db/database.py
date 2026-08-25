@@ -883,6 +883,16 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), response_id, for_update=for_update
         )
 
+    async def list_pending_task_cancellation_responses(
+        self, *, performer_id: UUID, limit: int
+    ) -> tuple[TaskCancellationResponse, ...]:
+        """Return pending cancellation decisions visible to one performer."""
+        return await cancellation_store.list_pending_responses(
+            self._require_session(),
+            performer_id=performer_id,
+            limit=limit,
+        )
+
     async def answer_task_cancellation(
         self, *, response_id: UUID, accepted: bool, now: datetime.datetime
     ) -> TaskCancellationResponse:

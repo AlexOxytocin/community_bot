@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 _MAX_OWNED_TASKS = 20
 _MAX_AVAILABLE_TASKS = 10
 _MAX_COMMUNITY_PUBLICATION_REQUESTS = 20
+_MAX_CANCELLATION_RESPONSES = 50
 _FORMAT_VALUE_SIZE = 2
 TaskCancellationStatus = Literal["cancelled", "pending", "closed", "declined", "obsolete"]
 
@@ -383,6 +384,9 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
     async def get_task_cancellation_response(
         self, response_id: UUID, *, for_update: bool = False
     ) -> TaskCancellationResponse | None: ...
+    async def list_pending_task_cancellation_responses(
+        self, *, performer_id: UUID, limit: int
+    ) -> tuple[TaskCancellationResponse, ...]: ...
     async def answer_task_cancellation(
         self, *, response_id: UUID, accepted: bool, now: datetime.datetime
     ) -> TaskCancellationResponse: ...
@@ -1580,6 +1584,22 @@ class TaskService:
                 f"task_cancel_request:{task.id}:{request_id}",
             )
             return TaskCancellationOutcome(task, request_id, "pending")
+
+    async def pending_cancellation_responses(
+        self,
+        *,
+        actor: ActorContext,
+        limit: int = 50,
+    ) -> tuple[TaskCancellationResponse, ...]:
+        """Return performer-owned cancellation responses that still need a decision."""
+        if not 1 <= limit <= _MAX_CANCELLATION_RESPONSES:
+            raise TaskError("Cancellation response page size must be between 1 and 50.")
+        async with self._unit_of_work_factory() as uow:
+            member = await _active_context_actor(uow, actor)
+            return await uow.list_pending_task_cancellation_responses(
+                performer_id=member.id,
+                limit=limit,
+            )
 
     async def respond_cancellation(
         self,

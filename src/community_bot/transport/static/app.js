@@ -1,6 +1,18 @@
-import { applyPlatformTheme, openExternalLink } from "/mini-assets/platform.js";
+const assetRelease = new URL(import.meta.url).searchParams.get("release") || "local";
+const {
+  applyPlatformTheme,
+  applyPreviewTheme,
+  getPreviewThemePreference,
+  openExternalLink,
+  watchSystemPreviewTheme,
+} = await import(`/mini-assets/platform.js?release=${encodeURIComponent(assetRelease)}`);
 
+const uiNextEnabled = new URLSearchParams(location.search).get("ui") === "next";
 applyPlatformTheme();
+if (uiNextEnabled) {
+  applyPreviewTheme();
+  watchSystemPreviewTheme();
+}
 
 const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
@@ -139,8 +151,11 @@ const setNavigation = (screen, context) => {
   shell.classList.toggle("catalog-screen", screen === "catalog");
   shell.classList.toggle("participants-screen", screen === "participants");
   shell.classList.toggle("profile-screen", screen === "profile");
+  shell.classList.toggle("task-home-screen", screen === "task-home");
+  document.body.classList.toggle("ui-next-tasks-home", screen === "task-home");
+  if (uiNextEnabled) assignmentsNav.hidden = true;
   shell.classList.remove("task-detail-screen");
-  catalogNav.setAttribute("aria-pressed", String(screen === "catalog"));
+  catalogNav.setAttribute("aria-pressed", String(screen === "catalog" || screen === "task-home"));
   profileNav.setAttribute("aria-pressed", String(screen === "profile"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
   participantsNav.setAttribute("aria-pressed", String(screen === "participants"));
@@ -3124,6 +3139,251 @@ async function bootstrap(authAttempted = false) {
   }
 }
 
+const taskHomeActionLabels = {
+  submit_result: "Сдать результат",
+  review_work: "Проверить работу",
+  answer_cancellation: "Ответить на отмену",
+};
+
+const taskHomeCount = (value, hasMore = false) => (
+  value === null || value === undefined ? "—" : `${value}${hasMore ? "+" : ""}`
+);
+
+const taskHomeIcon = (kind) => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = {
+    create: '<path d="M12 5v14M5 12h14"/>',
+    archive: '<path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/>',
+  }[kind];
+  return svg;
+};
+
+const taskHomeDestination = (target) => {
+  if (target === "created") return loadCreatedReviews();
+  return loadAssignments();
+};
+
+function showTaskHome(home, revision = ++screenRevision) {
+  if (revision !== screenRevision) return;
+  document.body.classList.remove("ui-next-preview");
+  setNavigation("task-home", false);
+  title.textContent = "Задания";
+  back.classList.add("hidden");
+  tasks = home.new_tasks;
+  const boundary = connectedBoundary("UX02", home.errors.length ? "partial" : "content");
+  boundary.dataset.uiEngine = "next-tasks-home";
+  boundary.classList.add("task-home");
+
+  const attention = element("section", undefined, "task-home-attention");
+  const attentionHeading = element("div", undefined, "task-home-attention-heading");
+  const attentionCopy = element("div", undefined, "task-home-attention-copy");
+  const totalAttention = home.attention.reduce((total, item) => total + item.count, 0);
+  attentionCopy.append(
+    element("p", "СЕЙЧАС", "task-home-eyebrow"),
+    element(
+      "h2",
+      totalAttention ? "Требуют вашего действия" : "Всё под контролем",
+      "task-home-attention-title",
+    ),
+  );
+  attentionHeading.append(
+    attentionCopy,
+    element("strong", String(totalAttention), "task-home-attention-count"),
+  );
+  attention.append(attentionHeading);
+  if (totalAttention) {
+    const actionList = element("div", undefined, "task-home-attention-list");
+    for (const item of home.attention.filter((candidate) => candidate.count > 0)) {
+      const action = element("button", undefined, "task-home-attention-action");
+      action.type = "button";
+      action.dataset.homeAttention = item.action;
+      action.append(
+        element("span", taskHomeActionLabels[item.action]),
+        element("span", String(item.count)),
+      );
+      action.addEventListener("click", () => taskHomeDestination(item.target));
+      actionList.append(action);
+    }
+    attention.append(actionList);
+  } else {
+    attention.append(element("p", "Новых действий сейчас нет.", "task-home-attention-empty"));
+  }
+  boundary.append(attention);
+
+  if (home.errors.length) {
+    const partial = element("div", undefined, "task-home-partial status");
+    partial.append(element("span", "Часть данных временно недоступна."));
+    const retry = element("button", "Обновить", "secondary");
+    retry.type = "button";
+    retry.addEventListener("click", () => {
+      clearJsonCache();
+      void loadTaskHome(false);
+    });
+    partial.append(retry);
+    boundary.append(partial);
+  }
+
+  const primaryActions = element("div", undefined, "task-home-primary-actions");
+  const find = element("button", undefined, "task-home-primary task-home-find");
+  find.type = "button";
+  find.dataset.homeAction = "find";
+  const findIcon = element("span", undefined, "task-home-action-icon");
+  findIcon.append(searchIcon());
+  find.append(
+    findIcon,
+    element("strong", "Найти задание"),
+    element(
+      "span",
+      home.available_count === null
+        ? "Список временно недоступен"
+        : `${taskHomeCount(home.available_count, home.available_has_more)} доступно`,
+    ),
+  );
+  find.disabled = home.available_count === null;
+  find.addEventListener("click", () => loadCatalog());
+
+  const create = element("button", undefined, "task-home-primary task-home-create");
+  create.type = "button";
+  create.dataset.homeAction = "create";
+  const createIcon = element("span", undefined, "task-home-action-icon");
+  createIcon.append(taskHomeIcon("create"));
+  create.append(
+    createIcon,
+    element("strong", "Создать новое"),
+    element("span", home.has_draft ? "Продолжить черновик" : "Новое за 2 минуты"),
+  );
+  create.disabled = home.can_create !== true;
+  create.addEventListener("click", () => beginTaskCreationFlow());
+  primaryActions.append(find, create);
+  boundary.append(primaryActions);
+
+  const work = element("div", undefined, "task-home-work-grid");
+  for (const [eyebrow, label, count, target] of [
+    ["В РАБОТЕ", "Вы выполняете", home.active_count, "taken"],
+    ["ОЖИДАНИЕ", "Ход за другими", home.waiting_count, "created"],
+  ]) {
+    const tile = element("button", undefined, "task-home-work-tile");
+    tile.type = "button";
+    tile.dataset.homeAction = target;
+    tile.append(
+      element("span", eyebrow, "task-home-work-eyebrow"),
+      element("strong", taskHomeCount(count), "task-home-work-count"),
+      element("span", label, "task-home-work-label"),
+    );
+    tile.disabled = count === null;
+    tile.addEventListener("click", () => taskHomeDestination(target));
+    work.append(tile);
+  }
+  boundary.append(work);
+
+  const archive = element("button", undefined, "task-home-archive");
+  archive.type = "button";
+  archive.dataset.homeAction = "archive";
+  const archiveIcon = element("span", undefined, "task-home-archive-icon");
+  archiveIcon.append(taskHomeIcon("archive"));
+  const archiveCopy = element("span", undefined, "task-home-archive-copy");
+  archiveCopy.append(
+    element("strong", "Архив заданий"),
+    element("span", "Завершённые, отменённые и истёкшие"),
+  );
+  archive.append(
+    archiveIcon,
+    archiveCopy,
+    element("strong", taskHomeCount(home.archive_count), "task-home-archive-count"),
+  );
+  archive.disabled = home.archive_count === null;
+  archive.addEventListener("click", () => loadCreatedReviews());
+  boundary.append(archive);
+
+  replaceContent(boundary);
+}
+
+async function loadTaskHome(push = true) {
+  const revision = ++screenRevision;
+  const path = "/api/v1/task-home";
+  const cached = cachedJson(path);
+  if (push || !location.hash.startsWith("#/tasks")) {
+    history.replaceState({ screen: "task-home" }, "", "#/tasks");
+  }
+  if (cached) showTaskHome(cached, revision);
+  else {
+    document.body.classList.remove("ui-next-preview");
+    setNavigation("task-home", false);
+    title.textContent = "Задания";
+    back.classList.add("hidden");
+    const loading = connectedBoundary("UX02", "loading");
+    loading.dataset.uiEngine = "next-tasks-home";
+    loading.classList.add("task-home", "task-home-loading");
+    loading.append(
+      element("div", undefined, "task-home-loading-attention"),
+      element("div", undefined, "task-home-loading-actions"),
+      element("div", undefined, "task-home-loading-list"),
+    );
+    replaceContent(loading);
+  }
+  try {
+    const home = await getJson(path, (refreshed) => {
+      if (revision === screenRevision) showTaskHome(refreshed, revision);
+    });
+    if (revision !== screenRevision || cached) return;
+    showTaskHome(home, revision);
+  } catch (error) {
+    if (revision !== screenRevision || cached) return;
+    const failure = connectedBoundary("UX02", "error");
+    failure.dataset.uiEngine = "next-tasks-home";
+    failure.classList.add("task-home", "task-home-error");
+    const retry = element("button", "Повторить", "primary");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadTaskHome(false));
+    failure.append(
+      element(
+        "p",
+        error.message === "session_expired"
+          ? "Сессия истекла. Откройте Mini App ещё раз."
+          : "Не удалось загрузить главный экран заданий.",
+        "status",
+      ),
+      retry,
+    );
+    replaceContent(failure);
+  }
+}
+
+async function bootstrapTaskHome(authAttempted = false) {
+  try {
+    const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
+    if (me.status === 401 && !authAttempted) {
+      const initData = globalThis.Telegram?.WebApp?.initData;
+      if (!initData) throw new Error("telegram_init_data_missing");
+      const auth = await apiFetch("/api/v1/auth/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: initData,
+        credentials: "same-origin",
+      });
+      if (!auth.ok) throw new Error("telegram_auth_failed");
+      return bootstrapTaskHome(true);
+    }
+    if (!me.ok) throw new Error("bootstrap_failed");
+    const profile = await me.json();
+    storeJson("/api/v1/me", profile);
+    currentMemberId = profile.member_id;
+    void configureRoleNavigation();
+    await loadTaskHome(false);
+  } catch {
+    setNavigation("task-home", false);
+    replaceContent(
+      element(
+        "p",
+        "Не удалось открыть главный экран заданий. Проверьте локальную сессию.",
+        "status",
+      ),
+    );
+  }
+}
+
 function showUiNextPreviewGate() {
   screenRevision += 1;
   document.body.classList.add("ui-next-preview");
@@ -3135,37 +3395,71 @@ function showUiNextPreviewGate() {
   boundary.dataset.uiEngine = "next-preview";
   boundary.classList.add("ui-next-gate");
   boundary.append(
-    element("p", "Этап 1 из 7 · CB-115", "badge"),
-    element("h2", "Контракт интерфейса заданий", "ui-next-gate-title"),
+    element("p", "Этап 2 из 7 · CB-116", "badge"),
+    element("h2", "Темы без изменения геометрии", "ui-next-gate-title"),
     element(
       "p",
-      "Новый renderer изолирован. Рабочий интерфейс без параметра ui=next не изменён.",
+      "Один layout переключается между системной, светлой и тёмной темами без перерендера.",
       "muted ui-next-gate-copy",
     ),
   );
 
+  const themeSetting = element("fieldset", undefined, "ui-next-theme-setting");
+  themeSetting.append(element("legend", "Тема интерфейса"));
+  const themeOptions = element("div", undefined, "ui-next-theme-options");
+  const preference = getPreviewThemePreference();
+  for (const [value, label] of [
+    ["system", "Системная"],
+    ["light", "Светлая"],
+    ["dark", "Тёмная"],
+  ]) {
+    const option = element("button", label);
+    option.type = "button";
+    option.dataset.themeChoice = value;
+    option.setAttribute("aria-pressed", String(preference === value));
+    option.addEventListener("click", () => {
+      const scroller = content.closest(".screen");
+      const scrollTop = scroller?.scrollTop ?? 0;
+      applyPreviewTheme(value);
+      const url = new URL(location.href);
+      url.searchParams.set("theme", value);
+      history.replaceState(history.state, "", url);
+      for (const button of themeOptions.querySelectorAll("button")) {
+        button.setAttribute("aria-pressed", String(button === option));
+      }
+      requestAnimationFrame(() => {
+        if (scroller) scroller.scrollTop = scrollTop;
+        option.focus({ preventScroll: true });
+      });
+    });
+    themeOptions.append(option);
+  }
+  themeSetting.append(themeOptions);
+  boundary.append(themeSetting);
+
   const facts = element("dl", undefined, "ui-next-contract-facts");
   for (const [label, value] of [
-    ["Task screens", "T01–T08"],
-    ["Work screens", "M01–M15"],
-    ["Источник действий", "Server-owned DTO"],
-    ["Preview URL", "?ui=next"],
+    ["Режимы", "system/light/dark"],
+    ["Палитры", "dark + light"],
+    ["Layout", "единый"],
+    ["Legacy UI", "без изменений"],
   ]) {
     facts.append(element("dt", label), element("dd", value));
   }
   boundary.append(facts);
 
   const stages = element("ol", undefined, "ui-next-stage-list");
-  for (const [name, status] of [
-    ["As-is parity contract и preview gate", "Готово к проверке"],
-    ["Theme foundation: system/light/dark", "Следующий этап"],
-    ["Главный экран заданий", "Запланировано"],
-    ["Каталог → карточка → принятие", "Запланировано"],
-    ["Создание задания", "Запланировано"],
-    ["Назначения → отправка → проверка", "Запланировано"],
-    ["Отмена, спор, архив и release-gate", "Запланировано"],
+  for (const [name, status, state] of [
+    ["As-is parity contract и preview gate", "Готово", "completed"],
+    ["Theme foundation: system/light/dark", "Готово", "completed"],
+    ["Главный экран заданий", "В работе", "current"],
+    ["Каталог → карточка → принятие", "Запланировано", "planned"],
+    ["Создание задания", "Запланировано", "planned"],
+    ["Назначения → отправка → проверка", "Запланировано", "planned"],
+    ["Отмена, спор, архив и release-gate", "Запланировано", "planned"],
   ]) {
     const item = element("li", undefined, "ui-next-stage-item");
+    item.dataset.stageState = state;
     item.append(element("span", name), element("span", status));
     stages.append(item);
   }
@@ -3183,7 +3477,8 @@ function showUiNextPreviewGate() {
 }
 
 catalogNav.addEventListener("click", () => {
-  void loadCatalog();
+  if (uiNextEnabled) void loadTaskHome();
+  else void loadCatalog();
 });
 assignmentsNav.addEventListener("click", () => loadAssignments());
 participantsNav.addEventListener("click", () => loadParticipants("members"));
@@ -3219,7 +3514,9 @@ back.addEventListener("click", () => {
   }
 });
 globalThis.addEventListener("popstate", (event) => {
-  if (event.state?.screen === "participants") {
+  if (event.state?.screen === "task-home") {
+    void loadTaskHome(false);
+  } else if (event.state?.screen === "participants") {
     loadParticipants(event.state.view || "members", event.state.period || "week");
   } else if (event.state?.screen === "task") {
     const task = tasks.find((item) => item.id === event.state.taskId);
@@ -3253,11 +3550,12 @@ globalThis.addEventListener("popstate", (event) => {
   }
 });
 globalThis.addEventListener("hashchange", () => {
-  if (new URLSearchParams(location.search).get("ui") === "next") return;
+  if (uiNextEnabled) return;
   if (!presentationFromLocation() && !/^#\/profile(?:\/.*)?$/.test(location.hash) && !/^#\/members\/[0-9a-f-]{36}$/i.test(location.hash)) {
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
     void loadCatalog(false);
   }
 });
-if (new URLSearchParams(location.search).get("ui") === "next") showUiNextPreviewGate();
+if (uiNextEnabled && location.hash.startsWith("#/theme")) showUiNextPreviewGate();
+else if (uiNextEnabled) void bootstrapTaskHome();
 else bootstrap();
