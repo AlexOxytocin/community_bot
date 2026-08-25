@@ -852,6 +852,20 @@ def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: 
         skill_input.fill("python")
         page.get_by_role("button", name="Добавить навык").click()
         assert page.get_by_text("Такой навык уже добавлен.", exact=True).is_visible()
+        page.get_by_role("button", name="Сохранить", exact=True).click()
+        page.get_by_role("heading", name="Alex Oxitocin").wait_for()
+        assert mutation_requests[-1] == {
+            "field": "skill_tags",
+            "value": "\n".join(me["skill_tags"]),
+        }
+        assert page.locator(".profile-chips span").all_text_contents() == [
+            "AI agents",
+            "Python",
+            "Архитектура",
+        ]
+        page.goto(mini_app_url + "?case=skills-limit#/profile/edit/skills")
+        skill_input = page.locator('input[maxlength="50"]')
+        skill_input.wait_for()
         assert page.evaluate(
             "document.documentElement.scrollWidth === document.documentElement.clientWidth"
         )
