@@ -164,9 +164,7 @@ def test_ui_next_preview_gate_isolated_from_legacy_bootstrap(
         api_requests: list[str] = []
         preview.on(
             "request",
-            lambda request: api_requests.append(request.url)
-            if "/api/v1/" in request.url
-            else None,
+            lambda request: api_requests.append(request.url) if "/api/v1/" in request.url else None,
         )
         preview.goto(mini_app_url + "?ui=next#/theme")
         gate = preview.locator('[data-screen-id="UX01"][data-ui-engine="next-preview"]')
@@ -281,9 +279,12 @@ def test_ui_next_theme_switch_preserves_geometry_route_scroll_and_focus(
         page.goto(mini_app_url + "?ui=next&theme=dark#/theme-check")
         page.locator('[data-screen-id="UX01"]').wait_for()
         assert page.evaluate("document.documentElement.dataset.theme") == "dark"
-        assert page.evaluate(
-            "getComputedStyle(document.documentElement).getPropertyValue('--app-background').trim()"
-        ) == "#070807"
+        assert (
+            page.evaluate(
+                "getComputedStyle(document.documentElement).getPropertyValue('--app-background').trim()"
+            )
+            == "#070807"
+        )
         screen_scroll = page.locator(".screen").evaluate(
             """node => {
               node.scrollTop = Math.min(45, node.scrollHeight - node.clientHeight);
@@ -307,9 +308,12 @@ def test_ui_next_theme_switch_preserves_geometry_route_scroll_and_focus(
         assert page.locator(".screen").evaluate("node => node.scrollTop") == screen_scroll
         assert light.evaluate("node => node === document.activeElement")
         assert boxes(page) == dark_boxes
-        assert page.evaluate(
-            "getComputedStyle(document.documentElement).getPropertyValue('--app-background').trim()"
-        ) == "#fbf8f6"
+        assert (
+            page.evaluate(
+                "getComputedStyle(document.documentElement).getPropertyValue('--app-background').trim()"
+            )
+            == "#fbf8f6"
+        )
         assert page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
@@ -317,9 +321,10 @@ def test_ui_next_theme_switch_preserves_geometry_route_scroll_and_focus(
         page.goto(mini_app_url + "?ui=next#/theme")
         page.locator('[data-screen-id="UX01"]').wait_for()
         assert page.evaluate("document.documentElement.dataset.theme") == "light"
-        assert page.get_by_role("button", name="Светлая", exact=True).get_attribute(
-            "aria-pressed"
-        ) == "true"
+        assert (
+            page.get_by_role("button", name="Светлая", exact=True).get_attribute("aria-pressed")
+            == "true"
+        )
         browser.close()
 
 
@@ -391,9 +396,9 @@ def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(
         requests: list[str] = []
         page.on(
             "request",
-            lambda request: requests.append(urlsplit(request.url).path)
-            if "/api/v1/" in request.url
-            else None,
+            lambda request: (
+                requests.append(urlsplit(request.url).path) if "/api/v1/" in request.url else None
+            ),
         )
         page.route("**/api/v1/me", lambda route: route.fulfill(json={"member_id": "member"}))
         page.route("**/api/v1/task-home", lambda route: route.fulfill(json=home))
@@ -457,9 +462,7 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(
         )
         page.route(
             "**/api/v1/tasks",
-            lambda route: route.fulfill(
-                json={"items": [_task_home_task()], "next_cursor": None}
-            ),
+            lambda route: route.fulfill(json={"items": [_task_home_task()], "next_cursor": None}),
         )
 
         page.goto(mini_app_url + "?ui=next&theme=dark#/tasks")

@@ -870,7 +870,7 @@ async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
         assert (
             await client.post(
                 "/api/v1/auth/telegram",
-                content=proof(member.telegram_user_id, now=now),
+                content=proof(member.telegram_user_id, now=now + datetime.timedelta(seconds=1)),
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
         ).status_code == 204

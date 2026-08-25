@@ -908,9 +908,7 @@ def create_web_app(
             if active_items is None
             else sum(card.assignment.status is AssignmentStatus.ACCEPTED for card in active_items)
         )
-        waiting = (
-            None if active_items is None else len(active_items) - cast("int", in_progress)
-        )
+        waiting = None if active_items is None else len(active_items) - cast("int", in_progress)
         archived_statuses = {
             TaskStatus.EXPIRED,
             TaskStatus.PARTIALLY_COMPLETED,
