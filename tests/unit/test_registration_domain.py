@@ -135,6 +135,13 @@ def test_help_categories_accept_human_sized_descriptions() -> None:
     )
 
 
+def test_profile_skills_accept_separate_lines_without_merging_items() -> None:
+    assert normalize_profile_value(
+        ProfileField.SKILL_TAGS,
+        "AI agents\n Architecture \nProgramming\nReview\nai AGENTS",
+    ) == ("AI agents", "Architecture", "Programming", "Review")
+
+
 @pytest.mark.parametrize(
     ("location", "expected"),
     [

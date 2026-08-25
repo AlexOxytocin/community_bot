@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
@@ -340,7 +341,7 @@ def _normalized_list(
 ) -> tuple[str, ...]:
     items: list[str] = []
     seen: set[str] = set()
-    for raw_item in raw_value.split(","):
+    for raw_item in re.split(r"[,\n]+", raw_value):
         item = " ".join(raw_item.split())
         identity = item.casefold()
         if not item or identity in seen:

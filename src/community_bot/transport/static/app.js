@@ -51,20 +51,13 @@ const element = (tag, text, className) => {
   return node;
 };
 
-const interfaceIcon = (name) => {
+const trashIcon = () => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
-  svg.innerHTML = {
-    "arrow-up-right": '<path d="M6 18 18 6M9 6h9v9"/>',
-    pencil: '<path d="m6 18 1-5L16 4l4 4-9 9-5 1Z"/><path d="m14 6 4 4"/>',
-    "trash-2": '<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>',
-    x: '<path d="m6 6 12 12M18 6 6 18"/>',
-  }[name] || "";
+  svg.innerHTML = '<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>';
   return svg;
 };
-
-const trashIcon = () => interfaceIcon("trash-2");
 
 const markTransition = (node, id, trigger) => {
   node.dataset.transitionId = id;
@@ -875,8 +868,7 @@ const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
 const pencilButton = (label, route, state, revision, key) => {
-  const button = element("button", undefined, "profile-pencil");
-  button.append(interfaceIcon("pencil"));
+  const button = element("button", "✎", "profile-pencil");
   button.type = "button";
   button.dataset.profileAction = key;
   button.setAttribute("aria-label", `Редактировать ${label.toLowerCase()}`);
@@ -893,11 +885,7 @@ const openPublicUrl = (url, options = {}) => {
 const publicLinkRow = (link) => {
   const button = element("button", undefined, "public-link-row");
   button.type = "button";
-  button.append(
-    element("strong", link.label),
-    element("span", link.url),
-    interfaceIcon("arrow-up-right"),
-  );
+  button.append(element("strong", link.label), element("span", link.url), element("span", "↗"));
   button.addEventListener("click", () => openPublicUrl(link.url));
   return button;
 };
@@ -1033,8 +1021,7 @@ function profileSkillsEditor(state, revision) {
     list.replaceChildren();
     draft.items.forEach((item, index) => {
       const skill = element("div", undefined, "skill-draft-row");
-      const remove = element("button", undefined, "skill-remove");
-      remove.append(interfaceIcon("x"));
+      const remove = element("button", "×", "skill-remove");
       remove.type = "button";
       remove.setAttribute("aria-label", `Удалить навык ${item}`);
       remove.addEventListener("click", () => { draft.items.splice(index, 1); draft.operationKey = null; renderItems(); });
@@ -1094,8 +1081,7 @@ function profileLinksList(state, revision) {
     const row = element("div", undefined, "managed-link-row");
     row.append(element("div", undefined, "managed-link-copy"));
     row.firstChild.append(element("strong", link.label), element("span", link.url));
-    const edit = element("button", undefined, "profile-pencil");
-    edit.append(interfaceIcon("pencil"));
+    const edit = element("button", "✎", "profile-pencil");
     edit.type = "button";
     edit.dataset.linkId = link.id;
     edit.setAttribute("aria-label", `Изменить ссылку ${link.label}`);
