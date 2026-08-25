@@ -28,8 +28,7 @@ jobs:
         env:
           HOST: ${{ vars.DEV_DEPLOY_HOST }}
           USER: ${{ vars.DEV_DEPLOY_USER }}
-          PUSHED_AT: ${{ github.event.repository.pushed_at }}
         run: |
           set -euo pipefail
-          started="$PUSHED_AT"
+          started="$(date +%s)"
           ssh -i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "${USER}@${HOST}" "deploy ${GITHUB_SHA} ${started}"

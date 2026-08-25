@@ -95,6 +95,8 @@ def test_ci_and_deploy_use_one_bounded_manual_dev_path() -> None:
     assert publication["concurrency"]["cancel-in-progress"] is False
     assert set(publication["jobs"]) == {"deploy"}
     assert "DEV_DEPLOY_SSH_PRIVATE_KEY" in release
+    assert 'started="$(date +%s)"' in release
+    assert "PUSHED_AT" not in release
 
 
 def test_host_maintenance_surface_is_python_and_data_only() -> None:
