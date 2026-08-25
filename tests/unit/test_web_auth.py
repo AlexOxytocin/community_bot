@@ -67,6 +67,7 @@ class FakeDatabase:
         self.member_id = uuid4()
         self.created_digest: bytes | None = None
         self.created_sessions: list[dict[str, object]] = []
+        self.consumed_proofs: set[bytes] = set()
         self.fail_create = False
         self.resolve_member = False
         self.return_member = True
@@ -78,6 +79,11 @@ class FakeDatabase:
     async def create_web_session(self, **values: object) -> object:
         if self.fail_create:
             raise SQLAlchemyError
+        proof_digest = values["proof_digest"]
+        assert isinstance(proof_digest, bytes)
+        if proof_digest in self.consumed_proofs:
+            return None
+        self.consumed_proofs.add(proof_digest)
         digest = values["token_digest"]
         assert isinstance(digest, bytes)
         self.created_digest = digest
@@ -539,18 +545,21 @@ async def test_auth_issues_exact_cookie_without_exposing_raw_token(
     assert "__Host-community_session=" in cookie
     assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
     assert "Path=/" in cookie and "Max-Age=2592000" in cookie and "Domain=" not in cookie
-    assert response.headers["set-cookie"] != repeated.headers["set-cookie"]
+    assert repeated.status_code == 401
+    assert "set-cookie" not in repeated.headers
     assert [session["token_digest"] for session in database.created_sessions] == [
         hashlib.sha256(b"x" * 32).digest(),
-        hashlib.sha256(b"y" * 32).digest(),
     ]
+    assert (
+        database.created_sessions[0]["proof_digest"] == hashlib.sha256(_proof(1, now=now)).digest()
+    )
     assert all(
         cast("datetime.datetime", session["expires_at"])
         - cast("datetime.datetime", session["authenticated_at"])
         == datetime.timedelta(days=30)
         for session in database.created_sessions
     )
-    assert b"x" * 32 not in response.content and b"y" * 32 not in repeated.content
+    assert b"x" * 32 not in response.content
 
     database.return_member = False
     async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
