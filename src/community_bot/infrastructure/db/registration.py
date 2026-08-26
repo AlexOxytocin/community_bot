@@ -44,11 +44,6 @@ _REQUIRED_PROFILE_FIELDS = {
     ProfileField.DISPLAY_NAME.value,
     ProfileField.CITY.value,
     ProfileField.TIMEZONE.value,
-    ProfileField.SHORT_BIO.value,
-    ProfileField.CURRENT_GOAL.value,
-    ProfileField.HELP_CATEGORIES.value,
-    ProfileField.SKILL_TAGS.value,
-    ProfileField.AVAILABILITY.value,
 }
 
 
@@ -226,6 +221,24 @@ async def save_registration_answer(
     return _registration_context(member, application, state)
 
 
+async def rewind_registration_step(
+    session: AsyncSession,
+    *,
+    member_id: UUID,
+    previous_step: RegistrationStep,
+) -> RegistrationContext:
+    """Move one editable registration draft back without discarding its answers."""
+    member, application, state = await _locked_registration_rows(session, member_id)
+    if application.status != RegistrationApplicationStatus.DRAFT.value:
+        message = "Only a registration draft can move to a previous step."
+        raise RegistrationError(message)
+    state.current_step = previous_step.value
+    state.flow_type = "registration"
+    state.updated_at = datetime.now(UTC)
+    await session.flush()
+    return _registration_context(member, application, state)
+
+
 async def submit_registration(
     session: AsyncSession,
     member_id: UUID,
@@ -261,6 +274,23 @@ async def reopen_rejected_registration(
     application.status = RegistrationApplicationStatus.DRAFT.value
     state.flow_type = "registration"
     state.current_step = RegistrationStep.PREVIEW.value
+    state.updated_at = datetime.now(UTC)
+    await session.flush()
+    return _registration_context(member, application, state)
+
+
+async def restart_rejected_registration(
+    session: AsyncSession,
+    member_id: UUID,
+) -> RegistrationContext:
+    """Move a rejected application back to the first editable profile field."""
+    member, application, state = await _locked_registration_rows(session, member_id)
+    if application.status != RegistrationApplicationStatus.REJECTED.value:
+        message = "Only a rejected registration can be restarted."
+        raise RegistrationError(message)
+    application.status = RegistrationApplicationStatus.DRAFT.value
+    state.flow_type = "registration"
+    state.current_step = RegistrationStep.DISPLAY_NAME.value
     state.updated_at = datetime.now(UTC)
     await session.flush()
     return _registration_context(member, application, state)
@@ -635,11 +665,12 @@ def _copy_payload_to_member(member: MemberModel, payload: dict[str, object]) -> 
     member.display_name = str(payload[ProfileField.DISPLAY_NAME.value])
     member.city = str(payload[ProfileField.CITY.value])
     member.timezone = str(payload[ProfileField.TIMEZONE.value])
-    member.short_bio = str(payload[ProfileField.SHORT_BIO.value])
-    member.current_goal = str(payload[ProfileField.CURRENT_GOAL.value])
-    member.help_categories_json = _string_list(payload[ProfileField.HELP_CATEGORIES.value])
-    member.skill_tags_json = _string_list(payload[ProfileField.SKILL_TAGS.value])
-    member.availability = str(payload[ProfileField.AVAILABILITY.value])
+    short_bio = str(payload.get(ProfileField.SHORT_BIO.value, "")).strip()
+    member.short_bio = short_bio or None
+    member.current_goal = None
+    member.help_categories_json = []
+    member.skill_tags_json = _string_list(payload.get(ProfileField.SKILL_TAGS.value, ()))
+    member.availability = None
 
 
 def _set_member_profile_field(

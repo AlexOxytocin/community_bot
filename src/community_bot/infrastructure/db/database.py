@@ -1131,6 +1131,19 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             next_step=next_step,
         )
 
+    async def rewind_registration_step(
+        self,
+        *,
+        member_id: UUID,
+        previous_step: RegistrationStep,
+    ) -> RegistrationContext:
+        """Move one registration draft to its previous editable step."""
+        return await registration_store.rewind_registration_step(
+            self._require_session(),
+            member_id=member_id,
+            previous_step=previous_step,
+        )
+
     async def submit_registration(self, member_id: UUID) -> RegistrationContext:
         """Submit one complete registration draft."""
         return await registration_store.submit_registration(self._require_session(), member_id)
@@ -1138,6 +1151,12 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     async def reopen_rejected_registration(self, member_id: UUID) -> RegistrationContext:
         """Reopen one rejected registration."""
         return await registration_store.reopen_rejected_registration(
+            self._require_session(), member_id
+        )
+
+    async def restart_rejected_registration(self, member_id: UUID) -> RegistrationContext:
+        """Restart one rejected registration at its first editable field."""
+        return await registration_store.restart_rejected_registration(
             self._require_session(), member_id
         )
 

@@ -37,7 +37,11 @@ from community_bot.application.assignments import (
     DecideAssignmentCommand,
     SaveSubmissionDraftCommand,
 )
-from community_bot.application.cities import TaskCityError, search_task_cities
+from community_bot.application.cities import (
+    TaskCityError,
+    canonical_city_and_timezone,
+    search_task_cities,
+)
 from community_bot.application.identity import ActorContext
 from community_bot.application.moderation import (
     ModerationApplicationError,
@@ -46,7 +50,15 @@ from community_bot.application.moderation import (
     ModerationService,
     ResolveCaseCommand,
 )
-from community_bot.application.registration import ProfileSnapshot, RegistrationService
+from community_bot.application.registration import (
+    InviteTokenCodec,
+    ProfileSnapshot,
+    RegistrationAnswerCommand,
+    RegistrationContext,
+    RegistrationService,
+    RegistrationStartCommand,
+    RegistrationView,
+)
 from community_bot.application.reputation import (
     KarmaDraft,
     KarmaVoteResult,
@@ -81,7 +93,9 @@ from community_bot.domain.registration import (
     ProfileField,
     ProfileLinkAction,
     ProfileLinkCommand,
+    RegistrationApplicationStatus,
     RegistrationError,
+    RegistrationStep,
     StaleRegistrationStepError,
     normalize_profile_link_command,
 )
@@ -105,6 +119,7 @@ _PROOF_MAX_BYTES = 8192
 _PROOF_MAX_FIELDS = 32
 _MAX_TELEGRAM_USER_ID = 2**63 - 1
 _TELEGRAM_USERNAME = re.compile(r"^[A-Za-z0-9_]{5,32}$")
+_INVITATION_TOKEN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _MAX_IDEMPOTENCY_KEY = 2**63 - 1
 _SUBMISSION_BODY_MAX_BYTES = 4096
 _STATIC_DIR = Path(__file__).with_name("static")
@@ -114,9 +129,12 @@ _PUBLIC_ERROR_CODES = frozenset(
         "invalid_idempotency_key",
         "invalid_origin",
         "invalid_request",
+        "invalid_invitation",
         "invalid_task_city",
+        "invitation_required",
         "karma_vote_unavailable",
         "not_found",
+        "onboarding_unavailable",
         "profile_unavailable",
         "assignment_unavailable",
         "task_catalog_unavailable",
@@ -135,6 +153,7 @@ class TelegramIdentity:
 
     user_id: int
     username: str | None
+    display_name: str = "Новый участник"
 
 
 class LevelDto(_Dto):
@@ -158,6 +177,7 @@ class MeDto(_Dto):
     telegram_username: str | None
     display_name: str
     city: str | None
+    timezone: str
     short_bio: str | None
     skill_tags: tuple[str, ...]
     profile_links: tuple[ProfileLinkDto, ...]
@@ -165,6 +185,19 @@ class MeDto(_Dto):
     experience_total: int
     level: LevelDto
     statistics: ProfileStatisticsDto
+
+
+class OnboardingDto(_Dto):
+    outcome: str
+    application_status: RegistrationApplicationStatus
+    step: RegistrationStep
+    payload: dict[str, object]
+    review_comment: str | None
+
+
+class OnboardingAnswerRequest(_Dto):
+    step: RegistrationStep
+    value: str = Field(max_length=2000)
 
 
 class ProfileUpdateRequest(_Dto):
@@ -261,6 +294,7 @@ class TaskDto(_Dto):
     minimum_level: int
     format: str
     city: str | None
+    created_at: datetime.datetime
     deadline_at: datetime.datetime
     status: str
     description: str
@@ -275,18 +309,37 @@ class TasksDto(_Dto):
     next_cursor: UUID | None
 
 
+class TaskHomeActionItemDto(_Dto):
+    id: UUID
+    title: str
+    context: str | None = None
+    status: str | None = None
+    started_at: datetime.datetime | None = None
+    deadline_at: datetime.datetime | None = None
+
+
 class TaskHomeAttentionDto(_Dto):
     action: Literal["submit_result", "review_work", "answer_cancellation"]
     count: int = Field(ge=0)
     target: Literal["taken", "created", "cancellations"]
+    items: tuple[TaskHomeActionItemDto, ...] = ()
+
+
+class TaskHomeWaitingDto(_Dto):
+    action: Literal["performer_work", "work_review", "external_decision"]
+    count: int = Field(ge=0)
+    target: Literal["taken", "created"]
 
 
 class TaskHomeDto(_Dto):
     attention: tuple[TaskHomeAttentionDto, ...]
+    waiting_on_others: tuple[TaskHomeWaitingDto, ...]
     available_count: int | None = Field(default=None, ge=0)
     available_has_more: bool = False
     can_create: bool | None = None
     has_draft: bool | None = None
+    taken_count: int | None = Field(default=None, ge=0)
+    created_count: int | None = Field(default=None, ge=0)
     active_count: int | None = Field(default=None, ge=0)
     waiting_count: int | None = Field(default=None, ge=0)
     archive_count: int | None = Field(default=None, ge=0)
@@ -303,8 +356,17 @@ class OwnedTaskDto(_Dto):
     id: UUID
     title: str
     status: str
+    created_at: datetime.datetime
+    category_name: str | None
+    task_kind: str | None
+    time_size: str | None
+    format: str
+    city: str | None
+    credit_reward_per_performer: int
+    minimum_level: int
     performer_slots: int
     deadline_at: datetime.datetime
+    archived_at: datetime.datetime | None
     assignees: tuple[OwnedTaskAssigneeDto, ...]
     cancellation_status: str | None
     cancellation_action: Literal["cancel", "request"] | None
@@ -331,6 +393,16 @@ class AssignmentCardDto(_Dto):
     task_id: UUID
     task_title: str
     task_origin: str
+    created_at: datetime.datetime
+    category_name: str | None
+    task_kind: str | None
+    time_size: str | None
+    format: str
+    city: str | None
+    credit_reward_per_performer: int
+    performer_slots: int
+    minimum_level: int
+    deadline_at: datetime.datetime
     assignment_status: str
     accepted_at: datetime.datetime
     submitted_at: datetime.datetime | None
@@ -349,6 +421,7 @@ class AssignmentsDto(_Dto):
 
 class AssignmentReviewDto(_Dto):
     id: UUID
+    task_id: UUID
     task_title: str
     performer_display_name: str
     submitted_at: datetime.datetime
@@ -367,7 +440,7 @@ class AssignmentDecisionRequest(_Dto):
 
 class AssignmentDisputeRequest(_Dto):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    comment: str = Field(min_length=1)
+    comment: str = Field(min_length=10, max_length=1000)
 
 
 class AssignmentCancellationRequest(_Dto):
@@ -499,7 +572,15 @@ def create_web_app(
     bot_token, origin = _web_config(settings)
     secure_cookie = origin.startswith("https://")
     cookie_name = _COOKIE_NAME if secure_cookie else _LOCAL_COOKIE_NAME
-    registration = RegistrationService(database.unit_of_work)
+    invite_secret = (
+        None
+        if settings.invite_token_secret is None
+        else settings.invite_token_secret.get_secret_value()
+    )
+    registration = RegistrationService(
+        database.unit_of_work,
+        None if invite_secret is None else InviteTokenCodec(invite_secret),
+    )
     reputation = ReputationService(database.unit_of_work)
     tasks = TaskService(database.unit_of_work)
     assignments = AssignmentService(database.unit_of_work)
@@ -615,6 +696,24 @@ def create_web_app(
             identity = validate_telegram_init_data(raw, bot_token=bot_token)
         except (TypeError, ValueError):
             return _error_response(401, "unauthorized")
+        invitation_token = request.headers.get("x-community-invitation")
+        if invitation_token is not None:
+            if _INVITATION_TOKEN.fullmatch(invitation_token) is None:
+                return _error_response(422, "invalid_request")
+            try:
+                await registration.start(
+                    RegistrationStartCommand(
+                        update_id=_registration_update_id(raw),
+                        telegram_user_id=identity.user_id,
+                        telegram_username=identity.username,
+                        telegram_display_name=identity.display_name,
+                        invitation_token=invitation_token,
+                    )
+                )
+            except RegistrationError:
+                return _error_response(403, "invalid_invitation")
+            except (RuntimeError, SQLAlchemyError):
+                return _error_response(503, "onboarding_unavailable")
         return await issue_session(
             identity,
             Response(status_code=204, headers={"Cache-Control": "no-store"}),
@@ -623,11 +722,36 @@ def create_web_app(
 
     local_review_user_id = settings.local_review_telegram_user_id
     if not secure_cookie and local_review_user_id is not None:
+        local_review_invitation = (
+            None
+            if settings.local_review_invitation_token is None
+            else settings.local_review_invitation_token.get_secret_value()
+        )
 
         @app.get("/local-review", include_in_schema=False)
         async def local_review() -> Response:
+            identity = TelegramIdentity(local_review_user_id, None, "Тестовый участник")
+            if local_review_invitation is not None:
+                if _INVITATION_TOKEN.fullmatch(local_review_invitation) is None:
+                    return _error_response(503, "onboarding_unavailable")
+                try:
+                    await registration.start(
+                        RegistrationStartCommand(
+                            update_id=_registration_update_id(
+                                f"local-review:{local_review_user_id}:{local_review_invitation}".encode()
+                            ),
+                            telegram_user_id=identity.user_id,
+                            telegram_username=identity.username,
+                            telegram_display_name=identity.display_name,
+                            invitation_token=local_review_invitation,
+                        )
+                    )
+                except RegistrationError:
+                    return _error_response(403, "invalid_invitation")
+                except (RuntimeError, SQLAlchemyError):
+                    return _error_response(503, "onboarding_unavailable")
             return await issue_session(
-                TelegramIdentity(local_review_user_id, None),
+                identity,
                 RedirectResponse(url="/", status_code=303),
             )
 
@@ -661,6 +785,119 @@ def create_web_app(
         except (PermissionError, ProfileUnavailableError) as error:
             raise HTTPException(status_code=403, detail="profile_unavailable") from error
         return _json_response(_me_dto(profile, statistics))
+
+    @app.get("/api/v1/onboarding", response_model=OnboardingDto)
+    async def onboarding(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
+        try:
+            view = await registration.status_for_actor(actor)
+        except (LookupError, RegistrationError) as error:
+            raise HTTPException(status_code=404, detail="not_found") from error
+        return _json_response(_onboarding_dto(view))
+
+    @app.post("/api/v1/onboarding/answer", response_model=OnboardingDto)
+    async def answer_onboarding(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        if request.headers.get("content-type", "").lower() != "application/json":
+            return _error_response(422, "invalid_request")
+        try:
+            body = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
+            command = OnboardingAnswerRequest.model_validate_json(body)
+            current = await registration.status_for_actor(actor)
+            context = _required_registration_context(current)
+            view = await registration.answer(
+                RegistrationAnswerCommand(
+                    update_id=_submission_update_id(
+                        actor.member_id,
+                        actor.member_id,
+                        f"answer:{command.step.value}",
+                        operation_key,
+                        namespace=b"web-onboarding-v1",
+                    ),
+                    telegram_user_id=context.telegram_user_id,
+                    expected_step=command.step,
+                    raw_value=command.value,
+                )
+            )
+        except (OverflowError, ValidationError, RegistrationError, ValueError):
+            return _error_response(422, "invalid_request")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_onboarding_dto(view))
+
+    @app.post("/api/v1/onboarding/submit", response_model=OnboardingDto)
+    async def submit_onboarding(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        try:
+            current = await registration.status_for_actor(actor)
+            context = _required_registration_context(current)
+            view = await registration.submit(
+                update_id=_submission_update_id(
+                    actor.member_id,
+                    actor.member_id,
+                    "submit",
+                    operation_key,
+                    namespace=b"web-onboarding-v1",
+                ),
+                telegram_user_id=context.telegram_user_id,
+            )
+        except RegistrationError:
+            return _error_response(422, "invalid_request")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_onboarding_dto(view))
+
+    @app.post("/api/v1/onboarding/back", response_model=OnboardingDto)
+    async def back_onboarding(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        try:
+            current = await registration.status_for_actor(actor)
+            context = _required_registration_context(current)
+            view = await registration.back(
+                update_id=_submission_update_id(
+                    actor.member_id,
+                    actor.member_id,
+                    "back",
+                    operation_key,
+                    namespace=b"web-onboarding-v1",
+                ),
+                telegram_user_id=context.telegram_user_id,
+            )
+        except RegistrationError:
+            return _error_response(409, "onboarding_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_onboarding_dto(view))
+
+    @app.post("/api/v1/onboarding/reopen", response_model=OnboardingDto)
+    async def reopen_onboarding(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        try:
+            current = await registration.status_for_actor(actor)
+            context = _required_registration_context(current)
+            view = await registration.reopen_rejected(
+                update_id=_submission_update_id(
+                    actor.member_id,
+                    actor.member_id,
+                    "reopen",
+                    operation_key,
+                    namespace=b"web-onboarding-v1",
+                ),
+                telegram_user_id=context.telegram_user_id,
+                restart=True,
+            )
+        except RegistrationError:
+            return _error_response(409, "onboarding_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_onboarding_dto(view))
 
     @app.put("/api/v1/me/profile", response_model=MeDto)
     async def update_me(request: Request) -> JSONResponse:
@@ -886,21 +1123,132 @@ def create_web_app(
             errors.append("cancellations")
 
         active_items = None if active is None else active.items
+        active_by_assignment_id = {
+            card.assignment.id: card for card in (() if active_items is None else active_items)
+        }
+        submit_items = tuple(
+            TaskHomeActionItemDto(
+                id=card.assignment.id,
+                title=card.task_title,
+                context="Сообщество" if card.task_origin == "community" else "От участника",
+                status=card.assignment.status.value,
+                started_at=card.assignment.accepted_at,
+                deadline_at=card.task.deadline_at,
+            )
+            for card in (() if active_items is None else active_items)
+            if card.can_submit
+        )
+        review_items = tuple(
+            TaskHomeActionItemDto(
+                id=card.assignment.id,
+                title=card.task_title,
+                context=card.performer_display_name,
+                status=card.assignment.status.value,
+                started_at=card.assignment.submitted_at,
+                deadline_at=card.assignment.review_deadline_at,
+            )
+            for card in (() if reviews is None else reviews)
+        )
+        cancellation_items = tuple(
+            TaskHomeActionItemDto(
+                id=response.assignment_id,
+                title=(
+                    active_by_assignment_id[response.assignment_id].task_title
+                    if response.assignment_id in active_by_assignment_id
+                    else "Запрос на отмену задания"
+                ),
+                context=(
+                    active_by_assignment_id[response.assignment_id].performer_display_name
+                    if response.assignment_id in active_by_assignment_id
+                    else None
+                ),
+                status="cancellation_pending",
+                started_at=(
+                    active_by_assignment_id[response.assignment_id].assignment.accepted_at
+                    if response.assignment_id in active_by_assignment_id
+                    else None
+                ),
+                deadline_at=(
+                    active_by_assignment_id[response.assignment_id].task.deadline_at
+                    if response.assignment_id in active_by_assignment_id
+                    else None
+                ),
+            )
+            for response in (() if cancellations is None else cancellations)
+        )
         attention = (
             TaskHomeAttentionDto(
                 action="submit_result",
-                count=0 if active_items is None else sum(card.can_submit for card in active_items),
+                count=len(submit_items),
                 target="taken",
+                items=submit_items,
             ),
             TaskHomeAttentionDto(
                 action="review_work",
-                count=0 if reviews is None else len(reviews),
+                count=len(review_items),
                 target="created",
+                items=review_items,
             ),
             TaskHomeAttentionDto(
                 action="answer_cancellation",
-                count=0 if cancellations is None else len(cancellations),
+                count=len(cancellation_items),
                 target="cancellations",
+                items=cancellation_items,
+            ),
+        )
+        owned_execution = (
+            0
+            if owned is None
+            else sum(
+                assignee.status == AssignmentStatus.ACCEPTED.value
+                for card in owned
+                if card.cancellation_status != "pending"
+                for assignee in card.assignees
+            )
+        )
+        work_review = (
+            0
+            if active_items is None
+            else sum(card.assignment.status is AssignmentStatus.SUBMITTED for card in active_items)
+        )
+        taken_external_decisions = (
+            0
+            if active_items is None
+            else sum(
+                card.assignment.status
+                in {AssignmentStatus.DISPUTED, AssignmentStatus.REVIEWER_REQUIRED}
+                for card in active_items
+            )
+        )
+        owned_external_decisions = (
+            0
+            if owned is None
+            else sum(card.cancellation_status == "pending" for card in owned)
+            + sum(
+                assignee.status
+                in {
+                    AssignmentStatus.DISPUTED.value,
+                    AssignmentStatus.REVIEWER_REQUIRED.value,
+                }
+                for card in owned
+                for assignee in card.assignees
+            )
+        )
+        waiting_on_others = (
+            TaskHomeWaitingDto(
+                action="performer_work",
+                count=owned_execution,
+                target="created",
+            ),
+            TaskHomeWaitingDto(
+                action="work_review",
+                count=work_review,
+                target="taken",
+            ),
+            TaskHomeWaitingDto(
+                action="external_decision",
+                count=taken_external_decisions + owned_external_decisions,
+                target="created" if owned_external_decisions else "taken",
             ),
         )
         in_progress = (
@@ -918,10 +1266,15 @@ def create_web_app(
         return _json_response(
             TaskHomeDto(
                 attention=attention,
+                waiting_on_others=waiting_on_others,
                 available_count=None if catalog is None else len(catalog.items),
                 available_has_more=catalog is not None and catalog.next_cursor_task_id is not None,
                 can_create=can_create,
                 has_draft=has_draft,
+                taken_count=None if active_items is None else len(active_items),
+                created_count=None
+                if owned is None
+                else sum(card.task.status not in archived_statuses for card in owned),
                 active_count=in_progress,
                 waiting_count=waiting,
                 archive_count=None
@@ -938,14 +1291,22 @@ def create_web_app(
     async def task_creation(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
         try:
             categories, draft, preview, needs_edit = await tasks.web_state(actor.member_id)
+            profile = await registration.own_profile(actor)
         except PermissionError:
             return _error_response(403, "task_catalog_unavailable")
         return _json_response(
             {
                 "categories": [
-                    {"id": str(item.id), "name": item.name, "icon": item.icon}
+                    {
+                        "id": str(item.id),
+                        "code": item.code,
+                        "name": item.name,
+                        "description": item.description,
+                        "icon": item.icon,
+                    }
                     for item in categories
                 ],
+                "credit_balance": profile.credit_balance,
                 "time_sizes": [
                     {
                         "value": size.value,
@@ -967,10 +1328,16 @@ def create_web_app(
         limit: Annotated[int, Query(ge=1, le=10)] = 8,
         _actor: ActorContext = Depends(current_actor),
     ) -> JSONResponse:
+        cities = search_task_cities(q, limit=limit)
         return _json_response(
             {
                 "items": [
-                    {"value": item, "label": item} for item in search_task_cities(q, limit=limit)
+                    {
+                        "value": city,
+                        "label": city,
+                        "timezone": canonical_city_and_timezone(city)[1],
+                    }
+                    for city in cities
                 ]
             }
         )
@@ -1497,7 +1864,7 @@ def create_web_app(
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (
                     "default-src 'self'; script-src 'self' https://telegram.org; "
-                    "style-src 'self'; font-src 'self'; img-src 'none'; object-src 'none'; "
+                    "style-src 'self'; font-src 'self'; img-src 'self'; object-src 'none'; "
                     "base-uri 'none'; frame-ancestors https://web.telegram.org "
                     "https://*.telegram.org"
                 ),
@@ -1551,6 +1918,7 @@ def validate_telegram_init_data(
         user = json.loads(fields["user"])
         telegram_user_id = user["id"]
         telegram_username = user.get("username")
+        display_name = _telegram_display_name(user)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("Invalid Telegram proof.") from error
     if isinstance(telegram_user_id, bool) or not isinstance(telegram_user_id, int):
@@ -1569,7 +1937,17 @@ def validate_telegram_init_data(
         or current_timestamp - auth_date > _PROOF_MAX_AGE_SECONDS
     ):
         raise ValueError("Invalid Telegram proof.")
-    return TelegramIdentity(telegram_user_id, telegram_username)
+    return TelegramIdentity(telegram_user_id, telegram_username, display_name)
+
+
+def _telegram_display_name(user: object) -> str:
+    if not isinstance(user, dict):
+        raise ValueError("Invalid Telegram proof.")
+    first_name = user.get("first_name", "")
+    last_name = user.get("last_name", "")
+    if not isinstance(first_name, str) or not isinstance(last_name, str):
+        raise ValueError("Invalid Telegram proof.")
+    return " ".join(f"{first_name} {last_name}".split())[:80] or "Новый участник"
 
 
 async def _bounded_body(request: Request, *, limit: int) -> bytes:
@@ -1669,6 +2047,12 @@ def _submission_update_id(
     encoded = b"".join(len(part).to_bytes(2, "big") + part for part in parts)
     resolved = int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") & _MAX_IDEMPOTENCY_KEY
     return resolved or 1
+
+
+def _registration_update_id(proof: bytes) -> int:
+    """Derive one stable receipt identity from a signed registration proof."""
+    digest = hashlib.sha256(b"web-registration-start-v1\0" + proof).digest()
+    return (int.from_bytes(digest[:8], "big") & _MAX_IDEMPOTENCY_KEY) or 1
 
 
 def _submission_fingerprint(
@@ -1860,6 +2244,7 @@ def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
         telegram_username=profile.telegram_username,
         display_name=profile.display_name,
         city=profile.city,
+        timezone=profile.timezone if profile.city else "UTC",
         short_bio=profile.short_bio,
         skill_tags=profile.skill_tags,
         profile_links=tuple(
@@ -1879,6 +2264,23 @@ def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
     )
 
 
+def _required_registration_context(view: RegistrationView) -> RegistrationContext:
+    if view.context is None:
+        raise LookupError("Registration context does not exist.")
+    return view.context
+
+
+def _onboarding_dto(view: RegistrationView) -> OnboardingDto:
+    context = _required_registration_context(view)
+    return OnboardingDto(
+        outcome=view.outcome_code,
+        application_status=context.application_status,
+        step=context.current_step,
+        payload=context.payload,
+        review_comment=context.review_comment,
+    )
+
+
 def _task_dto(task: PublishedTask) -> TaskDto:
     return TaskDto(
         id=task.id,
@@ -1894,6 +2296,7 @@ def _task_dto(task: PublishedTask) -> TaskDto:
         minimum_level=task.minimum_level,
         format=task.format.value,
         city=task.city,
+        created_at=task.created_at,
         deadline_at=task.deadline_at,
         status=task.status.value,
         description=task.description,
@@ -1913,12 +2316,26 @@ def _task_dto(task: PublishedTask) -> TaskDto:
 
 
 def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
+    archived_at = (
+        card.task.updated_at
+        if card.task.status.value in {"expired", "partially_completed", "completed", "cancelled"}
+        else None
+    )
     return OwnedTaskDto(
         id=card.task.id,
         title=card.task.title,
         status=card.task.status.value,
+        created_at=card.task.created_at,
+        category_name=card.task.category_name,
+        task_kind=None if card.task.task_kind is None else card.task.task_kind.value,
+        time_size=None if card.task.time_size is None else card.task.time_size.value,
+        format=card.task.format.value,
+        city=card.task.city,
+        credit_reward_per_performer=card.task.credit_reward_per_performer,
+        minimum_level=card.task.minimum_level,
         performer_slots=card.task.performer_slots,
         deadline_at=card.task.deadline_at,
+        archived_at=archived_at,
         assignees=tuple(
             OwnedTaskAssigneeDto(display_name=item.display_name, status=item.status)
             for item in card.assignees
@@ -1935,6 +2352,16 @@ def _assignment_card_dto(card: AssignmentCard) -> AssignmentCardDto:
         task_id=assignment.task_id,
         task_title=card.task_title,
         task_origin=card.task_origin,
+        created_at=card.task.created_at,
+        category_name=card.task.category_name,
+        task_kind=None if card.task.task_kind is None else card.task.task_kind.value,
+        time_size=None if card.task.time_size is None else card.task.time_size.value,
+        format=card.task.format.value,
+        city=card.task.city,
+        credit_reward_per_performer=card.task.credit_reward_per_performer,
+        performer_slots=card.task.performer_slots,
+        minimum_level=card.task.minimum_level,
+        deadline_at=card.task.deadline_at,
         assignment_status=assignment.status.value,
         accepted_at=assignment.accepted_at,
         submitted_at=assignment.submitted_at,
@@ -1952,18 +2379,11 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
     task = card.task
     return AssignmentDetailDto(
         **common,
-        category_name=task.category_name,
         category_icon=task.category_icon,
-        task_kind=None if task.task_kind is None else task.task_kind.value,
-        time_size=None if task.time_size is None else task.time_size.value,
         description=task.description,
         performer_instructions=task.performer_instructions,
         completion_criteria=task.completion_criteria,
         reward_per_performer=task.credit_reward_per_performer,
-        format=task.format.value,
-        city=task.city,
-        minimum_level=task.minimum_level,
-        performer_slots=task.performer_slots,
         submission_contract=cast('Literal["freeform_result_v1"] | None', card.submission_contract),
         can_submit=card.can_submit,
         can_cancel=card.can_cancel,
@@ -1976,6 +2396,7 @@ def _assignment_review_dto(card: AssignmentCard) -> AssignmentReviewDto:
         raise ValueError("Assignment review projection is incomplete.")
     return AssignmentReviewDto(
         id=card.assignment.id,
+        task_id=card.assignment.task_id,
         task_title=card.task_title,
         performer_display_name=card.performer_display_name,
         submitted_at=card.assignment.submitted_at,

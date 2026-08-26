@@ -20,10 +20,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from community_bot.application import assignments as assignment_app
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
+from community_bot.application.registration import (
+    InvitationCreateCommand,
+    InviteTokenCodec,
+    ModerationCommand,
+    RegistrationService,
+)
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.domain.notifications import DeliveryWindow
+from community_bot.domain.registration import ModerationDecision
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -35,6 +42,7 @@ from community_bot.infrastructure.db.models import (
     ConversationStateModel,
     DisputeEvidenceModel,
     DisputeResolutionModel,
+    InvitationRedemptionModel,
     KarmaVoteHistoryModel,
     KarmaVoteModel,
     MemberModel,
@@ -43,6 +51,7 @@ from community_bot.infrastructure.db.models import (
     NotificationModel,
     OutboxEventModel,
     ProcessedTelegramUpdateModel,
+    RegistrationApplicationModel,
     ReliabilityEventModel,
     TaskCategoryModel,
     TaskCreationDraftModel,
@@ -115,6 +124,157 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
     return member
 
 
+async def test_onboarding_uses_invitation_restricts_pending_and_activates_after_review(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    administrator = await active_member(database, 52_070)
+    secret = "integration-onboarding-secret-that-is-long-enough"
+    codec = InviteTokenCodec(secret)
+    service = RegistrationService(database.unit_of_work, codec)
+    invitation = await service.create_invitation(
+        InvitationCreateCommand(
+            update_id=70_001,
+            actor_telegram_user_id=administrator.telegram_user_id,
+            intended_telegram_user_id=52_071,
+        )
+    )
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN,
+            mini_app_origin=ORIGIN,
+            database_url=database_url,
+            invite_token_secret=secret,
+        ),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(52_071, now=datetime.datetime.now(datetime.UTC)),
+            headers={
+                "content-type": "text/plain; charset=utf-8",
+                "origin": ORIGIN,
+                "x-community-invitation": invitation.token,
+            },
+        )
+        assert authenticated.status_code == 204, authenticated.text
+        assert (await client.get("/api/v1/me")).status_code == 403
+        assert (await client.get("/api/v1/tasks")).status_code == 403
+        assert (await client.get("/api/v1/task-cities?q=Buenos&limit=3")).status_code == 200
+
+        state = (await client.get("/api/v1/onboarding")).json()
+        assert (state["application_status"], state["step"], state["payload"]) == (
+            "draft",
+            "consent",
+            {},
+        )
+
+        async def answer(step: str, value: str, key: int) -> dict[str, object]:
+            response = await client.post(
+                "/api/v1/onboarding/answer",
+                json={"step": step, "value": value},
+                headers={"origin": ORIGIN, "idempotency-key": str(key)},
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        assert (await answer("consent", "accept", 70_010))["step"] == "display_name"
+        assert (await answer("display_name", "Новый участник", 70_011))["step"] == "city"
+        city = await answer("city", "Buenos Aires — Argentina", 70_012)
+        assert city["step"] == "short_bio"
+        city_payload = city["payload"]
+        assert isinstance(city_payload, dict)
+        assert city_payload["timezone"] == "America/Argentina/Buenos_Aires"
+        returned = await client.post(
+            "/api/v1/onboarding/back",
+            headers={"origin": ORIGIN, "idempotency-key": "70013"},
+        )
+        assert returned.status_code == 200
+        assert returned.json()["step"] == "city"
+        assert returned.json()["payload"]["city"] == "Buenos Aires — Argentina"
+        await answer("city", "Buenos Aires — Argentina", 70_014)
+        await answer("short_bio", "Тестирую регистрацию нового участника.", 70_015)
+        preview = await answer("skill_tags", "QA\nTelegram Mini Apps", 70_016)
+        assert preview["step"] == "preview"
+
+        submitted = await client.post(
+            "/api/v1/onboarding/submit",
+            headers={"origin": ORIGIN, "idempotency-key": "70017"},
+        )
+        replay = await client.post(
+            "/api/v1/onboarding/submit",
+            headers={"origin": ORIGIN, "idempotency-key": "70017"},
+        )
+        assert submitted.status_code == replay.status_code == 200
+        assert submitted.json()["application_status"] == "submitted"
+        assert replay.json() == submitted.json()
+
+        sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+        async with sessions() as session:
+            pending = await session.scalar(
+                select(MemberModel).where(MemberModel.telegram_user_id == 52_071)
+            )
+            assert pending is not None
+            assert pending.status == MemberStatus.PENDING.value
+            target_member_id = pending.id
+            assert await session.scalar(select(func.count(InvitationRedemptionModel.id))) == 1
+            application_count = await session.scalar(
+                select(func.count(RegistrationApplicationModel.member_id))
+            )
+            assert application_count == 1
+
+        await service.moderate(
+            ModerationCommand(
+                update_id=70_016,
+                actor_telegram_user_id=administrator.telegram_user_id,
+                target_member_id=target_member_id,
+                decision=ModerationDecision.REJECT,
+                comment="Уточните описание профиля.",
+            )
+        )
+        rejected = (await client.get("/api/v1/onboarding")).json()
+        assert rejected["application_status"] == "rejected"
+        assert rejected["review_comment"] == "Уточните описание профиля."
+        reopened = await client.post(
+            "/api/v1/onboarding/reopen",
+            headers={"origin": ORIGIN, "idempotency-key": "70017"},
+        )
+        assert reopened.status_code == 200
+        assert (reopened.json()["application_status"], reopened.json()["step"]) == (
+            "draft",
+            "display_name",
+        )
+        await answer("display_name", "Новый участник", 70_018)
+        await answer("city", "Buenos Aires — Argentina", 70_019)
+        await answer("short_bio", "", 70_020)
+        await answer("skill_tags", "", 70_021)
+        resubmitted = await client.post(
+            "/api/v1/onboarding/submit",
+            headers={"origin": ORIGIN, "idempotency-key": "70022"},
+        )
+        assert resubmitted.status_code == 200
+        assert resubmitted.json()["application_status"] == "submitted"
+
+        await service.moderate(
+            ModerationCommand(
+                update_id=70_023,
+                actor_telegram_user_id=administrator.telegram_user_id,
+                target_member_id=target_member_id,
+                decision=ModerationDecision.APPROVE,
+            )
+        )
+        profile = await client.get("/api/v1/me")
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["display_name"] == "Новый участник"
+        assert profile.json()["timezone"] == "America/Argentina/Buenos_Aires"
+        assert profile.json()["short_bio"] is None
+        assert profile.json()["skill_tags"] == []
+        assert (await client.get("/api/v1/tasks")).status_code == 200
+
+    await database.dispose()
+
+
 async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
     database_url: str,
 ) -> None:
@@ -146,14 +306,19 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
             )
         ).status_code == 204
         saved = await client.put(
-            "/api/v1/me/profile", json={"field": "city", "value": " Rosario "}, headers=headers
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "Rosario — Argentina"},
+            headers=headers,
         )
         assert saved.status_code == 200, saved.text
-        assert saved.json()["city"] == "Rosario"
+        assert saved.json()["city"] == "Rosario — Argentina"
+        assert saved.json()["timezone"] == "America/Argentina/Cordoba"
         assert saved.json()["display_name"] == "Web Member"
 
         replay = await client.put(
-            "/api/v1/me/profile", json={"field": "city", "value": " Rosario "}, headers=headers
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "Rosario — Argentina"},
+            headers=headers,
         )
         assert replay.status_code == 200
         conflict = await client.put(
@@ -170,6 +335,20 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
             headers={"origin": ORIGIN, "idempotency-key": "8102"},
         )
         assert invalid.status_code == 422
+        free_text = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "city", "value": "Rosario"},
+            headers={"origin": ORIGIN, "idempotency-key": "8107"},
+        )
+        assert free_text.status_code == 422
+        cleared = await client.put(
+            "/api/v1/me/profile",
+            json={"field": "city", "value": ""},
+            headers={"origin": ORIGIN, "idempotency-key": "8108"},
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["city"] is None
+        assert cleared.json()["timezone"] == "UTC"
         extra_identity = await client.put(
             "/api/v1/me/profile",
             json={"field": "city", "value": "Córdoba", "member_id": str(member.id)},
@@ -204,7 +383,7 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         city, bio = await asyncio.gather(
             client.put(
                 "/api/v1/me/profile",
-                json={"field": "city", "value": "Córdoba"},
+                json={"field": "city", "value": "Córdoba — Argentina"},
                 headers={"origin": ORIGIN, "idempotency-key": "8105"},
             ),
             client.put(
@@ -215,11 +394,12 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         )
         assert city.status_code == bio.status_code == 200
         authoritative = (await client.get("/api/v1/me")).json()
-        assert authoritative["city"] == "Córdoba"
+        assert authoritative["city"] == "Córdoba — Argentina"
+        assert authoritative["timezone"] == "America/Argentina/Cordoba"
         assert authoritative["short_bio"] == "Запустить пилот"
-        legacy_fields = ("availability", "timezone", "current_goal", "help_categories")
+        legacy_fields = ("availability", "current_goal", "help_categories")
         assert set(authoritative).isdisjoint(legacy_fields)
-        for index, field in enumerate(legacy_fields, start=8110):
+        for index, field in enumerate((*legacy_fields, "timezone"), start=8110):
             rejected = await client.put(
                 "/api/v1/me/profile",
                 json={"field": field, "value": "legacy value"},
@@ -230,8 +410,9 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         member_list = (await client.get("/api/v1/members")).json()["items"]
         public_profile = (await client.get(f"/api/v1/members/{member.id}")).json()
         assert member_list
-        assert set(member_list[0]).isdisjoint(legacy_fields)
-        assert set(public_profile).isdisjoint(legacy_fields)
+        public_only_fields = (*legacy_fields, "timezone")
+        assert set(member_list[0]).isdisjoint(public_only_fields)
+        assert set(public_profile).isdisjoint(public_only_fields)
 
         created = await client.put(
             "/api/v1/me/profile",
@@ -318,7 +499,7 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
         async with sessions.begin() as session:
             stored_member = await session.get(MemberModel, member.id)
             assert stored_member is not None
-            assert stored_member.timezone == "UTC"
+            assert stored_member.timezone == "America/Argentina/Cordoba"
             stored_member.telegram_username = "bad!"
         malformed_public = await client.get(f"/api/v1/members/{member.id}")
         assert malformed_public.status_code == 200
@@ -358,7 +539,7 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
                 ProcessedTelegramUpdateModel.update_type == "profile_web_update",
             )
         )
-        assert profile_audits == web_receipts == 11
+        assert profile_audits == web_receipts == 12
     await database.dispose()
 
 
@@ -723,14 +904,22 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         ).status_code == 204
         state = (await client.get("/api/v1/task-creation")).json()
         draft_id = state["draft"]["id"]
+        assert state["credit_balance"] == 10
+        assert state["categories"][0]["code"]
+        assert state["categories"][0]["description"]
         assert state["draft"]["values"]["format"] == "online"
         city_search = await client.get("/api/v1/task-cities", params={"q": "Buenos Aires"})
         assert city_search.status_code == 200
-        canonical_city = next(
-            item["value"]
+        canonical_city_item = next(
+            item
             for item in city_search.json()["items"]
             if item["value"] == "Buenos Aires — Argentina"
         )
+        canonical_city = canonical_city_item["value"]
+        assert canonical_city_item["timezone"] == "America/Argentina/Buenos_Aires"
+        selected_city_search = await client.get("/api/v1/task-cities", params={"q": canonical_city})
+        assert selected_city_search.status_code == 200
+        assert selected_city_search.json()["items"] == [canonical_city_item]
         collisions = await client.get("/api/v1/task-cities", params={"q": "Dondo", "limit": 10})
         collision_values = [item["value"] for item in collisions.json()["items"]]
         assert collisions.status_code == 200
@@ -1686,6 +1875,7 @@ async def test_catalog_detail_projection_accept_and_cancel_path(database_url: st
         catalog = await client.get("/api/v1/tasks")
         assert catalog.status_code == 200, catalog.text
         item = next(value for value in catalog.json()["items"] if value["id"] == str(task.id))
+        assert item["created_at"] is not None
         assert item["description"]
         assert item["completion_criteria"]
         assert item["performer_instructions"]
@@ -1970,6 +2160,7 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
         assert response.status_code == 200, response.text
         cards = {item["id"]: item for item in response.json()["items"]}
         assert cards[str(owned.id)]["cancellation_action"] == "request"
+        assert cards[str(owned.id)]["archived_at"] is None
         assert cards[str(empty_owned_id)]["cancellation_action"] == "cancel"
         assert str(hidden_owned_id) not in cards
         cancel_path = f"/api/v1/owned-tasks/{empty_owned_id}/cancellation"
@@ -1977,6 +2168,10 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
         cancelled = await client.post(cancel_path, headers=cancel_headers)
         replay = await client.post(cancel_path, headers=cancel_headers)
         assert cancelled.json() == replay.json() == {"status": "cancelled"}
+        refreshed_cards = {
+            item["id"]: item for item in (await client.get("/api/v1/owned-tasks")).json()["items"]
+        }
+        assert refreshed_cards[str(empty_owned_id)]["archived_at"] is not None
         request_path = f"/api/v1/owned-tasks/{owned.id}/cancellation"
         requested = await client.post(
             request_path,
@@ -2406,6 +2601,16 @@ async def test_active_assignment_api_paginates_privately_without_effects(
             "task_id",
             "task_title",
             "task_origin",
+            "created_at",
+            "category_name",
+            "task_kind",
+            "time_size",
+            "format",
+            "city",
+            "credit_reward_per_performer",
+            "performer_slots",
+            "minimum_level",
+            "deadline_at",
             "assignment_status",
             "accepted_at",
             "submitted_at",
@@ -2532,7 +2737,13 @@ async def test_performer_dispute_api_is_exact_private_and_scope_owned(
         assert detail.json()["can_dispute"] is True
         assert detail.json()["reject_dispute_deadline_at"] is not None
         _schema, baseline = await schema_snapshot(database.engine)
-        for body in ({}, {"comment": ""}, {"comment": "   "}):
+        for body in (
+            {},
+            {"comment": ""},
+            {"comment": "   "},
+            {"comment": "short"},
+            {"comment": "x" * 1001},
+        ):
             invalid = await client.post(path, headers=headers, json=body)
             assert (invalid.status_code, invalid.json()) == (422, {"code": "invalid_request"})
         assert (await schema_snapshot(database.engine))[1] == baseline
@@ -2566,7 +2777,11 @@ async def test_performer_dispute_api_is_exact_private_and_scope_owned(
                 content=proof(foreign.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
-            denied = await outsider.post(path, headers=headers, json={"comment": "Foreign"})
+            denied = await outsider.post(
+                path,
+                headers=headers,
+                json={"comment": "Foreign reason"},
+            )
             assert (denied.status_code, denied.json()) == (
                 409,
                 {"code": "assignment_unavailable"},
@@ -2577,7 +2792,7 @@ async def test_performer_dispute_api_is_exact_private_and_scope_owned(
             session.add(run)
             await session.flush()
             session.add(DbTestRunParticipantModel(run_id=run.id, member_id=performer.id))
-        hidden_response = await post(hidden.id, "55705", "Hidden")
+        hidden_response = await post(hidden.id, "55705", "Hidden reason")
         assert (hidden_response.status_code, hidden_response.json()) == (
             409,
             {"code": "assignment_unavailable"},
@@ -2591,7 +2806,7 @@ async def test_performer_dispute_api_is_exact_private_and_scope_owned(
             participant.is_active = False
             participant.left_at = datetime.datetime.now(datetime.UTC)
             stored_hidden.reject_dispute_deadline_at = datetime.datetime.now(datetime.UTC)
-        assert (await post(hidden.id, "55706", "Expired")).status_code == 409
+        assert (await post(hidden.id, "55706", "Expired reason")).status_code == 409
 
     _schema, final = await schema_snapshot(database.engine)
     effect_tables = (

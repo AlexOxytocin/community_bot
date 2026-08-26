@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     bot_token: SecretStr | None = None
     mini_app_origin: str | None = None
     local_review_telegram_user_id: int | None = None
+    local_review_invitation_token: SecretStr | None = None
     invite_token_secret: SecretStr | None = None
     sentry_dsn: SecretStr | None = None
     release: str = "local"
@@ -59,6 +60,11 @@ class Settings(BaseSettings):
             or not 1 <= self.local_review_telegram_user_id <= 2**63 - 1
         ):
             msg = "local review identity requires development and a valid Telegram user ID"
+            raise ValueError(msg)
+        if self.local_review_invitation_token is not None and (
+            self.environment != "development" or self.local_review_telegram_user_id is None
+        ):
+            msg = "local review invitation requires a development review identity"
             raise ValueError(msg)
         return self
 

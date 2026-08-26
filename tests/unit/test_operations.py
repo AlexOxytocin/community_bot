@@ -107,8 +107,10 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "_runtime.py",
         "backup_postgres.py",
         "deploy_dev.py",
+        "prepare_onboarding_local.py",
         "release_contract.py",
         "restore_drill.py",
+        "seed_task_home_local.py",
     }
     assert list((root / "ops").glob("*.sh")) == []
     assert list((root / "ops" / "systemd").glob("*")) == []

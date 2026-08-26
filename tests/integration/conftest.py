@@ -31,21 +31,44 @@ def postgresql_server_url() -> Iterator[str]:
         yield postgres.get_connection_url()
 
 
-@pytest.fixture
-def database_url(postgresql_server_url: str) -> Iterator[str]:
-    """Create, migrate, and force-drop an isolated database per test."""
+@pytest.fixture(scope="session")
+def migrated_template_database(postgresql_server_url: str) -> Iterator[tuple[URL, str]]:
+    """Migrate one template database used to clone isolated test databases."""
     server_url = make_url(postgresql_server_url)
-    database_name = f"test_{uuid4().hex}"
+    database_name = f"template_{uuid4().hex}"
     asyncio.run(_database_command(server_url, f'CREATE DATABASE "{database_name}"'))
-    test_url = server_url.set(database=database_name)
+    template_url = server_url.set(database=database_name)
     migration_environment = os.environ.copy()
-    migration_environment["DATABASE_URL"] = test_url.render_as_string(hide_password=False)
+    migration_environment["DATABASE_URL"] = template_url.render_as_string(hide_password=False)
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=PROJECT_ROOT,
         env=migration_environment,
         check=True,
     )
+    try:
+        yield server_url, database_name
+    finally:
+        asyncio.run(
+            _database_command(
+                server_url,
+                f'DROP DATABASE "{database_name}" WITH (FORCE)',
+            )
+        )
+
+
+@pytest.fixture
+def database_url(migrated_template_database: tuple[URL, str]) -> Iterator[str]:
+    """Clone a migrated template and force-drop the isolated database after the test."""
+    server_url, template_name = migrated_template_database
+    database_name = f"test_{uuid4().hex}"
+    asyncio.run(
+        _database_command(
+            server_url,
+            f'CREATE DATABASE "{database_name}" TEMPLATE "{template_name}"',
+        )
+    )
+    test_url = server_url.set(database=database_name)
     try:
         yield test_url.render_as_string(hide_password=False)
     finally:

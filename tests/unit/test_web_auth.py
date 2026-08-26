@@ -211,7 +211,7 @@ def test_frozen_proof_and_exact_failure_cases() -> None:
     now = datetime.datetime.fromtimestamp(1_700_000_100, datetime.UTC)
     assert validate_telegram_init_data(
         FROZEN_PROOF, bot_token=BOT_TOKEN, now=now
-    ) == TelegramIdentity(123456789, None)
+    ) == TelegramIdentity(123456789, None, "Alex")
     username_proof = _signed_fields(
         {
             "auth_date": str(int(now.timestamp())),
@@ -220,7 +220,7 @@ def test_frozen_proof_and_exact_failure_cases() -> None:
     )
     assert validate_telegram_init_data(
         username_proof, bot_token=BOT_TOKEN, now=now
-    ) == TelegramIdentity(123456789, "Alex_53")
+    ) == TelegramIdentity(123456789, "Alex_53", "Новый участник")
 
     failures = (
         (FROZEN_PROOF.replace(b"123456789", b"123456788"), now),
@@ -293,6 +293,11 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/auth/telegram", ("POST",)),
         ("/api/v1/session", ("DELETE",)),
         ("/api/v1/me", ("GET",)),
+        ("/api/v1/onboarding", ("GET",)),
+        ("/api/v1/onboarding/answer", ("POST",)),
+        ("/api/v1/onboarding/back", ("POST",)),
+        ("/api/v1/onboarding/submit", ("POST",)),
+        ("/api/v1/onboarding/reopen", ("POST",)),
         ("/api/v1/me/profile", ("PUT",)),
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
@@ -705,6 +710,7 @@ async def test_read_routes_map_application_denials_to_closed_errors(
 
 def test_task_dto_preserves_only_public_projection() -> None:
     assert inspect.signature(TaskService.list_available).parameters["limit"].default == 10
+    created_at = datetime.datetime.now(datetime.UTC)
     task = cast(
         "PublishedTask",
         SimpleNamespace(
@@ -721,7 +727,8 @@ def test_task_dto_preserves_only_public_projection() -> None:
             minimum_level=1,
             format=TaskFormat.ONLINE,
             city=None,
-            deadline_at=datetime.datetime.now(datetime.UTC),
+            created_at=created_at,
+            deadline_at=created_at + datetime.timedelta(days=1),
             status=TaskStatus.PUBLISHED,
             description="Public description",
             completion_criteria="Done",
@@ -734,6 +741,7 @@ def test_task_dto_preserves_only_public_projection() -> None:
     payload = _task_dto(task).model_dump(mode="json")
     assert payload["task_kind"] == "solo"
     assert payload["time_size"] == "s"
+    assert payload["created_at"] == created_at.isoformat().replace("+00:00", "Z")
     assert payload["description"] == "Public description"
     assert payload["materials"] == {
         "text": "Read me",
@@ -892,24 +900,33 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
         index = await client.get("/")
         font = await client.get("/mini-assets/manrope.ttf")
+        loader = await client.get("/mini-assets/onboarding-loader.png")
         app_module = await client.get("/mini-assets/app.js")
         theme_bootstrap = await client.get("/mini-assets/theme-bootstrap.js")
 
     assert (
         index.status_code
         == font.status_code
+        == loader.status_code
         == app_module.status_code
         == theme_bootstrap.status_code
         == 200
     )
     assert "default-src 'self'" in index.headers["content-security-policy"]
     assert "script-src 'self' https://telegram.org" in index.headers["content-security-policy"]
+    assert "img-src 'self'" in index.headers["content-security-policy"]
     bridge = b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
     assert index.content.index(bridge) < index.content.index(b"</head>")
     assert index.content.index(bridge) < index.content.index(b"/mini-assets/app.js")
     assert b"__RELEASE__" not in index.content
     assert b"/mini-assets/app.js?release=local" in index.content
     assert b"/mini-assets/styles.css?release=local" in index.content
+    assert b"/mini-assets/onboarding-loader.png?release=local" in index.content
+    assert b'class="app-booting"' in index.content
+    assert b'<h1 id="screen-title"></h1>' in index.content
+    hidden_navigation = 'id="primary-navigation" aria-label="Основное меню" hidden'.encode()
+    assert hidden_navigation in index.content
+    assert loader.headers["content-type"] == "image/png"
     assert b"platform.js?release=${encodeURIComponent(assetRelease)}" in app_module.content
     bootstrap_asset = b"/mini-assets/theme-bootstrap.js?release=local"
     assert bootstrap_asset in index.content

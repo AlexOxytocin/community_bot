@@ -18,6 +18,19 @@ const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
 const back = document.getElementById("back");
 const shell = document.getElementById("app");
+const appLoader = document.getElementById("app-loader");
+const primaryNavigation = document.getElementById("primary-navigation");
+const revealApplication = () => {
+  appLoader.hidden = true;
+  shell.hidden = false;
+  shell.removeAttribute("aria-hidden");
+  document.body.classList.remove("app-booting");
+};
+const anchorShellScroll = () => {
+  if (shell.scrollTop || shell.scrollLeft) shell.scrollTo({ top: 0, left: 0, behavior: "instant" });
+};
+shell.addEventListener("scroll", anchorShellScroll, { passive: true });
+anchorShellScroll();
 const catalogNav = document.getElementById("catalog-nav");
 const profileNav = document.getElementById("profile-nav");
 const assignmentsNav = document.getElementById("assignments-nav");
@@ -28,7 +41,44 @@ let tasks = [];
 let assignments = [];
 let ownedTasks = [];
 let ownedReviews = [];
-let catalogFilters = { format: "", minReward: "" };
+let takenTasksQuery = "";
+let createdTasksQuery = "";
+let archivedTasksQuery = "";
+let ownedTaskListScope = "active";
+let takenTasksSort = "created_desc";
+let createdTasksSort = "created_desc";
+let archivedTasksSort = "archive_desc";
+const archiveTaskSortOptions = [
+  ["Недавно в архиве", "archive_desc"],
+  ["Давно в архиве", "archive_asc"],
+  ["Срок ближе", "deadline_asc"],
+  ["Срок дальше", "deadline_desc"],
+];
+const emptyOwnedArchiveFilters = () => ({ status: "", performers: "", archivedUntil: "" });
+let ownedArchiveFilters = emptyOwnedArchiveFilters();
+const emptyCatalogFilters = () => ({
+  query: "",
+  taskKind: "",
+  format: "",
+  category: "",
+  timeSize: "",
+  minSlots: "",
+  minReward: "",
+  deadlineUntil: "",
+  city: "",
+});
+let catalogFilters = emptyCatalogFilters();
+let takenTasksFilters = emptyCatalogFilters();
+let createdTasksFilters = emptyCatalogFilters();
+let catalogSort = "created_desc";
+const catalogSortOptions = [
+  ["Создано позже", "created_desc"],
+  ["Создано раньше", "created_asc"],
+  ["Срок ближе", "deadline_asc"],
+  ["Срок дальше", "deadline_desc"],
+  ["Награда выше", "reward_desc"],
+  ["Награда ниже", "reward_asc"],
+];
 const pendingAcceptKeys = new Map();
 let pendingTaskCreation = null;
 let returnFocusTaskId = null;
@@ -41,8 +91,10 @@ let returnFocusProfile = false;
 let returnFocusLeaderboardTab = false;
 let screenRevision = 0;
 let currentMemberId = null;
+let currentMemberTimezone = "UTC";
 let activeProfileState = null;
 let memberProfileHasInternalHistory = false;
+let headerBackAction = null;
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -74,7 +126,11 @@ const resetScrollPosition = () => {
 };
 
 const replaceContent = (...nodes) => {
+  shell.querySelector(
+    ".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop, .assignment-action-backdrop, .profile-editor-backdrop",
+  )?.remove();
   content.replaceChildren(...nodes);
+  revealApplication();
   resetScrollPosition();
   queueMicrotask(resetScrollPosition);
   requestAnimationFrame(resetScrollPosition);
@@ -145,21 +201,55 @@ const section = (heading, value) => {
   return node;
 };
 
+const setHeaderControl = (
+  kind = null,
+  { label = null, screenLabel = null, hideTitle = false, onBack = null } = {},
+) => {
+  const normalized = kind === "back" || (kind === "close" && uiNextEnabled) ? kind : null;
+  const titleless = normalized === "close" || hideTitle;
+  headerBackAction = normalized === "back" ? onBack : null;
+  back.classList.toggle("hidden", normalized === null);
+  back.dataset.navigationKind = normalized || "none";
+  back.textContent = normalized === "close" ? "×" : uiNextEnabled ? "‹" : "←";
+  back.setAttribute("aria-label", label || (normalized === "close" ? "Закрыть" : "Назад"));
+  heading.classList.toggle("navigation-close", normalized === "close");
+  heading.classList.toggle("navigation-titleless", titleless);
+  if (titleless) {
+    const screenNode = content.closest(".screen");
+    screenNode.removeAttribute("aria-labelledby");
+    screenNode.setAttribute("aria-label", screenLabel || "Экран");
+  }
+};
+
 const setNavigation = (screen, context) => {
+  if (screen !== "profile") activeProfileState = null;
   heading.querySelector(".heading-action")?.remove();
+  const screenNode = content.closest(".screen");
+  if (screen === "settings") {
+    screenNode.removeAttribute("aria-labelledby");
+    screenNode.setAttribute("aria-label", "Параметры");
+  } else {
+    screenNode.removeAttribute("aria-label");
+    screenNode.setAttribute("aria-labelledby", "screen-title");
+  }
   shell.classList.toggle("context-screen", context);
   shell.classList.toggle("catalog-screen", screen === "catalog");
   shell.classList.toggle("participants-screen", screen === "participants");
   shell.classList.toggle("profile-screen", screen === "profile");
+  shell.classList.toggle("settings-screen", screen === "settings");
   shell.classList.toggle("task-home-screen", screen === "task-home");
+  shell.classList.toggle("onboarding-screen", screen === "onboarding");
+  primaryNavigation.hidden = screen === "onboarding" || context;
+  shell.classList.remove("catalog-filter-screen", "task-creation-screen");
   document.body.classList.toggle("ui-next-tasks-home", screen === "task-home");
   if (uiNextEnabled) assignmentsNav.hidden = true;
-  shell.classList.remove("task-detail-screen");
+  shell.classList.remove("task-detail-screen", "assignment-detail-screen", "assignment-review-screen");
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog" || screen === "task-home"));
-  profileNav.setAttribute("aria-pressed", String(screen === "profile"));
+  profileNav.setAttribute("aria-pressed", String(screen === "profile" || screen === "settings"));
   assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
   participantsNav.setAttribute("aria-pressed", String(screen === "participants"));
   moderationNav.setAttribute("aria-pressed", String(screen === "moderation"));
+  setHeaderControl(context ? "back" : null);
 };
 
 const setHeadingAction = (action) => {
@@ -184,6 +274,32 @@ const slidersIcon = () => {
   return svg;
 };
 
+const sortIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M8 5v14M5 8l3-3 3 3M16 19V5m-3 11 3 3 3-3"/>';
+  return svg;
+};
+
+const calendarIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M6 3v3M18 3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z"/>';
+  return svg;
+};
+
+const settingsRowIcon = (name) => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = name === "profile"
+    ? '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0"/>'
+    : '<path d="M20 15.1A8 8 0 0 1 8.9 4 8 8 0 1 0 20 15.1Z"/>';
+  return svg;
+};
+
 const connectedBoundary = (screenId, state, ...nodes) => {
   const boundary = element("section", undefined, "state-view concept-screen");
   boundary.dataset.screenId = screenId;
@@ -202,21 +318,31 @@ const showActionConfirmation = ({
   onEdit,
   transitionId,
   transitionTrigger,
+  hideHeading = false,
+  showEdit = true,
+  onBack = null,
 }) => {
   title.textContent = headingText;
+  if (hideHeading) {
+    setHeaderControl("back", { screenLabel: headingText, hideTitle: true, onBack });
+  }
   const card = element("article", undefined, "card detail route-accent confirm-screen");
   card.append(element("p", "Подтверждение", "badge"), element("p", description, "muted"));
   const actions = element("div", undefined, "confirm-actions");
-  const edit = element("button", "Изменить", "secondary");
-  edit.type = "button";
-  edit.addEventListener("click", onEdit);
+  let edit = null;
+  if (showEdit) {
+    edit = element("button", "Изменить", "secondary");
+    edit.type = "button";
+    edit.addEventListener("click", onEdit);
+    actions.append(edit);
+  }
   const confirm = element("button", confirmLabel, "primary");
   confirm.type = "button";
   if (transitionId) markTransition(confirm, transitionId, transitionTrigger);
   const status = element("p", "", "status hidden");
   status.setAttribute("aria-live", "polite");
   confirm.addEventListener("click", () => onConfirm({ confirm, edit, status }));
-  actions.append(edit, confirm);
+  actions.append(confirm);
   card.append(actions, status);
   replaceContent(connectedBoundary(screenId, "confirm", card));
   confirm.focus({ preventScroll: true });
@@ -273,7 +399,81 @@ const restoreProfileFocus = () => {
   returnFocusProfile = false;
 };
 
-const formatDate = (value) => new Intl.DateTimeFormat("ru", {
+const validTimezone = (value) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value }).format();
+    return value;
+  } catch {
+    return "UTC";
+  }
+};
+const setMemberTimezone = (value) => {
+  currentMemberTimezone = validTimezone(value || "UTC");
+};
+const timezoneOffsetLabel = (timezone, value = new Date()) => {
+  try {
+    const offset = new Intl.DateTimeFormat("en", {
+      timeZone: validTimezone(timezone || "UTC"),
+      timeZoneName: "longOffset",
+    }).formatToParts(value).find((part) => part.type === "timeZoneName")?.value || "GMT";
+    if (offset === "GMT") return "UTC+00:00";
+    return offset.replace(/^GMT/, "UTC").replace("-", "−");
+  } catch {
+    return "UTC+00:00";
+  }
+};
+const memberDateFormatter = (options = {}) => new Intl.DateTimeFormat("ru", {
+  ...options,
+  timeZone: options.timeZone || currentMemberTimezone,
+});
+const memberDateParts = (value) => Object.fromEntries(
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: currentMemberTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(value))
+    .filter((part) => part.type !== "literal")
+    .map((part) => [part.type, part.value]),
+);
+const memberDateKey = (value) => {
+  const parts = memberDateParts(value);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+const memberTimeKey = (value) => {
+  const parts = memberDateParts(value);
+  return `${parts.hour}:${parts.minute}`;
+};
+const memberDateTimeValue = (value) => `${memberDateKey(value)}T${memberTimeKey(value)}`;
+const memberWallTimeToDate = (value) => {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const desired = match.slice(1).map(Number);
+  const desiredEpoch = Date.UTC(desired[0], desired[1] - 1, desired[2], desired[3], desired[4]);
+  let candidate = desiredEpoch;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = memberDateParts(candidate);
+    const observed = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+    );
+    const correction = desiredEpoch - observed;
+    candidate += correction;
+    if (!correction) break;
+  }
+  const finalParts = memberDateParts(candidate);
+  const finalValue = `${finalParts.year}-${finalParts.month}-${finalParts.day}T${finalParts.hour}:${finalParts.minute}`;
+  return finalValue === value ? new Date(candidate) : null;
+};
+
+const formatDate = (value) => memberDateFormatter({
   dateStyle: "medium",
   timeStyle: "short",
 }).format(new Date(value));
@@ -364,49 +564,316 @@ const newOperationKey = () => {
   return (value || 1n).toString();
 };
 
-function showCatalog(revision = ++screenRevision) {
-  if (revision !== screenRevision) return;
-  setNavigation("catalog", false);
-  title.textContent = "Задания";
-  back.classList.add("hidden");
-  const create = element("button", "+ Создать", "secondary compact-create");
-  create.type = "button";
-  create.addEventListener("click", () => beginTaskCreationFlow());
-  const boundary = element("section", undefined, "state-view catalog-view");
-  boundary.dataset.screenId = "T01";
-  boundary.dataset.uiEngine = "concept-05";
-  boundary.dataset.template = "list";
-  const visibleTasks = tasks.filter((task) => (
-    (!catalogFilters.format || task.format === catalogFilters.format)
-    && (!catalogFilters.minReward || task.credit_reward_per_performer >= Number(catalogFilters.minReward))
-  ));
-  boundary.dataset.state = visibleTasks.length ? "content" : "empty";
-  const activeFilterCount = Object.values(catalogFilters).filter(Boolean).length;
-  const actions = element("div", undefined, "catalog-actions");
-  const filterTrigger = element("button", undefined, "secondary catalog-filter-button");
-  filterTrigger.type = "button";
-  filterTrigger.append(slidersIcon(), element("span", "Фильтры"));
-  if (activeFilterCount) {
-    filterTrigger.classList.add("is-active");
-    filterTrigger.setAttribute("aria-label", `Фильтры, выбрано: ${activeFilterCount}`);
-    filterTrigger.append(element("span", String(activeFilterCount), "catalog-filter-count"));
+function showCatalogSortSheet(
+  trigger,
+  {
+    sortOptions = catalogSortOptions,
+    selectedSort = catalogSort,
+    onSelect = (value) => {
+      catalogSort = value;
+      showCatalog();
+    },
+  } = {},
+) {
+  shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop")?.remove();
+  const backdrop = element("section", undefined, "catalog-sort-backdrop");
+  const dialog = element("div", undefined, "catalog-sort-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "catalog-sort-title");
+  const header = element("div", undefined, "catalog-sort-heading");
+  const sortTitle = element("h2", "Сортировка");
+  sortTitle.id = "catalog-sort-title";
+  const close = element("button", "×", "catalog-sort-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть сортировку");
+  header.append(sortTitle, close);
+  const options = element("div", undefined, "catalog-sort-options");
+  options.setAttribute("role", "radiogroup");
+  options.setAttribute("aria-label", "Способ сортировки");
+  let selectedOption = null;
+  const dismiss = (restoreFocus = true) => {
+    backdrop.remove();
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  };
+  for (const [label, value] of sortOptions) {
+    const option = element("button", undefined, "catalog-sort-option");
+    option.type = "button";
+    option.setAttribute("role", "radio");
+    option.setAttribute("aria-checked", String(value === selectedSort));
+    option.append(element("span", label), element("span", value === selectedSort ? "✓" : "", "catalog-sort-check"));
+    if (value === selectedSort) {
+      option.classList.add("is-selected");
+      selectedOption = option;
+    }
+    option.addEventListener("click", () => {
+      dismiss(false);
+      onSelect(value);
+      queueMicrotask(() => content.querySelector(".catalog-sort-button")?.focus({ preventScroll: true }));
+    });
+    options.append(option);
   }
-  markTransition(filterTrigger, "PE-012", "open_filters");
-  filterTrigger.addEventListener("click", () => showCatalogFilters());
-  actions.append(filterTrigger, create);
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [close, ...options.querySelectorAll("button")];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, options);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  queueMicrotask(() => (selectedOption || close).focus({ preventScroll: true }));
+}
+
+function buildCatalogFilterForm({
+  onApply,
+  onReset,
+  filters = catalogFilters,
+  sourceTasks = tasks,
+  onChange = (value) => { catalogFilters = value; },
+}) {
+  const form = element("form", undefined, "task-form catalog-filter-form");
+  const labeledInput = (labelText, name, type = "text") => {
+    const label = element("label", labelText);
+    const input = element("input");
+    input.name = name;
+    input.type = type;
+    input.setAttribute("aria-label", labelText);
+    label.append(input);
+    return { label, input };
+  };
+  const labeledSelect = (labelText, name, options) => {
+    const label = element("label", labelText);
+    const select = element("select");
+    select.name = name;
+    select.setAttribute("aria-label", labelText);
+    for (const [text, value] of options) select.append(new Option(text, value));
+    label.append(select);
+    return { label, select };
+  };
+  const row = (...fields) => {
+    const grid = element("div", undefined, "form-grid two-columns");
+    grid.append(...fields);
+    return grid;
+  };
+  const kindField = labeledSelect("Тип задания", "taskKind", [
+    ["Любой", ""], ["Личное", "solo"], ["Групповое", "group"],
+  ]);
+  kindField.select.value = filters.taskKind;
+  const formatField = labeledSelect("Формат", "format", [
+    ["Любой", ""], ["Онлайн", "online"], ["Офлайн", "offline"],
+  ]);
+  formatField.select.value = filters.format;
+  const categories = [...new Set(sourceTasks.map((task) => task.category_name).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  const categoryField = labeledSelect("Категория", "category", [
+    ["Любая", ""], ...categories.map((category) => [category, category]),
+  ]);
+  categoryField.select.value = filters.category;
+  const sizeField = labeledSelect("Размер", "timeSize", [
+    ["Любой", ""], ["XS", "xs"], ["S", "s"], ["M", "m"], ["L", "l"], ["XL", "xl"],
+  ]);
+  sizeField.select.value = filters.timeSize;
+  const slotsField = labeledInput("Мест от", "minSlots", "number");
+  slotsField.input.min = "1";
+  slotsField.input.inputMode = "numeric";
+  slotsField.input.value = filters.minSlots;
+  const rewardField = labeledInput("Награда от", "minReward", "number");
+  rewardField.input.min = "1";
+  rewardField.input.inputMode = "numeric";
+  rewardField.input.value = filters.minReward;
+  const deadlineField = labeledInput("Срок до", "deadlineUntil", "date");
+  deadlineField.input.value = filters.deadlineUntil;
+  const cityField = labeledInput("Город", "city");
+  cityField.label.classList.add("catalog-city-filter");
+  cityField.input.placeholder = "Начните вводить город";
+  cityField.input.value = filters.city;
+  const updateCityVisibility = () => cityField.label.classList.toggle(
+    "hidden", formatField.select.value !== "offline",
+  );
+  formatField.select.addEventListener("change", updateCityVisibility);
+  updateCityVisibility();
+  const reset = element("button", "Сбросить", "secondary");
+  reset.type = "button";
+  const apply = element("button", "Применить", "primary");
+  apply.type = "submit";
+  const filterActions = element("div", undefined, "catalog-filter-actions");
+  filterActions.append(reset, apply);
+  form.append(
+    row(kindField.label, formatField.label),
+    categoryField.label,
+    row(sizeField.label, slotsField.label),
+    row(rewardField.label, deadlineField.label),
+    cityField.label,
+    filterActions,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    onChange({
+      query: filters.query,
+      taskKind: kindField.select.value,
+      format: formatField.select.value,
+      category: categoryField.select.value,
+      timeSize: sizeField.select.value,
+      minSlots: slotsField.input.value,
+      minReward: rewardField.input.value,
+      deadlineUntil: deadlineField.input.value,
+      city: formatField.select.value === "offline" ? cityField.input.value.trim() : "",
+    });
+    onApply();
+  });
+  reset.addEventListener("click", () => {
+    onChange({ ...emptyCatalogFilters(), query: filters.query });
+    onReset();
+  });
+  return { form, initialFocus: kindField.select };
+}
+
+function showCatalogFilterSheet(trigger, {
+  filters = catalogFilters,
+  sourceTasks = tasks,
+  onChange = (value) => { catalogFilters = value; },
+  refresh = () => showCatalog(),
+} = {}) {
+  shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop")?.remove();
+  const backdrop = element("section", undefined, "catalog-filter-backdrop");
+  const dialog = element("div", undefined, "catalog-filter-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "catalog-filter-title");
+  const header = element("div", undefined, "catalog-sort-heading");
+  const filterTitle = element("h2", "Активные фильтры");
+  filterTitle.id = "catalog-filter-title";
+  const close = element("button", "×", "catalog-sort-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть фильтры");
+  header.append(filterTitle, close);
+  const dismiss = (restoreFocus = true) => {
+    backdrop.remove();
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  };
+  const refreshCatalogAndFocusFilter = () => {
+    dismiss(false);
+    refresh();
+    queueMicrotask(() => content.querySelector(".catalog-filter-button")?.focus({ preventScroll: true }));
+  };
+  const { form, initialFocus } = buildCatalogFilterForm({
+    onApply: refreshCatalogAndFocusFilter,
+    onReset: refreshCatalogAndFocusFilter,
+    filters,
+    sourceTasks,
+    onChange,
+  });
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [close, ...form.querySelectorAll("button, input, select")]
+      .filter((node) => !node.closest(".hidden"));
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, form);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  queueMicrotask(() => initialFocus.focus({ preventScroll: true }));
+}
+
+const taskMatchesFilters = (task, filters) => (
+  (!filters.taskKind || task.task_kind === filters.taskKind)
+  && (!filters.format || task.format === filters.format)
+  && (!filters.category || task.category_name === filters.category)
+  && (!filters.timeSize || task.time_size === filters.timeSize)
+  && (!filters.minSlots || task.performer_slots >= Number(filters.minSlots))
+  && (
+    !filters.minReward
+    || task.credit_reward_per_performer >= Number(filters.minReward)
+  )
+  && (
+    !filters.deadlineUntil
+    || (task.deadline_at && memberDateKey(task.deadline_at) <= filters.deadlineUntil)
+  )
+  && (
+    !filters.city
+    || String(task.city || "").toLocaleLowerCase("ru")
+      .includes(filters.city.trim().toLocaleLowerCase("ru"))
+  )
+);
+
+const sortTaskLikeItems = (items, selectedSort) => {
+  const originalOrder = new Map(items.map((item, index) => [item.id, index]));
+  const byOriginalOrder = (left, right) => originalOrder.get(left.id) - originalOrder.get(right.id);
+  const finiteDate = (value, fallback) => {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  const comparators = {
+    created_desc: (left, right) => finiteDate(right.created_at, 0) - finiteDate(left.created_at, 0) || byOriginalOrder(left, right),
+    created_asc: (left, right) => finiteDate(left.created_at, Number.POSITIVE_INFINITY) - finiteDate(right.created_at, Number.POSITIVE_INFINITY) || byOriginalOrder(left, right),
+    deadline_asc: (left, right) => finiteDate(left.deadline_at, Number.POSITIVE_INFINITY) - finiteDate(right.deadline_at, Number.POSITIVE_INFINITY) || byOriginalOrder(left, right),
+    deadline_desc: (left, right) => finiteDate(right.deadline_at, 0) - finiteDate(left.deadline_at, 0) || byOriginalOrder(left, right),
+    reward_desc: (left, right) => (right.credit_reward_per_performer || 0) - (left.credit_reward_per_performer || 0) || byOriginalOrder(left, right),
+    reward_asc: (left, right) => (left.credit_reward_per_performer || 0) - (right.credit_reward_per_performer || 0) || byOriginalOrder(left, right),
+  };
+  items.sort(comparators[selectedSort] || byOriginalOrder);
+  return items;
+};
+
+function catalogTasksForView() {
+  const query = catalogFilters.query.trim().toLocaleLowerCase("ru");
+  const visibleTasks = tasks.filter((task) => {
+    const searchable = [task.title, task.description]
+      .filter(Boolean).join(" ").toLocaleLowerCase("ru");
+    return (
+      (!query || searchable.includes(query))
+      && taskMatchesFilters(task, catalogFilters)
+    );
+  });
+  return sortTaskLikeItems(visibleTasks, catalogSort);
+}
+
+function updateCatalogResults(boundary, results) {
+  const visibleTasks = catalogTasksForView();
+  boundary.dataset.state = visibleTasks.length ? "content" : "empty";
   const availableStatus = element(
     "p",
     visibleTasks.length ? `Доступно заданий: ${visibleTasks.length}` : "Доступных заданий нет",
     "visually-hidden",
   );
   availableStatus.setAttribute("role", "status");
-  boundary.append(actions, availableStatus);
   if (!visibleTasks.length) {
-    boundary.append(element("p", "Новые задания появятся здесь.", "compact-empty"));
-    replaceContent(boundary);
-    restoreModerationFocus();
-    restoreProfileFocus();
-    return;
+    results.replaceChildren(availableStatus, element("p", "Новые задания появятся здесь.", "compact-empty"));
+    return null;
   }
   const list = element("div", undefined, "list");
   let focusTarget = null;
@@ -416,7 +883,73 @@ function showCatalog(revision = ++screenRevision) {
     if (task.id === returnFocusTaskId) focusTarget = button;
     list.append(button);
   }
-  boundary.append(list);
+  results.replaceChildren(availableStatus, list);
+  return focusTarget;
+}
+
+function showCatalog(revision = ++screenRevision) {
+  if (revision !== screenRevision) return;
+  setNavigation("catalog", false);
+  title.textContent = "Задания";
+  back.classList.add("hidden");
+  const boundary = element("section", undefined, "state-view catalog-view");
+  boundary.dataset.screenId = "T01";
+  boundary.dataset.uiEngine = "concept-05";
+  boundary.dataset.template = "list";
+  const activeFilterCount = Object.entries(catalogFilters)
+    .filter(([key, value]) => key !== "query" && Boolean(value)).length;
+  const actions = element("div", undefined, "catalog-actions");
+  const filterTrigger = element("button", undefined, "secondary catalog-filter-button");
+  filterTrigger.type = "button";
+  filterTrigger.setAttribute("aria-label", "Фильтры");
+  filterTrigger.append(slidersIcon());
+  if (!uiNextEnabled) filterTrigger.append(element("span", "Фильтры"));
+  if (activeFilterCount) {
+    filterTrigger.classList.add("is-active");
+    filterTrigger.setAttribute("aria-label", `Фильтры, выбрано: ${activeFilterCount}`);
+    filterTrigger.append(element("span", String(activeFilterCount), "catalog-filter-count"));
+  }
+  markTransition(filterTrigger, "PE-012", "open_filters");
+  filterTrigger.addEventListener("click", () => {
+    if (uiNextEnabled) showCatalogFilterSheet(filterTrigger);
+    else showCatalogFilters();
+  });
+  if (uiNextEnabled) {
+    const catalogBack = element("button", "‹", "secondary catalog-back-button");
+    catalogBack.type = "button";
+    catalogBack.setAttribute("aria-label", "Назад к заданиям");
+    catalogBack.addEventListener("click", () => void loadTaskHome());
+    const search = element("label", undefined, "catalog-search");
+    const searchInput = element("input");
+    searchInput.type = "search";
+    searchInput.placeholder = "Название или описание";
+    searchInput.setAttribute("aria-label", "Поиск по названию и описанию");
+    searchInput.value = catalogFilters.query;
+    search.append(searchIcon(), searchInput);
+    const actionEnd = element("div", undefined, "catalog-actions-end");
+    const currentSortLabel = catalogSortOptions.find(([, value]) => value === catalogSort)?.[0] || "Создано позже";
+    const sort = element("button", undefined, "secondary catalog-sort-button");
+    sort.type = "button";
+    sort.setAttribute("aria-label", `Сортировка: ${currentSortLabel}`);
+    sort.setAttribute("aria-haspopup", "dialog");
+    sort.append(sortIcon());
+    sort.classList.toggle("is-active", catalogSort !== "created_desc");
+    sort.addEventListener("click", () => showCatalogSortSheet(sort));
+    actionEnd.append(filterTrigger, sort);
+    actions.append(catalogBack, search, actionEnd);
+    searchInput.addEventListener("input", () => {
+      catalogFilters.query = searchInput.value;
+      updateCatalogResults(boundary, results);
+    });
+  } else {
+    const create = element("button", "+ Создать", "secondary compact-create");
+    create.type = "button";
+    create.addEventListener("click", () => beginTaskCreationFlow());
+    actions.append(filterTrigger, create);
+  }
+  const results = element("div", undefined, "catalog-results");
+  boundary.append(actions, results);
+  const focusTarget = updateCatalogResults(boundary, results);
   replaceContent(boundary);
   focusTarget?.focus({ preventScroll: true });
   returnFocusTaskId = null;
@@ -463,6 +996,9 @@ function taskListCard(task, { preview = false } = {}) {
   const category = task.category_name || (task.origin === "community" ? "Сообщество" : null);
   if (category) chips.append(element("span", category, "chip muted-chip"));
   const meta = element("div", undefined, "task-meta");
+  if (task.created_at) {
+    meta.append(element("span", `создано ${compactListDate(task.created_at)}`));
+  }
   meta.append(
     element("span", `✦ ${task.credit_reward_per_performer} кред.`),
     element("span", `${task.performer_slots} ${task.performer_slots === 1 ? "место" : "места"}`),
@@ -470,7 +1006,7 @@ function taskListCard(task, { preview = false } = {}) {
   const deadline = element(
     "time",
     task.deadline_at
-      ? `до ${new Intl.DateTimeFormat("ru", { day: "numeric", month: "short" }).format(new Date(task.deadline_at))}`
+      ? `до ${memberDateFormatter({ day: "numeric", month: "short" }).format(new Date(task.deadline_at))}`
       : "Срок уточняется",
   );
   if (task.deadline_at) deadline.dateTime = task.deadline_at;
@@ -506,7 +1042,7 @@ function showCatalogFilters(push = true) {
   form.append(formatLabel, rewardLabel, apply);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    catalogFilters = { format: format.value, minReward: reward.value };
+    catalogFilters = { ...emptyCatalogFilters(), format: format.value, minReward: reward.value };
     history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
     showCatalog();
   });
@@ -575,50 +1111,334 @@ function showTaskCreation(state, forceEdit = false) {
     card.append(publish, status);
     return replaceContent(connectedBoundary("T06", "content", card));
   }
-  const values = draft.values;
+  const localDraftKey = (draftId = draft.id) => (
+    `community-bot:task-form:${currentMemberId || "current"}:${draftId || "new"}`
+  );
+  const localDraftKeys = new Set([localDraftKey()]);
+  const readLocalDraft = () => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(localDraftKey()) || "null");
+      return parsed?.revision === draft.revision && parsed.values ? parsed.values : null;
+    } catch {
+      return null;
+    }
+  };
+  const localValues = readLocalDraft();
+  const values = { ...draft.values };
+  if (localValues) {
+    for (const [name, value] of Object.entries(localValues)) {
+      if (!["material_text", "materials_expanded", "city_input"].includes(name)) values[name] = value;
+    }
+    if (Object.hasOwn(localValues, "material_text")) {
+      values.materials = localValues.material_text ? { text: localValues.material_text } : {};
+    }
+  }
   const form = element("form", undefined, "task-form");
   form.classList.add("creation-form");
-  form.innerHTML = '<fieldset class="type-field"><legend>Тип задания *</legend><select class="visually-hidden" name="task_kind" aria-label="Тип задания *" required><option value="solo">Личное</option><option value="group">Групповое</option></select><div class="type-segmented"><button type="button" data-kind="solo">Личное</button><button type="button" data-kind="group">Групповое</button></div></fieldset><div class="form-grid two-columns" data-format-row><label class="section">Число исполнителей *<input name="performer_slots" aria-label="Число исполнителей *" type="number" min="1" required></label><label class="section">Формат *<select name="format" aria-label="Формат *" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select></label></div><label class="section">Категория *<select name="category_id" aria-label="Категория *" required></select></label><label class="section">Название *<input name="title" aria-label="Название *" required><small>Коротко и с понятным результатом</small></label><label class="section">Что нужно сделать *<textarea name="description" aria-label="Что нужно сделать *" required></textarea></label><label class="section">Критерии приёмки *<textarea name="completion_criteria" aria-label="Критерии приёмки *" required></textarea><small>Проверяемые условия, по которым принимается каждый слот</small></label><div class="form-grid two-columns"><label class="section">Размер *<select name="time_size" aria-label="Размер *" required></select></label><label class="section">Награда за исполнителя *<input name="credit_reward_per_performer" aria-label="Награда за исполнителя *" type="number" min="1" required></label></div><p class="reserve-summary"><span>Резерв</span><strong data-reserve>—</strong></p><label class="section">Срок *<input name="deadline_at" aria-label="Срок *" type="datetime-local" required></label><label class="section">Материалы<textarea name="material_text" aria-label="Материалы"></textarea><small>Ссылка или короткий текст</small></label>';
+  form.innerHTML = `
+    <section class="creation-group" aria-label="Формат задания">
+      <div class="creation-choice-row">
+        <div class="section creation-choice-field">
+          <span class="field-label">Тип задания *</span>
+          <select class="visually-hidden" name="task_kind" aria-label="Тип задания *" required>
+            <option value="solo">Личное</option><option value="group">Групповое</option>
+          </select>
+          <button class="creation-choice-trigger" type="button" data-kind-trigger aria-label="Выбрать тип задания" aria-haspopup="dialog">
+            <span class="creation-choice-copy"><strong data-kind-label>Личное</strong><small data-kind-summary>Один исполнитель</small></span>
+            <span class="creation-choice-chevron" aria-hidden="true">›</span>
+          </button>
+        </div>
+        <div class="section creation-choice-field">
+          <span class="field-label">Формат *</span>
+          <select class="visually-hidden" name="format" aria-label="Формат *" required><option value="online">Онлайн</option><option value="offline">Офлайн</option></select>
+          <button class="creation-choice-trigger" type="button" data-format-trigger aria-label="Выбрать формат задания" aria-haspopup="dialog">
+            <span class="creation-choice-copy"><strong data-format-label>Онлайн</strong><small data-format-summary>Удалённо</small></span>
+            <span class="creation-choice-chevron" aria-hidden="true">›</span>
+          </button>
+        </div>
+      </div>
+      <label class="section slots-field" data-slots-field>Число исполнителей *<input name="performer_slots" aria-label="Число исполнителей *" type="number" min="1" required></label>
+      <span class="hidden" data-city-anchor></span>
+      <div class="section category-choice-field">
+        <span class="field-label">Категория *</span>
+        <select class="visually-hidden" name="category_id" aria-label="Категория *" required></select>
+        <button class="category-choice-trigger" type="button" data-category-trigger aria-label="Выбрать категорию" aria-haspopup="dialog">
+          <span class="category-choice-icon" data-category-icon aria-hidden="true"></span>
+          <span class="creation-choice-copy"><strong data-category-name>Выберите категорию</strong><small data-category-description></small></span>
+          <span class="creation-choice-chevron" aria-hidden="true">›</span>
+        </button>
+      </div>
+      <div class="terms-picker-stack">
+        <div class="section size-picker-field">
+          <span class="field-label">Размер *</span>
+          <select class="visually-hidden" name="time_size" aria-label="Размер *" required></select>
+          <button class="size-picker-trigger" type="button" aria-label="Выбрать размер задания" aria-haspopup="dialog">
+            <span class="size-picker-copy"><strong data-size-name>—</strong><small data-size-duration>Выберите размер</small></span>
+            <span class="size-picker-chevron" aria-hidden="true">›</span>
+          </button>
+        </div>
+        <div class="section reward-picker-field">
+          <div class="reward-picker-heading"><span class="field-label">Награда за исполнителя *</span><small data-reward-hint></small></div>
+          <input class="visually-hidden" name="credit_reward_per_performer" aria-label="Награда за исполнителя *" type="number" min="1" required>
+          <div class="reward-options" data-reward-options role="radiogroup" aria-label="Допустимая награда"></div>
+          <div class="reward-stepper hidden" data-reward-stepper>
+            <button type="button" data-reward-decrease aria-label="Уменьшить награду">−</button>
+            <output data-reward-value aria-live="polite"></output>
+            <button type="button" data-reward-increase aria-label="Увеличить награду">+</button>
+          </div>
+        </div>
+      </div>
+      <div class="reserve-summary" data-reserve-summary>
+        <span data-reserve-formula>Будет зарезервировано</span>
+        <strong data-reserve>—</strong>
+        <span class="reserve-meter" data-reserve-meter role="progressbar" aria-label="Использование доступных кредитов" aria-valuemin="0">
+          <span data-reserve-meter-fill></span>
+        </span>
+      </div>
+    </section>
+    <section class="creation-group" aria-labelledby="creation-content-title">
+      <p class="creation-group-title" id="creation-content-title">Содержание</p>
+      <div class="section content-choice-field" data-content-field="title">
+        <textarea class="visually-hidden" name="title" aria-label="Название *" maxlength="80" required></textarea>
+        <button class="content-choice-trigger" type="button" data-content-trigger="title" aria-label="Редактировать название" aria-haspopup="dialog">
+          <span class="content-choice-copy"><strong>Название *</strong><small data-content-summary="title">Коротко опишите результат</small></span><span class="creation-choice-chevron" aria-hidden="true">›</span>
+        </button>
+        <small class="field-error hidden" data-content-error="title" aria-live="polite"></small>
+      </div>
+      <div class="section content-choice-field" data-content-field="description">
+        <textarea class="visually-hidden" name="description" aria-label="Что нужно сделать *" maxlength="1200" required></textarea>
+        <button class="content-choice-trigger" type="button" data-content-trigger="description" aria-label="Редактировать что нужно сделать" aria-haspopup="dialog">
+          <span class="content-choice-copy"><strong>Что нужно сделать *</strong><small data-content-summary="description">Опишите действия исполнителя</small></span><span class="creation-choice-chevron" aria-hidden="true">›</span>
+        </button>
+        <small class="field-error hidden" data-content-error="description" aria-live="polite"></small>
+      </div>
+      <div class="section content-choice-field" data-content-field="material_text">
+        <textarea class="visually-hidden" name="material_text" aria-label="Материалы" maxlength="1000"></textarea>
+        <button class="content-choice-trigger" type="button" data-content-trigger="material_text" aria-label="Редактировать материалы" aria-haspopup="dialog">
+          <span class="content-choice-copy"><strong>Материалы <span class="optional-label">(необязательно)</span></strong><small data-content-summary="material_text">Ссылка или короткий текст</small></span><span class="creation-choice-chevron" aria-hidden="true">›</span>
+        </button>
+        <small class="field-error hidden" data-content-error="material_text" aria-live="polite"></small>
+      </div>
+    </section>
+    <section class="creation-group" aria-labelledby="creation-terms-title">
+      <p class="creation-group-title" id="creation-terms-title">Условия</p>
+      <div class="section content-choice-field" data-content-field="completion_criteria">
+        <textarea class="visually-hidden" name="completion_criteria" aria-label="Критерии приёмки *" maxlength="700" required></textarea>
+        <button class="content-choice-trigger" type="button" data-content-trigger="completion_criteria" aria-label="Редактировать критерии приёмки" aria-haspopup="dialog">
+          <span class="content-choice-copy"><strong>Критерии приёмки *</strong><small data-content-summary="completion_criteria">Добавьте проверяемые условия</small></span><span class="creation-choice-chevron" aria-hidden="true">›</span>
+        </button>
+        <small class="field-error hidden" data-content-error="completion_criteria" aria-live="polite"></small>
+      </div>
+      <div class="section deadline-choice-field">
+        <input class="visually-hidden" name="deadline_at" aria-label="Срок *" type="datetime-local" required>
+        <button class="category-choice-trigger deadline-choice-trigger" type="button" data-deadline-trigger aria-label="Выбрать срок" aria-haspopup="dialog">
+          <span class="category-choice-icon deadline-choice-icon" data-deadline-icon aria-hidden="true"></span>
+          <span class="creation-choice-copy"><strong data-deadline-date>Выберите срок *</strong><small data-deadline-time>Дата и время</small></span>
+          <span class="creation-choice-chevron" aria-hidden="true">›</span>
+        </button>
+        <small class="field-error hidden" data-deadline-error aria-live="polite"></small>
+      </div>
+    </section>`;
+  const resizeAutoGrow = (field) => {
+    if (!field?.isConnected || field.closest(".hidden")) return;
+    const maximum = field.name === "title" ? 92 : field.name === "material_text" ? 156 : 184;
+    field.style.height = "auto";
+    const height = Math.min(field.scrollHeight, maximum);
+    field.style.height = `${height}px`;
+    field.style.overflowY = field.scrollHeight > maximum ? "auto" : "hidden";
+  };
+  const keepControlVisible = (control) => {
+    requestAnimationFrame(() => {
+      const viewport = globalThis.visualViewport;
+      const box = control.getBoundingClientRect();
+      if (viewport && box.bottom > viewport.height - 16) {
+        control.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    });
+  };
   for (const item of state.categories) form.category_id.append(new Option(item.icon + " " + item.name, item.id));
   for (const item of state.time_sizes) form.time_size.append(new Option(item.value.toUpperCase() + " · " + item.label, item.value));
   for (const name of ["task_kind", "category_id", "time_size", "format"]) if (values[name]) form[name].value = values[name];
+  const taskKindOptions = [
+    { value: "solo", label: "Личное", description: "Один исполнитель и фиксированная награда." },
+    { value: "group", label: "Групповое", description: "Несколько исполнителей и общий резерв." },
+  ];
+  const formatOptions = [
+    { value: "online", label: "Онлайн", description: "Можно выполнить удалённо." },
+    { value: "offline", label: "Офлайн", description: "Нужно присутствовать в указанном городе." },
+  ];
+  const categoryDescription = (category) => {
+    if (category?.code === "other") {
+      return "Если задача не подходит ни к одной из основных категорий.";
+    }
+    return category?.description || `Задания категории «${category?.name || "Другое"}».`;
+  };
+  const syncCategoryPresentation = () => {
+    const category = state.categories.find((item) => item.id === form.category_id.value);
+    form.querySelector("[data-category-icon]").textContent = category?.icon || "•";
+    form.querySelector("[data-category-name]").textContent = category?.name || "Выберите категорию";
+    form.querySelector("[data-category-description]").textContent = categoryDescription(category);
+  };
+  const syncFormatPresentation = () => {
+    const option = formatOptions.find((item) => item.value === form.format.value);
+    form.querySelector("[data-format-label]").textContent = option?.label || "Выберите";
+    form.querySelector("[data-format-summary]").textContent = option?.value === "offline"
+      ? "В городе" : "Удалённо";
+  };
   let groupSlots = values.task_kind === "group" && Number(values.performer_slots) >= 2
     ? Number(values.performer_slots) : 2;
+  let persistDraft = () => {};
   const syncTaskKind = () => {
     const group = form.task_kind.value === "group";
-    for (const button of form.querySelectorAll("[data-kind]")) {
-      button.setAttribute("aria-pressed", String(button.dataset.kind === form.task_kind.value));
-    }
+    const option = taskKindOptions.find((item) => item.value === form.task_kind.value);
+    form.querySelector("[data-kind-label]").textContent = option?.label || "Выберите";
+    form.querySelector("[data-kind-summary]").textContent = group ? "Несколько участников" : "Один исполнитель";
     form.performer_slots.disabled = !group;
     form.performer_slots.min = group ? "2" : "1";
     form.performer_slots.value = String(group ? groupSlots : 1);
+    form.querySelector("[data-slots-field]").classList.toggle("hidden", !group);
     updateReserve();
   };
-  for (const button of form.querySelectorAll("[data-kind]")) {
-    button.addEventListener("click", () => {
-      if (form.task_kind.value === "group" && Number(form.performer_slots.value) >= 2) {
-        groupSlots = Number(form.performer_slots.value);
-      }
-      form.task_kind.value = button.dataset.kind;
-      syncTaskKind();
-    });
-  }
   for (const name of ["title", "description", "completion_criteria"]) form[name].value = values[name] || "";
-  form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
-  form.deadline_at.value = values.deadline_at?.slice(0, 16) || "";
-  const deadlineMin = new Date(Date.now() + 60_000);
-  deadlineMin.setSeconds(0, 0);
-  form.deadline_at.min = new Date(deadlineMin - deadlineMin.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-  form.performer_slots.value = values.performer_slots || 1;
   form.material_text.value = values.materials?.text || values.materials?.url || "";
+  const contentEditorSpecs = {
+    title: {
+      title: "Название",
+      hint: "Коротко и с понятным результатом.",
+      placeholder: "Например: Проверить сценарий первого запуска",
+      emptySummary: "Коротко опишите результат",
+      rows: 2,
+    },
+    description: {
+      title: "Что нужно сделать",
+      hint: "Опишите конкретные действия исполнителя.",
+      placeholder: "Что именно нужно сделать и какой результат приложить",
+      emptySummary: "Опишите действия исполнителя",
+      rows: 5,
+    },
+    completion_criteria: {
+      title: "Критерии приёмки",
+      hint: "Добавьте условия, по которым можно проверить результат.",
+      placeholder: "Например: результат приложен и соответствует описанию",
+      emptySummary: "Добавьте проверяемые условия",
+      rows: 4,
+    },
+    material_text: {
+      title: "Материалы",
+      hint: "Добавьте ссылку или короткий текст, если исполнителю нужны исходные материалы.",
+      placeholder: "Ссылка или короткий текст",
+      emptySummary: "Ссылка или короткий текст",
+      required: false,
+      rows: 4,
+    },
+  };
+  const syncContentPresentation = (name) => {
+    const value = form[name].value.trim().replace(/\s+/g, " ");
+    const summary = form.querySelector(`[data-content-summary="${name}"]`);
+    summary.textContent = value || contentEditorSpecs[name].emptySummary;
+    summary.classList.toggle("is-filled", Boolean(value));
+  };
+  for (const name of Object.keys(contentEditorSpecs)) {
+    form[name].addEventListener("input", () => syncContentPresentation(name));
+    syncContentPresentation(name);
+  }
+  form.credit_reward_per_performer.value = values.credit_reward_per_performer || "";
+  const deadlineTrigger = form.querySelector("[data-deadline-trigger]");
+  const deadlineError = form.querySelector("[data-deadline-error]");
+  form.querySelector("[data-deadline-icon]").append(calendarIcon());
+  const storedDeadline = String(values.deadline_at || "");
+  form.deadline_at.value = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(storedDeadline)
+    ? storedDeadline
+    : storedDeadline ? memberDateTimeValue(storedDeadline) : "";
+  const parseLocalDateTime = memberWallTimeToDate;
+  const localDateKey = memberDateKey;
+  const localTimeKey = memberTimeKey;
+  const ceilToFiveMinutes = (date) => {
+    const rounded = new Date(date);
+    rounded.setSeconds(0, 0);
+    const remainder = rounded.getMinutes() % 5;
+    if (remainder) rounded.setMinutes(rounded.getMinutes() + 5 - remainder);
+    return rounded;
+  };
+  let deadlineMin;
+  const refreshDeadlineMinimum = () => {
+    deadlineMin = ceilToFiveMinutes(new Date(Date.now() + 60_000));
+    form.deadline_at.min = `${localDateKey(deadlineMin)}T${localTimeKey(deadlineMin)}`;
+    return deadlineMin;
+  };
+  refreshDeadlineMinimum();
+  const syncDeadlinePresentation = () => {
+    const selected = parseLocalDateTime(form.deadline_at.value);
+    form.querySelector("[data-deadline-date]").textContent = selected
+      ? memberDateFormatter({ day: "numeric", month: "short", year: "numeric" }).format(selected)
+      : "Выберите срок *";
+    form.querySelector("[data-deadline-time]").textContent = selected
+      ? memberDateFormatter({ hour: "2-digit", minute: "2-digit" }).format(selected)
+      : "Дата и время";
+  };
+  syncDeadlinePresentation();
+  form.performer_slots.value = values.performer_slots || 1;
   const submit = element("button", "Предварительный просмотр", "primary");
   submit.type = "submit";
   submit.setAttribute("aria-label", "Предварительный просмотр");
   const reserve = form.querySelector("[data-reserve]");
+  const reserveFormula = form.querySelector("[data-reserve-formula]");
+  const reserveSummary = form.querySelector("[data-reserve-summary]");
+  const reserveMeter = form.querySelector("[data-reserve-meter]");
+  const reserveMeterFill = form.querySelector("[data-reserve-meter-fill]");
+  const cachedBalance = cachedJson("/api/v1/me")?.credit_balance;
+  const availableCreditBalance = Number(state.credit_balance ?? cachedBalance);
+  const hasCreditBalance = Number.isFinite(availableCreditBalance);
+  const russianWord = (value, one, few, many) => {
+    const absolute = Math.abs(value) % 100;
+    const last = absolute % 10;
+    if (absolute > 10 && absolute < 20) return many;
+    if (last === 1) return one;
+    if (last >= 2 && last <= 4) return few;
+    return many;
+  };
+  const creditLabel = (value) => `${value} ${russianWord(value, "кредит", "кредита", "кредитов")}`;
+  const availableCreditLabel = (value) => (
+    `${value} ${russianWord(value, "кредита", "кредитов", "кредитов")}`
+  );
+  const performerLabel = (value) => `${value} ${russianWord(value, "исполнитель", "исполнителя", "исполнителей")}`;
   const updateReserve = () => {
     const slots = Number(form.performer_slots.value || 0);
     const reward = Number(form.credit_reward_per_performer.value || 0);
-    reserve.textContent = slots && reward ? `${slots * reward} кредитов` : "—";
+    if (!slots || !reward) {
+      reserveFormula.textContent = "Будет зарезервировано";
+      reserve.textContent = "—";
+      reserveSummary.classList.remove("is-over-limit");
+      reserveMeter.classList.toggle("hidden", !hasCreditBalance);
+      reserveMeter.setAttribute("aria-valuemax", String(Math.max(availableCreditBalance, 1)));
+      reserveMeter.setAttribute("aria-valuenow", "0");
+      reserveMeter.setAttribute("aria-valuetext", "Резерв не рассчитан");
+      reserveMeterFill.style.width = "0%";
+      return;
+    }
+    const total = slots * reward;
+    reserveFormula.textContent = form.task_kind.value === "group"
+      ? `${performerLabel(slots)} × ${creditLabel(reward)}`
+      : "Будет зарезервировано";
+    const exceedsBalance = hasCreditBalance && total > availableCreditBalance;
+    reserve.textContent = hasCreditBalance
+      ? `${total} из ${availableCreditLabel(availableCreditBalance)}`
+      : creditLabel(total);
+    reserveSummary.classList.toggle("is-over-limit", exceedsBalance);
+    reserveMeter.classList.toggle("hidden", !hasCreditBalance);
+    if (hasCreditBalance) {
+      const meterMaximum = Math.max(availableCreditBalance, 1);
+      const meterValue = Math.min(total, meterMaximum);
+      reserveMeter.setAttribute("aria-valuemax", String(meterMaximum));
+      reserveMeter.setAttribute("aria-valuenow", String(meterValue));
+      reserveMeter.setAttribute(
+        "aria-valuetext",
+        exceedsBalance
+          ? `Нужно ${creditLabel(total)}, доступно ${creditLabel(availableCreditBalance)}`
+          : `Будет использовано ${creditLabel(total)} из ${availableCreditLabel(availableCreditBalance)}`,
+      );
+      reserveMeterFill.style.width = `${Math.min(100, (total / meterMaximum) * 100)}%`;
+    }
   };
   form.performer_slots.addEventListener("input", updateReserve);
   form.performer_slots.addEventListener("input", () => {
@@ -626,93 +1446,952 @@ function showTaskCreation(state, forceEdit = false) {
       groupSlots = Number(form.performer_slots.value);
     }
   });
-  form.credit_reward_per_performer.addEventListener("input", updateReserve);
-  const deadlineStatus = element("p", "Выберите будущий срок.", "status hidden");
-  deadlineStatus.id = "deadline-status";
-  deadlineStatus.setAttribute("aria-live", "polite");
-  form.deadline_at.setAttribute("aria-describedby", deadlineStatus.id);
+  const showDeadlineValidity = (force = false) => {
+    const invalid = !form.deadline_at.checkValidity();
+    const reveal = invalid && force;
+    form.deadline_at.setAttribute("aria-invalid", String(reveal));
+    deadlineTrigger.setAttribute("aria-invalid", String(reveal));
+    deadlineError.textContent = reveal
+      ? form.deadline_at.validity.rangeUnderflow ? "Выберите будущий срок." : "Выберите дату и время."
+      : "";
+    deadlineError.classList.toggle("hidden", !reveal);
+  };
   const updateDeadlineValidity = () => {
     const expired = form.deadline_at.validity.rangeUnderflow;
-    form.deadline_at.setAttribute("aria-invalid", String(expired));
-    deadlineStatus.classList.toggle("hidden", !expired);
     submit.disabled = expired;
+    syncDeadlinePresentation();
+    showDeadlineValidity(deadlineTrigger.getAttribute("aria-invalid") === "true" || expired);
   };
   form.deadline_at.addEventListener("input", updateDeadlineValidity);
-  form.deadline_at.parentElement.append(deadlineStatus);
+  form.deadline_at.addEventListener("invalid", (event) => {
+    event.preventDefault();
+    showDeadlineValidity(true);
+  });
   const saveStatus = element("p", "", "status hidden");
   saveStatus.setAttribute("aria-live", "polite");
-  form.append(submit, saveStatus);
-  let selectedCity = values.format === "offline" ? values.city || "" : "";
-  let cityField = null;
-  let cityTimer = null;
-  const syncFormat = () => {
-    if (form.format.value !== "offline") {
-      selectedCity = "";
-      cityField?.remove();
-      cityField = null;
-      return;
-    }
-    if (cityField) return;
-    cityField = element("label", "Город *", "section city-field");
-    const input = element("input");
-    input.name = "city";
-    input.autocomplete = "off";
-    input.placeholder = "Начните вводить город";
-    input.setAttribute("role", "combobox");
-    input.setAttribute("aria-autocomplete", "list");
-    input.setAttribute("aria-expanded", "false");
-    input.required = true;
-    input.value = selectedCity;
-    const results = element("div", undefined, "city-results hidden");
-    results.id = "task-city-results";
-    results.setAttribute("role", "listbox");
-    input.setAttribute("aria-controls", results.id);
-    const choose = (item) => {
-      selectedCity = item.value;
-      input.value = item.label;
-      input.setCustomValidity("");
-      input.setAttribute("aria-expanded", "false");
-      results.classList.add("hidden");
+  const localSaveStatus = element("small", "Автосохранение включено", "local-draft-status");
+  localSaveStatus.setAttribute("aria-live", "polite");
+  const submitBar = element("div", undefined, "creation-submit-bar");
+  submitBar.append(localSaveStatus, submit, saveStatus);
+  form.append(submitBar);
+  for (const field of form.querySelectorAll("textarea.auto-grow")) {
+    const counter = form.querySelector(`[data-counter-for="${field.name}"]`);
+    const updateCounter = () => {
+      const length = field.value.length;
+      counter.textContent = `${length} / ${field.maxLength}`;
+      counter.classList.toggle("hidden", length === 0);
+      counter.classList.toggle("is-limit", length >= field.maxLength * 0.95);
     };
-    input.addEventListener("input", () => {
-      selectedCity = "";
-      input.setCustomValidity("Выберите город из списка.");
-      clearTimeout(cityTimer);
-      const query = input.value.trim();
-      if (!query) {
-        results.classList.add("hidden");
-        input.setAttribute("aria-expanded", "false");
+    field.addEventListener("input", () => {
+      resizeAutoGrow(field);
+      updateCounter();
+      keepControlVisible(field);
+    });
+    field.addEventListener("focus", () => keepControlVisible(field));
+    updateCounter();
+    queueMicrotask(() => resizeAutoGrow(field));
+  }
+  const validationMessage = (control) => {
+    if (control.validity.valueMissing) return "Заполните это поле.";
+    if (control.name === "deadline_at" && control.validity.rangeUnderflow) {
+      return "Выберите будущий срок.";
+    }
+    if (control.name === "performer_slots" && control.validity.rangeUnderflow) {
+      return "Для группового задания нужно минимум 2 исполнителя.";
+    }
+    if (control.validity.badInput || control.validity.stepMismatch) return "Введите корректное число.";
+    if (control.validity.rangeUnderflow) return `Минимальное значение: ${control.min}.`;
+    if (control.validity.rangeOverflow) return `Максимальное значение: ${control.max}.`;
+    if (control.validity.customError) return control.validationMessage;
+    return "Проверьте введённое значение.";
+  };
+  const showFieldValidity = (control, force = false) => {
+    if (control.disabled || control.closest(".hidden")) return;
+    const invalid = !control.checkValidity();
+    const reveal = invalid && force;
+    control.setAttribute("aria-invalid", String(reveal));
+    const error = control.parentElement.querySelector(":scope > .field-error");
+    if (!error) return;
+    error.textContent = reveal ? validationMessage(control) : "";
+    error.classList.toggle("hidden", !reveal);
+  };
+  const attachFieldValidation = (control) => {
+    const label = control.closest("label");
+    if (!label || label.querySelector(":scope > .field-error")) return;
+    const error = element("small", "", "field-error hidden");
+    error.id = `field-error-${control.name}`;
+    error.setAttribute("aria-live", "polite");
+    label.append(error);
+    const describedBy = [control.getAttribute("aria-describedby"), error.id].filter(Boolean).join(" ");
+    control.setAttribute("aria-describedby", describedBy);
+    control.addEventListener("blur", () => showFieldValidity(control, true));
+    control.addEventListener("input", () => {
+      const wasRevealed = control.getAttribute("aria-invalid") === "true";
+      showFieldValidity(control, wasRevealed);
+    });
+    control.addEventListener("change", () => showFieldValidity(control, true));
+    control.addEventListener("invalid", (event) => {
+      event.preventDefault();
+      showFieldValidity(control, true);
+    });
+    control.setAttribute("aria-invalid", "false");
+  };
+  for (const control of form.querySelectorAll("input, select, textarea")) {
+    if (!control.classList.contains("visually-hidden")) attachFieldValidation(control);
+  }
+  const rewardHint = form.querySelector("[data-reward-hint]");
+  const rewardOptions = form.querySelector("[data-reward-options]");
+  const rewardStepper = form.querySelector("[data-reward-stepper]");
+  const rewardOutput = form.querySelector("[data-reward-value]");
+  const sizeTrigger = form.querySelector(".size-picker-trigger");
+  const normalizedRewards = (spec) => (spec?.reward_options || [])
+    .map(Number)
+    .filter((value) => Number.isFinite(value));
+  const rewardRangeLabel = (spec) => {
+    const options = normalizedRewards(spec);
+    if (!options.length) return `от ${Number(spec?.minimum_reward || 1)} кредитов`;
+    if (options.length === 1) return creditLabel(options[0]);
+    const contiguous = options.every((value, index) => index === 0 || value === options[index - 1] + 1);
+    if (contiguous) {
+      const last = options.at(-1);
+      return `${options[0]}–${last} ${russianWord(last, "кредит", "кредита", "кредитов")}`;
+    }
+    return options.map(creditLabel).join(", ");
+  };
+  const syncSizePresentation = () => {
+    const spec = state.time_sizes.find((item) => item.value === form.time_size.value);
+    form.querySelector("[data-size-name]").textContent = spec?.value.toUpperCase() || "—";
+    form.querySelector("[data-size-duration]").textContent = spec?.label || "Выберите размер";
+  };
+  const setRewardValue = (value) => {
+    form.credit_reward_per_performer.value = String(value);
+    rewardOutput.textContent = creditLabel(value);
+    for (const option of rewardOptions.querySelectorAll("button")) {
+      const selected = Number(option.dataset.reward) === value;
+      option.classList.toggle("is-selected", selected);
+      option.setAttribute("aria-checked", String(selected));
+    }
+    const minimum = Number(form.credit_reward_per_performer.min || 1);
+    form.querySelector("[data-reward-decrease]").disabled = value <= minimum;
+    updateReserve();
+  };
+  const syncRewardRules = () => {
+    const spec = state.time_sizes.find((item) => item.value === form.time_size.value);
+    const options = normalizedRewards(spec);
+    const minimum = Number(spec?.minimum_reward || options[0] || 1);
+    const current = Number(form.credit_reward_per_performer.value);
+    form.credit_reward_per_performer.min = String(minimum);
+    form.credit_reward_per_performer.removeAttribute("max");
+    form.credit_reward_per_performer.setCustomValidity("");
+    rewardHint.textContent = `Для размера ${spec?.value.toUpperCase() || "—"} доступно ${rewardRangeLabel(spec)}`;
+    rewardOptions.replaceChildren();
+    rewardOptions.classList.toggle("hidden", !options.length);
+    rewardStepper.classList.toggle("hidden", Boolean(options.length));
+    if (options.length) {
+      const selected = options.includes(current) ? current : options[0];
+      for (const value of options) {
+        const option = element("button", String(value), "reward-option");
+        option.type = "button";
+        option.dataset.reward = String(value);
+        option.setAttribute("role", "radio");
+        option.setAttribute("aria-label", creditLabel(value));
+        option.addEventListener("click", () => {
+          setRewardValue(value);
+          persistDraft();
+        });
+        rewardOptions.append(option);
+      }
+      setRewardValue(selected);
+    } else {
+      setRewardValue(Number.isFinite(current) && current >= minimum ? current : minimum);
+    }
+  };
+  const changeSteppedReward = (delta) => {
+    const minimum = Number(form.credit_reward_per_performer.min || 1);
+    const current = Number(form.credit_reward_per_performer.value || minimum);
+    setRewardValue(Math.max(minimum, current + delta));
+    persistDraft();
+  };
+  form.querySelector("[data-reward-decrease]").addEventListener("click", () => changeSteppedReward(-1));
+  form.querySelector("[data-reward-increase]").addEventListener("click", () => changeSteppedReward(1));
+  const showCreationChoiceSheet = ({ trigger, titleText, options: choices, currentValue, onSelect }) => {
+    shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop")?.remove();
+    const backdrop = element("section", undefined, "task-size-backdrop");
+    const dialog = element("div", undefined, "task-size-sheet creation-choice-sheet");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "creation-choice-title");
+    const header = element("div", undefined, "catalog-sort-heading");
+    const sheetTitle = element("h2", titleText);
+    sheetTitle.id = "creation-choice-title";
+    const close = element("button", "×", "catalog-sort-close");
+    close.type = "button";
+    close.setAttribute("aria-label", `Закрыть выбор: ${titleText.toLocaleLowerCase("ru")}`);
+    header.append(sheetTitle, close);
+    const options = element("div", undefined, "creation-choice-options");
+    let selectedOption = null;
+    const dismiss = (restoreFocus = true) => {
+      backdrop.remove();
+      if (restoreFocus) trigger.focus({ preventScroll: true });
+    };
+    for (const choice of choices) {
+      const option = element("button", undefined, "creation-choice-option");
+      option.type = "button";
+      option.setAttribute("aria-label", `${choice.label}, ${choice.description}`);
+      const icon = element("span", choice.icon || "", "creation-choice-option-icon");
+      icon.setAttribute("aria-hidden", "true");
+      const copy = element("span", undefined, "creation-choice-option-copy");
+      copy.append(element("strong", choice.label), element("small", choice.description));
+      option.append(
+        icon,
+        copy,
+        element("span", choice.value === currentValue ? "✓" : "", "creation-choice-option-check"),
+      );
+      if (choice.value === currentValue) {
+        option.classList.add("is-selected");
+        selectedOption = option;
+      }
+      option.addEventListener("click", () => {
+        onSelect(choice.value);
+        dismiss();
+      });
+      options.append(option);
+    }
+    close.addEventListener("click", () => dismiss());
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) dismiss();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
         return;
       }
-      cityTimer = setTimeout(async () => {
-        const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
-        if (!cityField?.isConnected || input.value.trim() !== query) return;
-        results.replaceChildren();
-        for (const item of response.items) {
-          const option = element("button", item.label, "city-option");
-          option.type = "button";
-          option.setAttribute("role", "option");
-          option.addEventListener("click", () => choose(item));
-          results.append(option);
-        }
-        results.classList.toggle("hidden", !response.items.length);
-        input.setAttribute("aria-expanded", String(Boolean(response.items.length)));
-      }, 200);
+      if (event.key !== "Tab") return;
+      const focusable = [close, ...options.querySelectorAll("button")];
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     });
-    input.addEventListener("keydown", (event) => {
+    dialog.append(header, options);
+    backdrop.append(dialog);
+    shell.append(backdrop);
+    queueMicrotask(() => (selectedOption || close).focus({ preventScroll: true }));
+  };
+  const kindTrigger = form.querySelector("[data-kind-trigger]");
+  const formatTrigger = form.querySelector("[data-format-trigger]");
+  const categoryTrigger = form.querySelector("[data-category-trigger]");
+  kindTrigger.addEventListener("click", () => showCreationChoiceSheet({
+    trigger: kindTrigger,
+    titleText: "Тип задания",
+    options: taskKindOptions,
+    currentValue: form.task_kind.value,
+    onSelect: (value) => {
+      if (form.task_kind.value === "group" && Number(form.performer_slots.value) >= 2) {
+        groupSlots = Number(form.performer_slots.value);
+      }
+      form.task_kind.value = value;
+      syncTaskKind();
+      persistDraft();
+    },
+  }));
+  formatTrigger.addEventListener("click", () => showCreationChoiceSheet({
+    trigger: formatTrigger,
+    titleText: "Формат задания",
+    options: formatOptions,
+    currentValue: form.format.value,
+    onSelect: (value) => {
+      form.format.value = value;
+      syncFormatPresentation();
+      syncFormat();
+      persistDraft();
+    },
+  }));
+  categoryTrigger.addEventListener("click", () => showCreationChoiceSheet({
+    trigger: categoryTrigger,
+    titleText: "Категория",
+    options: state.categories.map((item) => ({
+      value: item.id,
+      label: item.name,
+      description: categoryDescription(item),
+      icon: item.icon,
+    })),
+    currentValue: form.category_id.value,
+    onSelect: (value) => {
+      form.category_id.value = value;
+      syncCategoryPresentation();
+      persistDraft();
+    },
+  }));
+  const showSizeSheet = () => {
+    shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop")?.remove();
+    const backdrop = element("section", undefined, "task-size-backdrop");
+    const dialog = element("div", undefined, "task-size-sheet");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "task-size-title");
+    const header = element("div", undefined, "catalog-sort-heading");
+    const title = element("h2", "Размер задания");
+    title.id = "task-size-title";
+    const close = element("button", "×", "catalog-sort-close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Закрыть выбор размера");
+    header.append(title, close);
+    const options = element("div", undefined, "task-size-options");
+    let selectedOption = null;
+    const dismiss = (restoreFocus = true) => {
+      backdrop.remove();
+      if (restoreFocus) sizeTrigger.focus({ preventScroll: true });
+    };
+    for (const spec of state.time_sizes) {
+      const option = element("button", undefined, "task-size-option");
+      option.type = "button";
+      option.setAttribute("aria-label", `${spec.value.toUpperCase()}, ${spec.label}, награда ${rewardRangeLabel(spec)}`);
+      option.append(
+        element("strong", spec.value.toUpperCase()),
+        element("span", spec.label),
+        element("small", `Награда ${rewardRangeLabel(spec)}`),
+        element("span", spec.value === form.time_size.value ? "✓" : "", "task-size-check"),
+      );
+      if (spec.value === form.time_size.value) {
+        option.classList.add("is-selected");
+        selectedOption = option;
+      }
+      option.addEventListener("click", () => {
+        form.time_size.value = spec.value;
+        syncSizePresentation();
+        syncRewardRules();
+        persistDraft();
+        dismiss();
+      });
+      options.append(option);
+    }
+    close.addEventListener("click", () => dismiss());
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) dismiss();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [close, ...options.querySelectorAll("button")];
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    dialog.append(header, options);
+    backdrop.append(dialog);
+    shell.append(backdrop);
+    queueMicrotask(() => (selectedOption || close).focus({ preventScroll: true }));
+  };
+  sizeTrigger.addEventListener("click", showSizeSheet);
+  form.time_size.addEventListener("change", () => {
+    syncSizePresentation();
+    syncRewardRules();
+  });
+  const showDeadlineSheet = () => {
+    shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop")?.remove();
+    const backdrop = element("section", undefined, "task-size-backdrop");
+    const dialog = element("div", undefined, "task-size-sheet deadline-choice-sheet");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "deadline-choice-title");
+    const header = element("div", undefined, "catalog-sort-heading");
+    const title = element("h2", "Срок");
+    title.id = "deadline-choice-title";
+    const close = element("button", "×", "catalog-sort-close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Закрыть выбор срока");
+    header.append(title, close);
+
+    const minimum = refreshDeadlineMinimum();
+    const minimumDateKey = localDateKey(minimum);
+    const minimumTime = localTimeKey(minimum);
+    const selected = parseLocalDateTime(form.deadline_at.value);
+    const normalizedSelection = selected
+      ? selected >= minimum ? selected : minimum
+      : null;
+    let selectedDate = normalizedSelection ? localDateKey(normalizedSelection) : "";
+    let selectedTime = normalizedSelection ? localTimeKey(normalizedSelection) : minimumTime;
+    let timeNotice = selected && normalizedSelection.getTime() !== selected.getTime()
+      ? `Установлено ближайшее допустимое время — ${selectedTime}.`
+      : "";
+    const monthSeed = memberDateParts(normalizedSelection || minimum);
+    let monthCursor = new Date(Date.UTC(Number(monthSeed.year), Number(monthSeed.month) - 1, 1));
+    const calendarDateKey = (date) => [
+      date.getUTCFullYear(),
+      String(date.getUTCMonth() + 1).padStart(2, "0"),
+      String(date.getUTCDate()).padStart(2, "0"),
+    ].join("-");
+
+    const monthNavigation = element("div", undefined, "deadline-month-navigation");
+    const previousMonth = element("button", "‹", "deadline-month-button");
+    previousMonth.type = "button";
+    previousMonth.setAttribute("aria-label", "Предыдущий месяц");
+    const monthLabel = element("strong", "", "deadline-month-label");
+    monthLabel.setAttribute("aria-live", "polite");
+    const nextMonth = element("button", "›", "deadline-month-button");
+    nextMonth.type = "button";
+    nextMonth.setAttribute("aria-label", "Следующий месяц");
+    monthNavigation.append(previousMonth, monthLabel, nextMonth);
+
+    const calendar = element("div", undefined, "deadline-calendar");
+    calendar.setAttribute("role", "grid");
+    calendar.setAttribute("aria-label", "Календарь срока");
+    const timeField = element("label", "Время", "deadline-time-field");
+    const timeInput = element("input");
+    timeInput.type = "time";
+    timeInput.step = "60";
+    timeInput.value = selectedTime;
+    timeInput.setAttribute("aria-label", "Время срока");
+    timeField.append(timeInput);
+    const sheetError = element("small", "", "deadline-sheet-error hidden");
+    const done = element("button", "Готово", "primary deadline-choice-done");
+    done.type = "button";
+
+    const selectedDateTime = () => (
+      selectedDate && selectedTime ? parseLocalDateTime(`${selectedDate}T${selectedTime}`) : null
+    );
+    const syncDoneState = () => {
+      selectedTime = timeInput.value;
+      const candidate = selectedDateTime();
+      const valid = Boolean(candidate && candidate >= minimum);
+      done.disabled = !valid;
+      if (selectedDate === minimumDateKey) {
+        timeInput.min = minimumTime;
+      } else {
+        timeInput.removeAttribute("min");
+      }
+      const invalidMessage = selectedDate === minimumDateKey
+        ? `Для сегодняшней даты выберите ${minimumTime} или позже.`
+        : "Выберите будущие дату и время.";
+      sheetError.textContent = timeNotice || invalidMessage;
+      sheetError.classList.toggle("is-note", Boolean(timeNotice));
+      sheetError.classList.toggle("hidden", !timeNotice && (!selectedDate || !selectedTime || valid));
+    };
+    const renderCalendar = () => {
+      monthLabel.textContent = memberDateFormatter({
+        month: "long",
+        year: "numeric",
+        timeZone: "UTC",
+      }).format(monthCursor);
+      calendar.replaceChildren();
+      for (const weekday of ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]) {
+        calendar.append(element("span", weekday, "deadline-weekday"));
+      }
+      const year = monthCursor.getUTCFullYear();
+      const month = monthCursor.getUTCMonth();
+      const leading = (new Date(Date.UTC(year, month, 1)).getUTCDay() + 6) % 7;
+      const days = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+      for (let index = 0; index < leading; index += 1) {
+        calendar.append(element("span", "", "deadline-day-placeholder"));
+      }
+      const todayKey = localDateKey(new Date());
+      for (let day = 1; day <= days; day += 1) {
+        const date = new Date(Date.UTC(year, month, day));
+        const dateKey = calendarDateKey(date);
+        const option = element("button", String(day), "deadline-day");
+        option.type = "button";
+        option.dataset.date = dateKey;
+        option.setAttribute("role", "gridcell");
+        option.setAttribute("aria-label", memberDateFormatter({
+          weekday: "long",
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+          timeZone: "UTC",
+        }).format(date));
+        option.disabled = dateKey < minimumDateKey;
+        option.classList.toggle("is-today", dateKey === todayKey);
+        option.classList.toggle("is-selected", dateKey === selectedDate);
+        option.setAttribute("aria-selected", String(dateKey === selectedDate));
+        option.addEventListener("click", () => {
+          selectedDate = dateKey;
+          if (selectedDate === minimumDateKey && selectedTime < form.deadline_at.min.slice(11, 16)) {
+            selectedTime = minimumTime;
+            timeInput.value = selectedTime;
+            timeNotice = `Установлено ближайшее допустимое время — ${selectedTime}.`;
+          }
+          renderCalendar();
+          syncDoneState();
+          timeInput.focus({ preventScroll: true });
+        });
+        calendar.append(option);
+      }
+      const minimumParts = memberDateParts(minimum);
+      const minimumMonth = Number(minimumParts.year) * 12 + Number(minimumParts.month) - 1;
+      const currentMonth = monthCursor.getUTCFullYear() * 12 + monthCursor.getUTCMonth();
+      previousMonth.disabled = currentMonth <= minimumMonth;
+    };
+    const dismiss = () => {
+      backdrop.remove();
+      deadlineTrigger.focus({ preventScroll: true });
+    };
+    previousMonth.addEventListener("click", () => {
+      monthCursor = new Date(Date.UTC(monthCursor.getUTCFullYear(), monthCursor.getUTCMonth() - 1, 1));
+      renderCalendar();
+    });
+    nextMonth.addEventListener("click", () => {
+      monthCursor = new Date(Date.UTC(monthCursor.getUTCFullYear(), monthCursor.getUTCMonth() + 1, 1));
+      renderCalendar();
+    });
+    timeInput.addEventListener("input", () => {
+      timeNotice = "";
+      syncDoneState();
+    });
+    timeInput.addEventListener("change", () => {
+      if (selectedDate === minimumDateKey && timeInput.value && timeInput.value < minimumTime) {
+        timeInput.value = minimumTime;
+        selectedTime = minimumTime;
+        timeNotice = `Установлено ближайшее допустимое время — ${minimumTime}.`;
+      }
+      syncDoneState();
+    });
+    done.addEventListener("click", () => {
+      if (done.disabled) return;
+      form.deadline_at.value = `${selectedDate}T${selectedTime}`;
+      form.deadline_at.dispatchEvent(new Event("input", { bubbles: true }));
+      form.deadline_at.dispatchEvent(new Event("change", { bubbles: true }));
+      showDeadlineValidity(false);
+      persistDraft();
+      dismiss();
+    });
+    close.addEventListener("click", dismiss);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) dismiss();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled)")];
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    dialog.append(header, monthNavigation, calendar, timeField, sheetError, done);
+    backdrop.append(dialog);
+    shell.append(backdrop);
+    renderCalendar();
+    syncDoneState();
+    queueMicrotask(() => {
+      const selectedDay = calendar.querySelector(".deadline-day.is-selected");
+      (selectedDay || calendar.querySelector(".deadline-day:not(:disabled)") || close)
+        .focus({ preventScroll: true });
+    });
+  };
+  deadlineTrigger.addEventListener("click", showDeadlineSheet);
+
+  const showContentEditorSheet = (name) => {
+    const spec = contentEditorSpecs[name];
+    const source = form[name];
+    const trigger = form.querySelector(`[data-content-trigger="${name}"]`);
+    shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop")?.remove();
+    const backdrop = element("section", undefined, "task-size-backdrop");
+    const dialog = element("div", undefined, "task-size-sheet content-editor-sheet");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "content-editor-title");
+    const header = element("div", undefined, "catalog-sort-heading");
+    const title = element("h2", spec.title);
+    title.id = "content-editor-title";
+    const close = element("button", "×", "catalog-sort-close");
+    close.type = "button";
+    close.setAttribute("aria-label", `Закрыть редактор: ${spec.title.toLocaleLowerCase("ru")}`);
+    header.append(title, close);
+    const hint = element("p", spec.hint, "content-editor-hint");
+    const editor = element("textarea", undefined, "content-editor-input");
+    editor.value = source.value;
+    editor.rows = spec.rows;
+    editor.maxLength = source.maxLength;
+    editor.placeholder = spec.placeholder;
+    editor.setAttribute("aria-label", `${spec.title}: текст`);
+    const counter = element("small", "", "content-editor-counter");
+    counter.setAttribute("aria-live", "polite");
+    const done = element("button", "Готово", "primary content-editor-done");
+    done.type = "button";
+    const resize = () => {
+      editor.style.height = "auto";
+      const maximum = name === "title" ? 112 : 260;
+      editor.style.height = `${Math.min(editor.scrollHeight, maximum)}px`;
+      editor.style.overflowY = editor.scrollHeight > maximum ? "auto" : "hidden";
+    };
+    const sync = () => {
+      counter.textContent = `${editor.value.length} / ${editor.maxLength}`;
+      counter.classList.toggle("is-limit", editor.value.length >= editor.maxLength * 0.95);
+      done.disabled = spec.required !== false && !editor.value.trim();
+      resize();
+    };
+    const dismiss = () => {
+      backdrop.remove();
+      trigger.focus({ preventScroll: true });
+    };
+    editor.addEventListener("input", sync);
+    done.addEventListener("click", () => {
+      if (done.disabled) return;
+      source.value = editor.value.trim();
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+      source.dispatchEvent(new Event("change", { bubbles: true }));
+      source.setAttribute("aria-invalid", "false");
+      trigger.setAttribute("aria-invalid", "false");
+      form.querySelector(`[data-content-error="${name}"]`).classList.add("hidden");
+      persistDraft();
+      dismiss();
+    });
+    close.addEventListener("click", dismiss);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) dismiss();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [close, editor, done].filter((item) => !item.disabled);
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    dialog.append(header, hint, editor, counter, done);
+    backdrop.append(dialog);
+    shell.append(backdrop);
+    sync();
+    queueMicrotask(() => {
+      editor.focus({ preventScroll: true });
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+    });
+  };
+  for (const name of Object.keys(contentEditorSpecs)) {
+    form.querySelector(`[data-content-trigger="${name}"]`).addEventListener(
+      "click",
+      () => showContentEditorSheet(name),
+    );
+  }
+
+  const showContentValidity = (name, reveal = true) => {
+    const source = form[name];
+    const trigger = form.querySelector(`[data-content-trigger="${name}"]`);
+    const error = form.querySelector(`[data-content-error="${name}"]`);
+    const invalid = !source.checkValidity();
+    source.setAttribute("aria-invalid", String(invalid && reveal));
+    trigger.setAttribute("aria-invalid", String(invalid && reveal));
+    error.textContent = invalid && reveal ? "Заполните это поле." : "";
+    error.classList.toggle("hidden", !invalid || !reveal);
+  };
+  const focusInvalidContent = () => {
+    const name = Object.keys(contentEditorSpecs).find((key) => !form[key].checkValidity());
+    if (!name) return false;
+    showContentValidity(name, true);
+    const trigger = form.querySelector(`[data-content-trigger="${name}"]`);
+    trigger.focus({ preventScroll: true });
+    trigger.scrollIntoView({ block: "center", behavior: "smooth" });
+    return true;
+  };
+  for (const name of Object.keys(contentEditorSpecs)) {
+    form[name].addEventListener("invalid", (event) => {
+      event.preventDefault();
+      showContentValidity(name, true);
+    });
+    form[name].addEventListener("input", () => {
+      if (form[name].getAttribute("aria-invalid") === "true") showContentValidity(name, true);
+    });
+  }
+
+  let focusInvalidDeadline = () => {};
+  let focusInvalidCity = () => {};
+  focusInvalidDeadline = () => {
+    showDeadlineValidity(true);
+    deadlineTrigger.focus({ preventScroll: true });
+    deadlineTrigger.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  submit.addEventListener("click", () => {
+    if (form.checkValidity()) return;
+    queueMicrotask(() => {
+      const firstInvalid = [...form.elements].find((control) => (
+        typeof control.checkValidity === "function"
+        && !control.disabled
+        && !control.classList.contains("visually-hidden")
+        && !control.checkValidity()
+      ));
+      if (firstInvalid) {
+        firstInvalid.focus({ preventScroll: true });
+        firstInvalid.scrollIntoView({ block: "center", behavior: "smooth" });
+      } else {
+        const city = form.querySelector('[name="city"]');
+        if (city && !city.checkValidity()) focusInvalidCity();
+        else if (focusInvalidContent()) return;
+        else if (!form.deadline_at.checkValidity()) focusInvalidDeadline();
+      }
+    });
+  });
+  let selectedCity = values.format === "offline" ? values.city || "" : "";
+  let selectedCityLabel = localValues?.city_input || selectedCity;
+  let selectedCityTimezone = localValues?.city_timezone || "";
+  let cityField = null;
+  let cityTimer = null;
+  const showCitySheet = (trigger, cityInput) => {
+    shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop")?.remove();
+    const backdrop = element("section", undefined, "task-size-backdrop");
+    const dialog = element("div", undefined, "task-size-sheet city-choice-sheet");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "city-choice-title");
+    const header = element("div", undefined, "catalog-sort-heading");
+    const sheetTitle = element("h2", "Город");
+    sheetTitle.id = "city-choice-title";
+    const close = element("button", "×", "catalog-sort-close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Закрыть выбор города");
+    header.append(sheetTitle, close);
+    const searchLabel = element("label", "Поиск города", "city-search-field");
+    const search = element("input");
+    search.type = "search";
+    search.autocomplete = "off";
+    search.placeholder = "Начните вводить название";
+    search.setAttribute("aria-label", "Поиск города");
+    search.value = selectedCityLabel;
+    const results = element("div", undefined, "city-sheet-results");
+    results.setAttribute("role", "listbox");
+    searchLabel.append(search);
+    const dismiss = () => {
+      clearTimeout(cityTimer);
+      backdrop.remove();
+      trigger.focus({ preventScroll: true });
+    };
+    const choose = (item) => {
+      selectedCity = item.value;
+      selectedCityLabel = item.label;
+      selectedCityTimezone = item.timezone || selectedCityTimezone || currentMemberTimezone;
+      cityInput.value = item.value;
+      cityInput.setCustomValidity("");
+      trigger.querySelector("[data-city-name]").textContent = item.label;
+      trigger.querySelector("[data-city-summary]").textContent = timezoneOffsetLabel(
+        selectedCityTimezone,
+      );
+      trigger.setAttribute("aria-invalid", "false");
+      cityField.querySelector("[data-city-error]").classList.add("hidden");
+      persistDraft();
+      dismiss();
+    };
+    const loadResults = async (query) => {
+      if (!query) {
+        results.replaceChildren(element("p", "Введите название города.", "city-sheet-empty"));
+        return;
+      }
+      results.replaceChildren(element("p", "Ищем города…", "city-sheet-empty"));
+      const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
+      if (!dialog.isConnected || search.value.trim() !== query) return;
+      if (!response.items.length) {
+        results.replaceChildren(element("p", "Города не найдены.", "city-sheet-empty"));
+        return;
+      }
+      results.replaceChildren();
+      for (const item of response.items) {
+        const option = element("button", undefined, "city-sheet-option");
+        option.type = "button";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-label", item.label);
+        option.setAttribute("aria-selected", String(item.value === selectedCity));
+        const optionCopy = element("span", undefined, "city-sheet-copy");
+        optionCopy.append(
+          element("strong", item.label),
+          element("small", timezoneOffsetLabel(item.timezone || currentMemberTimezone)),
+        );
+        option.append(
+          element("span", "⌖", "city-sheet-icon"),
+          optionCopy,
+          element("span", item.value === selectedCity ? "✓" : "", "city-sheet-check"),
+        );
+        option.addEventListener("click", () => choose(item));
+        results.append(option);
+      }
+    };
+    search.addEventListener("input", () => {
+      clearTimeout(cityTimer);
+      const query = search.value.trim();
+      cityTimer = setTimeout(() => void loadResults(query), 200);
+    });
+    search.addEventListener("keydown", (event) => {
       if (event.key === "ArrowDown") {
         event.preventDefault();
         results.querySelector("button")?.focus();
       }
     });
-    cityField.append(input, results);
-    form.querySelector("[data-format-row]").after(cityField);
+    close.addEventListener("click", dismiss);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) dismiss();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [close, search, ...results.querySelectorAll("button")];
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    dialog.append(header, searchLabel, results);
+    backdrop.append(dialog);
+    shell.append(backdrop);
+    queueMicrotask(() => {
+      search.focus({ preventScroll: true });
+      search.select();
+      void loadResults(search.value.trim());
+    });
   };
-  form.format.addEventListener("change", syncFormat);
+  const syncFormat = () => {
+    if (form.format.value !== "offline") {
+      selectedCity = "";
+      selectedCityLabel = "";
+      selectedCityTimezone = "";
+      cityField?.remove();
+      cityField = null;
+      focusInvalidCity = () => {};
+      return;
+    }
+    if (cityField) return;
+    cityField = element("div", undefined, "section city-choice-field");
+    const label = element("span", "Город *", "field-label");
+    const input = element("input");
+    input.className = "visually-hidden";
+    input.name = "city";
+    input.required = true;
+    input.value = selectedCity;
+    input.setAttribute("aria-label", "Город *");
+    input.setCustomValidity(selectedCity ? "" : "Выберите город из списка.");
+    const trigger = element("button", undefined, "category-choice-trigger city-choice-trigger");
+    trigger.type = "button";
+    trigger.setAttribute("aria-label", "Выбрать город");
+    trigger.setAttribute("aria-haspopup", "dialog");
+    const icon = element("span", "⌖", "category-choice-icon");
+    icon.setAttribute("aria-hidden", "true");
+    const copy = element("span", undefined, "creation-choice-copy");
+    copy.append(
+      element("strong", selectedCityLabel || "Выберите город"),
+      element(
+        "small",
+        selectedCity
+          ? selectedCityTimezone
+            ? timezoneOffsetLabel(selectedCityTimezone)
+            : "Часовой пояс будет определён"
+          : "Поиск по названию",
+      ),
+    );
+    copy.querySelector("strong").dataset.cityName = "";
+    copy.querySelector("small").dataset.citySummary = "";
+    trigger.append(icon, copy, element("span", "›", "creation-choice-chevron"));
+    const error = element("small", "Выберите город.", "field-error hidden");
+    error.dataset.cityError = "";
+    const revealValidity = (reveal = true) => {
+      const invalid = !selectedCity;
+      trigger.setAttribute("aria-invalid", String(invalid && reveal));
+      error.classList.toggle("hidden", !invalid || !reveal);
+    };
+    input.addEventListener("invalid", (event) => {
+      event.preventDefault();
+      revealValidity(true);
+    });
+    trigger.addEventListener("click", () => showCitySheet(trigger, input));
+    focusInvalidCity = () => {
+      revealValidity(true);
+      trigger.focus({ preventScroll: true });
+      trigger.scrollIntoView({ block: "center", behavior: "smooth" });
+    };
+    cityField.append(label, input, trigger, error);
+    form.querySelector("[data-city-anchor]").after(cityField);
+  };
+  form.format.addEventListener("change", () => {
+    syncFormatPresentation();
+    syncFormat();
+  });
+  persistDraft = () => {
+    const snapshot = {
+      task_kind: form.task_kind.value,
+      performer_slots: form.task_kind.value === "solo" ? "1" : form.performer_slots.value,
+      format: form.format.value,
+      category_id: form.category_id.value,
+      title: form.title.value,
+      description: form.description.value,
+      completion_criteria: form.completion_criteria.value,
+      time_size: form.time_size.value,
+      credit_reward_per_performer: form.credit_reward_per_performer.value,
+      deadline_at: form.deadline_at.value,
+      city: selectedCity,
+      city_input: selectedCityLabel,
+      city_timezone: selectedCityTimezone,
+      material_text: form.material_text.value,
+    };
+    const key = localDraftKey();
+    localDraftKeys.add(key);
+    try {
+      localStorage.setItem(key, JSON.stringify({ revision: draft.revision, values: snapshot }));
+      localSaveStatus.textContent = "Сохранено на устройстве";
+      localSaveStatus.classList.remove("is-error");
+    } catch {
+      localSaveStatus.textContent = "Автосохранение недоступно";
+      localSaveStatus.classList.add("is-error");
+    }
+  };
+  const clearLocalDraft = () => {
+    for (const key of localDraftKeys) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // The server copy is already authoritative; storage cleanup is best effort.
+      }
+    }
+  };
+  form.addEventListener("input", persistDraft);
+  form.addEventListener("change", persistDraft);
   syncFormat();
   syncTaskKind();
-  updateReserve();
+  syncFormatPresentation();
+  syncCategoryPresentation();
+  syncSizePresentation();
+  syncRewardRules();
   updateDeadlineValidity();
+  showDeadlineValidity(form.deadline_at.validity.rangeUnderflow);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
@@ -731,8 +2410,12 @@ function showTaskCreation(state, forceEdit = false) {
         if (!started.draft) throw new Error("task_draft_unavailable");
         draft = started.draft;
         target = draft;
+        persistDraft();
       }
-      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: new Date(value.deadline_at).toISOString(), materials } });
+      const deadline = memberWallTimeToDate(value.deadline_at);
+      if (!deadline) throw new Error("invalid_deadline");
+      await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: deadline.toISOString(), materials } });
+      clearLocalDraft();
       history.pushState(
         { screen: "task-preview", draftId: target.id },
         "",
@@ -743,11 +2426,13 @@ function showTaskCreation(state, forceEdit = false) {
       const city = form.querySelector('[name="city"]');
       if (error.message === "invalid_task_city" && city) {
         city.setCustomValidity("Выберите город из списка.");
-        city.reportValidity();
+        focusInvalidCity();
       }
       saveStatus.textContent = error.message === "invalid_task_city"
         ? "Выберите город из списка."
-        : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
+        : error.message === "invalid_deadline"
+          ? "Выберите корректные дату и время для вашего часового пояса."
+          : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
     }
@@ -830,8 +2515,13 @@ function beginTaskCreationFlow(push = true) {
 
 async function openTaskCreation(forceEdit = false, recovery = null) {
   setNavigation("", true);
-  title.textContent = "Создать задание";
-  back.classList.remove("hidden");
+  title.textContent = uiNextEnabled ? "Новое задание" : "Создать задание";
+  if (uiNextEnabled) {
+    shell.classList.add("task-creation-screen");
+    setHeaderControl("back", { screenLabel: "Новое задание" });
+  } else {
+    back.classList.remove("hidden");
+  }
   replaceContent(element("p", "Загружаем черновик…", "status muted"));
   try {
     const state = await getJson("/api/v1/task-creation");
@@ -876,6 +2566,286 @@ const pencilButton = (label, route, state, revision, key) => {
   return button;
 };
 
+const profileEditTrigger = (label, key, onOpen, className = "profile-card") => {
+  const trigger = element("button", undefined, `${className} profile-edit-trigger`);
+  trigger.type = "button";
+  trigger.dataset.profileAction = key;
+  trigger.setAttribute("aria-label", `Изменить ${label.toLowerCase()}`);
+  trigger.addEventListener("click", () => onOpen(trigger));
+  return trigger;
+};
+
+function createProfileEditorSheet(trigger, state, revision, titleText) {
+  shell.querySelector(".profile-editor-backdrop")?.remove();
+  state.draft = null;
+  const backdrop = element("section", undefined, "task-size-backdrop profile-editor-backdrop");
+  const dialog = element("div", undefined, "task-size-sheet profile-editor-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "profile-editor-sheet-title");
+  const header = element("div", undefined, "catalog-sort-heading");
+  const sheetTitle = element("h2", titleText);
+  sheetTitle.id = "profile-editor-sheet-title";
+  const close = element("button", "×", "catalog-sort-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть редактор");
+  const body = element("div", undefined, "profile-editor-sheet-body");
+  const dismiss = (restoreFocus = true) => {
+    state.draft = null;
+    backdrop.remove();
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  };
+  const finish = () => {
+    state.route = "/profile";
+    showProfileState(state, revision);
+  };
+  const setBody = (nextTitle, node) => {
+    sheetTitle.textContent = nextTitle;
+    body.replaceChildren(node);
+  };
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...dialog.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled])',
+    )];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  header.append(sheetTitle, close);
+  dialog.append(header, body);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  return { body, close, dismiss, finish, setBody };
+}
+
+function showProfileFieldSheet(trigger, state, revision, name) {
+  const titleText = name === "skills" ? "Навыки" : editorConfigs[name].title;
+  const sheet = createProfileEditorSheet(trigger, state, revision, titleText);
+  const editor = name === "skills"
+    ? profileSkillsEditor(state, revision, sheet.finish)
+    : profileTextEditor(state, revision, name, sheet.finish);
+  sheet.setBody(titleText, editor);
+}
+
+function showProfileCitySheet(trigger, state, revision) {
+  const sheet = createProfileEditorSheet(trigger, state, revision, "Город");
+  const panel = element("section", undefined, "profile-editor profile-city-editor");
+  panel.append(
+    element("h2", "Выберите город"),
+    element(
+      "p",
+      "По городу мы определим ваш часовой пояс для сроков и времени заданий.",
+      "profile-helper",
+    ),
+    element(
+      "p",
+      `Часовой пояс · ${timezoneOffsetLabel(state.profile.me.timezone || "UTC")}`,
+      "profile-timezone-note",
+    ),
+  );
+  const searchLabel = element("label", "Поиск города", "city-search-field");
+  const search = element("input");
+  search.type = "search";
+  search.autocomplete = "off";
+  search.placeholder = "Начните вводить название";
+  search.setAttribute("aria-label", "Поиск города");
+  search.value = state.profile.me.city || "";
+  searchLabel.append(search);
+  const results = element("div", undefined, "city-sheet-results profile-city-results");
+  results.setAttribute("role", "listbox");
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+  const clear = element("button", "Не указывать город", "profile-city-clear");
+  clear.type = "button";
+  let timer = null;
+  let operationKey = null;
+
+  const saveCity = async (value, button) => {
+    operationKey ||= newOperationKey();
+    for (const control of panel.querySelectorAll("button, input")) control.disabled = true;
+    status.className = "status";
+    status.textContent = "Сохраняем город…";
+    try {
+      const updated = await submissionRequest(
+        "/api/v1/me/profile",
+        "PUT",
+        operationKey,
+        { field: "city", value },
+      );
+      if (revision !== screenRevision) return;
+      state.profile.me = updated;
+      setMemberTimezone(updated.timezone || "UTC");
+      state.draft = null;
+      state.returnFocus = '[data-profile-action="city"]';
+      sheet.dismiss(false);
+      state.route = "/profile";
+      showProfileState(state, revision);
+    } catch (error) {
+      if (!retryableSubmissionError(error)) operationKey = null;
+      status.className = "status";
+      status.textContent = error?.status === 422
+        ? "Выберите город из найденного списка."
+        : "Не удалось сохранить город. Повторите попытку.";
+      for (const control of panel.querySelectorAll("button, input")) control.disabled = false;
+      button?.focus({ preventScroll: true });
+    }
+  };
+  const loadResults = async (query) => {
+    if (!query) {
+      results.replaceChildren(element("p", "Введите название города.", "city-sheet-empty"));
+      return;
+    }
+    results.replaceChildren(element("p", "Ищем города…", "city-sheet-empty"));
+    try {
+      const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=8`);
+      if (!panel.isConnected || search.value.trim() !== query) return;
+      if (!response.items.length) {
+        results.replaceChildren(element("p", "Города не найдены.", "city-sheet-empty"));
+        return;
+      }
+      results.replaceChildren();
+      for (const item of response.items) {
+        const option = element("button", undefined, "city-sheet-option");
+        option.type = "button";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-label", item.label);
+        option.setAttribute("aria-selected", String(item.value === state.profile.me.city));
+        const optionCopy = element("span", undefined, "city-sheet-copy");
+        optionCopy.append(
+          element("strong", item.label),
+          element("small", timezoneOffsetLabel(item.timezone || state.profile.me.timezone)),
+        );
+        option.append(
+          element("span", "⌖", "city-sheet-icon"),
+          optionCopy,
+          element("span", item.value === state.profile.me.city ? "✓" : "", "city-sheet-check"),
+        );
+        option.addEventListener("click", () => void saveCity(item.value, option));
+        results.append(option);
+      }
+    } catch {
+      if (!panel.isConnected) return;
+      results.replaceChildren(element("p", "Не удалось загрузить города.", "city-sheet-empty"));
+    }
+  };
+  search.addEventListener("input", () => {
+    clearTimeout(timer);
+    operationKey = null;
+    status.className = "status hidden";
+    const query = search.value.trim();
+    timer = setTimeout(() => void loadResults(query), 200);
+  });
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      results.querySelector("button")?.focus();
+    }
+  });
+  clear.addEventListener("click", () => void saveCity("", clear));
+  panel.append(searchLabel, results, clear, status);
+  sheet.setBody("Город", panel);
+  queueMicrotask(() => {
+    search.focus({ preventScroll: true });
+    search.select();
+    void loadResults(search.value.trim());
+  });
+}
+
+function showProfileLinksSheet(trigger, state, revision) {
+  const sheet = createProfileEditorSheet(trigger, state, revision, "Ссылки");
+  const renderDelete = (link) => {
+    state.draft = { route: state.route, operationKey: null };
+    const panel = element("section", undefined, "profile-editor profile-link-delete");
+    panel.append(
+      element("span", "Подтверждение", "confirm-badge"),
+      element("h2", `Удалить ${link.label}?`),
+      element("p", "Ссылка исчезнет из профиля. Сам аккаунт не изменится.", "profile-helper"),
+    );
+    const status = element("p", "", "status hidden");
+    const remove = element("button", "Удалить", "secondary danger profile-delete-large");
+    remove.type = "button";
+    remove.addEventListener("click", async () => {
+      await saveProfileCommand(
+        state,
+        revision,
+        remove,
+        status,
+        { field: "profile_links", action: "delete", link_id: link.id },
+        "/profile",
+        '[data-profile-action="links"]',
+        sheet.finish,
+      );
+    });
+    panel.append(status, remove);
+    sheet.setBody("Удалить ссылку", panel);
+    queueMicrotask(() => remove.focus({ preventScroll: true }));
+  };
+  const renderEditor = (linkId = null) => {
+    state.draft = null;
+    const link = linkId
+      ? state.profile.me.profile_links.find((item) => item.id === linkId)
+      : null;
+    const editor = profileLinkEditor(state, revision, linkId, {
+      onSaved: sheet.finish,
+      onDelete: renderDelete,
+    });
+    sheet.setBody(link ? "Изменить ссылку" : "Новая ссылка", editor);
+  };
+  const renderManager = () => {
+    state.draft = null;
+    const links = state.profile.me.profile_links || [];
+    const manager = element("section", undefined, "profile-links-manager");
+    const list = element("div", undefined, "managed-link-list");
+    for (const link of links) {
+      const row = element("div", undefined, "managed-link-row");
+      const edit = element("button", undefined, "managed-link-open");
+      edit.type = "button";
+      edit.dataset.linkId = link.id;
+      edit.setAttribute("aria-label", `Изменить ссылку ${link.label}`);
+      const copy = element("span", undefined, "managed-link-copy");
+      copy.append(element("strong", link.label), element("span", link.url));
+      edit.append(copy, element("span", "›", "profile-edit-chevron"));
+      edit.addEventListener("click", () => renderEditor(link.id));
+      const trash = element("button", undefined, "link-trash");
+      trash.type = "button";
+      trash.setAttribute("aria-label", `Удалить ссылку ${link.label}`);
+      trash.append(trashIcon());
+      trash.addEventListener("click", () => renderDelete(link));
+      row.append(edit, trash);
+      list.append(row);
+    }
+    manager.append(list);
+    if (links.length < 5) {
+      const add = element("button", "+ Добавить ссылку", "secondary profile-add-link");
+      add.type = "button";
+      add.addEventListener("click", () => renderEditor());
+      manager.append(add);
+    }
+    manager.append(element("p", `${links.length} / 5 ссылок`, "profile-counter"));
+    sheet.setBody("Ссылки", manager);
+    queueMicrotask(() => (list.querySelector("button") || manager.querySelector("button") || sheet.close)
+      ?.focus({ preventScroll: true }));
+  };
+  renderManager();
+}
+
 const openPublicUrl = (url, options = {}) => {
   if (!openExternalLink(url, options)) {
     content.append(element("p", "Не удалось открыть ссылку.", "status"));
@@ -893,19 +2863,27 @@ const publicLinkRow = (link) => {
 function ownProfileOverview(state, revision) {
   const { me, member } = state.profile;
   const view = element("section", undefined, "profile-overview");
-  const identity = element("section", undefined, "profile-card profile-identity-card");
+  const identity = uiNextEnabled
+    ? profileEditTrigger("имя", "name", (trigger) => showProfileFieldSheet(trigger, state, revision, "name"), "profile-card profile-identity-card")
+    : element("section", undefined, "profile-card profile-identity-card");
   const copy = element("div", undefined, "identity-copy");
   copy.append(element("h2", me.display_name));
   if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(
-    element("span", initialsFor(me.display_name), "avatar"),
-    copy,
-    pencilButton("имя", "/profile/edit/name", state, revision, "name"),
+  identity.append(element("span", initialsFor(me.display_name), "avatar"), copy);
+  if (uiNextEnabled) identity.append(element("span", "›", "profile-edit-chevron"));
+  else identity.append(pencilButton("имя", "/profile/edit/name", state, revision, "name"));
+  const city = uiNextEnabled
+    ? profileEditTrigger("город", "city", (trigger) => showProfileCitySheet(trigger, state, revision), "profile-card profile-inline-card")
+    : element("section", undefined, "profile-card profile-inline-card");
+  city.append(element("div", undefined, "profile-copy"));
+  if (uiNextEnabled) city.append(element("span", "›", "profile-edit-chevron"));
+  else city.append(pencilButton("город", "/profile/edit/city", state, revision, "city"));
+  city.firstChild.append(
+    element("span", "Город", "section-label"),
+    element("strong", me.city || "Не указан"),
+    element("small", timezoneOffsetLabel(me.timezone || "UTC"), "profile-timezone"),
   );
-  const city = element("section", undefined, "profile-card profile-inline-card");
-  city.append(element("div", undefined, "profile-copy"), pencilButton("город", "/profile/edit/city", state, revision, "city"));
-  city.firstChild.append(element("span", "Город", "section-label"), element("strong", me.city || "Не указан"));
   const metrics = element("div", undefined, "metric-grid");
   for (const [value, label] of [[me.credit_balance, "Кредиты"], [me.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
     const metric = element("article", undefined, "metric-card");
@@ -914,14 +2892,19 @@ function ownProfileOverview(state, revision) {
   }
   view.append(identity, city, metrics);
   const blocks = [
-    ["ОБО МНЕ", me.short_bio, "/profile/edit/bio", "bio", "Добавить описание", "Расскажите о себе"],
-    ["НАВЫКИ", me.skill_tags, "/profile/edit/skills", "skills", "Добавить навыки", "Добавьте навыки"],
+    ["О себе", me.short_bio, "/profile/edit/bio", "bio", "Добавить описание", "Расскажите о себе"],
+    ["Навыки", me.skill_tags, "/profile/edit/skills", "skills", "Добавить навыки", "Добавьте навыки"],
   ];
   for (const [label, value, route, key, cta, emptyTitle] of blocks) {
     const filled = Array.isArray(value) ? value.length > 0 : Boolean(value);
-    const block = element("section", undefined, filled ? "profile-card profile-content-card" : "profile-empty-card");
+    const openSheet = (trigger) => showProfileFieldSheet(trigger, state, revision, key);
+    const block = uiNextEnabled
+      ? profileEditTrigger(label, key, openSheet, filled ? "profile-card profile-content-card" : "profile-empty-card")
+      : element("section", undefined, filled ? "profile-card profile-content-card" : "profile-empty-card");
     if (filled) {
-      block.append(element("h3", label, "section-label"), pencilButton(label, route, state, revision, key));
+      block.append(element("h3", label, "section-label"));
+      if (uiNextEnabled) block.append(element("span", "›", "profile-edit-chevron"));
+      else block.append(pencilButton(label, route, state, revision, key));
       if (Array.isArray(value)) {
         const chips = element("div", undefined, "profile-chips");
         value.forEach((item) => chips.append(element("span", item)));
@@ -929,22 +2912,41 @@ function ownProfileOverview(state, revision) {
       } else block.append(element("p", value));
     } else {
       block.append(element("strong", emptyTitle), element("p", key === "bio" ? "Пара строк поможет другим участникам понять, чем вы занимаетесь." : "Навыки помогут быстрее понять, с чем к вам можно обратиться.", "muted"));
-      const add = element("button", cta, "secondary");
-      add.type = "button";
-      add.dataset.profileAction = key;
-      add.addEventListener("click", () => openProfileRoute(state, revision, route, true));
-      block.append(add);
+      if (uiNextEnabled) block.append(element("span", cta, "profile-edit-cta"), element("span", "›", "profile-edit-chevron"));
+      else {
+        const add = element("button", cta, "secondary");
+        add.type = "button";
+        add.dataset.profileAction = key;
+        add.addEventListener("click", () => openProfileRoute(state, revision, route, true));
+        block.append(add);
+      }
     }
     view.append(block);
   }
   const links = me.profile_links || [];
   const linksBlock = element("section", undefined, links.length ? "profile-links-block" : "profile-empty-card");
   if (links.length) {
-    const header = element("div", undefined, "profile-section-heading");
-    header.append(element("h3", "Ссылки"), pencilButton("ссылки", "/profile/links", state, revision, "links"));
+    const header = uiNextEnabled
+      ? profileEditTrigger("ссылки", "links", (trigger) => showProfileLinksSheet(trigger, state, revision), "profile-section-heading")
+      : element("div", undefined, "profile-section-heading");
+    header.append(element("h3", "Ссылки"));
+    if (uiNextEnabled) header.append(element("span", "›", "profile-edit-chevron"));
+    else header.append(pencilButton("ссылки", "/profile/links", state, revision, "links"));
     linksBlock.append(header);
     links.forEach((link) => linksBlock.append(publicLinkRow(link)));
   } else {
+    if (uiNextEnabled) {
+      linksBlock.remove();
+      const emptyLinks = profileEditTrigger("ссылки", "links", (trigger) => showProfileLinksSheet(trigger, state, revision), "profile-empty-card");
+      emptyLinks.append(
+        element("strong", "Добавьте ссылки"),
+        element("p", "LinkedIn, GitHub, сайт или другие публичные страницы.", "muted"),
+        element("span", "Добавить ссылки", "profile-edit-cta"),
+        element("span", "›", "profile-edit-chevron"),
+      );
+      view.append(emptyLinks);
+      return view;
+    }
     linksBlock.append(element("strong", "Добавьте ссылки"), element("p", "LinkedIn, GitHub, сайт или другие публичные страницы.", "muted"));
     const add = element("button", "Добавить ссылки", "secondary");
     add.type = "button";
@@ -962,7 +2964,14 @@ const editorConfigs = {
   bio: { title: "О себе", label: "Описание", prompt: "Расскажите о себе", helper: "Чем вы занимаетесь и чем можете быть полезны сообществу.", field: "short_bio", min: 10, max: 500, multiline: true },
 };
 
-function profileTextEditor(state, revision, name) {
+const titlelessProfileRoutes = new Set([
+  "/profile/edit/city",
+  "/profile/edit/bio",
+  "/profile/edit/skills",
+  "/profile/links",
+]);
+
+function profileTextEditor(state, revision, name, onSaved = null) {
   const config = editorConfigs[name];
   const current = state.profile.me[config.field] || "";
   const draft = state.draft?.route === state.route ? state.draft : { route: state.route, value: current, operationKey: null, message: "" };
@@ -991,69 +3000,97 @@ function profileTextEditor(state, revision, name) {
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, `/profile`, `[data-profile-action="${name}"]`);
+    await saveProfileCommand(state, revision, save, status, { field: config.field, value: draft.value }, `/profile`, `[data-profile-action="${name}"]`, onSaved);
   });
   form.append(label, counter, status, save);
   queueMicrotask(() => input.focus({ preventScroll: true }));
   return form;
 }
 
-function profileSkillsEditor(state, revision) {
+function profileSkillsEditor(state, revision, onSaved = null) {
   const draft = state.draft?.route === state.route ? state.draft : { route: state.route, items: [...state.profile.me.skill_tags], operationKey: null, message: "" };
   state.draft = draft;
-  const form = element("form", undefined, "profile-editor");
+  const form = element("form", undefined, "profile-editor profile-skills-editor");
   form.append(
-    element("h2", "Что вы умеете?"),
-    element("p", "Добавляйте навыки по одному.", "profile-helper"),
+    element("h2", "Чем вы можете помочь?"),
+    element("p", "Добавьте до 20 коротких навыков — они будут показаны в профиле.", "profile-helper"),
   );
-  const label = element("label", "Новый навык");
+  const label = element("label", "Добавить навык");
   const row = element("div", undefined, "skill-input-row");
   const input = element("input");
   input.maxLength = 50;
-  const add = element("button", "+", "secondary");
+  input.placeholder = "Например, дизайн";
+  input.autocomplete = "off";
+  const add = element("button", "Добавить", "secondary skill-add");
   add.type = "button";
   add.setAttribute("aria-label", "Добавить навык");
   row.append(input, add);
   label.append(row);
   const list = element("div", undefined, "skill-draft-list");
   const status = element("p", draft.message, draft.message ? "status" : "status hidden");
+  status.setAttribute("aria-live", "polite");
+  const counter = element("p", `${draft.items.length} / 20 навыков`, "profile-counter");
   const renderItems = () => {
     list.replaceChildren();
+    list.classList.toggle("is-empty", draft.items.length === 0);
+    if (!draft.items.length) {
+      list.append(element("p", "Навыки пока не добавлены", "skill-empty"));
+    }
     draft.items.forEach((item, index) => {
-      const skill = element("div", undefined, "skill-draft-row");
+      const skill = element("span", undefined, "skill-draft-row");
       const remove = element("button", "×", "skill-remove");
       remove.type = "button";
       remove.setAttribute("aria-label", `Удалить навык ${item}`);
-      remove.addEventListener("click", () => { draft.items.splice(index, 1); draft.operationKey = null; renderItems(); });
+      remove.addEventListener("click", () => {
+        draft.items.splice(index, 1);
+        draft.operationKey = null;
+        status.className = "status hidden";
+        renderItems();
+      });
       skill.append(element("strong", item), remove);
       list.append(skill);
     });
     counter.textContent = `${draft.items.length} / 20 навыков`;
+    counter.setAttribute("aria-label", `${draft.items.length} из 20 навыков`);
   };
-  add.addEventListener("click", () => {
+  const addSkill = () => {
     const value = input.value.trim().replace(/\s+/g, " ");
     if (!value || draft.items.length >= 20 || draft.items.some((item) => item.toLowerCase() === value.toLowerCase())) {
       status.className = "status";
-      status.textContent = draft.items.some((item) => item.toLowerCase() === value.toLowerCase()) ? "Такой навык уже добавлен." : "Проверьте навык или лимит 20.";
+      status.textContent = draft.items.some((item) => item.toLowerCase() === value.toLowerCase())
+        ? "Такой навык уже добавлен."
+        : "Проверьте навык или лимит 20.";
       input.focus();
       return;
     }
-    draft.items.push(value); draft.operationKey = null; input.value = ""; status.className = "status hidden"; renderItems(); input.focus();
+    draft.items.push(value);
+    draft.operationKey = null;
+    input.value = "";
+    status.className = "status hidden";
+    renderItems();
+    input.focus();
+  };
+  add.addEventListener("click", addSkill);
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addSkill();
   });
-  const counter = element("p", `${draft.items.length} / 20 навыков`, "profile-counter");
   const save = element("button", "Сохранить", "primary");
   save.type = "submit";
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await saveProfileCommand(state, revision, save, status, { field: "skill_tags", value: draft.items.join("\n") }, "/profile", '[data-profile-action="skills"]');
+    await saveProfileCommand(state, revision, save, status, { field: "skill_tags", value: draft.items.join("\n") }, "/profile", '[data-profile-action="skills"]', onSaved);
   });
   renderItems();
-  form.append(label, list, counter, status, save);
+  const footer = element("div", undefined, "profile-editor-footer");
+  footer.append(counter, save);
+  form.append(label, list, status, footer);
   queueMicrotask(() => input.focus({ preventScroll: true }));
   return form;
 }
 
-async function saveProfileCommand(state, revision, button, status, payload, destination, focusSelector) {
+async function saveProfileCommand(state, revision, button, status, payload, destination, focusSelector, onSaved = null) {
   button.disabled = true;
   status.className = "status";
   status.textContent = "Сохраняем…";
@@ -1062,8 +3099,13 @@ async function saveProfileCommand(state, revision, button, status, payload, dest
     const updated = await submissionRequest("/api/v1/me/profile", "PUT", state.draft.operationKey, payload);
     if (revision !== screenRevision) return;
     state.profile.me = updated;
+    setMemberTimezone(updated.timezone || "UTC");
     state.draft = null;
     state.returnFocus = focusSelector;
+    if (onSaved) {
+      onSaved(updated);
+      return;
+    }
     openProfileRoute(state, revision, destination, false);
   } catch (error) {
     if (revision !== screenRevision) return;
@@ -1115,7 +3157,7 @@ function profileLinksList(state, revision) {
   return view;
 }
 
-function profileLinkEditor(state, revision, linkId = null) {
+function profileLinkEditor(state, revision, linkId = null, { onSaved = null, onDelete = null } = {}) {
   const existing = linkId ? state.profile.me.profile_links.find((item) => item.id === linkId) : null;
   if (linkId && !existing) return element("p", "Ссылка не найдена.", "status");
   const draft = state.draft?.route === state.route ? state.draft : {
@@ -1178,7 +3220,7 @@ function profileLinkEditor(state, revision, linkId = null) {
     const payload = existing
       ? { field: "profile_links", action: "update", link_id: existing.id, label: draft.label, url: draft.url }
       : { field: "profile_links", action: "create", label: draft.label, url: draft.url };
-    await saveProfileCommand(state, revision, save, status, payload, "/profile/links", existing ? `[data-link-id="${existing.id}"]` : "[data-profile-add-link]");
+    await saveProfileCommand(state, revision, save, status, payload, "/profile/links", existing ? `[data-link-id="${existing.id}"]` : "[data-profile-add-link]", onSaved);
   });
   form.append(label, counter);
   if (presets) form.append(presets);
@@ -1188,6 +3230,10 @@ function profileLinkEditor(state, revision, linkId = null) {
     remove.type = "button";
     remove.dataset.linkDeleteId = existing.id;
     remove.addEventListener("click", () => {
+      if (onDelete) {
+        onDelete(existing);
+        return;
+      }
       state.deleteOrigin = "edit";
       history.replaceState(
         { ...history.state, profileReturnFocus: `[data-link-delete-id="${existing.id}"]` },
@@ -1235,8 +3281,15 @@ function profileDeleteConfirm(state, revision, linkId) {
 function openProfileRoute(state, revision, route, push) {
   state.route = route;
   state.draft = state.draft?.route === route ? state.draft : null;
-  if (push) history.pushState({ screen: "profile", route }, "", `#${route}`);
-  else history.replaceState({ screen: "profile", route }, "", `#${route}`);
+  if (push && state.fromSettings) state.closeHistoryDelta += 1;
+  const profileHistory = {
+    screen: "profile",
+    route,
+    returnToSettings: state.fromSettings,
+    profileCloseDelta: state.closeHistoryDelta,
+  };
+  if (push) history.pushState(profileHistory, "", `#${route}`);
+  else history.replaceState(profileHistory, "", `#${route}`);
   showProfileState(state, revision);
 }
 
@@ -1514,7 +3567,11 @@ function safeMemberDetails(member) {
     metrics.append(metric);
   }
   card.append(identity, metrics);
-  if (member.short_bio) card.append(valueSection("О ЧЕЛОВЕКЕ", member.short_bio));
+  if (member.short_bio) {
+    const bio = element("section", undefined, "profile-card foreign-bio-card");
+    bio.append(element("h3", "О себе"), element("p", member.short_bio));
+    card.append(bio);
+  }
   if (member.skill_tags?.length) {
     const skills = element("section", undefined, "profile-card profile-content-card");
     skills.append(element("h3", "НАВЫКИ", "section-label"));
@@ -1618,7 +3675,7 @@ function karmaForm(state, revision) {
   });
   const saveKarma = async ({ confirm, edit, status: actionStatus }) => {
     confirm.disabled = true;
-    edit.disabled = true;
+    if (edit) edit.disabled = true;
     actionStatus.className = "status";
     actionStatus.textContent = "Сохраняем оценку…";
     try {
@@ -1661,6 +3718,9 @@ function karmaForm(state, revision) {
         draft.refreshError = true;
       }
       title.textContent = "Карма сохранена";
+      if (uiNextEnabled) {
+        setHeaderControl("back", { screenLabel: "Карма сохранена", hideTitle: true });
+      }
       history.replaceState(
         { screen: "member-karma-success", memberId: state.member.member_id },
         "",
@@ -1681,7 +3741,7 @@ function karmaForm(state, revision) {
             : "Оценка изменилась в другом окне. Вернитесь к редактированию и повторите."
           : "Оценка недоступна или не удалось сохранить. Повторите попытку.";
       confirm.disabled = false;
-      edit.disabled = false;
+      if (edit) edit.disabled = false;
     }
   };
   form.addEventListener("submit", (event) => {
@@ -1696,6 +3756,9 @@ function karmaForm(state, revision) {
       transitionId: "PE-059",
       transitionTrigger: "authoritative_karma_success",
       onEdit: () => openKarmaEditor(state, revision, false),
+      hideHeading: uiNextEnabled,
+      showEdit: !uiNextEnabled,
+      onBack: () => openKarmaEditor(state, revision, false),
       onConfirm: saveKarma,
     });
   });
@@ -1711,7 +3774,11 @@ function openKarmaEditor(state, revision, push = true) {
   else history.replaceState(nextState, "", location);
   setNavigation("", true);
   title.textContent = "Оценка кармы";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    setHeaderControl("back", { screenLabel: "Оценка кармы", hideTitle: true });
+  } else {
+    back.classList.remove("hidden");
+  }
   replaceContent(connectedBoundary("P03", "content", karmaForm(state, revision)));
   content.querySelector("select")?.focus({ preventScroll: true });
 }
@@ -1731,7 +3798,7 @@ function showMemberState(state, revision) {
     const rate = element("button", "Оценить карму", "primary");
     rate.type = "button";
     rate.addEventListener("click", () => openKarmaEditor(state, revision));
-    details.append(rate);
+    details.querySelector(".foreign-metrics")?.after(rate);
   }
   replaceContent(connectedBoundary("P02", "content", ...nodes));
 }
@@ -1744,7 +3811,13 @@ async function showMemberProfile(memberId, push = true) {
   memberProfileHasInternalHistory = push;
   setNavigation("", true);
   title.textContent = "Профиль участника";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    setHeaderControl("back", {
+      label: "Назад к участникам",
+      screenLabel: "Профиль участника",
+      hideTitle: true,
+    });
+  }
   showMemberState(state, revision);
   back.focus({ preventScroll: true });
   try {
@@ -1758,7 +3831,16 @@ async function showMemberProfile(memberId, push = true) {
 function showProfileState(state, revision) {
   if (revision !== screenRevision) return;
   setNavigation(state.route === "/profile" ? "profile" : "", state.route !== "/profile");
-  back.classList.toggle("hidden", state.route === "/profile");
+  activeProfileState = state;
+  if (uiNextEnabled && state.route === "/profile") {
+    setHeaderControl("back", {
+      label: "Назад в параметры",
+      screenLabel: "Профиль",
+      hideTitle: true,
+    });
+  } else {
+    back.classList.toggle("hidden", state.route === "/profile" && !state.fromSettings);
+  }
   if (!state.profile) {
     replaceContent(element("p", state.profileError ? "Не удалось загрузить профиль." : "Загружаем профиль…", "status"));
     return;
@@ -1796,6 +3878,9 @@ function showProfileState(state, revision) {
     node = ownProfileOverview(state, revision);
   }
   title.textContent = headingText;
+  if (uiNextEnabled && titlelessProfileRoutes.has(state.route)) {
+    setHeaderControl("back", { screenLabel: headingText, hideTitle: true });
+  }
   replaceContent(node);
   if (state.returnFocus) {
     const selector = state.returnFocus;
@@ -1832,6 +3917,9 @@ async function loadOwnProfile(state, revision) {
 function loadProfile(push = true) {
   const revision = ++screenRevision;
   const route = /^#\/profile(?:\/.*)?$/.test(location.hash) ? location.hash.slice(1) : "/profile";
+  const fromSettings = push
+    ? history.state?.screen === "settings"
+    : history.state?.returnToSettings === true;
   const cachedMe = cachedJson("/api/v1/me");
   const cachedMember = cachedMe
     ? cachedJson("/api/v1/members/" + encodeURIComponent(cachedMe.member_id))
@@ -1843,14 +3931,77 @@ function loadProfile(push = true) {
     profileError: false,
     route,
     draft: null,
+    fromSettings,
+    closeHistoryDelta: push && fromSettings
+      ? 1
+      : Number(history.state?.profileCloseDelta || 0),
     returnFocus: history.state?.profileReturnFocus || storedReturnFocus || null,
   };
   activeProfileState = state;
   returnFocusProfile = true;
-  if (push) history.pushState({ screen: "profile", route: "/profile" }, "", "#/profile");
-  else history.replaceState({ screen: "profile", route }, "", `#${route}`);
+  const profileHistory = {
+    screen: "profile",
+    route,
+    returnToSettings: fromSettings,
+    profileCloseDelta: state.closeHistoryDelta,
+  };
+  if (push) history.pushState(profileHistory, "", "#/profile");
+  else history.replaceState(profileHistory, "", `#${route}`);
   showProfileState(state, revision);
   void loadOwnProfile(state, revision);
+}
+
+function showSettings(push = true) {
+  screenRevision += 1;
+  activeProfileState = null;
+  document.body.classList.remove("ui-next-preview");
+  setNavigation("settings", false);
+  title.textContent = "Параметры";
+  back.classList.add("hidden");
+  if (push) history.pushState({ screen: "settings" }, "", "#/settings");
+  else history.replaceState({ screen: "settings" }, "", "#/settings");
+
+  const list = element("section", undefined, "settings-list");
+  const profile = element("button", undefined, "settings-row settings-link-row");
+  profile.type = "button";
+  profile.append(settingsRowIcon("profile"));
+  profile.firstChild.classList.add("settings-row-icon");
+  const profileCopy = element("span", undefined, "settings-row-copy");
+  profileCopy.append(
+    element("strong", "Профиль"),
+    element("span", "Личные данные, навыки и ссылки"),
+  );
+  profile.append(profileCopy, element("span", "›", "settings-chevron"));
+  profile.addEventListener("click", () => loadProfile());
+
+  const theme = element("div", undefined, "settings-row settings-theme-row");
+  theme.append(settingsRowIcon("moon"));
+  theme.firstChild.classList.add("settings-row-icon");
+  const themeCopy = element("span", undefined, "settings-row-copy");
+  themeCopy.append(
+    element("strong", "Ночной режим"),
+    element("span", "Тёмное оформление интерфейса"),
+  );
+  const toggle = element("button", undefined, "settings-switch");
+  toggle.type = "button";
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-label", "Ночной режим");
+  toggle.append(element("span", undefined, "settings-switch-thumb"));
+  const updateToggle = () => {
+    toggle.setAttribute("aria-checked", String(document.documentElement.dataset.theme === "dark"));
+  };
+  updateToggle();
+  toggle.addEventListener("click", () => {
+    const preference = toggle.getAttribute("aria-checked") === "true" ? "light" : "dark";
+    applyPreviewTheme(preference);
+    const url = new URL(location.href);
+    url.searchParams.set("theme", preference);
+    history.replaceState({ ...history.state, theme: preference }, "", url);
+    updateToggle();
+  });
+  theme.append(themeCopy, toggle);
+  list.append(profile, theme);
+  replaceContent(list);
 }
 
 function showTaskDetail(task, push = true) {
@@ -1859,7 +4010,13 @@ function showTaskDetail(task, push = true) {
   setNavigation("", true);
   shell.classList.add("task-detail-screen");
   title.textContent = "Карточка задания";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    setHeaderControl("back", {
+      label: "Назад к заданиям",
+      screenLabel: "Карточка задания",
+      hideTitle: true,
+    });
+  }
   if (push) history.pushState({ screen: "task", taskId: task.id }, "", presentationLocationFor("T03", task.id));
   const detail = element("article", undefined, "card detail task-detail");
   detail.append(element("h3", task.title, "task-detail-title"));
@@ -1896,10 +4053,9 @@ function showTaskDetail(task, push = true) {
       confirmLabel: "Принять слот",
       transitionId: "PE-024",
       transitionTrigger: "authoritative_accept_success",
-      onEdit: () => history.back(),
-      onConfirm: ({ confirm, edit, status: actionStatus }) => {
-        edit.disabled = true;
-        void acceptTask(task, confirm, actionStatus).finally(() => { edit.disabled = false; });
+      showEdit: false,
+      onConfirm: ({ confirm, status: actionStatus }) => {
+        void acceptTask(task, confirm, actionStatus);
       },
     });
   });
@@ -1933,7 +4089,15 @@ async function acceptTask(task, button, status) {
     );
     const payload = await submissionResponse(response);
     pendingAcceptKeys.delete(task.id);
-    history.replaceState({ screen: "assignment", assignmentId: payload.id }, "", presentationLocationFor("M03", payload.id));
+    history.replaceState(
+      {
+        screen: "assignment",
+        assignmentId: payload.id,
+        ...(uiNextEnabled ? { returnTo: "assignments-taken" } : {}),
+      },
+      "",
+      presentationLocationFor("M03", payload.id),
+    );
     await showAssignmentDetail(payload.id, false);
   } catch (error) {
     status.textContent = error instanceof TypeError
@@ -1944,8 +4108,223 @@ async function acceptTask(task, button, status) {
   }
 }
 
+const archivedOwnedTaskStatuses = new Set([
+  "expired",
+  "partially_completed",
+  "completed",
+  "cancelled",
+]);
+
+const compactListDate = (value) => (
+  value
+    ? memberDateFormatter({ day: "numeric", month: "short" }).format(new Date(value))
+    : "без срока"
+);
+
+const nextWorkListHeader = ({
+  searchLabel,
+  query,
+  onQuery,
+  leadingControl = null,
+  trailingControls = null,
+}) => {
+  const actions = element("div", undefined, "catalog-actions work-list-actions");
+  const listBack = element("button", "‹", "secondary catalog-back-button");
+  listBack.type = "button";
+  listBack.setAttribute("aria-label", "Назад к заданиям");
+  listBack.addEventListener("click", () => void loadTaskHome());
+  const search = element("label", undefined, "catalog-search");
+  const searchInput = element("input");
+  searchInput.type = "search";
+  searchInput.placeholder = "Название задания";
+  searchInput.setAttribute("aria-label", searchLabel);
+  searchInput.value = query;
+  search.append(searchIcon(), searchInput);
+  if (trailingControls) {
+    actions.classList.add("has-trailing-controls");
+    actions.append(listBack, search, trailingControls);
+  } else if (leadingControl) {
+    actions.classList.add("has-leading-control");
+    actions.append(listBack, leadingControl, search);
+  } else {
+    actions.append(listBack, search);
+  }
+  searchInput.addEventListener("input", () => onQuery(searchInput.value));
+  return { actions, searchInput };
+};
+
+const nextWorkListHeading = (label, count, actionCount = 0) => {
+  const headingRow = element("div", undefined, "work-list-heading");
+  headingRow.append(
+    element("h2", label),
+    element("span", String(count), "work-list-count"),
+  );
+  if (actionCount) {
+    headingRow.append(
+      element(
+        "span",
+        `${actionCount} ${actionCount === 1 ? "действие" : "действия"}`,
+        "work-list-action-count",
+      ),
+    );
+  }
+  return headingRow;
+};
+
+const activeTaskFilterCount = (filters) => Object.entries(filters)
+  .filter(([key, value]) => key !== "query" && Boolean(value)).length;
+
+const taskFilterButton = (filters, onClick) => {
+  const count = activeTaskFilterCount(filters);
+  const filter = element("button", undefined, "secondary catalog-filter-button");
+  filter.type = "button";
+  filter.setAttribute("aria-label", count ? `Фильтры, выбрано: ${count}` : "Фильтры");
+  filter.setAttribute("aria-haspopup", "dialog");
+  filter.append(slidersIcon());
+  if (count) {
+    filter.classList.add("is-active");
+    filter.append(element("span", String(count), "catalog-filter-count"));
+  }
+  filter.addEventListener("click", onClick);
+  return filter;
+};
+
+const assignmentTaskProjection = (assignment) => ({
+  ...assignment,
+  deadline_at: assignment.deadline_at || assignment.task_deadline_at,
+});
+
+const assignmentListDescription = (assignment) => assignment.result_summary || ({
+  accepted: "Задание выполняется — результат ещё не отправлен.",
+  submitted: "Результат отправлен и ожидает проверки.",
+  rejected_pending_dispute: "Нужно принять решение по отклонённому результату.",
+  disputed: "Спор открыт и ожидает решения.",
+  reviewer_required: "Ожидается независимая проверка.",
+}[assignment.assignment_status] || "Откройте задание, чтобы посмотреть текущее состояние.");
+
+const nextAssignmentListCard = (assignment) => {
+  const card = element("button", undefined, "card task-card work-task-card");
+  card.type = "button";
+  const chips = element("div", undefined, "card-chips");
+  chips.append(element("span", assignmentStatus(assignment.assignment_status), "chip"));
+  chips.append(
+    element(
+      "span",
+      assignment.task_origin === "community" ? "Сообщество" : "От участника",
+      "chip muted-chip",
+    ),
+  );
+  const label = element("div", undefined, "task-card-title");
+  label.append(element("h3", assignment.task_title), element("span", "›", "chevron"));
+  const meta = element("div", undefined, "task-meta");
+  meta.append(
+    element("span", `Взято ${compactListDate(assignment.accepted_at)}`),
+    element("span", `до ${compactListDate(assignment.task_deadline_at)}`),
+  );
+  card.append(
+    chips,
+    label,
+    element("p", assignmentListDescription(assignment), "muted"),
+    meta,
+  );
+  card.addEventListener("click", () => showAssignmentDetail(assignment.id));
+  return card;
+};
+
+function showNextTakenAssignments(revision, screenId = "M01") {
+  if (revision !== screenRevision) return;
+  setNavigation("catalog", false);
+  title.textContent = "Что я выполняю";
+  back.classList.add("hidden");
+  const boundary = connectedBoundary(screenId, assignments.length ? "content" : "empty");
+  boundary.dataset.uiEngine = "next-work-list";
+  boundary.dataset.template = "list";
+  boundary.classList.add("catalog-view", "work-list-view", "taken-tasks-view");
+  const results = element("div", undefined, "catalog-results work-list-results");
+  const headingRow = nextWorkListHeading("Что я выполняю", assignments.length);
+  const updateResults = () => {
+    const query = takenTasksQuery.trim().toLocaleLowerCase("ru");
+    const visible = assignments.filter((assignment) => {
+      const queryMatches = !query
+        || assignment.task_title.toLocaleLowerCase("ru").includes(query)
+        || assignmentListDescription(assignment).toLocaleLowerCase("ru").includes(query);
+      return queryMatches && taskMatchesFilters(
+        assignmentTaskProjection(assignment),
+        takenTasksFilters,
+      );
+    });
+    const visibleById = new Map(visible.map((assignment) => [assignment.id, assignment]));
+    const orderedVisible = sortTaskLikeItems(
+      visible.map(assignmentTaskProjection),
+      takenTasksSort,
+    ).map((projection) => visibleById.get(projection.id));
+    boundary.dataset.state = visible.length ? "content" : "empty";
+    headingRow.querySelector(".work-list-count").textContent = String(visible.length);
+    if (!visible.length) {
+      results.replaceChildren(
+        element(
+          "p",
+          query ? "По вашему запросу ничего не найдено." : "Активных заданий пока нет.",
+          "compact-empty",
+        ),
+      );
+      return null;
+    }
+    const list = element("div", undefined, "list");
+    let focusTarget = null;
+    for (const assignment of orderedVisible) {
+      const card = nextAssignmentListCard(assignment);
+      if (assignment.id === returnFocusAssignmentId) focusTarget = card;
+      list.append(card);
+    }
+    results.replaceChildren(list);
+    return focusTarget;
+  };
+  const currentSortLabel = catalogSortOptions.find(([, value]) => value === takenTasksSort)?.[0] || "Создано позже";
+  const sort = element("button", undefined, "secondary catalog-sort-button work-list-sort-button");
+  sort.type = "button";
+  sort.setAttribute("aria-label", `Сортировка: ${currentSortLabel}`);
+  sort.setAttribute("aria-haspopup", "dialog");
+  sort.append(sortIcon());
+  sort.classList.toggle("is-active", takenTasksSort !== "created_desc");
+  sort.addEventListener("click", () => showCatalogSortSheet(sort, {
+    sortOptions: catalogSortOptions,
+    selectedSort: takenTasksSort,
+    onSelect: (value) => {
+      takenTasksSort = value;
+      showNextTakenAssignments(screenRevision, screenId);
+    },
+  }));
+  const actionEnd = element("div", undefined, "catalog-actions-end");
+  const filter = taskFilterButton(takenTasksFilters, () => showCatalogFilterSheet(filter, {
+    filters: takenTasksFilters,
+    sourceTasks: assignments.map(assignmentTaskProjection),
+    onChange: (value) => { takenTasksFilters = value; },
+    refresh: () => showNextTakenAssignments(screenRevision, screenId),
+  }));
+  actionEnd.append(filter, sort);
+  const header = nextWorkListHeader({
+    searchLabel: "Поиск в выполняемых заданиях",
+    query: takenTasksQuery,
+    onQuery: (value) => {
+      takenTasksQuery = value;
+      updateResults();
+    },
+    trailingControls: actionEnd,
+  });
+  boundary.append(header.actions, headingRow, results);
+  const focusTarget = updateResults();
+  replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
+  returnFocusAssignmentId = null;
+}
+
 function showAssignments(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
+  if (uiNextEnabled) {
+    showNextTakenAssignments(revision);
+    return;
+  }
   setNavigation("assignments", false);
   title.textContent = "Мои задания";
   back.classList.add("hidden");
@@ -1983,6 +4362,10 @@ function showAssignments(revision = ++screenRevision) {
 function showTakenAssignments() {
   screenRevision += 1;
   history.replaceState({ screen: "assignments-taken" }, "", presentationLocationFor("M02"));
+  if (uiNextEnabled) {
+    showNextTakenAssignments(screenRevision, "M02");
+    return;
+  }
   setNavigation("assignments", false);
   title.textContent = "Мои задания";
   back.classList.add("hidden");
@@ -2068,6 +4451,9 @@ const decisionLabels = {
 const createdTaskStatus = (value) => ({
   published: "Опубликовано",
   closed_for_new_performers: "Набор закрыт",
+  settling: "Завершается",
+  expired: "Срок истёк",
+  partially_completed: "Частично завершено",
   completed: "Завершено",
   cancelled: "Отменено",
 }[value] || value);
@@ -2076,7 +4462,26 @@ function showOwnedTask(task, push = true) {
   if (push) history.pushState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
   setNavigation("", true);
   title.textContent = "Созданное задание";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    const returnScope = ownedTaskListScope;
+    setHeaderControl("back", {
+      label: "Назад к созданным заданиям",
+      screenLabel: "Созданное задание",
+      hideTitle: true,
+      onBack: () => {
+        const baseLocation = presentationLocationFor("M09");
+        const nextLocation = returnScope === "archive"
+          ? `${baseLocation}&scope=archive`
+          : baseLocation;
+        history.replaceState(
+          { screen: "created-assignments", scope: returnScope },
+          "",
+          nextLocation,
+        );
+        void loadCreatedReviews(false, returnScope);
+      },
+    });
+  }
   const detail = element("article", undefined, "card detail");
   detail.append(
     element("h3", task.title),
@@ -2111,10 +4516,10 @@ function confirmOwnedTaskCancellation(task) {
       ? "Набор новых исполнителей закроется, а текущие получат запрос на отмену."
       : "Задание будет отменено, зарезервированные кредиты вернутся.",
     confirmLabel: task.cancellation_action === "request" ? "Отправить запрос" : "Отменить задание",
-    onEdit: () => showOwnedTask(task, false),
+    showEdit: false,
     onConfirm: async ({ confirm, edit, status }) => {
       confirm.disabled = true;
-      edit.disabled = true;
+      if (edit) edit.disabled = true;
       status.className = "status";
       status.textContent = "Применяем отмену…";
       operationKey ||= newOperationKey();
@@ -2143,14 +4548,369 @@ function confirmOwnedTaskCancellation(task) {
           : "Не удалось применить отмену. Повторите запрос.";
         if (!retryableSubmissionError(error)) operationKey = null;
         confirm.disabled = false;
-        edit.disabled = false;
+        if (edit) edit.disabled = false;
       }
     },
   });
 }
 
+const nextOwnedTaskListCard = (task) => {
+  const card = element("button", undefined, "card task-card work-task-card owned-work-card");
+  card.type = "button";
+  const chips = element("div", undefined, "card-chips");
+  const archived = archivedOwnedTaskStatuses.has(task.status);
+  chips.append(
+    element("span", createdTaskStatus(task.status), archived ? "chip muted-chip" : "chip"),
+  );
+  if (task.cancellation_status === "pending") {
+    chips.append(element("span", "Ждёт ответа на отмену", "chip action-chip"));
+  }
+  const label = element("div", undefined, "task-card-title");
+  label.append(element("h3", task.title), element("span", "›", "chevron"));
+  const meta = element("div", undefined, "task-meta");
+  meta.append(
+    element("span", `${task.assignees.length} из ${task.performer_slots} исполнителей`),
+    element("span", `до ${compactListDate(task.deadline_at)}`),
+  );
+  const description = task.assignees.length
+    ? task.assignees.map((assignee) => (
+      `${assignee.display_name}: ${assignmentStatus(assignee.status)}`
+    )).join(" · ")
+    : archived ? "Задание находится в архиве." : "Пока без исполнителя.";
+  card.append(chips, label, element("p", description, "muted"), meta);
+  card.addEventListener("click", () => {
+    returnFocusOwnedTaskId = task.id;
+    const screen = content.closest(".screen");
+    history.replaceState(
+      { ...history.state, scrollTop: screen?.scrollTop || 0 },
+      "",
+      location.href,
+    );
+    showOwnedTask(task);
+  });
+  return card;
+};
+
+const nextOwnedReviewListCard = (review) => {
+  const card = element("button", undefined, "card task-card work-task-card work-review-card");
+  card.type = "button";
+  const chips = element("div", undefined, "card-chips");
+  chips.append(
+    element("span", "Требуется проверка", "chip action-chip"),
+    element("span", review.performer_display_name, "chip muted-chip"),
+  );
+  const label = element("div", undefined, "task-card-title");
+  label.append(element("h3", review.task_title), element("span", "›", "chevron"));
+  const meta = element("div", undefined, "task-meta");
+  meta.append(element("span", `Отправлено ${compactListDate(review.submitted_at)}`));
+  if (review.review_deadline_at) {
+    meta.append(element("span", `решить до ${compactListDate(review.review_deadline_at)}`));
+  }
+  card.append(
+    chips,
+    label,
+    element("p", `Исполнитель ${review.performer_display_name} отправил результат.`, "muted"),
+    meta,
+  );
+  card.addEventListener("click", () => showCreatedReview(review.id));
+  return card;
+};
+
+function showOwnedArchiveFilterSheet(trigger) {
+  shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop")?.remove();
+  const backdrop = element("section", undefined, "catalog-filter-backdrop");
+  const dialog = element("div", undefined, "catalog-filter-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "owned-archive-filter-title");
+  const header = element("div", undefined, "catalog-sort-heading");
+  const filterTitle = element("h2", "Фильтры архива");
+  filterTitle.id = "owned-archive-filter-title";
+  const close = element("button", "×", "catalog-sort-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть фильтры");
+  header.append(filterTitle, close);
+
+  const form = element("form", undefined, "task-form card catalog-filter-form");
+  const selectField = (labelText, options, value) => {
+    const label = element("label", labelText);
+    const select = element("select");
+    for (const [optionLabel, optionValue] of options) {
+      select.append(new Option(optionLabel, optionValue));
+    }
+    select.value = value;
+    label.append(select);
+    return { label, select };
+  };
+  const statusField = selectField("Статус", [
+    ["Любой", ""],
+    ["Завершено", "completed"],
+    ["Частично завершено", "partially_completed"],
+    ["Отменено", "cancelled"],
+    ["Срок истёк", "expired"],
+  ], ownedArchiveFilters.status);
+  const performersField = selectField("Исполнители", [
+    ["Неважно", ""],
+    ["Есть исполнители", "with"],
+    ["Без исполнителей", "without"],
+  ], ownedArchiveFilters.performers);
+  const archivedLabel = element("label", "Добавлено в архив до");
+  const archivedInput = element("input");
+  archivedInput.type = "date";
+  archivedInput.setAttribute("aria-label", "Добавлено в архив до");
+  archivedInput.value = ownedArchiveFilters.archivedUntil;
+  archivedLabel.append(
+    archivedInput,
+    element("span", "Дата завершения, отмены или истечения срока", "profile-helper"),
+  );
+  const actions = element("div", undefined, "catalog-filter-actions");
+  const reset = element("button", "Сбросить", "secondary");
+  reset.type = "button";
+  const apply = element("button", "Применить", "primary");
+  apply.type = "submit";
+  actions.append(reset, apply);
+  form.append(statusField.label, performersField.label, archivedLabel, actions);
+
+  const dismiss = (restoreFocus = true) => {
+    backdrop.remove();
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  };
+  const refresh = () => {
+    dismiss(false);
+    showNextCreatedAssignments(screenRevision);
+    queueMicrotask(() => content.querySelector(".catalog-filter-button")?.focus({ preventScroll: true }));
+  };
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    ownedArchiveFilters = {
+      status: statusField.select.value,
+      performers: performersField.select.value,
+      archivedUntil: archivedInput.value,
+    };
+    refresh();
+  });
+  reset.addEventListener("click", () => {
+    ownedArchiveFilters = emptyOwnedArchiveFilters();
+    refresh();
+  });
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [close, ...form.querySelectorAll("select, input, button")];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, form);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  queueMicrotask(() => statusField.select.focus({ preventScroll: true }));
+}
+
+function showNextCreatedAssignments(revision) {
+  if (revision !== screenRevision) return;
+  const archiveMode = ownedTaskListScope === "archive";
+  const scopedTasks = ownedTasks.filter((task) => (
+    archivedOwnedTaskStatuses.has(task.status) === archiveMode
+  ));
+  const scopedReviews = archiveMode ? [] : ownedReviews;
+  const scopedTaskById = new Map(scopedTasks.map((task) => [task.id, task]));
+  const screenTitle = archiveMode ? "Архив заданий" : "Созданные мной";
+  const currentQuery = () => archiveMode ? archivedTasksQuery : createdTasksQuery;
+  const currentSort = () => archiveMode ? archivedTasksSort : createdTasksSort;
+  const activeArchiveFilterCount = Object.values(ownedArchiveFilters).filter(Boolean).length;
+  const activeCreatedFilterCount = activeTaskFilterCount(createdTasksFilters);
+  setNavigation("catalog", false);
+  title.textContent = screenTitle;
+  back.classList.add("hidden");
+  const boundary = connectedBoundary(
+    "M09",
+    scopedTasks.length || scopedReviews.length ? "content" : "empty",
+  );
+  boundary.dataset.uiEngine = "next-work-list";
+  boundary.dataset.template = "list";
+  boundary.dataset.listScope = ownedTaskListScope;
+  boundary.classList.add("catalog-view", "work-list-view", "created-tasks-view");
+  const results = element("div", undefined, "catalog-results work-list-results");
+  const headingRow = nextWorkListHeading(screenTitle, scopedTasks.length, scopedReviews.length);
+  const updateResults = () => {
+    const query = currentQuery().trim().toLocaleLowerCase("ru");
+    const matchingTasks = scopedTasks.filter((task) => {
+      const queryMatches = !query
+        || task.title.toLocaleLowerCase("ru").includes(query)
+        || task.assignees.some((assignee) => (
+          assignee.display_name.toLocaleLowerCase("ru").includes(query)
+        ));
+      if (!queryMatches) return false;
+      if (!archiveMode) return taskMatchesFilters(task, createdTasksFilters);
+      return (
+        (!ownedArchiveFilters.status || task.status === ownedArchiveFilters.status)
+        && (
+          !ownedArchiveFilters.performers
+          || (ownedArchiveFilters.performers === "with" && task.assignees.length > 0)
+          || (ownedArchiveFilters.performers === "without" && task.assignees.length === 0)
+        )
+        && (
+          !ownedArchiveFilters.archivedUntil
+          || (task.archived_at && memberDateKey(task.archived_at) <= ownedArchiveFilters.archivedUntil)
+        )
+      );
+    });
+    if (archiveMode) {
+      const originalOrder = new Map(scopedTasks.map((task, index) => [task.id, index]));
+      const byOriginalOrder = (left, right) => originalOrder.get(left.id) - originalOrder.get(right.id);
+      const deadlineValue = (task) => {
+        const value = Date.parse(task.deadline_at);
+        return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
+      };
+      const archiveValue = (task) => {
+        const value = Date.parse(task.archived_at);
+        return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+      };
+      const comparators = {
+        archive_desc: (left, right) => archiveValue(right) - archiveValue(left) || byOriginalOrder(left, right),
+        archive_asc: (left, right) => archiveValue(left) - archiveValue(right) || byOriginalOrder(left, right),
+        deadline_asc: (left, right) => deadlineValue(left) - deadlineValue(right) || byOriginalOrder(left, right),
+        deadline_desc: (left, right) => deadlineValue(right) - deadlineValue(left) || byOriginalOrder(left, right),
+      };
+      matchingTasks.sort(comparators[currentSort()] || byOriginalOrder);
+    } else {
+      sortTaskLikeItems(matchingTasks, currentSort());
+    }
+    const matchingReviews = scopedReviews.filter((review) => (
+      (
+        !query
+        || review.task_title.toLocaleLowerCase("ru").includes(query)
+        || review.performer_display_name.toLocaleLowerCase("ru").includes(query)
+      )
+      && (
+        !activeCreatedFilterCount
+        || (scopedTaskById.has(review.task_id)
+          && taskMatchesFilters(scopedTaskById.get(review.task_id), createdTasksFilters))
+      )
+    ));
+    const hasItems = matchingTasks.length || matchingReviews.length;
+    boundary.dataset.state = hasItems ? "content" : "empty";
+    headingRow.querySelector(".work-list-count").textContent = String(matchingTasks.length);
+    const actionCount = headingRow.querySelector(".work-list-action-count");
+    if (actionCount) {
+      actionCount.textContent = `${matchingReviews.length} ${matchingReviews.length === 1 ? "действие" : "действия"}`;
+      actionCount.classList.toggle("hidden", matchingReviews.length === 0);
+    }
+    if (!hasItems) {
+      results.replaceChildren(
+        element(
+          "p",
+          query
+            ? "По вашему запросу ничего не найдено."
+            : archiveMode && activeArchiveFilterCount
+              ? "По заданным фильтрам ничего не найдено."
+              : archiveMode ? "Архив пока пуст." : "Созданных заданий пока нет.",
+          "compact-empty",
+        ),
+      );
+      return null;
+    }
+    const list = element("div", undefined, "list");
+    let focusTarget = null;
+    for (const review of matchingReviews) {
+      const card = nextOwnedReviewListCard(review);
+      if (review.id === returnFocusReviewId) focusTarget = card;
+      list.append(card);
+    }
+    for (const task of matchingTasks) {
+      const card = nextOwnedTaskListCard(task);
+      if (task.id === returnFocusOwnedTaskId) focusTarget = card;
+      list.append(card);
+    }
+    results.replaceChildren(list);
+    return focusTarget;
+  };
+  const currentSortOptions = archiveMode ? archiveTaskSortOptions : catalogSortOptions;
+  const currentSortLabel = currentSortOptions.find(([, value]) => value === currentSort())?.[0]
+    || (archiveMode ? "Недавно в архиве" : "Создано позже");
+  const sort = element("button", undefined, "secondary catalog-sort-button work-list-sort-button");
+  sort.type = "button";
+  sort.setAttribute("aria-label", `Сортировка: ${currentSortLabel}`);
+  sort.setAttribute("aria-haspopup", "dialog");
+  sort.append(sortIcon());
+  sort.classList.toggle("is-active", currentSort() !== (archiveMode ? "archive_desc" : "created_desc"));
+  sort.addEventListener("click", () => showCatalogSortSheet(sort, {
+    sortOptions: currentSortOptions,
+    selectedSort: currentSort(),
+    onSelect: (value) => {
+      if (archiveMode) archivedTasksSort = value;
+      else createdTasksSort = value;
+      showNextCreatedAssignments(screenRevision);
+    },
+  }));
+  let trailingControls = null;
+  if (archiveMode) {
+    const actionEnd = element("div", undefined, "catalog-actions-end");
+    const filter = element("button", undefined, "secondary catalog-filter-button");
+    filter.type = "button";
+    filter.setAttribute("aria-label", "Фильтры архива");
+    filter.setAttribute("aria-haspopup", "dialog");
+    filter.append(slidersIcon());
+    if (activeArchiveFilterCount) {
+      filter.classList.add("is-active");
+      filter.setAttribute("aria-label", `Фильтры архива, выбрано: ${activeArchiveFilterCount}`);
+      filter.append(element("span", String(activeArchiveFilterCount), "catalog-filter-count"));
+    }
+    filter.addEventListener("click", () => showOwnedArchiveFilterSheet(filter));
+    actionEnd.append(filter, sort);
+    trailingControls = actionEnd;
+  } else {
+    const actionEnd = element("div", undefined, "catalog-actions-end");
+    const filter = taskFilterButton(createdTasksFilters, () => showCatalogFilterSheet(filter, {
+      filters: createdTasksFilters,
+      sourceTasks: scopedTasks,
+      onChange: (value) => { createdTasksFilters = value; },
+      refresh: () => showNextCreatedAssignments(screenRevision),
+    }));
+    actionEnd.append(filter, sort);
+    trailingControls = actionEnd;
+  }
+  const header = nextWorkListHeader({
+    searchLabel: archiveMode ? "Поиск в архиве заданий" : "Поиск в созданных заданиях",
+    query: currentQuery(),
+    onQuery: (value) => {
+      if (archiveMode) archivedTasksQuery = value;
+      else createdTasksQuery = value;
+      updateResults();
+    },
+    trailingControls,
+  });
+  boundary.append(header.actions, headingRow, results);
+  const focusTarget = updateResults();
+  replaceContent(boundary);
+  focusTarget?.focus({ preventScroll: true });
+  returnFocusOwnedTaskId = null;
+  returnFocusReviewId = null;
+  const scrollTop = Number(history.state?.scrollTop || 0);
+  if (scrollTop) queueMicrotask(() => content.closest(".screen")?.scrollTo({ top: scrollTop }));
+}
+
 function renderCreatedAssignments(revision) {
   if (revision !== screenRevision) return;
+  if (uiNextEnabled) {
+    showNextCreatedAssignments(revision);
+    return;
+  }
   setNavigation("assignments", false);
   title.textContent = "Мои задания";
   back.classList.add("hidden");
@@ -2229,9 +4989,20 @@ function renderCreatedAssignments(revision) {
   if (scrollTop) queueMicrotask(() => content.closest(".screen")?.scrollTo({ top: scrollTop }));
 }
 
-async function loadCreatedReviews(push = true) {
+async function loadCreatedReviews(push = true, scope = "active") {
   const revision = ++screenRevision;
-  if (push) history.replaceState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
+  ownedTaskListScope = uiNextEnabled && scope === "archive" ? "archive" : "active";
+  if (push) {
+    const baseLocation = presentationLocationFor("M09");
+    const nextLocation = ownedTaskListScope === "archive"
+      ? `${baseLocation}&scope=archive`
+      : baseLocation;
+    history.replaceState(
+      { screen: "created-assignments", scope: ownedTaskListScope },
+      "",
+      nextLocation,
+    );
+  }
   const ownedPath = "/api/v1/owned-tasks";
   const reviewsPath = "/api/v1/assignment-reviews";
   const cachedOwned = cachedJson(ownedPath);
@@ -2260,35 +5031,96 @@ async function loadCreatedReviews(push = true) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
-    retry.addEventListener("click", () => loadCreatedReviews(false));
+    retry.addEventListener("click", () => loadCreatedReviews(false, ownedTaskListScope));
     replaceContent(element("p", "Не удалось загрузить созданные задания.", "status"), retry);
   }
 }
 
-async function showCreatedReview(assignmentId, push = true) {
+async function showCreatedReview(assignmentId, push = true, returnTo = null) {
   const revision = ++screenRevision;
   returnFocusReviewId = assignmentId;
-  if (push) history.pushState({ screen: "assignment-review", assignmentId }, "", presentationLocationFor("M11", assignmentId));
+  const returnTarget = returnTo || (
+    history.state?.screen === "assignment-review"
+      && history.state.assignmentId === assignmentId
+      ? history.state.returnTo
+      : null
+  );
+  if (push) {
+    history.pushState(
+      {
+        screen: "assignment-review",
+        assignmentId,
+        ...(returnTarget ? { returnTo: returnTarget } : {}),
+      },
+      "",
+      presentationLocationFor("M11", assignmentId),
+    );
+  }
   setNavigation("", true);
   title.textContent = "Решение по результату";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    shell.classList.add("assignment-review-screen");
+    setHeaderControl("back", {
+      label: returnTarget === "task-home" ? "Назад к заданиям" : "Назад",
+      screenLabel: "Решение по результату",
+      hideTitle: true,
+      onBack: returnTarget === "task-home" ? () => loadTaskHome() : null,
+    });
+  } else {
+    back.classList.remove("hidden");
+  }
   replaceContent(element("p", "Загружаем результат…", "status muted"));
   try {
     const review = await getJson("/api/v1/assignment-reviews/" + encodeURIComponent(assignmentId));
     if (revision !== screenRevision) return;
-    const detail = element("article", undefined, "card detail");
+    const detail = element(
+      "article",
+      undefined,
+      uiNextEnabled ? "card detail assignment-review-detail" : "card detail",
+    );
     const status = element("p", "", "status hidden");
     status.setAttribute("aria-live", "polite");
-    detail.append(
-      element("h3", review.task_title),
-      section("Исполнитель", review.performer_display_name),
-      section("Результат", review.result),
-    );
-    if (review.review_deadline_at) {
-      detail.append(dateSection("Срок решения", review.review_deadline_at));
+    if (uiNextEnabled) {
+      const detailHeader = element("header", undefined, "assignment-detail-header");
+      const detailMeta = element("div", undefined, "assignment-detail-meta");
+      detailMeta.append(element("span", "Требуется решение", "assignment-detail-status"));
+      if (review.review_deadline_at) {
+        const deadline = element("span", undefined, "assignment-detail-deadline");
+        deadline.append(element("span", "Решить до"), time(review.review_deadline_at));
+        detailMeta.append(deadline);
+      }
+      detailHeader.append(element("h2", review.task_title), detailMeta);
+      const detailContent = element("div", undefined, "assignment-detail-content");
+      const performer = section("Исполнитель", review.performer_display_name);
+      performer.classList.add("assignment-detail-section");
+      const result = section("Результат", review.result);
+      result.classList.add("assignment-detail-section", "assignment-review-result");
+      detailContent.append(performer, result);
+      detail.append(detailHeader, detailContent);
+    } else {
+      detail.append(
+        element("h3", review.task_title),
+        section("Исполнитель", review.performer_display_name),
+        section("Результат", review.result),
+      );
+      if (review.review_deadline_at) {
+        detail.append(dateSection("Срок решения", review.review_deadline_at));
+      }
     }
+    const decisionActions = uiNextEnabled
+      ? element("div", undefined, "assignment-review-actions")
+      : detail;
     for (const [index, decision] of review.available_decisions.entries()) {
-      const button = element("button", decisionLabels[decision], index ? "secondary" : "primary");
+      const decisionClass = decision === "full"
+        ? "primary assignment-review-action-full"
+        : decision === "reject"
+          ? "secondary danger"
+          : "secondary";
+      const button = element(
+        "button",
+        decisionLabels[decision],
+        uiNextEnabled ? decisionClass : index ? "secondary" : "primary",
+      );
       button.type = "button";
       markTransition(button, "PE-040", "authoritative_review_success");
       let operationKey = null;
@@ -2305,6 +5137,10 @@ async function showCreatedReview(assignmentId, push = true) {
             operationKey,
             { decision },
           );
+          if (returnTarget === "task-home") {
+            await loadTaskHome();
+            return;
+          }
           history.replaceState(
             { screen: "review-outcome", assignmentId },
             "",
@@ -2314,8 +5150,12 @@ async function showCreatedReview(assignmentId, push = true) {
           const done = element("button", "К созданным заданиям", "primary");
           done.type = "button";
           done.addEventListener("click", () => {
-            history.replaceState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
-            void loadCreatedReviews(false);
+            history.replaceState(
+              { screen: "created-assignments", scope: "active" },
+              "",
+              presentationLocationFor("M09"),
+            );
+            void loadCreatedReviews(false, "active");
           });
           replaceContent(connectedBoundary("M13", "success", element("p", `Решение «${decisionLabels[decision]}» сохранено.`, "status success"), done));
         } catch (error) {
@@ -2326,6 +5166,30 @@ async function showCreatedReview(assignmentId, push = true) {
         }
       };
       button.addEventListener("click", () => {
+        if (uiNextEnabled) {
+          const sheet = showAssignmentActionSheet(button, {
+            title: decisionLabels[decision],
+            description: decision === "reject"
+              ? "Резерв останется заморожен на 24 часа — исполнитель сможет открыть спор."
+              : decision === "partial"
+                ? "Исполнитель получит частичную награду за принятый результат."
+                : "Результат будет принят, а награда полностью перечислена исполнителю.",
+            tone: decision === "reject" ? "danger" : "default",
+          });
+          const confirmClass = decision === "reject"
+            ? "assignment-action-confirm-danger"
+            : "primary";
+          const confirm = element("button", decisionLabels[decision], confirmClass);
+          confirm.type = "button";
+          markTransition(confirm, "PE-040", "authoritative_review_success");
+          confirm.addEventListener("click", () => saveDecision({
+            confirm,
+            status: sheet.status,
+          }));
+          sheet.actions.append(confirm);
+          queueMicrotask(() => confirm.focus({ preventScroll: true }));
+          return;
+        }
         history.pushState(
           { screen: "assignment-review-confirm", assignmentId },
           "",
@@ -2344,8 +5208,9 @@ async function showCreatedReview(assignmentId, push = true) {
           onConfirm: saveDecision,
         });
       });
-      detail.append(button);
+      decisionActions.append(button);
     }
+    if (uiNextEnabled) detail.append(decisionActions);
     detail.append(status);
     replaceContent(connectedBoundary("M11", "content", detail));
     back.focus({ preventScroll: true });
@@ -2393,6 +5258,390 @@ async function submissionRequest(path, method, operationKey, body) {
     credentials: "same-origin",
   });
   return submissionResponse(response);
+}
+
+function showAssignmentActionSheet(trigger, { title: headingText, description, tone = "default" }) {
+  shell.querySelector(".assignment-action-backdrop")?.remove();
+  const backdrop = element("section", undefined, "assignment-action-backdrop");
+  const dialog = element("div", undefined, `assignment-action-sheet assignment-action-sheet-${tone}`);
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "assignment-action-title");
+  const header = element("header", undefined, "assignment-action-heading");
+  const headingNode = element("h2", headingText);
+  headingNode.id = "assignment-action-title";
+  const close = element("button", "×", "assignment-action-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть окно");
+  header.append(headingNode, close);
+  const body = element("div", undefined, "assignment-action-body");
+  if (description) body.append(element("p", description, "assignment-action-description"));
+  const status = element("p", "", "assignment-action-status hidden");
+  status.setAttribute("aria-live", "polite");
+  const actions = element("div", undefined, "assignment-action-buttons");
+  const dismiss = (restoreFocus = true) => {
+    if (!backdrop.isConnected) return;
+    backdrop.remove();
+    if (restoreFocus) trigger?.focus({ preventScroll: true });
+  };
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...dialog.querySelectorAll(
+      'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled])',
+    )];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, body, status, actions);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  return { backdrop, dialog, body, status, actions, close, dismiss };
+}
+
+function showSubmissionActionSheet(trigger, assignment) {
+  const returnToTaskHome = history.state?.screen === "assignment"
+    && history.state.returnTo === "task-home";
+  const sheet = showAssignmentActionSheet(trigger, {
+    title: "Отправить результат",
+    description: "Опишите готовый результат — автор увидит его при проверке.",
+  });
+  const form = element("form", undefined, "assignment-action-form");
+  const label = element("label", "Результат");
+  const input = document.createElement("textarea");
+  input.id = "assignment-result-sheet";
+  input.name = "result";
+  input.required = true;
+  input.minLength = 10;
+  input.maxLength = 2000;
+  input.rows = 4;
+  input.placeholder = "Что сделано и где посмотреть результат";
+  input.setAttribute("aria-label", "Результат");
+  label.htmlFor = input.id;
+  const counter = element(
+    "span",
+    "Минимум 10 символов · 0 / 2000",
+    "assignment-action-counter is-requirement",
+  );
+  label.append(input, counter);
+  form.append(label);
+  sheet.body.append(form);
+  const submit = element("button", "Подготавливаем…", "primary");
+  submit.type = "submit";
+  submit.disabled = true;
+  submit.setAttribute("form", "assignment-result-form");
+  form.id = "assignment-result-form";
+  markTransition(submit, "PE-034", "authoritative_submit_success");
+  sheet.actions.append(submit);
+
+  let draft = null;
+  let beginKey = null;
+  let saveKey = null;
+  let confirmKey = null;
+
+  const showStatus = (message, kind = "") => {
+    sheet.status.className = `assignment-action-status${kind ? ` ${kind}` : ""}`;
+    sheet.status.textContent = message;
+  };
+  const updateCounter = () => {
+    const normalizedLength = input.value.trim().length;
+    const missingLength = Math.max(0, input.minLength - normalizedLength);
+    counter.textContent = missingLength === input.minLength
+      ? `Минимум ${input.minLength} символов · ${input.value.length} / 2000`
+      : missingLength
+        ? `Нужно ещё ${missingLength} · ${input.value.length} / 2000`
+        : `${input.value.length} / 2000`;
+    counter.classList.toggle("is-requirement", missingLength > 0);
+    counter.classList.toggle("is-limit", input.value.length >= input.maxLength);
+    submit.disabled = !draft || normalizedLength < input.minLength;
+  };
+  input.addEventListener("input", () => {
+    confirmKey = null;
+    updateCounter();
+  });
+
+  const ensureDraft = async () => {
+    submit.disabled = true;
+    submit.textContent = "Подготавливаем…";
+    showStatus("Открываем черновик…", "is-loading");
+    beginKey ||= newOperationKey();
+    try {
+      const response = await apiFetch(
+        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/submission-drafts",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": beginKey },
+          credentials: "same-origin",
+        },
+      );
+      draft = await submissionResponse(response);
+      input.value = typeof draft.result === "string" ? draft.result : "";
+      sheet.status.className = "assignment-action-status hidden";
+      submit.textContent = "Отправить результат";
+      updateCounter();
+      input.focus({ preventScroll: true });
+    } catch (error) {
+      showStatus(submissionMessage(error), "is-error");
+      if (!retryableSubmissionError(error)) beginKey = null;
+      submit.textContent = "Повторить";
+      submit.disabled = false;
+    }
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!draft) {
+      await ensureDraft();
+      return;
+    }
+    const result = input.value.trim();
+    if (result.length < input.minLength) {
+      showStatus("Опишите результат минимум в 10 символах.", "is-error");
+      input.focus({ preventScroll: true });
+      return;
+    }
+    sheet.close.disabled = true;
+    submit.disabled = true;
+    submit.textContent = "Отправляем…";
+    showStatus("Сохраняем и отправляем результат…", "is-loading");
+    try {
+      if (draft.result !== result) {
+        saveKey ||= newOperationKey();
+        draft = await submissionRequest(
+          "/api/v1/submission-drafts/" + encodeURIComponent(draft.id),
+          "PUT",
+          saveKey,
+          { expected_revision: draft.revision, payload: { result } },
+        );
+        saveKey = null;
+        confirmKey = null;
+      }
+      confirmKey ||= newOperationKey();
+      await submissionRequest(
+        "/api/v1/submission-drafts/" + encodeURIComponent(draft.id) + "/confirm",
+        "POST",
+        confirmKey,
+        { expected_revision: draft.revision },
+      );
+      sheet.dismiss(false);
+      if (returnToTaskHome) {
+        await loadTaskHome();
+        return;
+      }
+      await showAssignmentDetail(assignment.id, false);
+      const success = element("p", "Результат отправлен на проверку.", "status success assignment-inline-outcome");
+      content.querySelector('[data-screen-id="M03"]')?.append(success);
+    } catch (error) {
+      showStatus(submissionMessage(error), "is-error");
+      if (!retryableSubmissionError(error)) {
+        saveKey = null;
+        confirmKey = null;
+      }
+      sheet.close.disabled = false;
+      submit.disabled = false;
+      submit.textContent = "Повторить отправку";
+    }
+  });
+  queueMicrotask(() => sheet.close.focus({ preventScroll: true }));
+  void ensureDraft();
+}
+
+function showCancellationActionSheet(trigger, assignment) {
+  const returnToTaskHome = history.state?.screen === "assignment"
+    && history.state.returnTo === "task-home";
+  const sheet = showAssignmentActionSheet(trigger, {
+    title: "Отказаться от задания",
+    description: "Слот освободится, а задание исчезнет из ваших активных.",
+    tone: "danger",
+  });
+  const form = element("form", undefined, "assignment-action-form");
+  form.id = "assignment-cancellation-form";
+  const label = element("label", "Причина отказа");
+  const reason = document.createElement("textarea");
+  reason.id = "assignment-cancellation-sheet-reason";
+  reason.name = "reason";
+  reason.required = true;
+  reason.maxLength = 1000;
+  reason.rows = 3;
+  reason.placeholder = "Коротко объясните причину";
+  reason.setAttribute("aria-label", "Причина отказа");
+  label.htmlFor = reason.id;
+  const counter = element(
+    "span",
+    "Укажите причину отказа · 0 / 1000",
+    "assignment-action-counter is-requirement",
+  );
+  label.append(reason, counter);
+  form.append(label);
+  sheet.body.append(form);
+  const confirm = element("button", "Подтвердить отказ", "assignment-action-confirm-danger");
+  confirm.type = "submit";
+  confirm.setAttribute("form", form.id);
+  confirm.disabled = true;
+  markTransition(confirm, "PE-036", "withdrawal_outcome");
+  sheet.actions.append(confirm);
+  let operationKey = null;
+  reason.addEventListener("input", () => {
+    const hasReason = Boolean(reason.value.trim());
+    counter.textContent = hasReason
+      ? `${reason.value.length} / 1000`
+      : `Укажите причину отказа · ${reason.value.length} / 1000`;
+    counter.classList.toggle("is-requirement", !hasReason);
+    counter.classList.toggle("is-limit", reason.value.length >= reason.maxLength);
+    confirm.disabled = !hasReason;
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const normalized = reason.value.trim();
+    if (!normalized) return;
+    sheet.close.disabled = true;
+    confirm.disabled = true;
+    confirm.textContent = "Отказываемся…";
+    sheet.status.className = "assignment-action-status is-loading";
+    sheet.status.textContent = "Отправляем отказ…";
+    operationKey ||= newOperationKey();
+    try {
+      await submissionRequest(
+        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/cancellation",
+        "POST",
+        operationKey,
+        { reason: normalized },
+      );
+      sheet.dismiss(false);
+      if (returnToTaskHome) {
+        await loadTaskHome();
+        return;
+      }
+      history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
+      await loadAssignments(false);
+    } catch (error) {
+      sheet.status.className = "assignment-action-status is-error";
+      sheet.status.textContent = error instanceof TypeError
+        ? "Сеть недоступна. Повторите запрос — он останется тем же."
+        : "Не удалось отказаться. Проверьте состояние задания и повторите.";
+      if (!retryableSubmissionError(error)) operationKey = null;
+      sheet.close.disabled = false;
+      confirm.disabled = false;
+      confirm.textContent = "Повторить отказ";
+    }
+  });
+  queueMicrotask(() => reason.focus({ preventScroll: true }));
+}
+
+function showDisputeActionSheet(trigger, assignment) {
+  const returnToTaskHome = history.state?.screen === "assignment"
+    && history.state.returnTo === "task-home";
+  const sheet = showAssignmentActionSheet(trigger, {
+    title: "Открыть спор",
+    description: "Опишите, почему результат нужно пересмотреть. Комментарий увидит только команда модерации.",
+  });
+  const form = element("form", undefined, "assignment-action-form");
+  form.id = "assignment-dispute-form";
+  const label = element("label", "Причина пересмотра");
+  const comment = document.createElement("textarea");
+  comment.id = "assignment-dispute-sheet-comment";
+  comment.name = "comment";
+  comment.required = true;
+  comment.minLength = 10;
+  comment.maxLength = 1000;
+  comment.rows = 4;
+  comment.placeholder = "Что именно нужно пересмотреть";
+  comment.setAttribute("aria-label", "Причина пересмотра");
+  label.htmlFor = comment.id;
+  const counter = element(
+    "span",
+    "Минимум 10 символов · 0 / 1000",
+    "assignment-action-counter is-requirement",
+  );
+  label.append(comment, counter);
+  form.append(label);
+  sheet.body.append(form);
+  const confirm = element("button", "Подать спор", "primary");
+  confirm.type = "submit";
+  confirm.setAttribute("form", form.id);
+  confirm.disabled = true;
+  markTransition(confirm, "PE-044", "open_dispute_materials");
+  sheet.actions.append(confirm);
+  let operationKey = null;
+
+  const updateCounter = () => {
+    const normalizedLength = comment.value.trim().length;
+    const missingLength = Math.max(0, comment.minLength - normalizedLength);
+    counter.textContent = missingLength === comment.minLength
+      ? `Минимум ${comment.minLength} символов · ${comment.value.length} / 1000`
+      : missingLength
+        ? `Нужно ещё ${missingLength} · ${comment.value.length} / 1000`
+        : `${comment.value.length} / 1000`;
+    counter.classList.toggle("is-requirement", missingLength > 0);
+    counter.classList.toggle("is-limit", comment.value.length >= comment.maxLength);
+    confirm.disabled = normalizedLength < comment.minLength;
+  };
+  comment.addEventListener("input", updateCounter);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const normalized = comment.value.trim();
+    if (normalized.length < comment.minLength) {
+      sheet.status.className = "assignment-action-status is-error";
+      sheet.status.textContent = "Опишите причину минимум в 10 символах.";
+      comment.focus({ preventScroll: true });
+      return;
+    }
+    sheet.close.disabled = true;
+    confirm.disabled = true;
+    confirm.textContent = "Подаём спор…";
+    sheet.status.className = "assignment-action-status is-loading";
+    sheet.status.textContent = "Передаём спор команде модерации…";
+    operationKey ||= newOperationKey();
+    try {
+      await submissionRequest(
+        "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/disputes",
+        "POST",
+        operationKey,
+        { comment: normalized },
+      );
+      sheet.dismiss(false);
+      if (returnToTaskHome) {
+        await loadTaskHome();
+        return;
+      }
+      await showAssignmentDetail(assignment.id, false);
+    } catch (error) {
+      if (error?.status === 409) {
+        sheet.dismiss(false);
+        if (returnToTaskHome) {
+          await loadTaskHome();
+          return;
+        }
+        await showAssignmentDetail(assignment.id, false);
+        return;
+      }
+      sheet.status.className = "assignment-action-status is-error";
+      sheet.status.textContent = error instanceof TypeError
+        ? "Сеть недоступна. Повторите запрос — он останется тем же."
+        : "Не удалось подать спор. Проверьте комментарий и состояние задания.";
+      if (!retryableSubmissionError(error)) operationKey = null;
+      sheet.close.disabled = false;
+      confirm.disabled = false;
+      confirm.textContent = "Повторить подачу";
+    }
+  });
+  queueMicrotask(() => comment.focus({ preventScroll: true }));
 }
 
 function submissionPanel(assignment, draft) {
@@ -2726,19 +5975,47 @@ function openCancellationEditor(assignment, push = true) {
   content.querySelector("textarea")?.focus({ preventScroll: true });
 }
 
-async function showAssignmentDetail(assignmentId, push = true) {
+async function showAssignmentDetail(assignmentId, push = true, returnTo = null) {
   const revision = ++screenRevision;
   returnFocusAssignmentId = assignmentId;
+  const returnTarget = returnTo || (
+    history.state?.screen === "assignment"
+      && history.state.assignmentId === assignmentId
+      ? history.state.returnTo
+      : null
+  );
   if (push) {
     history.pushState(
-      { screen: "assignment", assignmentId },
+      {
+        screen: "assignment",
+        assignmentId,
+        ...(returnTarget ? { returnTo: returnTarget } : {}),
+      },
       "",
       presentationLocationFor("M03", assignmentId),
     );
   }
   setNavigation("", true);
   title.textContent = "Активное назначение";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    const returnToTakenAssignments = returnTarget === "assignments-taken";
+    const returnToTaskHome = returnTarget === "task-home";
+    shell.classList.add("assignment-detail-screen");
+    setHeaderControl("back", {
+      label: returnToTaskHome
+        ? "Назад к заданиям"
+        : returnToTakenAssignments
+          ? "Назад к выполняемым заданиям"
+          : "Назад",
+      screenLabel: "Активное назначение",
+      hideTitle: true,
+      onBack: returnToTaskHome
+        ? () => loadTaskHome()
+        : returnToTakenAssignments
+          ? () => loadAssignments()
+          : null,
+    });
+  }
   replaceContent(element("p", "Загружаем назначение…", "status muted"));
   try {
     const response = await apiFetch(
@@ -2748,31 +6025,52 @@ async function showAssignmentDetail(assignmentId, push = true) {
     if (!response.ok) throw new Error(requestError(response));
     const assignment = await response.json();
     if (revision !== screenRevision) return;
-    const detail = element("article", undefined, "card detail");
-    detail.append(
-      element("h3", assignment.task_title),
-      section("Статус", assignmentStatus(assignment.assignment_status)),
-      dateSection("Срок", assignment.task_deadline_at),
-      section("Описание", assignment.description),
-      section("Критерии выполнения", assignment.completion_criteria),
-      section("Как выполнять", assignment.performer_instructions),
+    const detail = element("article", undefined, "card detail assignment-detail");
+    const detailHeader = element("header", undefined, "assignment-detail-header");
+    const detailMeta = element("div", undefined, "assignment-detail-meta");
+    const deadline = element("span", undefined, "assignment-detail-deadline");
+    deadline.append(element("span", "Срок"), time(assignment.task_deadline_at));
+    detailMeta.append(
+      element(
+        "span",
+        assignmentStatus(assignment.assignment_status),
+        "assignment-detail-status",
+      ),
+      deadline,
+    );
+    detailHeader.append(element("h2", assignment.task_title), detailMeta);
+    const detailContent = element("div", undefined, "assignment-detail-content");
+    const compactSection = (headingText, value) => {
+      const node = section(headingText, value);
+      node.classList.add("assignment-detail-section");
+      return node;
+    };
+    const compactDateSection = (headingText, value) => {
+      const node = dateSection(headingText, value);
+      node.classList.add("assignment-detail-section");
+      return node;
+    };
+    detailContent.append(
+      compactSection("Описание", assignment.description),
+      compactSection("Критерии приёмки", assignment.completion_criteria),
+      compactSection("Как выполнить", assignment.performer_instructions),
     );
     if (assignment.result_summary) {
-      detail.append(section("Последний результат", assignment.result_summary));
+      detailContent.append(compactSection("Последний результат", assignment.result_summary));
     }
     if (assignment.review_deadline_at) {
-      detail.append(dateSection("Срок проверки", assignment.review_deadline_at));
+      detailContent.append(compactDateSection("Срок проверки", assignment.review_deadline_at));
     }
     if (assignment.reject_dispute_deadline_at) {
-      detail.append(dateSection("Подать спор до", assignment.reject_dispute_deadline_at));
+      detailContent.append(compactDateSection("Подать спор до", assignment.reject_dispute_deadline_at));
     }
     if (assignment.case_status) {
-      const disputeStatus = section("Спор", "Передан команде модерации");
+      const disputeStatus = compactSection("Спор", "Передан команде модерации");
       disputeStatus.dataset.screenId = "M15";
       disputeStatus.dataset.uiEngine = "concept-05";
-      detail.append(disputeStatus);
+      detailContent.append(disputeStatus);
     } else if (assignment.assignment_status === "rejected_pending_dispute") {
-      detail.append(section(
+      detailContent.append(compactSection(
         "Условия спора",
         assignment.can_dispute
           ? "Опишите причину до указанного срока. Комментарий увидит только команда модерации."
@@ -2783,21 +6081,31 @@ async function showAssignmentDetail(assignmentId, push = true) {
     if (assignment.can_submit) {
       const submit = element("button", "Отправить результат", "primary");
       submit.type = "button";
-      submit.addEventListener("click", () => openSubmissionEditor(assignment));
+      submit.addEventListener("click", () => {
+        if (uiNextEnabled) showSubmissionActionSheet(submit, assignment);
+        else openSubmissionEditor(assignment);
+      });
       actions.append(submit);
     }
     if (assignment.can_dispute) {
       const dispute = element("button", "Подать спор", "secondary");
       dispute.type = "button";
-      dispute.addEventListener("click", () => openDisputeEditor(assignment));
+      dispute.addEventListener("click", () => {
+        if (uiNextEnabled) showDisputeActionSheet(dispute, assignment);
+        else openDisputeEditor(assignment);
+      });
       actions.append(dispute);
     }
     if (assignment.can_cancel) {
       const cancel = element("button", "Отказаться от задания", "secondary danger");
       cancel.type = "button";
-      cancel.addEventListener("click", () => openCancellationEditor(assignment));
+      cancel.addEventListener("click", () => {
+        if (uiNextEnabled) showCancellationActionSheet(cancel, assignment);
+        else openCancellationEditor(assignment);
+      });
       actions.append(cancel);
     }
+    detail.append(detailHeader, detailContent);
     if (actions.childElementCount) detail.append(actions);
     replaceContent(connectedBoundary("M03", "content", detail));
     back.focus({ preventScroll: true });
@@ -2935,7 +6243,9 @@ async function showModerationCase(caseId, push = true) {
   }
   setNavigation("moderation", true);
   title.textContent = "Решение по спору";
-  back.classList.remove("hidden");
+  if (uiNextEnabled) {
+    setHeaderControl("close", { label: "Закрыть спор", screenLabel: "Решение по спору" });
+  }
   replaceContent(element("p", "Загружаем спор…", "status muted"));
   back.focus({ preventScroll: true });
   try {
@@ -3075,6 +6385,7 @@ async function bootstrap(authAttempted = false) {
     const [profile, page] = await Promise.all([me.json(), getJson("/api/v1/tasks")]);
     storeJson("/api/v1/me", profile);
     currentMemberId = profile.member_id;
+    setMemberTimezone(profile.timezone || "UTC");
     void configureRoleNavigation();
     tasks = page.items;
     const initialHash = location.hash;
@@ -3113,8 +6424,13 @@ async function bootstrap(authAttempted = false) {
       history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
       loadAssignments(false);
     } else if (presentationId === "M09" || presentationId === "M10") {
-      history.replaceState({ screen: "created-assignments" }, "", presentationLocationFor("M09"));
-      loadCreatedReviews(false);
+      const scope = new URLSearchParams(initialHash.split("?", 2)[1] || "").get("scope");
+      history.replaceState(
+        { screen: "created-assignments", scope: scope === "archive" ? "archive" : "active" },
+        "",
+        location.hash,
+      );
+      loadCreatedReviews(false, scope === "archive" ? "archive" : "active");
     } else if (presentationId === "S01") {
       history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
       loadModeration(false);
@@ -3154,6 +6470,14 @@ const taskHomeActionLabels = {
   answer_cancellation: "Ответить на отмену",
 };
 
+const taskHomeWaitingLabels = {
+  performer_work: "Выполняют ваши задания",
+  work_review: "Проверяют вашу работу",
+  external_decision: "Решают отмену или спор",
+};
+
+let taskHomeHeroMode = null;
+
 const taskHomeCount = (value, hasMore = false) => (
   value === null || value === undefined ? "—" : `${value}${hasMore ? "+" : ""}`
 );
@@ -3174,6 +6498,214 @@ const taskHomeDestination = (target) => {
   return loadAssignments();
 };
 
+const taskHomeItemsTotal = (items = []) => (
+  items.reduce((total, item) => total + item.count, 0)
+);
+
+const openTaskHomeActionItem = (action, item) => {
+  if (action === "review_work") {
+    showCreatedReview(item.id, true, "task-home");
+    return;
+  }
+  showAssignmentDetail(item.id, true, "task-home");
+};
+
+const taskHomeActionStatus = (action, item) => {
+  if (action === "review_work") return "Требуется проверка";
+  if (action === "answer_cancellation") return "Требуется ответ";
+  return assignmentStatus(item.status || "accepted");
+};
+
+const taskHomeActionDescription = (action, item) => {
+  if (action === "review_work") {
+    return item.context
+      ? `Исполнитель ${item.context} отправил результат.`
+      : "Исполнитель отправил результат.";
+  }
+  if (action === "answer_cancellation") {
+    return "Запрос на отмену требует вашего решения.";
+  }
+  return item.status === "submitted"
+    ? "Результат уже отправлен — при необходимости его можно дополнить."
+    : "Задание выполняется — результат ещё не отправлен.";
+};
+
+const taskHomeActionCard = (action, item) => {
+  const option = element(
+    "button",
+    undefined,
+    "card task-card work-task-card task-home-action-card",
+  );
+  option.type = "button";
+  const chips = element("div", undefined, "card-chips");
+  chips.append(element("span", taskHomeActionStatus(action, item), "chip action-chip"));
+  if (item.context) chips.append(element("span", item.context, "chip muted-chip"));
+  const label = element("div", undefined, "task-card-title");
+  label.append(element("h3", item.title), element("span", "›", "chevron"));
+  const meta = element("div", undefined, "task-meta");
+  if (item.started_at) {
+    const startedLabel = action === "review_work" ? "Отправлено" : "Взято";
+    meta.append(element("span", `${startedLabel} ${compactListDate(item.started_at)}`));
+  }
+  if (item.deadline_at) {
+    const deadlineLabel = action === "review_work" ? "решить до" : "до";
+    meta.append(element("span", `${deadlineLabel} ${compactListDate(item.deadline_at)}`));
+  }
+  option.append(
+    chips,
+    label,
+    element("p", taskHomeActionDescription(action, item), "muted"),
+    meta,
+  );
+  return option;
+};
+
+function showTaskHomeActionSheet(trigger, action, label, items) {
+  shell.querySelector(".catalog-sort-backdrop, .catalog-filter-backdrop")?.remove();
+  const backdrop = element("section", undefined, "catalog-sort-backdrop");
+  const dialog = element("div", undefined, "catalog-sort-sheet task-home-action-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "task-home-action-title");
+  const header = element("div", undefined, "catalog-sort-heading");
+  const sheetTitle = element("h2", label);
+  sheetTitle.id = "task-home-action-title";
+  const close = element("button", "×", "catalog-sort-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть выбор задания");
+  header.append(sheetTitle, close);
+  const options = element("div", undefined, "catalog-sort-options task-home-action-options");
+  const dismiss = (restoreFocus = true) => {
+    backdrop.remove();
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  };
+  for (const item of items) {
+    const option = taskHomeActionCard(action, item);
+    option.addEventListener("click", () => {
+      dismiss(false);
+      openTaskHomeActionItem(action, item);
+    });
+    options.append(option);
+  }
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [close, ...options.querySelectorAll("button")];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, options);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  queueMicrotask(() => options.querySelector("button")?.focus({ preventScroll: true }));
+}
+
+const openTaskHomeAction = (trigger, item, label) => {
+  const actionItems = item.items || [];
+  if (item.count === 1 && actionItems.length === 1) {
+    openTaskHomeActionItem(item.action, actionItems[0]);
+    return;
+  }
+  if (actionItems.length > 1) {
+    showTaskHomeActionSheet(trigger, item.action, label, actionItems);
+    return;
+  }
+  taskHomeDestination(item.target);
+};
+
+function renderTaskHomeHero(hero, home) {
+  const attentionTotal = taskHomeItemsTotal(home.attention);
+  const waitingItems = home.waiting_on_others || [];
+  const waitingTotal = taskHomeItemsTotal(waitingItems);
+  if (!taskHomeHeroMode) {
+    taskHomeHeroMode = attentionTotal ? "attention" : waitingTotal ? "waiting" : "attention";
+  }
+  const waitingMode = taskHomeHeroMode === "waiting";
+  const items = waitingMode ? waitingItems : home.attention;
+  const total = waitingMode ? waitingTotal : attentionTotal;
+  const labels = waitingMode ? taskHomeWaitingLabels : taskHomeActionLabels;
+
+  hero.dataset.heroMode = taskHomeHeroMode;
+  const heading = element("div", undefined, "task-home-attention-heading");
+  const copy = element("div", undefined, "task-home-attention-copy");
+  copy.append(
+    element("p", waitingMode ? "ОЖИДАНИЕ" : "СЕЙЧАС", "task-home-eyebrow"),
+    element(
+      "h2",
+      total
+        ? waitingMode ? "Ждём действия других" : "Требуются ваши действия"
+        : waitingMode ? "Никого не ждём" : "Всё под контролем",
+      "task-home-attention-title",
+    ),
+  );
+  heading.append(
+    copy,
+    element("strong", String(total), "task-home-attention-count"),
+  );
+
+  const list = element("div", undefined, "task-home-attention-list");
+  list.setAttribute("aria-label", waitingMode ? "Ожидание действий других" : "Ваши действия");
+  const visibleItems = items.filter((candidate) => candidate.count > 0);
+  for (const item of visibleItems) {
+    const action = element("button", undefined, "task-home-attention-action");
+    action.type = "button";
+    action.dataset.homeAttention = item.action;
+    action.append(
+      element("span", labels[item.action]),
+      element("span", String(item.count)),
+    );
+    action.addEventListener("click", () => openTaskHomeAction(action, item, labels[item.action]));
+    list.append(action);
+  }
+  if (!visibleItems.length) {
+    list.append(
+      element(
+        "p",
+        waitingMode ? "Ожидаемых ответов сейчас нет." : "Новых действий сейчас нет.",
+        "task-home-attention-empty",
+      ),
+    );
+  }
+
+  const nextMode = waitingMode ? "attention" : "waiting";
+  const nextTotal = waitingMode ? attentionTotal : waitingTotal;
+  const switcher = element("button", undefined, "task-home-attention-switch");
+  switcher.type = "button";
+  switcher.dataset.homeHeroSwitch = nextMode;
+  switcher.setAttribute(
+    "aria-label",
+    waitingMode
+      ? `Показать требуемые ваши действия: ${nextTotal}`
+      : `Показать ожидание действий других: ${nextTotal}`,
+  );
+  switcher.append(
+    element("span", waitingMode ? "ТРЕБУЮТСЯ ВАШИ ДЕЙСТВИЯ" : "ЖДЁМ ДЕЙСТВИЯ ДРУГИХ"),
+    element("strong", String(nextTotal)),
+    element("span", "›", "task-home-attention-switch-chevron"),
+  );
+  switcher.addEventListener("click", () => {
+    taskHomeHeroMode = nextMode;
+    renderTaskHomeHero(hero, home);
+    requestAnimationFrame(() => hero.querySelector(".task-home-attention-switch")?.focus());
+  });
+  hero.replaceChildren(heading, list, switcher);
+}
+
 function showTaskHome(home, revision = ++screenRevision) {
   if (revision !== screenRevision) return;
   document.body.classList.remove("ui-next-preview");
@@ -3186,39 +6718,7 @@ function showTaskHome(home, revision = ++screenRevision) {
   boundary.classList.add("task-home");
 
   const attention = element("section", undefined, "task-home-attention");
-  const attentionHeading = element("div", undefined, "task-home-attention-heading");
-  const attentionCopy = element("div", undefined, "task-home-attention-copy");
-  const totalAttention = home.attention.reduce((total, item) => total + item.count, 0);
-  attentionCopy.append(
-    element("p", "СЕЙЧАС", "task-home-eyebrow"),
-    element(
-      "h2",
-      totalAttention ? "Требуют вашего действия" : "Всё под контролем",
-      "task-home-attention-title",
-    ),
-  );
-  attentionHeading.append(
-    attentionCopy,
-    element("strong", String(totalAttention), "task-home-attention-count"),
-  );
-  attention.append(attentionHeading);
-  if (totalAttention) {
-    const actionList = element("div", undefined, "task-home-attention-list");
-    for (const item of home.attention.filter((candidate) => candidate.count > 0)) {
-      const action = element("button", undefined, "task-home-attention-action");
-      action.type = "button";
-      action.dataset.homeAttention = item.action;
-      action.append(
-        element("span", taskHomeActionLabels[item.action]),
-        element("span", String(item.count)),
-      );
-      action.addEventListener("click", () => taskHomeDestination(item.target));
-      actionList.append(action);
-    }
-    attention.append(actionList);
-  } else {
-    attention.append(element("p", "Новых действий сейчас нет.", "task-home-attention-empty"));
-  }
+  renderTaskHomeHero(attention, home);
   boundary.append(attention);
 
   if (home.errors.length) {
@@ -3269,9 +6769,15 @@ function showTaskHome(home, revision = ++screenRevision) {
   boundary.append(primaryActions);
 
   const work = element("div", undefined, "task-home-work-grid");
+  const takenCount = home.taken_count ?? (
+    home.active_count === null || home.active_count === undefined
+      || home.waiting_count === null || home.waiting_count === undefined
+      ? null
+      : home.active_count + home.waiting_count
+  );
   for (const [eyebrow, label, count, target] of [
-    ["В РАБОТЕ", "Вы выполняете", home.active_count, "taken"],
-    ["ОЖИДАНИЕ", "Ход за другими", home.waiting_count, "created"],
+    ["ВЗЯТЫЕ МНОЙ", "Что я выполняю", takenCount, "taken"],
+    ["СОЗДАННЫЕ МНОЙ", "Что я поручил", home.created_count, "created"],
   ]) {
     const tile = element("button", undefined, "task-home-work-tile");
     tile.type = "button";
@@ -3303,7 +6809,7 @@ function showTaskHome(home, revision = ++screenRevision) {
     element("strong", taskHomeCount(home.archive_count), "task-home-archive-count"),
   );
   archive.disabled = home.archive_count === null;
-  archive.addEventListener("click", () => loadCreatedReviews());
+  archive.addEventListener("click", () => loadCreatedReviews(true, "archive"));
   boundary.append(archive);
 
   replaceContent(boundary);
@@ -3360,27 +6866,526 @@ async function loadTaskHome(push = true) {
   }
 }
 
+const onboardingFlow = [
+  "consent",
+  "display_name",
+  "city",
+  "short_bio",
+  "skill_tags",
+  "preview",
+];
+
+const removedOnboardingSteps = new Set(["current_goal", "help_categories", "availability"]);
+const onboardingStepsWithBack = new Set([
+  "display_name",
+  "city",
+  "short_bio",
+  "skill_tags",
+  "preview",
+]);
+let onboardingThemeInitialized = false;
+
+const onboardingFields = {
+  timezone: {
+    eyebrow: "Местное время",
+    title: "Укажите часовой пояс",
+    hint: "Используйте точное название IANA, например Europe/Moscow.",
+    label: "Часовой пояс",
+    placeholder: "Europe/Moscow",
+    minimum: 3,
+    maximum: 64,
+    multiline: false,
+  },
+  display_name: {
+    eyebrow: "Знакомство",
+    title: "Как к вам обращаться?",
+    hint: "Это имя увидят участники в профиле и заданиях.",
+    label: "Имя",
+    placeholder: "Например, Алекс",
+    minimum: 2,
+    maximum: 80,
+    multiline: false,
+  },
+  short_bio: {
+    eyebrow: "О себе",
+    title: "Расскажите о себе",
+    hint: "Коротко расскажите о себе или заполните это позже в профиле.",
+    label: "О себе",
+    placeholder: "От 10 до 500 символов",
+    minimum: 10,
+    maximum: 500,
+    multiline: true,
+  },
+  skill_tags: {
+    eyebrow: "Навыки",
+    title: "Что вы умеете?",
+    hint: "Добавьте навыки по одному или заполните это позже в профиле.",
+    label: "Навыки",
+    placeholder: "Python\nUX-дизайн\nКопирайтинг",
+    minimum: 1,
+    maximum: 1000,
+    multiline: true,
+  },
+};
+
+const onboardingProgress = (step) => {
+  const index = Math.max(0, onboardingFlow.indexOf(step));
+  const progress = element("div", undefined, "onboarding-progress");
+  const copy = element("div", undefined, "onboarding-progress-copy");
+  copy.append(
+    element("span", `Шаг ${Math.min(index + 1, onboardingFlow.length)} из ${onboardingFlow.length}`),
+    element("strong", step === "preview" ? "Проверка анкеты" : "Регистрация в сообществе"),
+  );
+  const track = element("span", undefined, "onboarding-progress-track");
+  const fill = element("span", undefined, "onboarding-progress-fill");
+  fill.style.width = `${((index + 1) / onboardingFlow.length) * 100}%`;
+  track.append(fill);
+  progress.append(copy, track);
+  return progress;
+};
+
+const onboardingMutation = async (path, body) => {
+  const headers = { "Idempotency-Key": newOperationKey() };
+  const options = { method: "POST", headers, credentials: "same-origin" };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await apiFetch(path, options);
+  if (!response.ok) {
+    const error = new Error(requestError(response));
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+};
+
+const onboardingStatus = () => {
+  const status = element("p", "", "status hidden onboarding-status");
+  status.setAttribute("aria-live", "polite");
+  return status;
+};
+
+const submitOnboardingAnswer = async (step, value, submit, status) => {
+  const controls = submit.closest(".onboarding-card")?.querySelectorAll("button") || [submit];
+  for (const control of controls) control.disabled = true;
+  status.className = "status onboarding-status";
+  status.textContent = "Сохраняем…";
+  try {
+    showOnboarding(await onboardingMutation("/api/v1/onboarding/answer", { step, value }));
+  } catch (error) {
+    status.textContent = error?.status === 422
+      ? "Проверьте заполнение поля. Значение не соответствует требованиям."
+      : "Не удалось сохранить. Повторите попытку.";
+    for (const control of controls) control.disabled = false;
+    submit.focus({ preventScroll: true });
+  }
+};
+
+const onboardingTextStep = (view, step) => {
+  const config = onboardingFields[step];
+  const optional = ["short_bio", "skill_tags"].includes(step);
+  const card = element("form", undefined, "onboarding-card onboarding-form");
+  card.append(
+    element("p", config.eyebrow, "onboarding-eyebrow"),
+    element("h2", config.title),
+    element("p", config.hint, "onboarding-hint"),
+  );
+  const label = element(
+    "label",
+    optional ? `${config.label} (необязательно)` : `${config.label} *`,
+    "onboarding-field",
+  );
+  const input = element(config.multiline ? "textarea" : "input");
+  input.name = step;
+  input.placeholder = config.placeholder;
+  input.maxLength = config.maximum;
+  input.required = !optional;
+  if (!config.multiline) input.type = "text";
+  const stored = view.payload?.[step];
+  input.value = Array.isArray(stored) ? stored.join("\n") : stored || "";
+  if (config.multiline) input.rows = step === "short_bio" ? 4 : 3;
+  const counter = element("span", `${input.value.length} / ${config.maximum}`, "onboarding-counter");
+  input.addEventListener("input", () => {
+    counter.textContent = `${input.value.length} / ${config.maximum}`;
+    counter.classList.toggle("is-limit", input.value.length >= config.maximum);
+  });
+  label.append(input, counter);
+  const submit = element("button", "Продолжить", "primary onboarding-primary");
+  submit.type = "submit";
+  const actions = element("div", undefined, "onboarding-form-actions");
+  actions.append(submit);
+  if (optional) {
+    const later = element("button", "Заполнить позже", "onboarding-later");
+    later.type = "button";
+    later.addEventListener("click", () => void submitOnboardingAnswer(step, "", later, status));
+    actions.append(later);
+  }
+  const status = onboardingStatus();
+  card.append(label, actions, status);
+  card.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = input.value.trim();
+    if (optional && !value) {
+      void submitOnboardingAnswer(step, "", submit, status);
+      return;
+    }
+    const itemCount = step === "skill_tags"
+      ? value.split(/[\n,]+/).filter((item) => item.trim()).length
+      : null;
+    const validList = itemCount === null || (itemCount >= 1 && itemCount <= 20);
+    if (value.length < config.minimum || value.length > config.maximum || !validList) {
+      status.className = "status onboarding-status";
+      status.textContent = itemCount !== null && !validList
+        ? "Укажите от 1 до 20 навыков."
+        : `Введите от ${config.minimum} до ${config.maximum} символов.`;
+      input.focus({ preventScroll: true });
+      return;
+    }
+    void submitOnboardingAnswer(step, value, submit, status);
+  });
+  queueMicrotask(() => input.focus({ preventScroll: true }));
+  return card;
+};
+
+const onboardingCityStep = (view) => {
+  const card = element(
+    "section",
+    undefined,
+    "onboarding-card onboarding-form onboarding-city-inline",
+  );
+  card.append(
+    element("p", "Обязательное поле", "onboarding-eyebrow"),
+    element("h2", "В каком городе вы живёте?"),
+    element(
+      "p",
+      "По городу мы определим ваш часовой пояс для сроков и времени заданий.",
+      "onboarding-hint",
+    ),
+  );
+  const selected = view.payload?.city;
+  const searchLabel = element("label", "Город *", "onboarding-field city-search-field");
+  const search = element("input");
+  search.type = "search";
+  search.autocomplete = "off";
+  search.placeholder = "Начните вводить название";
+  search.value = selected || "";
+  searchLabel.append(search);
+  const results = element("div", undefined, "city-sheet-results onboarding-city-results");
+  results.setAttribute("role", "listbox");
+  const selection = element(
+    "p",
+    selected
+      ? `Выбран: ${selected} · ${timezoneOffsetLabel(view.payload?.timezone || "UTC")}`
+      : "Выберите город из предложенного списка",
+    "onboarding-city-selection",
+  );
+  const next = element("button", "Продолжить", "primary onboarding-primary onboarding-city-next");
+  next.type = "button";
+  let pendingCity = selected
+    ? { value: selected, label: selected, timezone: view.payload?.timezone || "UTC" }
+    : null;
+  next.disabled = pendingCity === null;
+  const status = onboardingStatus();
+  let timer = null;
+  const loadResults = async (query) => {
+    results.classList.remove("hidden");
+    if (!query) {
+      results.replaceChildren();
+      results.classList.add("hidden");
+      return;
+    }
+    results.replaceChildren(element("p", "Ищем города…", "city-sheet-empty"));
+    try {
+      const response = await getJson(`/api/v1/task-cities?q=${encodeURIComponent(query)}&limit=6`);
+      if (!card.isConnected || search.value.trim() !== query) return;
+      if (!response.items.length) {
+        results.replaceChildren(element("p", "Города не найдены.", "city-sheet-empty"));
+        return;
+      }
+      results.replaceChildren();
+      for (const item of response.items) {
+        const option = element("button", undefined, "city-sheet-option");
+        option.type = "button";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-label", item.label);
+        option.setAttribute("aria-selected", String(item.value === pendingCity?.value));
+        const copy = element("span", undefined, "city-sheet-copy");
+        copy.append(element("strong", item.label), element("small", timezoneOffsetLabel(item.timezone)));
+        option.append(
+          copy,
+          element("span", item.value === pendingCity?.value ? "✓" : "", "city-sheet-check"),
+        );
+        option.addEventListener("click", () => {
+          pendingCity = item;
+          search.value = item.label;
+          selection.textContent = `Выбран: ${item.label} · ${timezoneOffsetLabel(item.timezone)}`;
+          next.disabled = false;
+          results.classList.add("hidden");
+          next.focus({ preventScroll: true });
+        });
+        results.append(option);
+      }
+    } catch {
+      results.replaceChildren(element("p", "Не удалось загрузить города.", "city-sheet-empty"));
+    }
+  };
+  search.addEventListener("input", () => {
+    clearTimeout(timer);
+    pendingCity = null;
+    next.disabled = true;
+    selection.textContent = "Выберите город из предложенного списка";
+    const query = search.value.trim();
+    timer = setTimeout(() => void loadResults(query), 200);
+  });
+  search.addEventListener("focus", () => {
+    if (search.value.trim() && !pendingCity) void loadResults(search.value.trim());
+  });
+  next.addEventListener("click", () => {
+    if (!pendingCity) return;
+    void submitOnboardingAnswer("city", pendingCity.value, next, status);
+  });
+  card.append(searchLabel, results, selection, next, status);
+  results.classList.add("hidden");
+  queueMicrotask(() => search.focus({ preventScroll: true }));
+  return card;
+};
+
+const onboardingPreview = (view) => {
+  const card = element("section", undefined, "onboarding-card onboarding-preview");
+  card.append(
+    element("p", "Почти готово", "onboarding-eyebrow"),
+    element("h2", "Проверьте анкету"),
+    element("p", "После отправки анкету проверит модератор.", "onboarding-hint"),
+  );
+  if (view.application_status === "rejected") {
+    const rejected = element("div", undefined, "onboarding-review-note is-rejected");
+    rejected.append(
+      element("strong", "Анкету нужно уточнить"),
+      element("span", view.review_comment || "Проверьте данные и отправьте анкету снова."),
+    );
+    card.append(rejected);
+  }
+  const rows = element("dl", undefined, "onboarding-summary");
+  const summary = [
+    ["Имя", view.payload?.display_name],
+    ["Город", view.payload?.city],
+    ["Часовой пояс", view.payload?.timezone ? `${view.payload.timezone} · ${timezoneOffsetLabel(view.payload.timezone)}` : null],
+    ["О себе", view.payload?.short_bio],
+    ["Навыки", Array.isArray(view.payload?.skill_tags) ? view.payload.skill_tags.join(", ") : null],
+  ];
+  for (const [label, value] of summary) {
+    rows.append(element("dt", label), element("dd", value || "—"));
+  }
+  const rejected = view.application_status === "rejected";
+  const submit = element(
+    "button",
+    rejected ? "Исправить анкету" : "Отправить на проверку",
+    "primary onboarding-primary",
+  );
+  submit.type = "button";
+  const status = onboardingStatus();
+  submit.addEventListener("click", async () => {
+    submit.disabled = true;
+    status.className = "status onboarding-status";
+    status.textContent = rejected ? "Открываем анкету…" : "Отправляем анкету…";
+    try {
+      showOnboarding(
+        await onboardingMutation(
+          rejected ? "/api/v1/onboarding/reopen" : "/api/v1/onboarding/submit",
+        ),
+      );
+    } catch {
+      status.textContent = rejected
+        ? "Не удалось открыть анкету. Повторите попытку."
+        : "Не удалось отправить анкету. Проверьте данные и повторите.";
+      submit.disabled = false;
+    }
+  });
+  card.append(rows, submit, status);
+  return card;
+};
+
+const onboardingSubmitted = (view) => {
+  const card = element("section", undefined, "onboarding-card onboarding-outcome");
+  const icon = element("span", "✓", "onboarding-outcome-icon");
+  card.append(
+    icon,
+    element("p", "Анкета отправлена", "onboarding-eyebrow"),
+    element("h2", "Ждём решение модератора"),
+    element(
+      "p",
+      "Регистрация сохранена. После одобрения при следующем открытии Mini App появится главный экран заданий.",
+      "onboarding-hint",
+    ),
+  );
+  const state = element("div", undefined, "onboarding-review-note");
+  state.append(element("strong", "Статус"), element("span", "На проверке"));
+  card.append(state);
+  return card;
+};
+
+const returnToPreviousOnboardingStep = async () => {
+  back.disabled = true;
+  back.setAttribute("aria-busy", "true");
+  try {
+    showOnboarding(await onboardingMutation("/api/v1/onboarding/back"));
+  } catch {
+    back.disabled = false;
+    back.removeAttribute("aria-busy");
+    setHeaderControl("back", {
+      label: "Предыдущий шаг",
+      onBack: () => void returnToPreviousOnboardingStep(),
+    });
+  }
+};
+
+function showOnboarding(view) {
+  screenRevision += 1;
+  const onboardingUrl = new URL(location.href);
+  onboardingUrl.hash = "/onboarding";
+  if (!onboardingThemeInitialized) {
+    onboardingThemeInitialized = true;
+    onboardingUrl.searchParams.set("theme", "light");
+    applyPreviewTheme("light");
+  }
+  history.replaceState({ screen: "onboarding" }, "", onboardingUrl);
+  document.body.classList.remove("ui-next-preview");
+  setNavigation("onboarding", false);
+  const canGoBack = view.application_status === "draft" && onboardingStepsWithBack.has(view.step);
+  setHeaderControl(canGoBack ? "back" : null, {
+    label: "Предыдущий шаг",
+    hideTitle: false,
+    onBack: canGoBack ? () => void returnToPreviousOnboardingStep() : null,
+  });
+  back.disabled = false;
+  back.removeAttribute("aria-busy");
+  title.textContent = "Регистрация";
+  moderationNav.hidden = true;
+  const boundary = connectedBoundary("UX03", view.application_status);
+  boundary.dataset.uiEngine = "next-onboarding";
+  boundary.classList.add("onboarding");
+  if (view.application_status === "submitted" || view.step === "submitted") {
+    boundary.append(onboardingSubmitted(view));
+  } else {
+    boundary.append(onboardingProgress(view.step));
+    if (view.step === "consent") {
+      const card = element("section", undefined, "onboarding-card onboarding-consent");
+      card.append(
+        element("p", "Добро пожаловать", "onboarding-eyebrow"),
+        element("h2", "Вступление в сообщество"),
+        element(
+          "p",
+          "Заполните короткую анкету. Данные профиля будут видны другим участникам после проверки модератором.",
+          "onboarding-hint",
+        ),
+      );
+      const terms = element("div", undefined, "onboarding-terms");
+      terms.append(
+        element("span", "01"), element("p", "Указывайте достоверную информацию о себе."),
+        element("span", "02"), element("p", "Соблюдайте правила и уважайте других участников."),
+        element("span", "03"), element("p", "Вы сможете изменить профиль после одобрения."),
+      );
+      const accept = element("button", "Согласен, продолжить", "primary onboarding-primary");
+      accept.type = "button";
+      const status = onboardingStatus();
+      accept.addEventListener("click", () => void submitOnboardingAnswer("consent", "accept", accept, status));
+      card.append(terms, accept, status);
+      boundary.append(card);
+    } else if (view.step === "city") {
+      boundary.append(onboardingCityStep(view));
+    } else if (view.step === "timezone") {
+      boundary.append(onboardingTextStep(view, "timezone"));
+    } else if (view.step === "preview") {
+      boundary.append(onboardingPreview(view));
+    } else if (removedOnboardingSteps.has(view.step)) {
+      const card = element("section", undefined, "onboarding-card onboarding-outcome");
+      card.append(element("p", "Обновляем анкету…", "status muted"));
+      boundary.append(card);
+      queueMicrotask(async () => {
+        try {
+          showOnboarding(await onboardingMutation("/api/v1/onboarding/answer", { step: view.step, value: "" }));
+        } catch {
+          card.replaceChildren(element("p", "Не удалось обновить старый черновик анкеты.", "status"));
+        }
+      });
+    } else if (onboardingFields[view.step]) {
+      boundary.append(onboardingTextStep(view, view.step));
+    } else {
+      boundary.append(element("p", "Не удалось определить текущий шаг регистрации.", "status"));
+    }
+  }
+  replaceContent(boundary);
+}
+
+function showOnboardingAccessRequired() {
+  screenRevision += 1;
+  history.replaceState({ screen: "onboarding-access" }, "", "#/onboarding");
+  setNavigation("onboarding", false);
+  title.textContent = "Регистрация";
+  back.classList.add("hidden");
+  const card = element("section", undefined, "onboarding-card onboarding-outcome");
+  card.append(
+    element("span", "↗", "onboarding-outcome-icon"),
+    element("p", "Нужно приглашение", "onboarding-eyebrow"),
+    element("h2", "Откройте ссылку сообщества"),
+    element(
+      "p",
+      "Регистрация начинается по персональной ссылке-приглашению. Запросите её у администратора и откройте Mini App из этой ссылки.",
+      "onboarding-hint",
+    ),
+  );
+  const boundary = connectedBoundary("UX03", "invitation-required", card);
+  boundary.dataset.uiEngine = "next-onboarding";
+  boundary.classList.add("onboarding");
+  replaceContent(boundary);
+}
+
 async function bootstrapTaskHome(authAttempted = false) {
   try {
     const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
     if (me.status === 401 && !authAttempted) {
       const initData = await telegramInitData();
       if (!initData) throw new Error("telegram_init_data_missing");
+      const invitation = globalThis.Telegram?.WebApp?.initDataUnsafe?.start_param;
+      const authHeaders = { "Content-Type": "text/plain; charset=utf-8" };
+      if (typeof invitation === "string" && invitation) {
+        authHeaders["X-Community-Invitation"] = invitation;
+      }
       const auth = await apiFetch("/api/v1/auth/telegram", {
         method: "POST",
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        headers: authHeaders,
         body: initData,
         credentials: "same-origin",
       });
-      if (!auth.ok) throw new Error("telegram_auth_failed");
+      if (!auth.ok) {
+        if (auth.status === 401 || auth.status === 403) return showOnboardingAccessRequired();
+        throw new Error("telegram_auth_failed");
+      }
       return bootstrapTaskHome(true);
+    }
+    if (me.status === 403) {
+      const onboarding = await apiFetch("/api/v1/onboarding", { credentials: "same-origin" });
+      if (!onboarding.ok) throw new Error("onboarding_failed");
+      return showOnboarding(await onboarding.json());
     }
     if (!me.ok) throw new Error("bootstrap_failed");
     const profile = await me.json();
     storeJson("/api/v1/me", profile);
     currentMemberId = profile.member_id;
+    setMemberTimezone(profile.timezone || "UTC");
     void configureRoleNavigation();
-    await loadTaskHome(false);
+    if (location.hash === "#/settings") showSettings(false);
+    else if (/^#\/profile(?:\/.*)?$/.test(location.hash)) loadProfile(false);
+    else {
+      const presentationId = presentationFromLocation()?.screen.id;
+      if (presentationId === "M01" || presentationId === "M02") await loadAssignments(false);
+      else if (presentationId === "M09" || presentationId === "M10") {
+        const scope = new URLSearchParams(location.hash.split("?", 2)[1] || "").get("scope");
+        await loadCreatedReviews(false, scope === "archive" ? "archive" : "active");
+      }
+      else await loadTaskHome(false);
+    }
   } catch {
     setNavigation("task-home", false);
     replaceContent(
@@ -3491,10 +7496,22 @@ catalogNav.addEventListener("click", () => {
 });
 assignmentsNav.addEventListener("click", () => loadAssignments());
 participantsNav.addEventListener("click", () => loadParticipants("members"));
-profileNav.addEventListener("click", () => loadProfile());
+profileNav.addEventListener("click", () => {
+  if (uiNextEnabled) showSettings();
+  else loadProfile();
+});
 moderationNav.addEventListener("click", () => loadModeration());
 back.addEventListener("click", () => {
-  if (activeProfileState?.route && activeProfileState.route !== "/profile") {
+  if (headerBackAction) {
+    const action = headerBackAction;
+    headerBackAction = null;
+    action();
+  } else if (activeProfileState?.route === "/profile") {
+    if (activeProfileState.fromSettings && activeProfileState.closeHistoryDelta > 0) {
+      history.go(-activeProfileState.closeHistoryDelta);
+    }
+    else showSettings(false);
+  } else if (activeProfileState?.route && activeProfileState.route !== "/profile") {
     const route = activeProfileState.route;
     let destination = "/profile";
     if (route === "/profile/links/new" || /^\/profile\/links\/[0-9a-f-]{36}$/i.test(route)) destination = "/profile/links";
@@ -3535,13 +7552,15 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "assignments-taken") {
     showTakenAssignments();
   } else if (event.state?.screen === "created-assignments") {
-    loadCreatedReviews(false);
+    loadCreatedReviews(false, event.state.scope || "active");
   } else if (event.state?.screen === "assignment-review") {
     showCreatedReview(event.state.assignmentId, false);
   } else if (event.state?.screen === "assignment") {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
     loadProfile(false);
+  } else if (event.state?.screen === "settings") {
+    showSettings(false);
   } else if (event.state?.screen === "member-profile") {
     showMemberProfile(event.state.memberId, false);
   } else if (event.state?.screen === "moderation") {

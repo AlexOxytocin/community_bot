@@ -16,6 +16,7 @@ from community_bot.domain.registration import (
     normalize_profile_link_command,
     normalize_profile_value,
     normalize_registration_answer,
+    previous_registration_step,
     require_invitation_manager,
     require_registration_moderator,
     resolve_timezone,
@@ -26,7 +27,7 @@ def member(*, role: MemberRole, status: MemberStatus = MemberStatus.ACTIVE) -> M
     return Member(id=uuid4(), telegram_user_id=1, role=role, status=status)
 
 
-def test_registration_answers_follow_the_complete_order() -> None:
+def test_registration_answers_follow_the_minimal_onboarding_order() -> None:
     cases = [
         (RegistrationStep.CONSENT, "да", "consent", RegistrationStep.DISPLAY_NAME),
         (RegistrationStep.DISPLAY_NAME, "  Анна  ", "display_name", RegistrationStep.CITY),
@@ -36,30 +37,12 @@ def test_registration_answers_follow_the_complete_order() -> None:
             RegistrationStep.SHORT_BIO,
             "Помогаю запускать продукты",
             "short_bio",
-            RegistrationStep.CURRENT_GOAL,
-        ),
-        (
-            RegistrationStep.CURRENT_GOAL,
-            "Найти команду",
-            "current_goal",
-            RegistrationStep.HELP_CATEGORIES,
-        ),
-        (
-            RegistrationStep.HELP_CATEGORIES,
-            "Продукт, продукт, Тестирование",
-            "help_categories",
             RegistrationStep.SKILL_TAGS,
         ),
         (
             RegistrationStep.SKILL_TAGS,
             "Python, SQL",
             "skill_tags",
-            RegistrationStep.AVAILABILITY,
-        ),
-        (
-            RegistrationStep.AVAILABILITY,
-            "Два часа в неделю",
-            "availability",
             RegistrationStep.PREVIEW,
         ),
     ]
@@ -68,6 +51,32 @@ def test_registration_answers_follow_the_complete_order() -> None:
         answer = normalize_registration_answer(step, raw_value)
         assert answer.field == field
         assert answer.next_step is next_step
+
+
+def test_registration_bio_and_skills_can_be_filled_later() -> None:
+    bio = normalize_registration_answer(RegistrationStep.SHORT_BIO, "")
+    skills = normalize_registration_answer(RegistrationStep.SKILL_TAGS, "  ")
+
+    assert (bio.field, bio.value, bio.next_step) == (
+        "short_bio",
+        "",
+        RegistrationStep.SKILL_TAGS,
+    )
+    assert (skills.field, skills.value, skills.next_step) == (
+        "skill_tags",
+        (),
+        RegistrationStep.PREVIEW,
+    )
+
+
+def test_registration_can_return_to_each_previous_editable_step() -> None:
+    assert previous_registration_step(RegistrationStep.DISPLAY_NAME) is RegistrationStep.CONSENT
+    assert previous_registration_step(RegistrationStep.CITY) is RegistrationStep.DISPLAY_NAME
+    assert previous_registration_step(RegistrationStep.SHORT_BIO) is RegistrationStep.CITY
+    assert previous_registration_step(RegistrationStep.SKILL_TAGS) is RegistrationStep.SHORT_BIO
+    assert previous_registration_step(RegistrationStep.PREVIEW) is RegistrationStep.SKILL_TAGS
+    with pytest.raises(RegistrationError):
+        previous_registration_step(RegistrationStep.CONSENT)
 
 
 def test_profile_lists_are_trimmed_deduplicated_and_bounded() -> None:

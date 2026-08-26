@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
+from community_bot.application.cities import TaskCityError, canonical_city_and_timezone
 from community_bot.application.economy import EconomyUnitOfWork
 from community_bot.domain.economy import ResolvedLevel, starting_grant
 from community_bot.domain.members import Member, MemberStatus
@@ -26,10 +27,10 @@ from community_bot.domain.registration import (
     normalize_profile_link_command,
     normalize_profile_value,
     normalize_registration_answer,
+    previous_registration_step,
     require_invitation_manager,
     require_profile_owner,
     require_registration_moderator,
-    resolve_timezone,
 )
 
 if TYPE_CHECKING:
@@ -248,12 +249,25 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         """Persist one draft answer and advance the state."""
         ...
 
+    async def rewind_registration_step(
+        self,
+        *,
+        member_id: UUID,
+        previous_step: RegistrationStep,
+    ) -> RegistrationContext:
+        """Move one registration draft back while retaining its payload."""
+        ...
+
     async def submit_registration(self, member_id: UUID) -> RegistrationContext:
         """Copy the completed draft to the profile and submit it."""
         ...
 
     async def reopen_rejected_registration(self, member_id: UUID) -> RegistrationContext:
         """Move a rejected application back to editable preview."""
+        ...
+
+    async def restart_rejected_registration(self, member_id: UUID) -> RegistrationContext:
+        """Move a rejected application back to its first editable profile field."""
         ...
 
     async def lock_registration_application(self, member_id: UUID) -> RegistrationContext:
@@ -562,9 +576,17 @@ class RegistrationService:
             elif context.current_step is not command.expected_step:
                 outcome = f"stale_step:{context.current_step.value}"
             else:
+                raw_value = command.raw_value
+                inferred_timezone: str | None = None
+                if command.expected_step is RegistrationStep.CITY:
+                    try:
+                        raw_value, inferred_timezone = canonical_city_and_timezone(raw_value)
+                    except TaskCityError as error:
+                        message = "Registration city must be selected from the catalog."
+                        raise RegistrationError(message) from error
                 answer = normalize_registration_answer(
                     command.expected_step,
-                    command.raw_value,
+                    raw_value,
                 )
                 context = await unit_of_work.save_registration_answer(
                     member_id=context.member_id,
@@ -573,20 +595,77 @@ class RegistrationService:
                     next_step=answer.next_step,
                 )
                 next_step = answer.next_step
-                if command.expected_step is RegistrationStep.CITY:
-                    inferred_timezone = resolve_timezone(str(answer.value))
-                    if inferred_timezone is not None:
-                        next_step = RegistrationStep.SHORT_BIO
-                        context = await unit_of_work.save_registration_answer(
-                            member_id=context.member_id,
-                            field=ProfileField.TIMEZONE.value,
-                            value=inferred_timezone,
-                            next_step=next_step,
-                        )
+                if command.expected_step is RegistrationStep.CITY and inferred_timezone is not None:
+                    next_step = RegistrationStep.SHORT_BIO
+                    context = await unit_of_work.save_registration_answer(
+                        member_id=context.member_id,
+                        field=ProfileField.TIMEZONE.value,
+                        value=inferred_timezone,
+                        next_step=next_step,
+                    )
                 outcome = f"registration_step:{next_step.value}"
             await unit_of_work.add_registration_receipt(
                 update_id=command.update_id,
                 update_type="registration_answer",
+                actor_id=context.member_id,
+                outcome_code=outcome,
+            )
+            await unit_of_work.commit()
+        return RegistrationView(outcome, context)
+
+    async def status_for_actor(self, actor: ActorContext) -> RegistrationView:
+        """Return the caller's onboarding state without requiring an active profile."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None:
+                message = "Registration member does not exist."
+                raise LookupError(message)
+            context = await unit_of_work.get_registration_context(
+                member.telegram_user_id,
+                for_update=False,
+            )
+            if context is None or context.member_id != actor.member_id:
+                message = "Registration context does not exist."
+                raise LookupError(message)
+            return RegistrationView(_registration_outcome(context), context)
+
+    async def back(
+        self,
+        *,
+        update_id: int,
+        telegram_user_id: int,
+    ) -> RegistrationView:
+        """Return a registration draft to its previous editable step."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            await unit_of_work.acquire_update_gate(update_id)
+            stored = await unit_of_work.get_receipt_outcome(update_id)
+            if stored is not None:
+                context = await unit_of_work.get_registration_context(
+                    telegram_user_id,
+                    for_update=False,
+                )
+                return RegistrationView(stored, context)
+            await unit_of_work.acquire_registration_identity_gate(telegram_user_id)
+            context = await unit_of_work.get_registration_context(
+                telegram_user_id,
+                for_update=True,
+            )
+            if context is None:
+                message = "Registration context does not exist."
+                raise RegistrationError(message)
+            expectation = await unit_of_work.get_conversation_expectation(telegram_user_id)
+            if expectation is None:
+                outcome = "conversation_paused"
+            else:
+                previous_step = previous_registration_step(context.current_step)
+                context = await unit_of_work.rewind_registration_step(
+                    member_id=context.member_id,
+                    previous_step=previous_step,
+                )
+                outcome = f"registration_step:{previous_step.value}"
+            await unit_of_work.add_registration_receipt(
+                update_id=update_id,
+                update_type="registration_back",
                 actor_id=context.member_id,
                 outcome_code=outcome,
             )
@@ -640,6 +719,7 @@ class RegistrationService:
         *,
         update_id: int,
         telegram_user_id: int,
+        restart: bool = False,
     ) -> RegistrationView:
         """Reopen a rejected registration at its preview step."""
         async with self._unit_of_work_factory() as unit_of_work:
@@ -663,8 +743,12 @@ class RegistrationService:
             if expectation is None:
                 outcome = "conversation_paused"
             else:
-                context = await unit_of_work.reopen_rejected_registration(context.member_id)
-                outcome = "registration_step:preview"
+                context = (
+                    await unit_of_work.restart_rejected_registration(context.member_id)
+                    if restart
+                    else await unit_of_work.reopen_rejected_registration(context.member_id)
+                )
+                outcome = f"registration_step:{context.current_step.value}"
             await unit_of_work.add_registration_receipt(
                 update_id=update_id,
                 update_type="registration_reopen",
@@ -854,12 +938,32 @@ class RegistrationService:
             await unit_of_work.acquire_registration_identity_gate(actor.telegram_user_id)
             actor = (await unit_of_work.lock_members((actor.id,)))[actor.id]
             require_profile_owner(actor, actor_member_id)
-            value = normalize_profile_value(field, raw_value)
-            await unit_of_work.update_profile_field(
-                member_id=actor.id,
-                field=field,
-                value=value,
-            )
+            if field is ProfileField.CITY:
+                if raw_value.strip():
+                    try:
+                        city, timezone = canonical_city_and_timezone(raw_value)
+                    except TaskCityError as error:
+                        message = "Profile city must be selected from the city catalog."
+                        raise RegistrationError(message) from error
+                else:
+                    city, timezone = None, "UTC"
+                await unit_of_work.update_profile_field(
+                    member_id=actor.id,
+                    field=ProfileField.CITY,
+                    value=city,
+                )
+                await unit_of_work.update_profile_field(
+                    member_id=actor.id,
+                    field=ProfileField.TIMEZONE,
+                    value=timezone,
+                )
+            else:
+                value = normalize_profile_value(field, raw_value)
+                await unit_of_work.update_profile_field(
+                    member_id=actor.id,
+                    field=field,
+                    value=value,
+                )
             outcome = f"web_profile_update:{actor.id}:{field.value}:{replay_fingerprint}"
             await unit_of_work.append_audit_event(
                 actor_member_id=actor.id,

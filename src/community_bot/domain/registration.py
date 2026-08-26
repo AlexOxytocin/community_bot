@@ -187,7 +187,9 @@ _STEP_FLOW: dict[RegistrationStep, tuple[ProfileField | str, RegistrationStep]] 
     RegistrationStep.DISPLAY_NAME: (ProfileField.DISPLAY_NAME, RegistrationStep.CITY),
     RegistrationStep.CITY: (ProfileField.CITY, RegistrationStep.TIMEZONE),
     RegistrationStep.TIMEZONE: (ProfileField.TIMEZONE, RegistrationStep.SHORT_BIO),
-    RegistrationStep.SHORT_BIO: (ProfileField.SHORT_BIO, RegistrationStep.CURRENT_GOAL),
+    RegistrationStep.SHORT_BIO: (ProfileField.SHORT_BIO, RegistrationStep.SKILL_TAGS),
+    # Removed onboarding steps remain accepted so an older unfinished draft can
+    # be advanced without forcing the member through fields that no longer exist.
     RegistrationStep.CURRENT_GOAL: (
         ProfileField.CURRENT_GOAL,
         RegistrationStep.HELP_CATEGORIES,
@@ -196,8 +198,27 @@ _STEP_FLOW: dict[RegistrationStep, tuple[ProfileField | str, RegistrationStep]] 
         ProfileField.HELP_CATEGORIES,
         RegistrationStep.SKILL_TAGS,
     ),
-    RegistrationStep.SKILL_TAGS: (ProfileField.SKILL_TAGS, RegistrationStep.AVAILABILITY),
+    RegistrationStep.SKILL_TAGS: (ProfileField.SKILL_TAGS, RegistrationStep.PREVIEW),
     RegistrationStep.AVAILABILITY: (ProfileField.AVAILABILITY, RegistrationStep.PREVIEW),
+}
+
+_OPTIONAL_REGISTRATION_STEPS = {
+    RegistrationStep.SHORT_BIO,
+    RegistrationStep.SKILL_TAGS,
+}
+
+_REMOVED_REGISTRATION_STEPS = {
+    RegistrationStep.CURRENT_GOAL,
+    RegistrationStep.HELP_CATEGORIES,
+    RegistrationStep.AVAILABILITY,
+}
+
+_PREVIOUS_REGISTRATION_STEP = {
+    RegistrationStep.DISPLAY_NAME: RegistrationStep.CONSENT,
+    RegistrationStep.CITY: RegistrationStep.DISPLAY_NAME,
+    RegistrationStep.SHORT_BIO: RegistrationStep.CITY,
+    RegistrationStep.SKILL_TAGS: RegistrationStep.SHORT_BIO,
+    RegistrationStep.PREVIEW: RegistrationStep.SKILL_TAGS,
 }
 
 _PILOT_CITY_TIMEZONES: dict[str, str] = {
@@ -226,11 +247,34 @@ def normalize_registration_answer(
             raise RegistrationError(message)
         return NormalizedAnswer(field="consent", value=True, next_step=next_step)
     profile_field = ProfileField(field)
+    if not raw_value.strip() and step in _OPTIONAL_REGISTRATION_STEPS:
+        empty_value: str | tuple[str, ...] = () if step is RegistrationStep.SKILL_TAGS else ""
+        return NormalizedAnswer(
+            field=profile_field.value,
+            value=empty_value,
+            next_step=next_step,
+        )
+    if not raw_value.strip() and step in _REMOVED_REGISTRATION_STEPS:
+        empty_value = () if step is RegistrationStep.HELP_CATEGORIES else ""
+        return NormalizedAnswer(
+            field=profile_field.value,
+            value=empty_value,
+            next_step=next_step,
+        )
     return NormalizedAnswer(
         field=profile_field.value,
         value=normalize_profile_value(profile_field, raw_value),
         next_step=next_step,
     )
+
+
+def previous_registration_step(step: RegistrationStep) -> RegistrationStep:
+    """Return the editable step immediately preceding the current onboarding step."""
+    previous = _PREVIOUS_REGISTRATION_STEP.get(step)
+    if previous is None:
+        message = "The registration step has no previous editable step."
+        raise RegistrationError(message)
+    return previous
 
 
 def normalize_profile_value(  # noqa: PLR0911 - explicit field rules stay readable.
