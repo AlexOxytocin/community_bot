@@ -408,6 +408,26 @@ async def add_registration_approved_outbox(session: AsyncSession, member_id: UUI
     await session.flush()
 
 
+async def add_registration_submitted_outbox(session: AsyncSession, member_id: UUID) -> None:
+    """Stage one durable notification for active registration moderators."""
+    application = await session.get(RegistrationApplicationModel, member_id)
+    if application is None or application.submitted_at is None:
+        message = "Submitted registration does not exist."
+        raise LookupError(message)
+    session.add(
+        OutboxEventModel(
+            event_type="registration.submitted",
+            aggregate_type="member",
+            aggregate_id=member_id,
+            payload_json={"member_id": str(member_id)},
+            business_key=(
+                f"registration.submitted:{member_id}:{application.submitted_at.isoformat()}"
+            ),
+        )
+    )
+    await session.flush()
+
+
 async def get_conversation_expectation(
     session: AsyncSession,
     telegram_user_id: int,

@@ -5626,8 +5626,16 @@ function showModerationCases(cases, registrations, revision) {
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = cases.length || registrations.length ? "content" : "empty";
   const tabs = element("div", undefined, "root-tabs moderation-queue-tabs");
-  const registrationTab = element("button", `Регистрации · ${registrations.length}`);
-  const casesTab = element("button", `Обращения · ${cases.length}`);
+  const registrationTab = element("button");
+  registrationTab.append(
+    document.createTextNode("Регистрации · "),
+    element("span", String(registrations.length), "moderation-queue-count"),
+  );
+  const casesTab = element("button");
+  casesTab.append(
+    document.createTextNode("Обращения · "),
+    element("span", String(cases.length), "moderation-queue-count"),
+  );
   registrationTab.type = casesTab.type = "button";
   registrationTab.classList.toggle("active-tab", activeModerationQueue === "registrations");
   casesTab.classList.toggle("active-tab", activeModerationQueue === "cases");

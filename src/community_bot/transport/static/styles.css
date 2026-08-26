@@ -709,6 +709,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .moderation-queue-tabs { position: sticky; z-index: 3; top: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; width: 100%; padding: 4px; border: 1px solid var(--app-border); border-radius: 15px; background: color-mix(in srgb, var(--app-surface) 94%, transparent); backdrop-filter: blur(12px); }
 .moderation-queue-tabs button { width: 100%; min-width: 0; min-height: 48px; padding: 9px 7px; border: 0; border-radius: 11px; background: transparent; color: var(--app-text-muted); font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; }
 .moderation-queue-tabs .active-tab { background: var(--app-surface-raised); color: var(--app-text); }
+.moderation-queue-tabs .moderation-queue-count { color: var(--app-accent); }
 .moderation-registration-list, .moderation-case-list { gap: 6px; }
 .moderation-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; width: 100%; min-height: 84px; align-items: center; gap: 11px; padding: 14px; border-radius: 14px; color: var(--app-text); text-align: left; box-shadow: none; }
 .moderation-registration-card { cursor: pointer; }

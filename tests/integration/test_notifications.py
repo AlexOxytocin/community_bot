@@ -209,6 +209,90 @@ async def test_registration_approval_is_immediate_and_suppresses_inactive_recipi
     await database.dispose()
 
 
+async def test_registration_and_dispute_events_notify_active_moderation_staff(
+    database_url: str,
+) -> None:
+    """New moderation work reaches staff while inactive staff remains excluded."""
+    database = Database(database_url)
+    task, performer = await _seed_published_task(database, now=_IN_WINDOW_UTC)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        moderator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_011,
+            display_name="Moderator",
+            timezone="UTC",
+            status="active",
+            role="moderator",
+        )
+        administrator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_012,
+            display_name="Administrator",
+            timezone="UTC",
+            status="active",
+            role="administrator",
+        )
+        paused_moderator = MemberModel(
+            id=uuid4(),
+            telegram_user_id=80_013,
+            display_name="Paused moderator",
+            timezone="UTC",
+            status="paused",
+            role="moderator",
+        )
+        assignment = AssignmentModel(
+            id=uuid4(),
+            task_id=task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="disputed",
+        )
+        session.add_all((moderator, administrator, paused_moderator, assignment))
+    await _add_outbox(
+        database,
+        event_type="registration.submitted",
+        aggregate_type="member",
+        aggregate_id=performer.id,
+        business_key="registration-submitted-moderators",
+        now=_IN_WINDOW_UTC,
+    )
+    await _add_outbox(
+        database,
+        event_type="assignment_disputed",
+        aggregate_type="assignment",
+        aggregate_id=assignment.id,
+        business_key="assignment-disputed-moderators",
+        now=_IN_WINDOW_UTC,
+    )
+    queue = PostgresNotificationQueue(database.session_factory)
+    claims = await queue.claim_outbox(
+        now=_IN_WINDOW_UTC,
+        limit=10,
+        lease_duration=datetime.timedelta(seconds=30),
+    )
+    assert len(claims) == 2
+    for claim in claims:
+        await queue.materialize(claim, now=_IN_WINDOW_UTC, window=DeliveryWindow())
+    async with sessions() as session:
+        notifications = (await session.scalars(select(NotificationModel))).all()
+    by_type = {
+        notification_type: {
+            item.member_id for item in notifications if item.notification_type == notification_type
+        }
+        for notification_type in ("registration.submitted", "assignment_disputed")
+    }
+    assert by_type["registration.submitted"] == {moderator.id, administrator.id}
+    assert by_type["assignment_disputed"] == {
+        task.creator_id,
+        performer.id,
+        moderator.id,
+        administrator.id,
+    }
+    assert paused_moderator.id not in {item.member_id for item in notifications}
+    await database.dispose()
+
+
 async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notification(
     database_url: str,
 ) -> None:

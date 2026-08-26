@@ -289,6 +289,10 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         """Stage one durable approval notification for a newly active member."""
         ...
 
+    async def add_registration_submitted_outbox(self, member_id: UUID) -> None:
+        """Stage one durable notification for registration moderators."""
+        ...
+
     async def list_submitted_registrations(self, limit: int) -> tuple[RegistrationContext, ...]:
         """Return oldest submitted applications first."""
         ...
@@ -704,6 +708,7 @@ class RegistrationService:
                 outcome = f"stale_step:{context.current_step.value}"
             else:
                 context = await unit_of_work.submit_registration(context.member_id)
+                await unit_of_work.add_registration_submitted_outbox(context.member_id)
                 outcome = "registration_submitted"
             await unit_of_work.add_registration_receipt(
                 update_id=update_id,

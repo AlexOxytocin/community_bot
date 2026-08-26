@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 _MESSAGES = {
     "registration.approved": "Регистрация подтверждена.",
+    "registration.submitted": "В очереди модерации появилась новая регистрация.",
     "task.published": "Опубликовано новое задание в сообществе.",
     "task.cancelled": "Задание отменено.",
     "task.cancellation_requested": "Автор запросил отмену задания. Запрос ожидает ответа.",

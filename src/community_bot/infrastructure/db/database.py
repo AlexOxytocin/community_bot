@@ -1189,6 +1189,12 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), member_id
         )
 
+    async def add_registration_submitted_outbox(self, member_id: UUID) -> None:
+        """Stage one durable notification for active registration moderators."""
+        await registration_store.add_registration_submitted_outbox(
+            self._require_session(), member_id
+        )
+
     async def list_submitted_registrations(self, limit: int) -> tuple[RegistrationContext, ...]:
         """Return submitted registrations for the moderation queue."""
         return await registration_store.list_submitted_registrations(self._require_session(), limit)

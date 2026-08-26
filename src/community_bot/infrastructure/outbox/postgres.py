@@ -445,6 +445,15 @@ class PostgresNotificationQueue:
             task = await session.get(TaskModel, assignment.task_id)
             if task is not None and task.creator_id is not None:
                 member_ids.add(task.creator_id)
+            if event.event_type == "assignment_disputed":
+                member_ids.update(
+                    await session.scalars(
+                        select(MemberModel.id).where(
+                            MemberModel.status == "active",
+                            MemberModel.role.in_(("moderator", "administrator")),
+                        )
+                    )
+                )
         elif event.aggregate_type == "task_cancellation_response":
             response = await session.get(TaskCancellationResponseModel, event.aggregate_id)
             if response is None:
@@ -482,6 +491,15 @@ class PostgresNotificationQueue:
             member_ids.update(administrators)
         elif event.aggregate_type == "member" and event.event_type == "registration.approved":
             member_ids.add(event.aggregate_id)
+        elif event.aggregate_type == "member" and event.event_type == "registration.submitted":
+            member_ids.update(
+                await session.scalars(
+                    select(MemberModel.id).where(
+                        MemberModel.status == "active",
+                        MemberModel.role.in_(("moderator", "administrator")),
+                    )
+                )
+            )
         else:
             raise NotificationProcessingError(_UNSUPPORTED_OUTBOX_EVENT, permanent=True)
 
