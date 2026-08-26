@@ -4,6 +4,11 @@ export function applyPlatformTheme(webApp = globalThis.Telegram?.WebApp) {
   }
   webApp?.ready?.();
   webApp?.expand?.();
+  if (webApp?.isFullscreen !== true && typeof webApp?.requestFullscreen === "function") {
+    try {
+      webApp.requestFullscreen();
+    } catch { /* Telegram clients before Bot API 8.0 keep the expanded fallback. */ }
+  }
 }
 
 const THEME_STORAGE_KEY = "community_bot_ui_theme";
