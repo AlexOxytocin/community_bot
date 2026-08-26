@@ -1,14 +1,38 @@
+const FULLSCREEN_STORAGE_KEY = "community_bot_fullscreen_enabled";
+
+export function getFullscreenPreference() {
+  try {
+    return localStorage.getItem(FULLSCREEN_STORAGE_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function applyFullscreenMode(enabled, webApp) {
+  const method = enabled ? "requestFullscreen" : "exitFullscreen";
+  if (enabled ? webApp?.isFullscreen === true : webApp?.isFullscreen !== true) return;
+  if (typeof webApp?.[method] !== "function") return;
+  try {
+    webApp[method]();
+  } catch { /* Telegram clients before Bot API 8.0 keep the expanded fallback. */ }
+}
+
+export function setFullscreenPreference(enabled, webApp = globalThis.Telegram?.WebApp) {
+  const normalized = enabled === true;
+  try {
+    localStorage.setItem(FULLSCREEN_STORAGE_KEY, String(normalized));
+  } catch { /* The preference remains active for the current document. */ }
+  applyFullscreenMode(normalized, webApp);
+  return normalized;
+}
+
 export function applyPlatformTheme(webApp = globalThis.Telegram?.WebApp) {
   if (document.documentElement.dataset.uiThemeScope !== "next") {
     document.documentElement.style.colorScheme = "dark";
   }
   webApp?.ready?.();
   webApp?.expand?.();
-  if (webApp?.isFullscreen !== true && typeof webApp?.requestFullscreen === "function") {
-    try {
-      webApp.requestFullscreen();
-    } catch { /* Telegram clients before Bot API 8.0 keep the expanded fallback. */ }
-  }
+  applyFullscreenMode(getFullscreenPreference(), webApp);
 }
 
 const THEME_STORAGE_KEY = "community_bot_ui_theme";

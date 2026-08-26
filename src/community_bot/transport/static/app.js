@@ -2,7 +2,9 @@ const assetRelease = new URL(import.meta.url).searchParams.get("release") || "lo
 const {
   applyPlatformTheme,
   applyPreviewTheme,
+  getFullscreenPreference,
   openExternalLink,
+  setFullscreenPreference,
   watchSystemPreviewTheme,
 } = await import(`/mini-assets/platform.js?release=${encodeURIComponent(assetRelease)}`);
 
@@ -289,7 +291,9 @@ const settingsRowIcon = (name) => {
   svg.setAttribute("aria-hidden", "true");
   svg.innerHTML = name === "profile"
     ? '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0"/>'
-    : '<path d="M20 15.1A8 8 0 0 1 8.9 4 8 8 0 1 0 20 15.1Z"/>';
+    : name === "fullscreen"
+      ? '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>'
+      : '<path d="M20 15.1A8 8 0 0 1 8.9 4 8 8 0 1 0 20 15.1Z"/>';
   return svg;
 };
 
@@ -3925,7 +3929,31 @@ function showSettings(push = true) {
     updateToggle();
   });
   theme.append(themeCopy, toggle);
-  list.append(profile, theme);
+
+  const fullscreen = element("div", undefined, "settings-row settings-fullscreen-row");
+  fullscreen.append(settingsRowIcon("fullscreen"));
+  fullscreen.firstChild.classList.add("settings-row-icon");
+  const fullscreenCopy = element("span", undefined, "settings-row-copy");
+  fullscreenCopy.append(
+    element("strong", "Полноэкранный режим"),
+    element("span", "Использовать весь экран Telegram"),
+  );
+  const fullscreenToggle = element("button", undefined, "settings-switch");
+  fullscreenToggle.type = "button";
+  fullscreenToggle.setAttribute("role", "switch");
+  fullscreenToggle.setAttribute("aria-label", "Полноэкранный режим");
+  fullscreenToggle.append(element("span", undefined, "settings-switch-thumb"));
+  const updateFullscreenToggle = () => {
+    fullscreenToggle.setAttribute("aria-checked", String(getFullscreenPreference()));
+  };
+  updateFullscreenToggle();
+  fullscreenToggle.addEventListener("click", () => {
+    setFullscreenPreference(fullscreenToggle.getAttribute("aria-checked") !== "true");
+    updateFullscreenToggle();
+  });
+  fullscreen.append(fullscreenCopy, fullscreenToggle);
+
+  list.append(profile, theme, fullscreen);
   replaceContent(list);
 }
 
