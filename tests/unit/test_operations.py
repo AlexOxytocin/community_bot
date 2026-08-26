@@ -99,6 +99,18 @@ def test_ci_and_deploy_use_one_bounded_manual_dev_path() -> None:
     assert "PUSHED_AT" not in release
 
 
+def test_fast_deploy_uses_the_running_release_as_its_safety_baseline() -> None:
+    """A stale legacy manifest cannot turn an ordinary update into a slow path."""
+    root = Path(__file__).parents[2]
+    deploy = (root / "ops" / "deploy_dev.py").read_text(encoding="utf-8")
+
+    assert "before_release" in deploy
+    assert '"diff",\n                    "--quiet",\n                    before_release' in deploy
+    assert "if target_head != live_head:" in deploy
+    assert 'manifest["commit_sha"]' not in deploy
+    assert 'manifest["migration_head"]' not in deploy
+
+
 def test_host_maintenance_surface_is_python_and_data_only() -> None:
     """The manual contract adds one Python tool, not an R1 deployment surface."""
     root = Path(__file__).parents[2]

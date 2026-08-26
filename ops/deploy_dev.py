@@ -79,12 +79,21 @@ def main() -> int:
     releases = ROOT / "shared" / "releases"
     active_state = json.loads((releases / "active.json").read_text(encoding="utf-8"))
     active = releases / active_state["current"]["manifest_sha256"]
-    manifest = json.loads((active / "manifest.json").read_text(encoding="utf-8"))
     lock = releases / "dev-deploy.lock"
     with lock.open("w", encoding="utf-8") as stream:
         getattr(fcntl, "flock")(stream, getattr(fcntl, "LOCK_EX"))  # noqa: B009
         if run("git", "ls-remote", REPOSITORY, "refs/heads/main").split()[0] != sha:
             raise RuntimeError("Requested SHA is no longer main.")
+        before = run("docker", "inspect", "community-mini-app-core-web-1", "--format", "{{.Image}}")
+        before_release = run(
+            "docker",
+            "inspect",
+            "community-mini-app-core-web-1",
+            "--format",
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
+        )
+        if SHA.fullmatch(before_release) is None:
+            raise RuntimeError("Running image has no exact release identity.")
         with tempfile.TemporaryDirectory(prefix="community-dev-") as temporary:
             source = Path(temporary) / "source"
             run("git", "clone", "--quiet", "--no-checkout", REPOSITORY, str(source))
@@ -99,7 +108,7 @@ def main() -> int:
                     str(source),
                     "diff",
                     "--quiet",
-                    manifest["commit_sha"],
+                    before_release,
                     sha,
                     "--",
                     "migrations",
@@ -137,18 +146,8 @@ def main() -> int:
             migration_query,
             env=probe_environment,
         )
-        if target_head != manifest["migration_head"] or live_head != manifest["migration_head"]:
+        if target_head != live_head:
             raise RuntimeError("Migration head requires the slow path.")
-        before = run("docker", "inspect", "community-mini-app-core-web-1", "--format", "{{.Image}}")
-        before_release = run(
-            "docker",
-            "inspect",
-            "community-mini-app-core-web-1",
-            "--format",
-            '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
-        )
-        if SHA.fullmatch(before_release) is None:
-            raise RuntimeError("Running image has no exact release identity.")
         run("docker", "tag", before, PREVIOUS_IMAGE)
         deploy, environment = compose(active, image, sha)
         try:
