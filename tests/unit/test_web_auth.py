@@ -106,7 +106,7 @@ class FakeDatabase:
 
 def _app(database: FakeDatabase) -> FastAPI:
     return create_web_app(
-        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN),
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, _env_file=None),
         database=cast("Database", database),
     )
 
@@ -329,7 +329,7 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/", ("GET",)),
     }
     assert any(getattr(route, "path", None) == "/mini-assets" for route in app.routes)
-    assert Settings().mini_app_origin is None
+    assert Settings(_env_file=None).mini_app_origin is None
     for origin in (
         None,
         "http://mini.example",

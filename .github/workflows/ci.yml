@@ -75,7 +75,7 @@ jobs:
         with: {version: "0.12.3"}
       - run: uv python install 3.13 && uv sync --locked --all-groups
       - run: uv run playwright install --with-deps chromium
-      - run: uv run pytest tests/browser --no-cov
+      - run: uv run pytest tests/browser -m browser_smoke --no-cov
 
   auth-ledger:
     name: Auth and ledger

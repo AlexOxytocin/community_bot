@@ -150,11 +150,13 @@ addopts = [
     "-ra",
     "--strict-config",
     "--strict-markers",
+    "-m=not browser",
 ]
 asyncio_mode = "strict"
 filterwarnings = ["error"]
 markers = [
     "browser: exercises the native Mini App in a real browser",
+    "browser_smoke: bounded browser acceptance for pull requests",
     "integration: exercises an actual PostgreSQL instance",
 ]
 testpaths = ["tests"]

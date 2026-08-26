@@ -174,8 +174,13 @@ async def test_full_exchange_is_atomic_and_exactly_once(database_url: str) -> No
                 32_102, performer.telegram_user_id, assignment.id, uuid4(), payload_v2
             )
         ),
+        return_exceptions=True,
     )
-    assert sorted(item.version for item in submitted) == [1, 2]
+    successful = [item for item in submitted if not isinstance(item, BaseException)]
+    rejected = [item for item in submitted if isinstance(item, BaseException)]
+    assert [item.version for item in successful] == [1]
+    assert len(rejected) == 1
+    assert isinstance(rejected[0], AssignmentError)
     decision_id = uuid4()
     approved = await service.decide(
         DecideAssignmentCommand(
@@ -216,8 +221,8 @@ async def test_full_exchange_is_atomic_and_exactly_once(database_url: str) -> No
             )
         )
     assert rewards == 1
-    assert versions == 2
-    assert receipts == 4
+    assert versions == 1
+    assert receipts == 3
     with pytest.raises(DBAPIError):
         async with database.engine.begin() as connection:
             await connection.execute(

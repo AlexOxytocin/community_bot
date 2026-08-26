@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import datetime
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import pytest
 
@@ -12,7 +16,10 @@ from community_bot.worker import entrypoint
 from community_bot.worker.entrypoint import main as worker_main
 
 
-def test_worker_check_mode_returns_success(capsys: pytest.CaptureFixture[str]) -> None:
+def test_worker_check_mode_returns_success(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
 
     assert worker_main(["--check"]) == 0
@@ -21,7 +28,10 @@ def test_worker_check_mode_returns_success(capsys: pytest.CaptureFixture[str]) -
 
 def test_worker_runtime_mode_rejects_missing_secrets(
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
 
     assert worker_main([]) == 2

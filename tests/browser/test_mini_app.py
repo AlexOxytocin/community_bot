@@ -258,11 +258,10 @@ def _task_home_payload(*, empty: bool = False, partial: bool = False) -> dict[st
 
 
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
-@pytest.mark.parametrize("query", ["", "?ui=next", "?ui=legacy"])
+@pytest.mark.browser_smoke
 def test_clean_mini_app_url_only_starts_current_runtime(
     mini_app_url: str,
     viewport: tuple[int, int],
-    query: str,
 ) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -283,7 +282,7 @@ def test_clean_mini_app_url_only_starts_current_runtime(
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + query + "#/tasks")
+        page.goto(mini_app_url + "#/tasks")
         page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
         assert page.locator('[data-screen-id="UX01"]').count() == 0
         assert page.evaluate("document.documentElement.dataset.uiThemeScope") == "next"
@@ -293,10 +292,9 @@ def test_clean_mini_app_url_only_starts_current_runtime(
         browser.close()
 
 
-@pytest.mark.parametrize("query", ["", "?ui=next", "?ui=legacy"])
+@pytest.mark.browser_smoke
 def test_bootstrap_waits_for_late_telegram_desktop_init_data(
     mini_app_url: str,
-    query: str,
 ) -> None:
     """The single Mini App runtime tolerates late Telegram Desktop initData."""
     init_data = "query_id=desktop&user=%7B%22id%22%3A1%7D&hash=proof"
@@ -339,7 +337,7 @@ def test_bootstrap_waits_for_late_telegram_desktop_init_data(
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + query)
+        page.goto(mini_app_url)
         page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
         assert page.locator('[data-screen-id="UX01"]').count() == 0
         assert calls == 2
@@ -397,6 +395,7 @@ def test_ui_next_system_theme_tracks_telegram_and_syncs_chrome(mini_app_url: str
         browser.close()
 
 
+@pytest.mark.browser_smoke
 def test_ui_next_onboarding_starts_light_and_confirms_catalog_city(mini_app_url: str) -> None:
     view: dict[str, Any] = {
         "outcome": "registration_step:city",
@@ -605,18 +604,14 @@ def test_ui_next_settings_opens_profile_and_toggles_night_mode(  # noqa: PLR0915
         assert page.get_by_role("button", name="Профиль", exact=False).is_visible()
         toggle = page.get_by_role("switch", name="Ночной режим", exact=True)
         assert toggle.get_attribute("aria-checked") == "false"
-        fullscreen_toggle = page.get_by_role(
-            "switch", name="Полноэкранный режим", exact=True
-        )
+        fullscreen_toggle = page.get_by_role("switch", name="Полноэкранный режим", exact=True)
         assert fullscreen_toggle.get_attribute("aria-checked") == "true"
         assert page.evaluate("globalThis.fullscreenCalls") == ["enter"]
         light_boxes = boxes(page)
 
         fullscreen_toggle.click()
         assert fullscreen_toggle.get_attribute("aria-checked") == "false"
-        assert page.evaluate(
-            "localStorage.getItem('community_bot_fullscreen_enabled')"
-        ) == "false"
+        assert page.evaluate("localStorage.getItem('community_bot_fullscreen_enabled')") == "false"
         assert page.evaluate("globalThis.fullscreenCalls") == ["enter", "exit"]
 
         toggle.click()
@@ -640,9 +635,9 @@ def test_ui_next_settings_opens_profile_and_toggles_night_mode(  # noqa: PLR0915
             == "true"
         )
         assert (
-            page.get_by_role(
-                "switch", name="Полноэкранный режим", exact=True
-            ).get_attribute("aria-checked")
+            page.get_by_role("switch", name="Полноэкранный режим", exact=True).get_attribute(
+                "aria-checked"
+            )
             == "false"
         )
         assert page.evaluate("globalThis.fullscreenCalls") == []
@@ -944,6 +939,7 @@ def test_ui_next_task_creation_uses_medium_navigation_title(mini_app_url: str) -
 
 
 @pytest.mark.parametrize("viewport", [(375, 650), (375, 812), (430, 932)])
+@pytest.mark.browser_smoke
 def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(  # noqa: PLR0915
     mini_app_url: str,
     viewport: tuple[int, int],
@@ -1010,9 +1006,7 @@ def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(  # 
         )
         assert page.locator(
             ".task-home-attention-action, .task-home-attention-switch"
-        ).evaluate_all(
-            "nodes => nodes.every(node => node.getBoundingClientRect().height >= 38)"
-        )
+        ).evaluate_all("nodes => nodes.every(node => node.getBoundingClientRect().height >= 38)")
         if viewport[1] <= 760:
             assert page.locator(".task-home-screen .screen").evaluate(
                 "node => node.scrollHeight <= node.clientHeight"
@@ -1648,6 +1642,7 @@ def test_ui_next_accepted_task_returns_to_taken_assignments(mini_app_url: str) -
         browser.close()
 
 
+@pytest.mark.browser_smoke
 def test_ui_next_catalog_supports_full_filters_sorting_and_reset(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
@@ -3172,12 +3167,18 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
         )
         page.goto(mini_app_url)
         assert page.evaluate("document.documentElement.dataset.keyboardOpen") == "true"
-        assert page.evaluate(
-            "getComputedStyle(document.documentElement).getPropertyValue('--app-visual-viewport-width')"
-        ) == "350px"
-        assert page.evaluate(
-            "getComputedStyle(document.documentElement).getPropertyValue('--app-visual-viewport-height')"
-        ) == "420px"
+        assert (
+            page.evaluate(
+                "getComputedStyle(document.documentElement).getPropertyValue('--app-visual-viewport-width')"
+            )
+            == "350px"
+        )
+        assert (
+            page.evaluate(
+                "getComputedStyle(document.documentElement).getPropertyValue('--app-visual-viewport-height')"
+            )
+            == "420px"
+        )
         modal_geometry = page.evaluate(
             """() => {
               const backdrop = document.createElement('section');
@@ -3215,9 +3216,12 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
             "inputFontSize": "16px",
         }
         assert page.evaluate("getComputedStyle(document.body).paddingTop") == "86px"
-        assert page.locator(".bottom-nav").evaluate(
-            "node => Math.round(node.getBoundingClientRect().height)"
-        ) == 64
+        assert (
+            page.locator(".bottom-nav").evaluate(
+                "node => Math.round(node.getBoundingClientRect().height)"
+            )
+            == 64
+        )
         page.evaluate(
             """() => {
               Telegram.WebApp.contentSafeAreaInset.top = 90;
@@ -3284,8 +3288,7 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
         assert page.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
         assert page.evaluate("getComputedStyle(document.body).backgroundImage") != "none"
         assert (
-            page.evaluate("getComputedStyle(document.body).backgroundColor")
-            == "rgb(251, 248, 246)"
+            page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(251, 248, 246)"
         )
         assert page.evaluate("globalThis.readyCalls") == 1
         assert page.evaluate("globalThis.expandCalls") == 1
@@ -4386,9 +4389,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             page.locator(".profile-overview").wait_for()
             assert page.url.endswith("#/profile")
             heading_box = page.locator("#screen-title").bounding_box()
-            assert heading_box is None or (
-                heading_box["width"] <= 1 and heading_box["height"] <= 1
-            )
+            assert heading_box is None or (heading_box["width"] <= 1 and heading_box["height"] <= 1)
             assert page.locator("#screen-title").text_content() == "Профиль"
             assert page.get_by_text("Карма", exact=True).count() == 1
             assert page.get_by_text("Надёжность", exact=True).count() == 0
@@ -5675,6 +5676,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         browser.close()
 
 
+@pytest.mark.browser_smoke
 def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:

@@ -2196,6 +2196,7 @@ async def _submission_request(
         | AssignmentDisputeRequest
         | AssignmentCancellationRequest
         | ModerationResolutionRequest
+        | RegistrationModerationDecisionRequest
     ],
 ) -> (
     SaveSubmissionDraftRequest
@@ -2204,6 +2205,7 @@ async def _submission_request(
     | AssignmentDisputeRequest
     | AssignmentCancellationRequest
     | ModerationResolutionRequest
+    | RegistrationModerationDecisionRequest
     | None
 ):
     if request.headers.get("content-type", "").lower() != "application/json":
