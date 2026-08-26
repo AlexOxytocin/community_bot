@@ -1,4 +1,66 @@
 const FULLSCREEN_STORAGE_KEY = "community_bot_fullscreen_enabled";
+const PLATFORM_INSET_EVENTS = Object.freeze([
+  "safeAreaChanged",
+  "contentSafeAreaChanged",
+  "fullscreenChanged",
+  "viewportChanged",
+]);
+let viewportListenersInstalled = false;
+
+const insetValue = (inset, edge) => {
+  const value = Number(inset?.[edge]);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+};
+
+function syncPlatformInsets(webApp) {
+  const root = document.documentElement;
+  const safeArea = webApp?.safeAreaInset;
+  const contentSafeArea = webApp?.contentSafeAreaInset;
+  for (const edge of ["top", "right", "bottom", "left"]) {
+    const value = Math.max(
+      insetValue(safeArea, edge),
+      insetValue(contentSafeArea, edge),
+    );
+    root.style.setProperty(`--app-safe-area-inset-${edge}`, `${value}px`);
+  }
+  root.dataset.telegramFullscreen = String(webApp?.isFullscreen === true);
+}
+
+function syncVisualViewport() {
+  const viewport = globalThis.visualViewport;
+  const width = Number(viewport?.width) || globalThis.innerWidth || 0;
+  const height = Number(viewport?.height) || globalThis.innerHeight || 0;
+  const offsetLeft = Number(viewport?.offsetLeft) || 0;
+  const offsetTop = Number(viewport?.offsetTop) || 0;
+  const layoutHeight = globalThis.innerHeight || document.documentElement.clientHeight || height;
+  const keyboardInset = Math.max(0, layoutHeight - height - offsetTop);
+  const root = document.documentElement;
+  root.style.setProperty("--app-visual-viewport-width", `${width}px`);
+  root.style.setProperty("--app-visual-viewport-height", `${height}px`);
+  root.style.setProperty("--app-visual-viewport-offset-left", `${offsetLeft}px`);
+  root.style.setProperty("--app-visual-viewport-offset-top", `${offsetTop}px`);
+  root.style.setProperty("--app-visual-viewport-center-x", `${offsetLeft + (width / 2)}px`);
+  root.style.setProperty("--app-keyboard-inset", `${keyboardInset}px`);
+  root.dataset.keyboardOpen = String(keyboardInset > 80);
+}
+
+function installVisualViewportListeners() {
+  if (viewportListenersInstalled) return;
+  viewportListenersInstalled = true;
+  const refresh = () => requestAnimationFrame(syncVisualViewport);
+  globalThis.visualViewport?.addEventListener?.("resize", refresh);
+  globalThis.visualViewport?.addEventListener?.("scroll", refresh);
+  globalThis.addEventListener?.("resize", refresh);
+  document.addEventListener("focusin", (event) => {
+    if (!(event.target instanceof HTMLElement)) return;
+    if (!event.target.closest('[role="dialog"]')) return;
+    requestAnimationFrame(() => {
+      syncVisualViewport();
+      event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  });
+  syncVisualViewport();
+}
 
 export function getFullscreenPreference() {
   try {
@@ -32,6 +94,11 @@ export function applyPlatformTheme(webApp = globalThis.Telegram?.WebApp) {
   }
   webApp?.ready?.();
   webApp?.expand?.();
+  installVisualViewportListeners();
+  syncPlatformInsets(webApp);
+  for (const event of PLATFORM_INSET_EVENTS) {
+    webApp?.onEvent?.(event, () => syncPlatformInsets(webApp));
+  }
   applyFullscreenMode(getFullscreenPreference(), webApp);
 }
 

@@ -83,10 +83,10 @@ body {
   height: 100dvh;
   overflow: hidden;
   padding:
-    calc(12px + var(--tg-safe-area-inset-top, 0px))
-    calc(12px + var(--tg-safe-area-inset-right, 0px))
-    calc(12px + var(--tg-safe-area-inset-bottom, 0px))
-    calc(12px + var(--tg-safe-area-inset-left, 0px));
+    calc(12px + var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px)))
+    calc(12px + var(--app-safe-area-inset-right, var(--tg-safe-area-inset-right, 0px)))
+    calc(12px + var(--app-safe-area-inset-bottom, var(--tg-safe-area-inset-bottom, 0px)))
+    calc(12px + var(--app-safe-area-inset-left, var(--tg-safe-area-inset-left, 0px)));
   background:
     radial-gradient(circle at 100% 0, color-mix(in srgb, var(--app-brand-secondary) 11%, transparent), transparent 28rem),
     radial-gradient(circle at 0 42%, color-mix(in srgb, var(--app-accent) 7%, transparent), transparent 26rem),
@@ -104,8 +104,8 @@ button { font: inherit; color: inherit; }
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   width: min(100%, 430px);
-  height: calc(100vh - 24px - var(--tg-safe-area-inset-top, 0px) - var(--tg-safe-area-inset-bottom, 0px));
-  height: calc(100dvh - 24px - var(--tg-safe-area-inset-top, 0px) - var(--tg-safe-area-inset-bottom, 0px));
+  height: calc(100vh - 24px - var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px)) - var(--app-safe-area-inset-bottom, var(--tg-safe-area-inset-bottom, 0px)));
+  height: calc(100dvh - 24px - var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px)) - var(--app-safe-area-inset-bottom, var(--tg-safe-area-inset-bottom, 0px)));
   margin: 0 auto;
   overflow: hidden;
   border: 1px solid var(--app-border);
@@ -445,8 +445,8 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: minmax(0, 1fr);
-  min-height: calc(64px + var(--tg-safe-area-inset-bottom, 0px));
-  padding: 0 4px var(--tg-safe-area-inset-bottom, 0px);
+  min-height: 64px;
+  padding: 0 4px;
   border-top: 1px solid var(--app-border);
   background: var(--app-surface);
 }
@@ -472,22 +472,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   white-space: nowrap;
 }
 .task-home-screen .screen-content { gap: 0; }
-.task-home { gap: 12px; }
+.task-home { gap: 10px; }
 .task-home button { min-width: 0; }
 .task-home-attention {
   display: grid;
-  gap: 4px;
-  padding: 6px 0 6px 11px;
+  gap: 2px;
+  padding: 4px 0 4px 10px;
   border-left: 5px solid var(--app-accent);
 }
 .task-home-attention-heading {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  height: 50px;
+  height: 38px;
   align-items: start;
   gap: 8px;
 }
-.task-home-attention-copy { display: grid; min-width: 0; gap: 4px; }
+.task-home-attention-copy { display: grid; min-width: 0; gap: 1px; }
 .task-home-eyebrow {
   margin: 0;
   color: var(--app-accent);
@@ -495,11 +495,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-weight: 800;
   letter-spacing: .08em;
 }
-.task-home-attention-title { max-width: 275px; font-size: 20px; line-height: 1.1; }
+.task-home-attention-title { max-width: 275px; font-size: 18px; line-height: 1.02; }
 .task-home-attention-count {
   min-width: 38px;
   color: var(--app-accent);
-  font-size: 38px;
+  font-size: 32px;
   font-weight: 400;
   line-height: .9;
   text-align: right;
@@ -507,23 +507,24 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-attention-list {
   display: grid;
   align-content: start;
-  grid-auto-rows: 44px;
+  grid-auto-rows: 40px;
   margin-top: 0;
 }
 .task-home-attention-action {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 44px;
+  min-height: 40px;
   align-items: center;
   gap: 10px;
-  padding: 8px 4px 8px 0;
+  padding: 5px 4px 5px 0;
   border: 0;
   border-bottom: 1px solid var(--app-border);
   background: transparent;
   color: var(--app-text-muted);
   text-align: left;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1.12;
 }
 .task-home-attention-action:last-child { border-bottom: 0; }
 .task-home-attention-action span:last-child { color: var(--app-accent); font-weight: 800; }
@@ -531,11 +532,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-attention-switch {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
-  min-height: 44px;
+  min-height: 40px;
   align-items: center;
   gap: 7px;
   width: 100%;
-  padding: 6px 4px 4px 0;
+  padding: 4px 4px 2px 0;
   border: 0;
   border-top: 1px solid color-mix(in srgb, var(--app-accent) 32%, var(--app-border));
   background: transparent;
@@ -563,11 +564,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-primary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .task-home-primary {
   display: grid;
-  min-height: 168px;
+  min-height: 130px;
   align-content: space-between;
   justify-items: start;
   gap: 5px;
-  padding: 14px;
+  padding: 11px;
   border: 1px solid var(--app-border);
   border-radius: 15px;
   background: var(--app-surface);
@@ -586,16 +587,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-find > span:last-child { color: color-mix(in srgb, var(--app-accent-text) 78%, transparent); }
 .task-home-action-icon {
   display: grid;
-  width: 50px;
-  height: 50px;
+  width: 42px;
+  height: 42px;
   place-items: center;
   border: 1px solid currentColor;
   border-radius: 13px;
   background: color-mix(in srgb, var(--app-surface) 28%, transparent);
 }
 .task-home-action-icon svg, .task-home-archive-icon svg {
-  width: 27px;
-  height: 27px;
+  width: 23px;
+  height: 23px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -607,11 +608,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-work-tile {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto minmax(42px, auto);
-  min-height: 118px;
+  grid-template-rows: auto minmax(32px, auto);
+  min-height: 90px;
   align-items: start;
-  gap: 7px;
-  padding: 13px;
+  gap: 5px;
+  padding: 10px;
   border: 1px solid var(--app-border);
   border-radius: 14px;
   background: var(--app-surface);
@@ -624,12 +625,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-work-label { grid-column: 1 / -1; align-self: end; font-size: 15px; font-weight: 700; }
 .task-home-archive {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
-  min-height: 76px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  min-height: 66px;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   width: 100%;
-  padding: 11px 13px;
+  padding: 9px 11px;
   border: 1px solid var(--app-border);
   border-radius: 14px;
   background: var(--app-surface);
@@ -637,7 +638,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   text-align: left;
   cursor: pointer;
 }
-.task-home-archive-icon { display: grid; width: 48px; height: 48px; place-items: center; border: 1px solid var(--app-border); border-radius: 13px; color: var(--app-text-muted); }
+.task-home-archive-icon { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid var(--app-border); border-radius: 12px; color: var(--app-text-muted); }
 .task-home-archive-copy { display: grid; min-width: 0; gap: 3px; }
 .task-home-archive-copy strong { font-size: 15px; }
 .task-home-archive-copy span { color: var(--app-text-muted); font-size: 10px; line-height: 1.3; }
@@ -780,7 +781,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reserve-summary.is-over-limit { border-color: color-mix(in srgb, var(--app-danger) 58%, var(--app-border)); }
 .reserve-summary.is-over-limit strong { color: var(--app-danger); }
 .reserve-summary.is-over-limit .reserve-meter > span { background: var(--app-danger); }
-.task-size-backdrop { position: fixed; z-index: 20; top: calc(12px + var(--tg-safe-area-inset-top, 0px)); left: 50%; display: grid; width: min(calc(100vw - 24px - var(--tg-safe-area-inset-left, 0px) - var(--tg-safe-area-inset-right, 0px)), 430px); height: calc(100dvh - 24px - var(--tg-safe-area-inset-top, 0px) - var(--tg-safe-area-inset-bottom, 0px)); align-items: start; padding: 62px 10px 10px; overflow: hidden; transform: translateX(-50%); border-radius: 20px; background: var(--app-overlay); }
+.task-size-backdrop { position: fixed; z-index: 20; top: calc(var(--app-visual-viewport-offset-top, 0px) + 12px + var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px))); left: var(--app-visual-viewport-center-x, 50%); display: grid; width: min(calc(var(--app-visual-viewport-width, 100vw) - 24px - var(--app-safe-area-inset-left, var(--tg-safe-area-inset-left, 0px)) - var(--app-safe-area-inset-right, var(--tg-safe-area-inset-right, 0px))), 430px); height: calc(var(--app-visual-viewport-height, 100dvh) - 24px - var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px)) - var(--app-safe-area-inset-bottom, var(--tg-safe-area-inset-bottom, 0px))); align-items: start; padding: 62px 10px 10px; overflow: hidden; transform: translateX(-50%); border-radius: 20px; background: var(--app-overlay); }
 .task-size-sheet { display: grid; overflow: hidden; width: min(100%, 380px); max-height: calc(100% - 72px); justify-self: end; padding: 10px 12px 12px; border: 1px solid var(--app-border); border-radius: 16px; background: var(--app-surface-raised); box-shadow: 0 16px 40px var(--app-shadow-popover); }
 .deadline-choice-sheet { align-content: start; gap: 8px; }
 .deadline-month-navigation { display: grid; grid-template-columns: 38px minmax(0, 1fr) 38px; align-items: center; gap: 6px; }
@@ -800,12 +801,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .deadline-sheet-error { color: var(--app-danger); font-size: 10px; font-weight: 700; }
 .deadline-sheet-error.is-note { color: var(--app-text-muted); }
 .deadline-choice-done { width: 100%; min-height: 44px; margin-top: 1px; }
-.content-editor-sheet { align-content: start; gap: 8px; }
+.content-editor-sheet { align-content: start; gap: 8px; overflow: auto; }
 .content-editor-hint { margin: 0; color: var(--app-text-muted); font-size: 11px; line-height: 1.35; }
 .content-editor-input { box-sizing: border-box; min-height: 82px; max-height: 260px; resize: none; line-height: 1.4; }
 .content-editor-counter { color: var(--app-text-muted); font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; }
 .content-editor-counter.is-limit { color: var(--app-danger); font-weight: 800; }
-.content-editor-done { width: 100%; min-height: 44px; }
+.content-editor-done { position: sticky; z-index: 2; bottom: 0; width: 100%; min-height: 44px; box-shadow: 0 -8px 14px var(--app-surface-raised); }
 .task-size-options { display: grid; overflow: auto; gap: 6px; padding-top: 2px; }
 .task-size-option { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 2px 10px; min-height: 58px; align-items: center; padding: 8px 10px; border: 1px solid transparent; border-radius: 12px; background: transparent; color: var(--app-text); text-align: left; cursor: pointer; }
 .task-size-option strong { grid-column: 1; grid-row: 1 / span 2; font-size: 17px; }
@@ -1017,6 +1018,62 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .onboarding-outcome-icon { display: grid; width: 52px; height: 52px; place-items: center; margin-bottom: 4px; border: 1px solid color-mix(in srgb, var(--app-accent) 55%, var(--app-border)); border-radius: 50%; background: color-mix(in srgb, var(--app-accent) 10%, var(--app-surface-raised)); color: var(--app-accent); font-size: 24px; font-weight: 850; }
 .onboarding-outcome .onboarding-review-note { width: 100%; margin-top: 8px; }
 
+:root[data-keyboard-open="true"] .task-size-backdrop,
+:root[data-keyboard-open="true"] .assignment-action-backdrop,
+:root[data-keyboard-open="true"] .catalog-filter-backdrop,
+:root[data-keyboard-open="true"] .profile-confirm-backdrop {
+  position: fixed;
+  inset: auto;
+  top: calc(var(--app-visual-viewport-offset-top, 0px) + 8px);
+  left: var(--app-visual-viewport-center-x, 50%);
+  width: min(calc(var(--app-visual-viewport-width, 100vw) - 16px), 430px);
+  height: calc(var(--app-visual-viewport-height, 100dvh) - 16px);
+  align-items: start;
+  padding: 8px;
+  overflow: hidden;
+  transform: translateX(-50%);
+  border-radius: 18px;
+}
+:root[data-keyboard-open="true"] .task-size-sheet,
+:root[data-keyboard-open="true"] .assignment-action-sheet,
+:root[data-keyboard-open="true"] .catalog-filter-sheet,
+:root[data-keyboard-open="true"] .profile-confirm-sheet {
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: auto;
+  justify-self: center;
+}
+:root[data-keyboard-open="true"] .catalog-sort-heading,
+:root[data-keyboard-open="true"] .assignment-action-heading {
+  position: sticky;
+  z-index: 3;
+  top: -1px;
+  padding-block: 1px 5px;
+  background: var(--app-surface-raised);
+}
+:root[data-keyboard-open="true"] .assignment-action-buttons,
+:root[data-keyboard-open="true"] .catalog-filter-actions,
+:root[data-keyboard-open="true"] .profile-editor-footer {
+  position: sticky;
+  z-index: 3;
+  bottom: 0;
+  padding-top: 8px;
+  background: linear-gradient(transparent 0, var(--app-surface-raised) 8px);
+}
+:root[data-keyboard-open="true"] .content-editor-input,
+:root[data-keyboard-open="true"] .assignment-action-form textarea,
+:root[data-keyboard-open="true"] .profile-editor textarea {
+  min-height: 72px;
+  max-height: min(150px, calc(var(--app-visual-viewport-height, 100dvh) - 190px));
+  resize: none;
+}
+:root[data-keyboard-open="true"] [role="dialog"] input,
+:root[data-keyboard-open="true"] [role="dialog"] select,
+:root[data-keyboard-open="true"] [role="dialog"] textarea {
+  font-size: 16px;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .card, .primary, .back, .bottom-nav button, .settings-switch { transition: background-color 120ms cubic-bezier(.2, .8, .2, 1), box-shadow 120ms cubic-bezier(.2, .8, .2, 1), transform 80ms ease; }
   .settings-switch-thumb { transition: background-color 120ms cubic-bezier(.2, .8, .2, 1), transform 120ms cubic-bezier(.2, .8, .2, 1); }
@@ -1025,6 +1082,35 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 430px) {
   body { padding-right: calc(10px + var(--tg-safe-area-inset-right, 0px)); padding-left: calc(10px + var(--tg-safe-area-inset-left, 0px)); }
   .screen { padding-right: 13px; padding-left: 13px; }
+}
+
+@media (max-width: 430px) and (max-height: 760px) {
+  .task-home-screen .screen { padding: 8px 9px 10px; }
+  .task-home { gap: 7px; }
+  .task-home-attention { gap: 1px; padding: 3px 0 3px 8px; border-left-width: 4px; }
+  .task-home-attention-heading { height: 32px; gap: 4px; }
+  .task-home-attention-copy { gap: 1px; }
+  .task-home-eyebrow { font-size: 9px; }
+  .task-home-attention-title { font-size: 16.5px; line-height: 1; }
+  .task-home-attention-count { min-width: 28px; font-size: 27px; }
+  .task-home-attention-list { grid-auto-rows: 38px; }
+  .task-home-attention-action { min-height: 38px; gap: 7px; padding-block: 4px; font-size: 11.5px; }
+  .task-home-attention-switch { min-height: 40px; padding-block: 3px 1px; }
+  .task-home-primary-actions, .task-home-work-grid { gap: 7px; }
+  .task-home-primary { min-height: 106px; gap: 3px; padding: 9px; border-radius: 14px; }
+  .task-home-primary strong { font-size: 16px; }
+  .task-home-primary > span:last-child { font-size: 10px; }
+  .task-home-action-icon { width: 38px; height: 38px; border-radius: 11px; }
+  .task-home-action-icon svg { width: 21px; height: 21px; }
+  .task-home-work-tile { grid-template-rows: auto minmax(26px, auto); min-height: 72px; gap: 2px; padding: 8px; }
+  .task-home-work-count { font-size: 22px; }
+  .task-home-work-label { font-size: 14px; line-height: 1.1; }
+  .task-home-archive { grid-template-columns: 38px minmax(0, 1fr) auto; min-height: 56px; gap: 8px; padding: 7px 9px; }
+  .task-home-archive-icon { width: 38px; height: 38px; border-radius: 11px; }
+  .task-home-archive-icon svg { width: 23px; height: 23px; }
+  .task-home-archive-copy strong { font-size: 14px; }
+  .task-home-archive-copy span { font-size: 9px; }
+  .task-home-archive-count { font-size: 24px; }
 }
 
 @media (min-width: 431px) {
