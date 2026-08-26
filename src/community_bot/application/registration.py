@@ -774,6 +774,45 @@ class RegistrationService:
             require_registration_moderator(actor)
             return await unit_of_work.list_submitted_registrations(limit)
 
+    async def submitted_registrations_for_actor(
+        self, *, actor: ActorContext, limit: int = 20
+    ) -> tuple[RegistrationContext, ...]:
+        """Return the web moderation queue for one authenticated staff actor."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None:
+                message = "Moderation actor is not a registered member."
+                raise PermissionError(message)
+            require_registration_moderator(member)
+            return await unit_of_work.list_submitted_registrations(limit)
+
+    async def moderate_for_actor(
+        self,
+        *,
+        actor: ActorContext,
+        update_id: int,
+        target_member_id: UUID,
+        decision: ModerationDecision,
+        comment: str | None = None,
+    ) -> RegistrationView:
+        """Resolve a web moderation action through the existing command path."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None:
+                message = "Moderation actor is not a registered member."
+                raise PermissionError(message)
+            require_registration_moderator(member)
+            telegram_user_id = member.telegram_user_id
+        return await self.moderate(
+            ModerationCommand(
+                update_id=update_id,
+                actor_telegram_user_id=telegram_user_id,
+                target_member_id=target_member_id,
+                decision=decision,
+                comment=comment,
+            )
+        )
+
     async def moderate(self, command: ModerationCommand) -> RegistrationView:
         """Approve or reject one registration atomically and idempotently."""
         if command.decision is ModerationDecision.APPROVE:

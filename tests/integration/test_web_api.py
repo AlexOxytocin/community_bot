@@ -23,14 +23,12 @@ from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
-    ModerationCommand,
     RegistrationService,
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import MemberRole, MemberStatus
 from community_bot.domain.notifications import DeliveryWindow
-from community_bot.domain.registration import ModerationDecision
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -224,15 +222,38 @@ async def test_onboarding_uses_invitation_restricts_pending_and_activates_after_
             )
             assert application_count == 1
 
-        await service.moderate(
-            ModerationCommand(
-                update_id=70_016,
-                actor_telegram_user_id=administrator.telegram_user_id,
-                target_member_id=target_member_id,
-                decision=ModerationDecision.REJECT,
-                comment="Уточните описание профиля.",
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as admin_client:
+            admin_auth = await admin_client.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    administrator.telegram_user_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                ),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
-        )
+            assert admin_auth.status_code == 204
+            queue = await admin_client.get("/api/v1/moderation/registrations?limit=20")
+            assert queue.status_code == 200
+            assert queue.json()["items"] == [
+                {
+                    "member_id": str(target_member_id),
+                    "telegram_username": None,
+                    "display_name": "Новый участник",
+                    "city": "Buenos Aires — Argentina",
+                    "timezone": "America/Argentina/Buenos_Aires",
+                    "short_bio": "Тестирую регистрацию нового участника.",
+                    "skill_tags": ["QA", "Telegram Mini Apps"],
+                }
+            ]
+            rejected_response = await admin_client.post(
+                f"/api/v1/moderation/registrations/{target_member_id}/decision",
+                headers={"origin": ORIGIN, "idempotency-key": "70024"},
+                json={"decision": "reject", "comment": "Уточните описание профиля."},
+            )
+            assert rejected_response.status_code == 204
+            assert (await admin_client.get("/api/v1/moderation/registrations")).json() == {
+                "items": []
+            }
         rejected = (await client.get("/api/v1/onboarding")).json()
         assert rejected["application_status"] == "rejected"
         assert rejected["review_comment"] == "Уточните описание профиля."
@@ -256,14 +277,22 @@ async def test_onboarding_uses_invitation_restricts_pending_and_activates_after_
         assert resubmitted.status_code == 200
         assert resubmitted.json()["application_status"] == "submitted"
 
-        await service.moderate(
-            ModerationCommand(
-                update_id=70_023,
-                actor_telegram_user_id=administrator.telegram_user_id,
-                target_member_id=target_member_id,
-                decision=ModerationDecision.APPROVE,
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as admin_client:
+            admin_auth = await admin_client.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    administrator.telegram_user_id,
+                    now=datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1),
+                ),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
-        )
+            assert admin_auth.status_code == 204
+            approved_response = await admin_client.post(
+                f"/api/v1/moderation/registrations/{target_member_id}/decision",
+                headers={"origin": ORIGIN, "idempotency-key": "70025"},
+                json={"decision": "approve", "comment": None},
+            )
+            assert approved_response.status_code == 204
         profile = await client.get("/api/v1/me")
         assert profile.status_code == 200, profile.text
         assert profile.json()["display_name"] == "Новый участник"

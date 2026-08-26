@@ -321,6 +321,8 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/submission-drafts/{draft_id}", ("PUT",)),
         ("/api/v1/submission-drafts/{draft_id}/confirm", ("POST",)),
         ("/api/v1/moderation/cases", ("GET",)),
+        ("/api/v1/moderation/registrations", ("GET",)),
+        ("/api/v1/moderation/registrations/{member_id}/decision", ("POST",)),
         ("/api/v1/moderation/cases/{case_id}", ("GET",)),
         ("/api/v1/moderation/cases/{case_id}/resolution", ("POST",)),
         ("/api/v1/leaderboard", ("GET",)),

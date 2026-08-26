@@ -84,6 +84,7 @@ let returnFocusReviewId = null;
 let returnFocusOwnedTaskId = null;
 let returnFocusModeration = false;
 let returnFocusModerationCaseId = null;
+let activeModerationQueue = "registrations";
 let returnFocusProfile = false;
 let returnFocusLeaderboardTab = false;
 let screenRevision = 0;
@@ -236,6 +237,7 @@ const setNavigation = (screen, context) => {
   shell.classList.toggle("settings-screen", screen === "settings");
   shell.classList.toggle("task-home-screen", screen === "task-home");
   shell.classList.toggle("onboarding-screen", screen === "onboarding");
+  shell.classList.toggle("moderation-screen", screen === "moderation" && !context);
   primaryNavigation.hidden = screen === "onboarding" || context;
   shell.classList.remove("catalog-filter-screen", "task-creation-screen");
   document.body.classList.toggle("ui-next-tasks-home", screen === "task-home");
@@ -5612,78 +5614,178 @@ const moderationError = (code, retry) => {
   ];
 };
 
-function showModerationCases(cases, revision) {
+function showModerationCases(cases, registrations, revision) {
   if (revision !== screenRevision) return;
   const focusedCaseId = returnFocusModerationCaseId
     || document.activeElement?.closest?.(".moderation-card")?.dataset.caseId;
   setNavigation("moderation", false);
   title.textContent = "Модерация";
   back.classList.add("hidden");
-  setHeadingAction(element("span", String(cases.length), "queue-count"));
   const boundary = element("section", undefined, "state-view");
   boundary.dataset.screenId = "S01";
   boundary.dataset.uiEngine = "concept-05";
-  boundary.dataset.state = cases.length ? "content" : "empty";
-  boundary.append(element("p", "Открытые обращения", "screen-subtitle"));
-  if (!cases.length) {
+  boundary.dataset.state = cases.length || registrations.length ? "content" : "empty";
+  const tabs = element("div", undefined, "root-tabs moderation-queue-tabs");
+  const registrationTab = element("button", `Регистрации · ${registrations.length}`);
+  const casesTab = element("button", `Обращения · ${cases.length}`);
+  registrationTab.type = casesTab.type = "button";
+  registrationTab.classList.toggle("active-tab", activeModerationQueue === "registrations");
+  casesTab.classList.toggle("active-tab", activeModerationQueue === "cases");
+  registrationTab.setAttribute("aria-pressed", String(activeModerationQueue === "registrations"));
+  casesTab.setAttribute("aria-pressed", String(activeModerationQueue === "cases"));
+  registrationTab.addEventListener("click", () => {
+    activeModerationQueue = "registrations";
+    showModerationCases(cases, registrations, revision);
+  });
+  casesTab.addEventListener("click", () => {
+    activeModerationQueue = "cases";
+    showModerationCases(cases, registrations, revision);
+  });
+  tabs.append(registrationTab, casesTab);
+  boundary.append(tabs);
+
+  if (activeModerationQueue === "registrations" && !registrations.length) {
+    boundary.append(element("p", "Новых анкет нет.", "compact-empty"));
+  } else if (activeModerationQueue === "registrations") {
+    const registrationList = element("ul", undefined, "list moderation-registration-list");
+    for (const item of registrations) {
+      const card = element("button", undefined, "card moderation-card moderation-registration-card");
+      card.type = "button";
+      const username = item.telegram_username ? `@${item.telegram_username}` : "Без username";
+      const copy = element("span", undefined, "moderation-card-copy");
+      copy.append(element("h3", item.display_name), element("span", `${username} · ${item.city}`, "meta"));
+      card.append(copy, element("span", "›", "moderation-card-chevron"));
+      card.addEventListener("click", () => showRegistrationModerationSheet(card, item));
+      const row = element("li");
+      row.append(card);
+      registrationList.append(row);
+    }
+    boundary.append(registrationList);
+  } else if (!cases.length) {
     boundary.append(element("p", "Открытых обращений нет.", "compact-empty"));
     replaceContent(boundary);
     return;
-  }
-  const list = element("ul", undefined, "list");
-  let focusTarget = null;
-  for (const item of cases) {
-    const actionable = item.case_type === "dispute" && item.status === "open";
-    const card = element(actionable ? "button" : "article", undefined, "card moderation-card");
-    card.dataset.caseId = item.id;
-    if (actionable) card.type = "button";
-    const chips = element("div", undefined, "card-chips");
-    chips.append(element("span", moderationStatus(item.status), "chip"));
-    if (item.case_type !== "dispute") chips.append(element("span", "Проверка", "chip muted-chip"));
-    const opened = element("p", "Открыт: ", "meta");
-    opened.append(time(item.opened_at));
-    card.append(chips, element("h3", moderationCaseType(item.case_type)), opened);
-    if (item.current_code) card.append(element("p", "Текущее решение: " + item.current_code, "meta"));
-    if (actionable) {
-      card.addEventListener("click", () => showModerationCase(item.id));
-      if (item.id === focusedCaseId) focusTarget = card;
+  } else {
+    const list = element("ul", undefined, "list moderation-case-list");
+    let focusTarget = null;
+    for (const item of cases) {
+      const actionable = item.case_type === "dispute" && item.status === "open";
+      const card = element(actionable ? "button" : "article", undefined, "card moderation-card moderation-case-card");
+      card.dataset.caseId = item.id;
+      if (actionable) card.type = "button";
+      const copy = element("span", undefined, "moderation-card-copy");
+      const top = element("span", undefined, "moderation-card-topline");
+      top.append(element("span", moderationStatus(item.status), "chip"));
+      if (item.case_type !== "dispute") top.append(element("span", "Проверка", "chip muted-chip"));
+      const opened = element("span", "Открыт: ", "meta");
+      opened.append(time(item.opened_at));
+      copy.append(top, element("h3", moderationCaseType(item.case_type)), opened);
+      if (item.current_code) copy.append(element("span", "Решение: " + item.current_code, "meta"));
+      card.append(copy);
+      if (actionable) card.append(element("span", "›", "moderation-card-chevron"));
+      if (actionable) {
+        card.addEventListener("click", () => showModerationCase(item.id));
+        if (item.id === focusedCaseId) focusTarget = card;
+      }
+      const row = element("li");
+      row.append(card);
+      list.append(row);
     }
-    const row = element("li");
-    row.append(card);
-    list.append(row);
+    boundary.append(list);
+    replaceContent(boundary);
+    focusTarget?.focus({ preventScroll: true });
+    returnFocusModerationCaseId = null;
+    return;
   }
-  boundary.append(list);
   replaceContent(boundary);
-  focusTarget?.focus({ preventScroll: true });
   returnFocusModerationCaseId = null;
+}
+
+function showRegistrationModerationSheet(trigger, item) {
+  const sheet = showAssignmentActionSheet(trigger, {
+    title: "Проверка регистрации",
+    description: "Проверьте анкету перед допуском участника в сообщество.",
+  });
+  const profile = element("div", undefined, "registration-review-profile");
+  const addRow = (label, value) => {
+    const row = element("div", undefined, "registration-review-row");
+    row.append(element("span", label), element("strong", value || "Не указано"));
+    profile.append(row);
+  };
+  addRow("Имя", item.display_name);
+  addRow("Telegram", item.telegram_username ? `@${item.telegram_username}` : "Не указан");
+  addRow("Город", item.city);
+  addRow("Часовой пояс", item.timezone);
+  addRow("О себе", item.short_bio);
+  addRow("Навыки", item.skill_tags.length ? item.skill_tags.join(", ") : "Не указаны");
+  const commentLabel = element("label", undefined, "assignment-action-field");
+  commentLabel.append(element("span", "Комментарий при отклонении"));
+  const comment = element("textarea");
+  comment.maxLength = 500;
+  comment.rows = 3;
+  comment.placeholder = "Что нужно исправить в анкете";
+  commentLabel.append(comment);
+  sheet.body.append(profile, commentLabel);
+  const approve = element("button", "Одобрить", "primary");
+  const reject = element("button", "Отклонить", "secondary danger");
+  approve.type = reject.type = "button";
+  sheet.actions.append(reject, approve);
+  let operationKey = null;
+  const decide = async (decision) => {
+    const reason = comment.value.trim();
+    if (decision === "reject" && !reason) {
+      sheet.status.className = "assignment-action-status is-error";
+      sheet.status.textContent = "Укажите, что участнику нужно исправить.";
+      comment.focus();
+      return;
+    }
+    approve.disabled = reject.disabled = sheet.close.disabled = true;
+    sheet.status.className = "assignment-action-status";
+    sheet.status.textContent = decision === "approve" ? "Одобряем анкету…" : "Возвращаем анкету…";
+    operationKey ||= newOperationKey();
+    try {
+      const response = await apiFetch(
+        `/api/v1/moderation/registrations/${encodeURIComponent(item.member_id)}/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": operationKey },
+          body: JSON.stringify({ decision, comment: reason || null }),
+          credentials: "same-origin",
+        },
+      );
+      if (!response.ok) throw new Error(requestError(response));
+      sheet.dismiss(false);
+      await loadModeration(false);
+    } catch (error) {
+      sheet.status.className = "assignment-action-status is-error";
+      sheet.status.textContent = error instanceof TypeError
+        ? "Сеть недоступна. Повторите решение."
+        : "Не удалось сохранить решение. Обновите очередь и повторите.";
+      approve.disabled = reject.disabled = sheet.close.disabled = false;
+    }
+  };
+  approve.addEventListener("click", () => decide("approve"));
+  reject.addEventListener("click", () => decide("reject"));
+  approve.focus({ preventScroll: true });
 }
 
 async function loadModeration(push = true) {
   const revision = ++screenRevision;
-  const path = "/api/v1/moderation/cases?limit=20";
-  const cached = cachedJson(path);
   returnFocusModeration = true;
   if (push) history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
-  if (cached) {
-    showModerationCases(cached.items, revision);
-  } else {
-    setNavigation("moderation", false);
-    title.textContent = "Модерация";
-    back.classList.add("hidden");
-    replaceContent(
-      element("p", "Открытые обращения", "screen-subtitle"),
-      element("p", "Загружаем очередь…", "compact-empty"),
-    );
-  }
+  setNavigation("moderation", false);
+  title.textContent = "Модерация";
+  back.classList.add("hidden");
+  replaceContent(element("p", "Загружаем очередь…", "compact-empty"));
   try {
-    const page = await getJson(path, (refreshed) => {
-      if (revision === screenRevision) showModerationCases(refreshed.items, revision);
-    });
+    const [casePage, registrationPage] = await Promise.all([
+      getJson("/api/v1/moderation/cases?limit=20"),
+      getJson("/api/v1/moderation/registrations?limit=20"),
+    ]);
     if (revision !== screenRevision) return;
-    if (cached) return;
-    showModerationCases(page.items, revision);
+    showModerationCases(casePage.items, registrationPage.items, revision);
   } catch (error) {
-    if (revision !== screenRevision || cached) return;
+    if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadModeration(false));
@@ -5850,6 +5952,8 @@ const taskHomeIcon = (kind) => {
   svg.innerHTML = {
     create: '<path d="M12 5v14M5 12h14"/>',
     archive: '<path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/>',
+    taken: '<path d="m6.5 12.5 3.5 3.5 7.5-8"/>',
+    created: '<circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c.6-4.2 2.8-6.5 6.5-6.5s5.9 2.3 6.5 6.5"/>',
   }[kind];
   return svg;
 };
@@ -6142,10 +6246,13 @@ function showTaskHome(home, revision = ++screenRevision) {
     const tile = element("button", undefined, "task-home-work-tile");
     tile.type = "button";
     tile.dataset.homeAction = target;
+    const tileIcon = element("span", undefined, "task-home-action-icon task-home-work-icon");
+    tileIcon.append(taskHomeIcon(target));
     tile.append(
-      element("span", eyebrow, "task-home-work-eyebrow"),
+      tileIcon,
       element("strong", taskHomeCount(count), "task-home-work-count"),
-      element("span", label, "task-home-work-label"),
+      element("strong", label, "task-home-work-label"),
+      element("span", eyebrow, "task-home-work-eyebrow"),
     );
     tile.disabled = count === null;
     tile.addEventListener("click", () => taskHomeDestination(target));

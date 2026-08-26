@@ -90,6 +90,7 @@ from community_bot.domain.assignments import (
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.moderation import ModerationError, ResolutionCode
 from community_bot.domain.registration import (
+    ModerationDecision,
     ProfileField,
     ProfileLinkAction,
     ProfileLinkCommand,
@@ -461,6 +462,33 @@ class ModerationCaseDto(_Dto):
 
 class ModerationCasesDto(_Dto):
     items: tuple[ModerationCaseDto, ...]
+
+
+class RegistrationModerationItemDto(_Dto):
+    member_id: UUID
+    telegram_username: str | None
+    display_name: str
+    city: str
+    timezone: str
+    short_bio: str | None
+    skill_tags: tuple[str, ...]
+
+
+class RegistrationModerationQueueDto(_Dto):
+    items: tuple[RegistrationModerationItemDto, ...]
+
+
+class RegistrationModerationDecisionRequest(_Dto):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    decision: ModerationDecision
+    comment: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_rejection_comment(self) -> RegistrationModerationDecisionRequest:
+        """Require a useful explanation when returning an application."""
+        if self.decision is ModerationDecision.REJECT and not (self.comment or "").strip():
+            raise ValueError("Registration rejection requires a comment.")
+        return self
 
 
 class ModerationCaseDetailDto(_Dto):
@@ -1647,6 +1675,59 @@ def create_web_app(
             return _error_response(409, "assignment_unavailable")
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
+    @app.get(
+        "/api/v1/moderation/registrations",
+        response_model=RegistrationModerationQueueDto,
+    )
+    async def moderation_registrations(
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    ) -> JSONResponse:
+        try:
+            items = await registration.submitted_registrations_for_actor(actor=actor, limit=limit)
+        except PermissionError:
+            return _error_response(403, "moderation_unavailable")
+        return _json_response(
+            RegistrationModerationQueueDto(
+                items=tuple(_registration_moderation_dto(item) for item in items)
+            )
+        )
+
+    @app.post(
+        "/api/v1/moderation/registrations/{member_id}/decision",
+        status_code=204,
+    )
+    async def moderate_registration(member_id: UUID, request: Request) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "RegistrationModerationDecisionRequest | None",
+            await _submission_request(request, RegistrationModerationDecisionRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        update_id = _submission_update_id(
+            actor.member_id,
+            member_id,
+            f"registration:{payload.decision.value}",
+            operation_key,
+            namespace=b"registration-moderation-v1",
+        )
+        try:
+            await registration.moderate_for_actor(
+                actor=actor,
+                update_id=update_id,
+                target_member_id=member_id,
+                decision=payload.decision,
+                comment=payload.comment,
+            )
+        except PermissionError:
+            return _error_response(403, "moderation_unavailable")
+        except (LookupError, RegistrationError):
+            return _error_response(409, "registration_unavailable")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.get("/api/v1/moderation/cases", response_model=ModerationCasesDto)
     async def moderation_cases(
         actor: ActorContext = Depends(current_actor),
@@ -2278,6 +2359,24 @@ def _onboarding_dto(view: RegistrationView) -> OnboardingDto:
         step=context.current_step,
         payload=context.payload,
         review_comment=context.review_comment,
+    )
+
+
+def _registration_moderation_dto(
+    context: RegistrationContext,
+) -> RegistrationModerationItemDto:
+    payload = context.payload
+    skills = payload.get(ProfileField.SKILL_TAGS.value, ())
+    return RegistrationModerationItemDto(
+        member_id=context.member_id,
+        telegram_username=context.telegram_username,
+        display_name=str(payload.get(ProfileField.DISPLAY_NAME.value, "Участник")),
+        city=str(payload.get(ProfileField.CITY.value, "")),
+        timezone=str(payload.get(ProfileField.TIMEZONE.value, "UTC")),
+        short_bio=(
+            str(value).strip() if (value := payload.get(ProfileField.SHORT_BIO.value)) else None
+        ),
+        skill_tags=tuple(str(item) for item in skills) if isinstance(skills, list) else (),
     )
 
 
