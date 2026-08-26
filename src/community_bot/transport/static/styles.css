@@ -452,11 +452,6 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 }
 .bottom-nav button { position: relative; display: grid; place-items: center; align-content: center; gap: 3px; min-width: 44px; min-height: 56px; padding: 5px 2px 3px; border: 0; background: transparent; color: var(--app-text-muted); cursor: pointer; font-size: 9px; font-weight: 700; }
 .nav-icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
-.nav-settings-icon, .nav-settings-label { display: none; }
-:root[data-ui-theme-scope="next"] .nav-profile-icon,
-:root[data-ui-theme-scope="next"] .nav-profile-label { display: none; }
-:root[data-ui-theme-scope="next"] .nav-settings-icon,
-:root[data-ui-theme-scope="next"] .nav-settings-label { display: block; }
 .bottom-nav button[aria-pressed="true"] { color: var(--app-accent); }
 .bottom-nav button[aria-pressed="true"]::before { position: absolute; top: -1px; width: 24px; height: 2px; border-radius: 0 0 2px 2px; background: var(--app-accent); content: ""; }
 .shell.context-screen .bottom-nav { display: none; }
@@ -465,89 +460,6 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .hidden { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid var(--app-focus); outline-offset: 3px; }
 
-.ui-next-preview .screen { padding-top: 16px; }
-.ui-next-gate { gap: 14px; }
-.ui-next-gate-title { font-size: 24px; line-height: 1.15; }
-.ui-next-gate-copy { margin: -4px 0 0; font-size: 13px; line-height: 1.5; }
-.ui-next-theme-setting {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  margin: 0;
-  padding: 11px;
-  border: 1px solid var(--app-border);
-  border-radius: 14px;
-  background: var(--app-surface);
-}
-.ui-next-theme-setting legend { padding: 0 5px; color: var(--app-text-muted); font-size: 11px; font-weight: 800; }
-.ui-next-theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.ui-next-theme-options button {
-  min-width: 0;
-  min-height: 42px;
-  padding: 7px 4px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: var(--app-surface-raised);
-  color: var(--app-text-muted);
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 800;
-}
-.ui-next-theme-options button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent) 12%, var(--app-surface));
-  color: var(--app-accent);
-}
-.ui-next-contract-facts {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0;
-  margin: 0;
-  overflow: hidden;
-  border: 1px solid var(--app-border);
-  border-radius: 14px;
-  background: var(--app-surface);
-}
-.ui-next-contract-facts dt, .ui-next-contract-facts dd {
-  min-width: 0;
-  margin: 0;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--app-border);
-  font-size: 12px;
-}
-.ui-next-contract-facts dt { color: var(--app-text-muted); }
-.ui-next-contract-facts dd { font-weight: 800; text-align: right; }
-.ui-next-contract-facts dt:nth-last-of-type(1), .ui-next-contract-facts dd:last-child { border-bottom: 0; }
-.ui-next-stage-list {
-  display: grid;
-  gap: 7px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.ui-next-stage-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  min-height: 48px;
-  padding: 9px 11px;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  background: var(--app-surface);
-  font-size: 12px;
-}
-.ui-next-stage-item span:first-child { min-width: 0; font-weight: 700; }
-.ui-next-stage-item span:last-child { color: var(--app-text-muted); font-size: 10px; text-align: right; }
-.ui-next-stage-item[data-stage-state="completed"] {
-  background: color-mix(in srgb, var(--app-success) 7%, var(--app-surface));
-}
-.ui-next-stage-item[data-stage-state="current"] {
-  border-color: color-mix(in srgb, var(--app-accent) 60%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent) 7%, var(--app-surface));
-}
-.ui-next-stage-item[data-stage-state="completed"] span:last-child { color: var(--app-success); }
-.ui-next-stage-item[data-stage-state="current"] span:last-child { color: var(--app-accent); }
 
 .task-home-screen .screen { gap: 0; padding: 12px 10px 16px; }
 .task-home-screen .screen-heading {

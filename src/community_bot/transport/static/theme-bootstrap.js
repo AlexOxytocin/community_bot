@@ -1,6 +1,5 @@
 (() => {
   const parameters = new URLSearchParams(location.search);
-  if (parameters.get("ui") !== "next") return;
 
   const allowed = new Set(["system", "light", "dark"]);
   const storageKey = "community_bot_ui_theme";

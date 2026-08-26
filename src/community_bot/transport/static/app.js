@@ -2,17 +2,13 @@ const assetRelease = new URL(import.meta.url).searchParams.get("release") || "lo
 const {
   applyPlatformTheme,
   applyPreviewTheme,
-  getPreviewThemePreference,
   openExternalLink,
   watchSystemPreviewTheme,
 } = await import(`/mini-assets/platform.js?release=${encodeURIComponent(assetRelease)}`);
 
-const uiNextEnabled = new URLSearchParams(location.search).get("ui") === "next";
 applyPlatformTheme();
-if (uiNextEnabled) {
-  applyPreviewTheme();
-  watchSystemPreviewTheme();
-}
+applyPreviewTheme();
+watchSystemPreviewTheme();
 
 const content = document.getElementById("content");
 const title = document.getElementById("screen-title");
@@ -33,7 +29,6 @@ shell.addEventListener("scroll", anchorShellScroll, { passive: true });
 anchorShellScroll();
 const catalogNav = document.getElementById("catalog-nav");
 const profileNav = document.getElementById("profile-nav");
-const assignmentsNav = document.getElementById("assignments-nav");
 const participantsNav = document.getElementById("participants-nav");
 const moderationNav = document.getElementById("moderation-nav");
 const heading = title.parentElement;
@@ -205,12 +200,12 @@ const setHeaderControl = (
   kind = null,
   { label = null, screenLabel = null, hideTitle = false, onBack = null } = {},
 ) => {
-  const normalized = kind === "back" || (kind === "close" && uiNextEnabled) ? kind : null;
+  const normalized = kind === "back" || kind === "close" ? kind : null;
   const titleless = normalized === "close" || hideTitle;
   headerBackAction = normalized === "back" ? onBack : null;
   back.classList.toggle("hidden", normalized === null);
   back.dataset.navigationKind = normalized || "none";
-  back.textContent = normalized === "close" ? "×" : uiNextEnabled ? "‹" : "←";
+  back.textContent = normalized === "close" ? "×" : "‹";
   back.setAttribute("aria-label", label || (normalized === "close" ? "Закрыть" : "Назад"));
   heading.classList.toggle("navigation-close", normalized === "close");
   heading.classList.toggle("navigation-titleless", titleless);
@@ -242,11 +237,9 @@ const setNavigation = (screen, context) => {
   primaryNavigation.hidden = screen === "onboarding" || context;
   shell.classList.remove("catalog-filter-screen", "task-creation-screen");
   document.body.classList.toggle("ui-next-tasks-home", screen === "task-home");
-  if (uiNextEnabled) assignmentsNav.hidden = true;
   shell.classList.remove("task-detail-screen", "assignment-detail-screen", "assignment-review-screen");
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog" || screen === "task-home"));
   profileNav.setAttribute("aria-pressed", String(screen === "profile" || screen === "settings"));
-  assignmentsNav.setAttribute("aria-pressed", String(screen === "assignments"));
   participantsNav.setAttribute("aria-pressed", String(screen === "participants"));
   moderationNav.setAttribute("aria-pressed", String(screen === "moderation"));
   setHeaderControl(context ? "back" : null);
@@ -552,10 +545,6 @@ const assignmentStatus = (value) => ({
   disputed: "Открыт спор",
   reviewer_required: "Нужен проверяющий",
 }[value] || value);
-
-const createdAssignmentsButton = element("button", "Созданные мной", "back");
-createdAssignmentsButton.type = "button";
-createdAssignmentsButton.addEventListener("click", () => loadCreatedReviews());
 
 const newOperationKey = () => {
   const words = new Uint32Array(2);
@@ -903,50 +892,39 @@ function showCatalog(revision = ++screenRevision) {
   filterTrigger.type = "button";
   filterTrigger.setAttribute("aria-label", "Фильтры");
   filterTrigger.append(slidersIcon());
-  if (!uiNextEnabled) filterTrigger.append(element("span", "Фильтры"));
   if (activeFilterCount) {
     filterTrigger.classList.add("is-active");
     filterTrigger.setAttribute("aria-label", `Фильтры, выбрано: ${activeFilterCount}`);
     filterTrigger.append(element("span", String(activeFilterCount), "catalog-filter-count"));
   }
   markTransition(filterTrigger, "PE-012", "open_filters");
-  filterTrigger.addEventListener("click", () => {
-    if (uiNextEnabled) showCatalogFilterSheet(filterTrigger);
-    else showCatalogFilters();
+  filterTrigger.addEventListener("click", () => showCatalogFilterSheet(filterTrigger));
+  const catalogBack = element("button", "‹", "secondary catalog-back-button");
+  catalogBack.type = "button";
+  catalogBack.setAttribute("aria-label", "Назад к заданиям");
+  catalogBack.addEventListener("click", () => void loadTaskHome());
+  const search = element("label", undefined, "catalog-search");
+  const searchInput = element("input");
+  searchInput.type = "search";
+  searchInput.placeholder = "Название или описание";
+  searchInput.setAttribute("aria-label", "Поиск по названию и описанию");
+  searchInput.value = catalogFilters.query;
+  search.append(searchIcon(), searchInput);
+  const actionEnd = element("div", undefined, "catalog-actions-end");
+  const currentSortLabel = catalogSortOptions.find(([, value]) => value === catalogSort)?.[0] || "Создано позже";
+  const sort = element("button", undefined, "secondary catalog-sort-button");
+  sort.type = "button";
+  sort.setAttribute("aria-label", `Сортировка: ${currentSortLabel}`);
+  sort.setAttribute("aria-haspopup", "dialog");
+  sort.append(sortIcon());
+  sort.classList.toggle("is-active", catalogSort !== "created_desc");
+  sort.addEventListener("click", () => showCatalogSortSheet(sort));
+  actionEnd.append(filterTrigger, sort);
+  actions.append(catalogBack, search, actionEnd);
+  searchInput.addEventListener("input", () => {
+    catalogFilters.query = searchInput.value;
+    updateCatalogResults(boundary, results);
   });
-  if (uiNextEnabled) {
-    const catalogBack = element("button", "‹", "secondary catalog-back-button");
-    catalogBack.type = "button";
-    catalogBack.setAttribute("aria-label", "Назад к заданиям");
-    catalogBack.addEventListener("click", () => void loadTaskHome());
-    const search = element("label", undefined, "catalog-search");
-    const searchInput = element("input");
-    searchInput.type = "search";
-    searchInput.placeholder = "Название или описание";
-    searchInput.setAttribute("aria-label", "Поиск по названию и описанию");
-    searchInput.value = catalogFilters.query;
-    search.append(searchIcon(), searchInput);
-    const actionEnd = element("div", undefined, "catalog-actions-end");
-    const currentSortLabel = catalogSortOptions.find(([, value]) => value === catalogSort)?.[0] || "Создано позже";
-    const sort = element("button", undefined, "secondary catalog-sort-button");
-    sort.type = "button";
-    sort.setAttribute("aria-label", `Сортировка: ${currentSortLabel}`);
-    sort.setAttribute("aria-haspopup", "dialog");
-    sort.append(sortIcon());
-    sort.classList.toggle("is-active", catalogSort !== "created_desc");
-    sort.addEventListener("click", () => showCatalogSortSheet(sort));
-    actionEnd.append(filterTrigger, sort);
-    actions.append(catalogBack, search, actionEnd);
-    searchInput.addEventListener("input", () => {
-      catalogFilters.query = searchInput.value;
-      updateCatalogResults(boundary, results);
-    });
-  } else {
-    const create = element("button", "+ Создать", "secondary compact-create");
-    create.type = "button";
-    create.addEventListener("click", () => beginTaskCreationFlow());
-    actions.append(filterTrigger, create);
-  }
   const results = element("div", undefined, "catalog-results");
   boundary.append(actions, results);
   const focusTarget = updateCatalogResults(boundary, results);
@@ -1016,38 +994,6 @@ function taskListCard(task, { preview = false } = {}) {
   if (!preview) label.append(element("span", "›", "chevron"));
   card.append(chips, label, element("p", task.description, "muted"), meta);
   return card;
-}
-
-function showCatalogFilters(push = true) {
-  const nextState = { screen: "catalog-filters" };
-  if (push) history.pushState(nextState, "", presentationLocationFor("T02"));
-  else history.replaceState(nextState, "", presentationLocationFor("T02"));
-  setNavigation("", true);
-  title.textContent = "Фильтры заданий";
-  back.classList.remove("hidden");
-  const form = element("form", undefined, "task-form card");
-  const formatLabel = element("label", "Формат");
-  const format = element("select");
-  format.append(new Option("Любой", ""), new Option("Онлайн", "online"), new Option("Офлайн", "offline"));
-  format.value = catalogFilters.format;
-  formatLabel.append(format);
-  const rewardLabel = element("label", "Награда от");
-  const reward = element("input");
-  reward.type = "number";
-  reward.min = "1";
-  reward.value = catalogFilters.minReward;
-  rewardLabel.append(reward);
-  const apply = element("button", "Применить", "primary");
-  apply.type = "submit";
-  form.append(formatLabel, rewardLabel, apply);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    catalogFilters = { ...emptyCatalogFilters(), format: format.value, minReward: reward.value };
-    history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    showCatalog();
-  });
-  replaceContent(connectedBoundary("T02", "content", form));
-  format.focus({ preventScroll: true });
 }
 
 async function taskCreationCommand(body) {
@@ -2515,13 +2461,9 @@ function beginTaskCreationFlow(push = true) {
 
 async function openTaskCreation(forceEdit = false, recovery = null) {
   setNavigation("", true);
-  title.textContent = uiNextEnabled ? "Новое задание" : "Создать задание";
-  if (uiNextEnabled) {
-    shell.classList.add("task-creation-screen");
-    setHeaderControl("back", { screenLabel: "Новое задание" });
-  } else {
-    back.classList.remove("hidden");
-  }
+  title.textContent = "Новое задание";
+  shell.classList.add("task-creation-screen");
+  setHeaderControl("back", { screenLabel: "Новое задание" });
   replaceContent(element("p", "Загружаем черновик…", "status muted"));
   try {
     const state = await getJson("/api/v1/task-creation");
@@ -2556,15 +2498,6 @@ const valueSection = (heading, value) => {
 const valueOrDash = (value) => value == null ? "—" : String(value);
 const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
-
-const pencilButton = (label, route, state, revision, key) => {
-  const button = element("button", "✎", "profile-pencil");
-  button.type = "button";
-  button.dataset.profileAction = key;
-  button.setAttribute("aria-label", `Редактировать ${label.toLowerCase()}`);
-  button.addEventListener("click", () => openProfileRoute(state, revision, route, true));
-  return button;
-};
 
 const profileEditTrigger = (label, key, onOpen, className = "profile-card") => {
   const trigger = element("button", undefined, `${className} profile-edit-trigger`);
@@ -2863,22 +2796,26 @@ const publicLinkRow = (link) => {
 function ownProfileOverview(state, revision) {
   const { me, member } = state.profile;
   const view = element("section", undefined, "profile-overview");
-  const identity = uiNextEnabled
-    ? profileEditTrigger("имя", "name", (trigger) => showProfileFieldSheet(trigger, state, revision, "name"), "profile-card profile-identity-card")
-    : element("section", undefined, "profile-card profile-identity-card");
+  const identity = profileEditTrigger(
+    "имя",
+    "name",
+    (trigger) => showProfileFieldSheet(trigger, state, revision, "name"),
+    "profile-card profile-identity-card",
+  );
   const copy = element("div", undefined, "identity-copy");
   copy.append(element("h2", me.display_name));
   if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
   identity.append(element("span", initialsFor(me.display_name), "avatar"), copy);
-  if (uiNextEnabled) identity.append(element("span", "›", "profile-edit-chevron"));
-  else identity.append(pencilButton("имя", "/profile/edit/name", state, revision, "name"));
-  const city = uiNextEnabled
-    ? profileEditTrigger("город", "city", (trigger) => showProfileCitySheet(trigger, state, revision), "profile-card profile-inline-card")
-    : element("section", undefined, "profile-card profile-inline-card");
+  identity.append(element("span", "›", "profile-edit-chevron"));
+  const city = profileEditTrigger(
+    "город",
+    "city",
+    (trigger) => showProfileCitySheet(trigger, state, revision),
+    "profile-card profile-inline-card",
+  );
   city.append(element("div", undefined, "profile-copy"));
-  if (uiNextEnabled) city.append(element("span", "›", "profile-edit-chevron"));
-  else city.append(pencilButton("город", "/profile/edit/city", state, revision, "city"));
+  city.append(element("span", "›", "profile-edit-chevron"));
   city.firstChild.append(
     element("span", "Город", "section-label"),
     element("strong", me.city || "Не указан"),
@@ -2892,19 +2829,21 @@ function ownProfileOverview(state, revision) {
   }
   view.append(identity, city, metrics);
   const blocks = [
-    ["О себе", me.short_bio, "/profile/edit/bio", "bio", "Добавить описание", "Расскажите о себе"],
-    ["Навыки", me.skill_tags, "/profile/edit/skills", "skills", "Добавить навыки", "Добавьте навыки"],
+    ["О себе", me.short_bio, "bio", "Добавить описание", "Расскажите о себе"],
+    ["Навыки", me.skill_tags, "skills", "Добавить навыки", "Добавьте навыки"],
   ];
-  for (const [label, value, route, key, cta, emptyTitle] of blocks) {
+  for (const [label, value, key, cta, emptyTitle] of blocks) {
     const filled = Array.isArray(value) ? value.length > 0 : Boolean(value);
     const openSheet = (trigger) => showProfileFieldSheet(trigger, state, revision, key);
-    const block = uiNextEnabled
-      ? profileEditTrigger(label, key, openSheet, filled ? "profile-card profile-content-card" : "profile-empty-card")
-      : element("section", undefined, filled ? "profile-card profile-content-card" : "profile-empty-card");
+    const block = profileEditTrigger(
+      label,
+      key,
+      openSheet,
+      filled ? "profile-card profile-content-card" : "profile-empty-card",
+    );
     if (filled) {
       block.append(element("h3", label, "section-label"));
-      if (uiNextEnabled) block.append(element("span", "›", "profile-edit-chevron"));
-      else block.append(pencilButton(label, route, state, revision, key));
+      block.append(element("span", "›", "profile-edit-chevron"));
       if (Array.isArray(value)) {
         const chips = element("div", undefined, "profile-chips");
         value.forEach((item) => chips.append(element("span", item)));
@@ -2912,47 +2851,42 @@ function ownProfileOverview(state, revision) {
       } else block.append(element("p", value));
     } else {
       block.append(element("strong", emptyTitle), element("p", key === "bio" ? "Пара строк поможет другим участникам понять, чем вы занимаетесь." : "Навыки помогут быстрее понять, с чем к вам можно обратиться.", "muted"));
-      if (uiNextEnabled) block.append(element("span", cta, "profile-edit-cta"), element("span", "›", "profile-edit-chevron"));
-      else {
-        const add = element("button", cta, "secondary");
-        add.type = "button";
-        add.dataset.profileAction = key;
-        add.addEventListener("click", () => openProfileRoute(state, revision, route, true));
-        block.append(add);
-      }
+      block.append(
+        element("span", cta, "profile-edit-cta"),
+        element("span", "›", "profile-edit-chevron"),
+      );
     }
     view.append(block);
   }
   const links = me.profile_links || [];
   const linksBlock = element("section", undefined, links.length ? "profile-links-block" : "profile-empty-card");
   if (links.length) {
-    const header = uiNextEnabled
-      ? profileEditTrigger("ссылки", "links", (trigger) => showProfileLinksSheet(trigger, state, revision), "profile-section-heading")
-      : element("div", undefined, "profile-section-heading");
+    const header = profileEditTrigger(
+      "ссылки",
+      "links",
+      (trigger) => showProfileLinksSheet(trigger, state, revision),
+      "profile-section-heading",
+    );
     header.append(element("h3", "Ссылки"));
-    if (uiNextEnabled) header.append(element("span", "›", "profile-edit-chevron"));
-    else header.append(pencilButton("ссылки", "/profile/links", state, revision, "links"));
+    header.append(element("span", "›", "profile-edit-chevron"));
     linksBlock.append(header);
     links.forEach((link) => linksBlock.append(publicLinkRow(link)));
   } else {
-    if (uiNextEnabled) {
-      linksBlock.remove();
-      const emptyLinks = profileEditTrigger("ссылки", "links", (trigger) => showProfileLinksSheet(trigger, state, revision), "profile-empty-card");
-      emptyLinks.append(
-        element("strong", "Добавьте ссылки"),
-        element("p", "LinkedIn, GitHub, сайт или другие публичные страницы.", "muted"),
-        element("span", "Добавить ссылки", "profile-edit-cta"),
-        element("span", "›", "profile-edit-chevron"),
-      );
-      view.append(emptyLinks);
-      return view;
-    }
-    linksBlock.append(element("strong", "Добавьте ссылки"), element("p", "LinkedIn, GitHub, сайт или другие публичные страницы.", "muted"));
-    const add = element("button", "Добавить ссылки", "secondary");
-    add.type = "button";
-    add.dataset.profileAction = "links";
-    add.addEventListener("click", () => openProfileRoute(state, revision, "/profile/links", true));
-    linksBlock.append(add);
+    linksBlock.remove();
+    const emptyLinks = profileEditTrigger(
+      "ссылки",
+      "links",
+      (trigger) => showProfileLinksSheet(trigger, state, revision),
+      "profile-empty-card",
+    );
+    emptyLinks.append(
+      element("strong", "Добавьте ссылки"),
+      element("p", "LinkedIn, GitHub, сайт или другие публичные страницы.", "muted"),
+      element("span", "Добавить ссылки", "profile-edit-cta"),
+      element("span", "›", "profile-edit-chevron"),
+    );
+    view.append(emptyLinks);
+    return view;
   }
   view.append(linksBlock);
   return view;
@@ -3718,9 +3652,7 @@ function karmaForm(state, revision) {
         draft.refreshError = true;
       }
       title.textContent = "Карма сохранена";
-      if (uiNextEnabled) {
-        setHeaderControl("back", { screenLabel: "Карма сохранена", hideTitle: true });
-      }
+      setHeaderControl("back", { screenLabel: "Карма сохранена", hideTitle: true });
       history.replaceState(
         { screen: "member-karma-success", memberId: state.member.member_id },
         "",
@@ -3756,8 +3688,8 @@ function karmaForm(state, revision) {
       transitionId: "PE-059",
       transitionTrigger: "authoritative_karma_success",
       onEdit: () => openKarmaEditor(state, revision, false),
-      hideHeading: uiNextEnabled,
-      showEdit: !uiNextEnabled,
+      hideHeading: true,
+      showEdit: false,
       onBack: () => openKarmaEditor(state, revision, false),
       onConfirm: saveKarma,
     });
@@ -3774,11 +3706,7 @@ function openKarmaEditor(state, revision, push = true) {
   else history.replaceState(nextState, "", location);
   setNavigation("", true);
   title.textContent = "Оценка кармы";
-  if (uiNextEnabled) {
-    setHeaderControl("back", { screenLabel: "Оценка кармы", hideTitle: true });
-  } else {
-    back.classList.remove("hidden");
-  }
+  setHeaderControl("back", { screenLabel: "Оценка кармы", hideTitle: true });
   replaceContent(connectedBoundary("P03", "content", karmaForm(state, revision)));
   content.querySelector("select")?.focus({ preventScroll: true });
 }
@@ -3811,13 +3739,11 @@ async function showMemberProfile(memberId, push = true) {
   memberProfileHasInternalHistory = push;
   setNavigation("", true);
   title.textContent = "Профиль участника";
-  if (uiNextEnabled) {
-    setHeaderControl("back", {
-      label: "Назад к участникам",
-      screenLabel: "Профиль участника",
-      hideTitle: true,
-    });
-  }
+  setHeaderControl("back", {
+    label: "Назад к участникам",
+    screenLabel: "Профиль участника",
+    hideTitle: true,
+  });
   showMemberState(state, revision);
   back.focus({ preventScroll: true });
   try {
@@ -3832,7 +3758,7 @@ function showProfileState(state, revision) {
   if (revision !== screenRevision) return;
   setNavigation(state.route === "/profile" ? "profile" : "", state.route !== "/profile");
   activeProfileState = state;
-  if (uiNextEnabled && state.route === "/profile") {
+  if (state.route === "/profile") {
     setHeaderControl("back", {
       label: "Назад в параметры",
       screenLabel: "Профиль",
@@ -3878,7 +3804,7 @@ function showProfileState(state, revision) {
     node = ownProfileOverview(state, revision);
   }
   title.textContent = headingText;
-  if (uiNextEnabled && titlelessProfileRoutes.has(state.route)) {
+  if (titlelessProfileRoutes.has(state.route)) {
     setHeaderControl("back", { screenLabel: headingText, hideTitle: true });
   }
   replaceContent(node);
@@ -3954,7 +3880,6 @@ function loadProfile(push = true) {
 function showSettings(push = true) {
   screenRevision += 1;
   activeProfileState = null;
-  document.body.classList.remove("ui-next-preview");
   setNavigation("settings", false);
   title.textContent = "Параметры";
   back.classList.add("hidden");
@@ -4010,13 +3935,11 @@ function showTaskDetail(task, push = true) {
   setNavigation("", true);
   shell.classList.add("task-detail-screen");
   title.textContent = "Карточка задания";
-  if (uiNextEnabled) {
-    setHeaderControl("back", {
-      label: "Назад к заданиям",
-      screenLabel: "Карточка задания",
-      hideTitle: true,
-    });
-  }
+  setHeaderControl("back", {
+    label: "Назад к заданиям",
+    screenLabel: "Карточка задания",
+    hideTitle: true,
+  });
   if (push) history.pushState({ screen: "task", taskId: task.id }, "", presentationLocationFor("T03", task.id));
   const detail = element("article", undefined, "card detail task-detail");
   detail.append(element("h3", task.title, "task-detail-title"));
@@ -4093,7 +4016,7 @@ async function acceptTask(task, button, status) {
       {
         screen: "assignment",
         assignmentId: payload.id,
-        ...(uiNextEnabled ? { returnTo: "assignments-taken" } : {}),
+        returnTo: "assignments-taken",
       },
       "",
       presentationLocationFor("M03", payload.id),
@@ -4321,92 +4244,13 @@ function showNextTakenAssignments(revision, screenId = "M01") {
 
 function showAssignments(revision = ++screenRevision) {
   if (revision !== screenRevision) return;
-  if (uiNextEnabled) {
-    showNextTakenAssignments(revision);
-    return;
-  }
-  setNavigation("assignments", false);
-  title.textContent = "Мои задания";
-  back.classList.add("hidden");
-  const boundary = element("section", undefined, "state-view");
-  boundary.dataset.screenId = "M01";
-  boundary.dataset.uiEngine = "concept-05";
-  boundary.dataset.state = assignments.length ? "content" : "empty";
-  boundary.append(element("p", "Работа и проверки в одном месте", "screen-subtitle"));
-  const tabs = element("div", undefined, "segmented root-tabs");
-  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
-  active.type = "button";
-  active.addEventListener("click", () => showTakenAssignments());
-  createdAssignmentsButton.classList.remove("active-tab");
-  createdAssignmentsButton.disabled = false;
-  tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
-  if (!assignments.length) {
-    boundary.append(element("p", "Активных заданий пока нет.", "compact-empty"));
-    replaceContent(boundary);
-    restoreModerationFocus();
-    return;
-  }
-  const summary = element("button", undefined, "card assignment-card");
-  summary.type = "button";
-  summary.append(
-    element("h3", "Взятые мной"),
-    element("p", `${assignments.length} активных назначений`, "muted"),
-  );
-  summary.addEventListener("click", () => showTakenAssignments());
-  boundary.append(summary);
-  replaceContent(boundary);
-  restoreModerationFocus();
+  showNextTakenAssignments(revision);
 }
 
 function showTakenAssignments() {
   screenRevision += 1;
   history.replaceState({ screen: "assignments-taken" }, "", presentationLocationFor("M02"));
-  if (uiNextEnabled) {
-    showNextTakenAssignments(screenRevision, "M02");
-    return;
-  }
-  setNavigation("assignments", false);
-  title.textContent = "Мои задания";
-  back.classList.add("hidden");
-  const boundary = connectedBoundary("M02", "content");
-  boundary.append(element("p", "Взятые мной", "screen-subtitle"));
-  const tabs = element("div", undefined, "segmented root-tabs");
-  const active = element("button", `В работе · ${assignments.length}`, "active-tab");
-  active.type = "button";
-  active.disabled = true;
-  createdAssignmentsButton.classList.remove("active-tab");
-  createdAssignmentsButton.disabled = false;
-  tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
-  const list = element("ul", undefined, "list");
-  let focusTarget = null;
-  for (const assignment of assignments) {
-    const button = element("button", undefined, "card assignment-card");
-    button.type = "button";
-    const chips = element("div", undefined, "card-chips");
-    chips.append(element("span", assignmentStatus(assignment.assignment_status), "chip"));
-    const deadline = element("p", "Срок: ", "meta");
-    deadline.append(time(assignment.task_deadline_at));
-    button.append(
-      chips,
-      element("h3", assignment.task_title),
-      deadline,
-    );
-    if (assignment.result_summary) {
-      button.append(element("p", assignment.result_summary, "muted"));
-    }
-    button.addEventListener("click", () => showAssignmentDetail(assignment.id));
-    if (assignment.id === returnFocusAssignmentId) focusTarget = button;
-    const item = element("li");
-    item.append(button);
-    list.append(item);
-  }
-  boundary.append(list);
-  replaceContent(boundary);
-  focusTarget?.focus({ preventScroll: true });
-  returnFocusAssignmentId = null;
-  restoreModerationFocus();
+  showNextTakenAssignments(screenRevision, "M02");
 }
 
 async function loadAssignments(push = true) {
@@ -4462,26 +4306,24 @@ function showOwnedTask(task, push = true) {
   if (push) history.pushState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
   setNavigation("", true);
   title.textContent = "Созданное задание";
-  if (uiNextEnabled) {
-    const returnScope = ownedTaskListScope;
-    setHeaderControl("back", {
-      label: "Назад к созданным заданиям",
-      screenLabel: "Созданное задание",
-      hideTitle: true,
-      onBack: () => {
-        const baseLocation = presentationLocationFor("M09");
-        const nextLocation = returnScope === "archive"
-          ? `${baseLocation}&scope=archive`
-          : baseLocation;
-        history.replaceState(
-          { screen: "created-assignments", scope: returnScope },
-          "",
-          nextLocation,
-        );
-        void loadCreatedReviews(false, returnScope);
-      },
-    });
-  }
+  const returnScope = ownedTaskListScope;
+  setHeaderControl("back", {
+    label: "Назад к созданным заданиям",
+    screenLabel: "Созданное задание",
+    hideTitle: true,
+    onBack: () => {
+      const baseLocation = presentationLocationFor("M09");
+      const nextLocation = returnScope === "archive"
+        ? `${baseLocation}&scope=archive`
+        : baseLocation;
+      history.replaceState(
+        { screen: "created-assignments", scope: returnScope },
+        "",
+        nextLocation,
+      );
+      void loadCreatedReviews(false, returnScope);
+    },
+  });
   const detail = element("article", undefined, "card detail");
   detail.append(
     element("h3", task.title),
@@ -4907,91 +4749,12 @@ function showNextCreatedAssignments(revision) {
 
 function renderCreatedAssignments(revision) {
   if (revision !== screenRevision) return;
-  if (uiNextEnabled) {
-    showNextCreatedAssignments(revision);
-    return;
-  }
-  setNavigation("assignments", false);
-  title.textContent = "Мои задания";
-  back.classList.add("hidden");
-  const boundary = connectedBoundary("M09", "content");
-  boundary.classList.add("owned-tasks-view");
-  const tabs = element("div", undefined, "segmented root-tabs");
-  let focusTarget = null;
-  const active = element("button", `В работе · ${assignments.length}`);
-  active.type = "button";
-  active.addEventListener("click", () => showTakenAssignments());
-  createdAssignmentsButton.classList.add("active-tab");
-  createdAssignmentsButton.disabled = true;
-  tabs.append(active, createdAssignmentsButton);
-  boundary.append(tabs);
-  if (!ownedTasks.length) {
-    boundary.append(element("p", "Созданных заданий пока нет.", "compact-empty"));
-  } else {
-    const list = element("ul", undefined, "list owned-task-list");
-    for (const task of ownedTasks) {
-      const card = element("button", undefined, "card owned-task-card");
-      card.type = "button";
-      const chips = element("div", undefined, "card-chips");
-      chips.append(element("span", createdTaskStatus(task.status), "chip muted-chip"));
-      if (task.cancellation_status === "pending") {
-        chips.append(element("span", "Отмена ожидает", "chip"));
-      }
-      card.append(
-        chips,
-        element("h3", task.title),
-        element(
-          "p",
-          `Исполнители ${task.assignees.length}/${task.performer_slots} · ${formatDate(task.deadline_at)}`,
-          "meta",
-        ),
-      );
-      card.addEventListener("click", () => {
-        returnFocusOwnedTaskId = task.id;
-        const screen = content.closest(".screen");
-        history.replaceState(
-          { ...history.state, scrollTop: screen?.scrollTop || 0 },
-          "",
-          location.href,
-        );
-        showOwnedTask(task);
-      });
-      if (task.id === returnFocusOwnedTaskId) focusTarget = card;
-      const item = element("li");
-      item.append(card);
-      list.append(item);
-    }
-    boundary.append(list);
-  }
-  if (ownedReviews.length) {
-    const reviewList = element("ul", undefined, "list owned-review-list");
-    for (const review of ownedReviews) {
-      const button = element("button", undefined, "card owned-task-card");
-      button.type = "button";
-      button.append(
-        element("span", "Ожидает проверки", "chip"),
-        element("h3", review.task_title),
-        element("p", "Исполнитель: " + review.performer_display_name, "meta"),
-      );
-      button.addEventListener("click", () => showCreatedReview(review.id));
-      if (review.id === returnFocusReviewId) focusTarget = button;
-      const item = element("li");
-      item.append(button);
-      reviewList.append(item);
-    }
-    boundary.append(reviewList);
-  }
-  replaceContent(boundary);
-  focusTarget?.focus({ preventScroll: true });
-  returnFocusOwnedTaskId = null;
-  returnFocusReviewId = null;
-  const scrollTop = Number(history.state?.scrollTop || 0);
-  if (scrollTop) queueMicrotask(() => content.closest(".screen")?.scrollTo({ top: scrollTop }));
+  showNextCreatedAssignments(revision);
 }
 
 async function loadCreatedReviews(push = true, scope = "active") {
   const revision = ++screenRevision;
-  ownedTaskListScope = uiNextEnabled && scope === "archive" ? "archive" : "active";
+  ownedTaskListScope = scope === "archive" ? "archive" : "active";
   if (push) {
     const baseLocation = presentationLocationFor("M09");
     const nextLocation = ownedTaskListScope === "archive"
@@ -5058,59 +4821,38 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
   }
   setNavigation("", true);
   title.textContent = "Решение по результату";
-  if (uiNextEnabled) {
-    shell.classList.add("assignment-review-screen");
-    setHeaderControl("back", {
-      label: returnTarget === "task-home" ? "Назад к заданиям" : "Назад",
-      screenLabel: "Решение по результату",
-      hideTitle: true,
-      onBack: returnTarget === "task-home" ? () => loadTaskHome() : null,
-    });
-  } else {
-    back.classList.remove("hidden");
-  }
+  shell.classList.add("assignment-review-screen");
+  setHeaderControl("back", {
+    label: returnTarget === "task-home" ? "Назад к заданиям" : "Назад",
+    screenLabel: "Решение по результату",
+    hideTitle: true,
+    onBack: returnTarget === "task-home" ? () => loadTaskHome() : null,
+  });
   replaceContent(element("p", "Загружаем результат…", "status muted"));
   try {
     const review = await getJson("/api/v1/assignment-reviews/" + encodeURIComponent(assignmentId));
     if (revision !== screenRevision) return;
-    const detail = element(
-      "article",
-      undefined,
-      uiNextEnabled ? "card detail assignment-review-detail" : "card detail",
-    );
+    const detail = element("article", undefined, "card detail assignment-review-detail");
     const status = element("p", "", "status hidden");
     status.setAttribute("aria-live", "polite");
-    if (uiNextEnabled) {
-      const detailHeader = element("header", undefined, "assignment-detail-header");
-      const detailMeta = element("div", undefined, "assignment-detail-meta");
-      detailMeta.append(element("span", "Требуется решение", "assignment-detail-status"));
-      if (review.review_deadline_at) {
-        const deadline = element("span", undefined, "assignment-detail-deadline");
-        deadline.append(element("span", "Решить до"), time(review.review_deadline_at));
-        detailMeta.append(deadline);
-      }
-      detailHeader.append(element("h2", review.task_title), detailMeta);
-      const detailContent = element("div", undefined, "assignment-detail-content");
-      const performer = section("Исполнитель", review.performer_display_name);
-      performer.classList.add("assignment-detail-section");
-      const result = section("Результат", review.result);
-      result.classList.add("assignment-detail-section", "assignment-review-result");
-      detailContent.append(performer, result);
-      detail.append(detailHeader, detailContent);
-    } else {
-      detail.append(
-        element("h3", review.task_title),
-        section("Исполнитель", review.performer_display_name),
-        section("Результат", review.result),
-      );
-      if (review.review_deadline_at) {
-        detail.append(dateSection("Срок решения", review.review_deadline_at));
-      }
+    const detailHeader = element("header", undefined, "assignment-detail-header");
+    const detailMeta = element("div", undefined, "assignment-detail-meta");
+    detailMeta.append(element("span", "Требуется решение", "assignment-detail-status"));
+    if (review.review_deadline_at) {
+      const deadline = element("span", undefined, "assignment-detail-deadline");
+      deadline.append(element("span", "Решить до"), time(review.review_deadline_at));
+      detailMeta.append(deadline);
     }
-    const decisionActions = uiNextEnabled
-      ? element("div", undefined, "assignment-review-actions")
-      : detail;
-    for (const [index, decision] of review.available_decisions.entries()) {
+    detailHeader.append(element("h2", review.task_title), detailMeta);
+    const detailContent = element("div", undefined, "assignment-detail-content");
+    const performer = section("Исполнитель", review.performer_display_name);
+    performer.classList.add("assignment-detail-section");
+    const result = section("Результат", review.result);
+    result.classList.add("assignment-detail-section", "assignment-review-result");
+    detailContent.append(performer, result);
+    detail.append(detailHeader, detailContent);
+    const decisionActions = element("div", undefined, "assignment-review-actions");
+    for (const decision of review.available_decisions) {
       const decisionClass = decision === "full"
         ? "primary assignment-review-action-full"
         : decision === "reject"
@@ -5119,7 +4861,7 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
       const button = element(
         "button",
         decisionLabels[decision],
-        uiNextEnabled ? decisionClass : index ? "secondary" : "primary",
+        decisionClass,
       );
       button.type = "button";
       markTransition(button, "PE-040", "authoritative_review_success");
@@ -5166,51 +4908,31 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
         }
       };
       button.addEventListener("click", () => {
-        if (uiNextEnabled) {
-          const sheet = showAssignmentActionSheet(button, {
-            title: decisionLabels[decision],
-            description: decision === "reject"
-              ? "Резерв останется заморожен на 24 часа — исполнитель сможет открыть спор."
-              : decision === "partial"
-                ? "Исполнитель получит частичную награду за принятый результат."
-                : "Результат будет принят, а награда полностью перечислена исполнителю.",
-            tone: decision === "reject" ? "danger" : "default",
-          });
-          const confirmClass = decision === "reject"
-            ? "assignment-action-confirm-danger"
-            : "primary";
-          const confirm = element("button", decisionLabels[decision], confirmClass);
-          confirm.type = "button";
-          markTransition(confirm, "PE-040", "authoritative_review_success");
-          confirm.addEventListener("click", () => saveDecision({
-            confirm,
-            status: sheet.status,
-          }));
-          sheet.actions.append(confirm);
-          queueMicrotask(() => confirm.focus({ preventScroll: true }));
-          return;
-        }
-        history.pushState(
-          { screen: "assignment-review-confirm", assignmentId },
-          "",
-          presentationLocationFor("M12", assignmentId),
-        );
-        showActionConfirmation({
-          screenId: "M12",
-          headingText: "Подтвердить решение",
+        const sheet = showAssignmentActionSheet(button, {
+          title: decisionLabels[decision],
           description: decision === "reject"
-            ? "Выплата и резерв останутся заморожены на 24 часа для возможного спора. Повторная отправка результата не откроется."
-            : `Решение: ${decisionLabels[decision]}.`,
-          confirmLabel: decisionLabels[decision],
-          transitionId: "PE-040",
-          transitionTrigger: "authoritative_review_success",
-          onEdit: () => history.back(),
-          onConfirm: saveDecision,
+            ? "Резерв останется заморожен на 24 часа — исполнитель сможет открыть спор."
+            : decision === "partial"
+              ? "Исполнитель получит частичную награду за принятый результат."
+              : "Результат будет принят, а награда полностью перечислена исполнителю.",
+          tone: decision === "reject" ? "danger" : "default",
         });
+        const confirmClass = decision === "reject"
+          ? "assignment-action-confirm-danger"
+          : "primary";
+        const confirm = element("button", decisionLabels[decision], confirmClass);
+        confirm.type = "button";
+        markTransition(confirm, "PE-040", "authoritative_review_success");
+        confirm.addEventListener("click", () => saveDecision({
+          confirm,
+          status: sheet.status,
+        }));
+        sheet.actions.append(confirm);
+        queueMicrotask(() => confirm.focus({ preventScroll: true }));
       });
       decisionActions.append(button);
     }
-    if (uiNextEnabled) detail.append(decisionActions);
+    detail.append(decisionActions);
     detail.append(status);
     replaceContent(connectedBoundary("M11", "content", detail));
     back.focus({ preventScroll: true });
@@ -5644,336 +5366,6 @@ function showDisputeActionSheet(trigger, assignment) {
   queueMicrotask(() => comment.focus({ preventScroll: true }));
 }
 
-function submissionPanel(assignment, draft) {
-  const submissionRevision = screenRevision;
-  const boundary = element("section", undefined, "submission");
-  boundary.append(element("h3", "Отправить результат"));
-  const status = element("p", "", "status hidden");
-  status.setAttribute("aria-live", "polite");
-
-  if (!draft) {
-    const begin = element("button", "Начать отправку", "primary");
-    begin.type = "button";
-    markTransition(begin, "PE-030", "open_result_versions");
-    let beginKey = null;
-    begin.addEventListener("click", async () => {
-      begin.disabled = true;
-      status.className = "status";
-      status.textContent = "Открываем черновик…";
-      beginKey ||= newOperationKey();
-      try {
-        const response = await apiFetch(
-          "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/submission-drafts",
-          {
-            method: "POST",
-            headers: { "Idempotency-Key": beginKey },
-            credentials: "same-origin",
-          },
-        );
-        const payload = await submissionResponse(response);
-        const next = submissionPanel(assignment, payload);
-        boundary.replaceWith(next);
-        next.querySelector("textarea")?.focus({ preventScroll: true });
-      } catch (error) {
-        status.textContent = submissionMessage(error);
-        if (!retryableSubmissionError(error)) beginKey = null;
-        begin.disabled = false;
-      }
-    });
-    boundary.append(status, begin);
-    return boundary;
-  }
-
-  boundary.dataset.screenId = "M04";
-  boundary.dataset.uiEngine = "concept-05";
-
-  const form = element("form", undefined, "submission-form");
-  const label = element("label", "Результат", "section");
-  const input = document.createElement("textarea");
-  input.name = "result";
-  input.required = true;
-  input.rows = 6;
-  input.value = typeof draft.result === "string" ? draft.result : "";
-  label.htmlFor = "submission-result";
-  input.id = "submission-result";
-  label.append(input);
-  const preview = element("button", "Предпросмотр", "primary");
-  preview.type = "submit";
-  let saveKey = null;
-  let confirmKey = null;
-
-  const addPreview = (saved) => {
-    history.replaceState(
-      { screen: "assignment-result-preview", assignmentId: assignment.id },
-      "",
-      presentationLocationFor("M05", assignment.id),
-    );
-    title.textContent = "Предпросмотр результата";
-    const card = element("article", undefined, "card detail preview-grid");
-    card.append(element("p", "Предпросмотр", "badge"), element("p", typeof saved.result === "string" ? saved.result : ""));
-    const proceed = element("button", "Продолжить", "primary");
-    proceed.type = "button";
-    proceed.addEventListener("click", () => {
-      history.replaceState(
-        { screen: "assignment-submission-confirm", assignmentId: assignment.id },
-        "",
-        presentationLocationFor("M06", assignment.id),
-      );
-      showActionConfirmation({
-        screenId: "M06",
-        headingText: "Подтвердить отправку",
-        description: typeof saved.result === "string" ? saved.result : "",
-        confirmLabel: "Отправить результат",
-        transitionId: "PE-034",
-        transitionTrigger: "authoritative_submit_success",
-        onEdit: () => {
-          history.replaceState(
-            { screen: "assignment-submission", assignmentId: assignment.id },
-            "",
-            presentationLocationFor("M04", assignment.id),
-          );
-          title.textContent = "Редактор результата";
-          replaceContent(connectedBoundary("M04", "content", submissionPanel(assignment, saved)));
-          content.querySelector("textarea")?.focus({ preventScroll: true });
-        },
-        onConfirm: async ({ confirm, edit, status: actionStatus }) => {
-          confirm.disabled = true;
-          edit.disabled = true;
-          actionStatus.className = "status";
-          actionStatus.textContent = "Отправляем результат…";
-          confirmKey ||= newOperationKey();
-          try {
-            await submissionRequest(
-              "/api/v1/submission-drafts/" + encodeURIComponent(saved.id) + "/confirm",
-              "POST",
-              confirmKey,
-              { expected_revision: saved.revision },
-            );
-            if (submissionRevision === screenRevision) {
-              const done = element("button", "К заданию", "primary");
-              done.type = "button";
-              done.addEventListener("click", () => history.back());
-              title.textContent = "Результат отправлен";
-              history.replaceState(
-                { screen: "assignment-submission-success", assignmentId: assignment.id },
-                "",
-                presentationLocationFor("M07", assignment.id),
-              );
-              replaceContent(connectedBoundary("M07", "success", element("p", "Результат сохранён и отправлен на проверку.", "status success"), done));
-            }
-          } catch (error) {
-            actionStatus.textContent = submissionMessage(error);
-            if (!retryableSubmissionError(error)) confirmKey = null;
-            confirm.disabled = false;
-            edit.disabled = false;
-          }
-        },
-      });
-    });
-    card.append(proceed);
-    replaceContent(connectedBoundary("M05", "content", card));
-  };
-
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    preview.disabled = true;
-    status.className = "status";
-    status.textContent = "Сохраняем предпросмотр…";
-    saveKey ||= newOperationKey();
-    try {
-      const saved = await submissionRequest(
-        "/api/v1/submission-drafts/" + encodeURIComponent(draft.id),
-        "PUT",
-        saveKey,
-        { expected_revision: draft.revision, payload: { result: input.value } },
-      );
-      draft = saved;
-      saveKey = null;
-      status.className = "status success";
-      status.textContent = "Предпросмотр сохранён. Подтвердите отправку.";
-      addPreview(saved);
-    } catch (error) {
-      status.textContent = submissionMessage(error);
-      if (!retryableSubmissionError(error)) saveKey = null;
-    } finally {
-      preview.disabled = false;
-    }
-  });
-  form.append(label, preview);
-  boundary.append(form, status);
-  if (draft.result !== null) input.value = draft.result;
-  return boundary;
-}
-
-function openSubmissionEditor(assignment, push = true) {
-  if (push) {
-    history.pushState(
-      { screen: "assignment-submission", assignmentId: assignment.id },
-      "",
-      presentationLocationFor("M04", assignment.id),
-    );
-  }
-  setNavigation("", true);
-  title.textContent = "Редактор результата";
-  back.classList.remove("hidden");
-  replaceContent(connectedBoundary("M04", "content", submissionPanel(assignment, null)));
-  content.querySelector("button")?.focus({ preventScroll: true });
-}
-
-function disputePanel(assignment) {
-  const form = element("form", undefined, "submission-form");
-  const label = element("label", "Почему результат нужно пересмотреть", "section");
-  const comment = document.createElement("textarea");
-  comment.id = "dispute-comment";
-  comment.name = "comment";
-  comment.required = true;
-  comment.rows = 5;
-  label.htmlFor = comment.id;
-  label.append(comment);
-  const submit = element("button", "Подать спор", "primary");
-  submit.type = "submit";
-  markTransition(submit, "PE-044", "open_dispute_materials");
-  const status = element("p", "", "status hidden");
-  status.setAttribute("aria-live", "polite");
-  let operationKey = null;
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const normalized = comment.value.trim();
-    if (!normalized) return;
-    showActionConfirmation({
-      screenId: "M14",
-      headingText: "Подтвердить спор",
-      description: normalized + " Комментарий увидит только команда модерации.",
-      confirmLabel: "Подать спор",
-      transitionId: "PE-044",
-      transitionTrigger: "open_dispute_materials",
-      onEdit: () => {
-        openDisputeEditor(assignment, false);
-        const restored = content.querySelector("#dispute-comment");
-        if (restored) restored.value = normalized;
-        restored?.focus({ preventScroll: true });
-      },
-      onConfirm: async ({ confirm, edit, status: actionStatus }) => {
-        confirm.disabled = true;
-        edit.disabled = true;
-        actionStatus.className = "status";
-        actionStatus.textContent = "Подаём спор…";
-        operationKey ||= newOperationKey();
-        try {
-          await submissionRequest(
-            "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/disputes",
-            "POST",
-            operationKey,
-            { comment: normalized },
-          );
-          await showAssignmentDetail(assignment.id, false);
-        } catch (error) {
-          if (error?.status === 409) {
-            await showAssignmentDetail(assignment.id, false);
-            return;
-          }
-          actionStatus.textContent = error instanceof TypeError
-            ? "Сеть недоступна. Повторите запрос — он останется тем же."
-            : "Не удалось подать спор. Проверьте комментарий и состояние назначения.";
-          if (!retryableSubmissionError(error)) operationKey = null;
-          confirm.disabled = false;
-          edit.disabled = false;
-        }
-      },
-    });
-  });
-  form.append(label, submit, status);
-  return form;
-}
-
-function openDisputeEditor(assignment, push = true) {
-  const nextState = { screen: "assignment-dispute", assignmentId: assignment.id };
-  const location = presentationLocationFor("M14", assignment.id);
-  if (push) history.pushState(nextState, "", location);
-  else history.replaceState(nextState, "", location);
-  setNavigation("", true);
-  title.textContent = "Открытие спора";
-  back.classList.remove("hidden");
-  replaceContent(connectedBoundary("M14", "content", disputePanel(assignment)));
-  content.querySelector("textarea")?.focus({ preventScroll: true });
-}
-
-function cancellationPanel(assignment) {
-  const form = element("form", undefined, "submission-form");
-  const heading = element("h3", "Отказаться от задания");
-  const label = element("label", "Причина отказа", "section");
-  const reason = document.createElement("textarea");
-  reason.id = "assignment-cancellation-reason";
-  reason.name = "reason";
-  reason.required = true;
-  reason.maxLength = 1000;
-  reason.rows = 4;
-  label.htmlFor = reason.id;
-  label.append(reason);
-  const submit = element("button", "Подтвердить отказ", "secondary danger");
-  submit.type = "submit";
-  markTransition(submit, "PE-036", "withdrawal_outcome");
-  const status = element("p", "", "status hidden");
-  status.setAttribute("aria-live", "polite");
-  let operationKey = null;
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const normalized = reason.value.trim();
-    if (!normalized) return;
-    showActionConfirmation({
-      screenId: "M08",
-      headingText: "Подтвердить отказ",
-      description: normalized + " Слот будет освобождён.",
-      confirmLabel: "Отказаться от задания",
-      transitionId: "PE-036",
-      transitionTrigger: "withdrawal_outcome",
-      onEdit: () => {
-        openCancellationEditor(assignment, false);
-        const restored = content.querySelector("#assignment-cancellation-reason");
-        if (restored) restored.value = normalized;
-        restored?.focus({ preventScroll: true });
-      },
-      onConfirm: async ({ confirm, edit, status: actionStatus }) => {
-        confirm.disabled = true;
-        edit.disabled = true;
-        actionStatus.className = "status";
-        actionStatus.textContent = "Отказываемся от задания…";
-        operationKey ||= newOperationKey();
-        try {
-          await submissionRequest(
-            "/api/v1/assignments/" + encodeURIComponent(assignment.id) + "/cancellation",
-            "POST",
-            operationKey,
-            { reason: normalized },
-          );
-          history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
-          await loadAssignments(false);
-        } catch (error) {
-          actionStatus.textContent = error instanceof TypeError
-            ? "Сеть недоступна. Повторите запрос — он останется тем же."
-            : "Не удалось отказаться. Проверьте состояние назначения и повторите.";
-          if (!retryableSubmissionError(error)) operationKey = null;
-          confirm.disabled = false;
-          edit.disabled = false;
-        }
-      },
-    });
-  });
-  form.append(heading, label, submit, status);
-  return form;
-}
-
-function openCancellationEditor(assignment, push = true) {
-  const nextState = { screen: "assignment-cancellation", assignmentId: assignment.id };
-  const location = presentationLocationFor("M08", assignment.id);
-  if (push) history.pushState(nextState, "", location);
-  else history.replaceState(nextState, "", location);
-  setNavigation("", true);
-  title.textContent = "Отказ от задания";
-  back.classList.remove("hidden");
-  replaceContent(connectedBoundary("M08", "content", cancellationPanel(assignment)));
-  content.querySelector("textarea")?.focus({ preventScroll: true });
-}
 
 async function showAssignmentDetail(assignmentId, push = true, returnTo = null) {
   const revision = ++screenRevision;
@@ -5997,25 +5389,23 @@ async function showAssignmentDetail(assignmentId, push = true, returnTo = null) 
   }
   setNavigation("", true);
   title.textContent = "Активное назначение";
-  if (uiNextEnabled) {
-    const returnToTakenAssignments = returnTarget === "assignments-taken";
-    const returnToTaskHome = returnTarget === "task-home";
-    shell.classList.add("assignment-detail-screen");
-    setHeaderControl("back", {
-      label: returnToTaskHome
-        ? "Назад к заданиям"
-        : returnToTakenAssignments
-          ? "Назад к выполняемым заданиям"
-          : "Назад",
-      screenLabel: "Активное назначение",
-      hideTitle: true,
-      onBack: returnToTaskHome
-        ? () => loadTaskHome()
-        : returnToTakenAssignments
-          ? () => loadAssignments()
-          : null,
-    });
-  }
+  const returnToTakenAssignments = returnTarget === "assignments-taken";
+  const returnToTaskHome = returnTarget === "task-home";
+  shell.classList.add("assignment-detail-screen");
+  setHeaderControl("back", {
+    label: returnToTaskHome
+      ? "Назад к заданиям"
+      : returnToTakenAssignments
+        ? "Назад к выполняемым заданиям"
+        : "Назад",
+    screenLabel: "Активное назначение",
+    hideTitle: true,
+    onBack: returnToTaskHome
+      ? () => loadTaskHome()
+      : returnToTakenAssignments
+        ? () => loadAssignments()
+        : null,
+  });
   replaceContent(element("p", "Загружаем назначение…", "status muted"));
   try {
     const response = await apiFetch(
@@ -6081,28 +5471,19 @@ async function showAssignmentDetail(assignmentId, push = true, returnTo = null) 
     if (assignment.can_submit) {
       const submit = element("button", "Отправить результат", "primary");
       submit.type = "button";
-      submit.addEventListener("click", () => {
-        if (uiNextEnabled) showSubmissionActionSheet(submit, assignment);
-        else openSubmissionEditor(assignment);
-      });
+      submit.addEventListener("click", () => showSubmissionActionSheet(submit, assignment));
       actions.append(submit);
     }
     if (assignment.can_dispute) {
       const dispute = element("button", "Подать спор", "secondary");
       dispute.type = "button";
-      dispute.addEventListener("click", () => {
-        if (uiNextEnabled) showDisputeActionSheet(dispute, assignment);
-        else openDisputeEditor(assignment);
-      });
+      dispute.addEventListener("click", () => showDisputeActionSheet(dispute, assignment));
       actions.append(dispute);
     }
     if (assignment.can_cancel) {
       const cancel = element("button", "Отказаться от задания", "secondary danger");
       cancel.type = "button";
-      cancel.addEventListener("click", () => {
-        if (uiNextEnabled) showCancellationActionSheet(cancel, assignment);
-        else openCancellationEditor(assignment);
-      });
+      cancel.addEventListener("click", () => showCancellationActionSheet(cancel, assignment));
       actions.append(cancel);
     }
     detail.append(detailHeader, detailContent);
@@ -6243,9 +5624,7 @@ async function showModerationCase(caseId, push = true) {
   }
   setNavigation("moderation", true);
   title.textContent = "Решение по спору";
-  if (uiNextEnabled) {
-    setHeaderControl("close", { label: "Закрыть спор", screenLabel: "Решение по спору" });
-  }
+  setHeaderControl("close", { label: "Закрыть спор", screenLabel: "Решение по спору" });
   replaceContent(element("p", "Загружаем спор…", "status muted"));
   back.focus({ preventScroll: true });
   try {
@@ -6366,103 +5745,6 @@ async function telegramInitData() {
   return null;
 }
 
-async function bootstrap(authAttempted = false) {
-  try {
-    const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
-    if (me.status === 401 && !authAttempted) {
-      const initData = await telegramInitData();
-      if (!initData) throw new Error("telegram_init_data_missing");
-      const auth = await apiFetch("/api/v1/auth/telegram", {
-        method: "POST",
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
-        body: initData,
-        credentials: "same-origin",
-      });
-      if (!auth.ok) throw new Error("telegram_auth_failed");
-      return bootstrap(true);
-    }
-    if (!me.ok) throw new Error("bootstrap_failed");
-    const [profile, page] = await Promise.all([me.json(), getJson("/api/v1/tasks")]);
-    storeJson("/api/v1/me", profile);
-    currentMemberId = profile.member_id;
-    setMemberTimezone(profile.timezone || "UTC");
-    void configureRoleNavigation();
-    tasks = page.items;
-    const initialHash = location.hash;
-    const initialPresentation = presentationFromLocation();
-    history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    showCatalog();
-    const presentationId = initialPresentation?.screen.id;
-    const resourceId = initialPresentation?.resourceId;
-    const directProfile = initialHash.match(/^#(\/profile(?:\/.*)?)$/);
-    const directMember = initialHash.match(/^#\/members\/([0-9a-f-]{36})$/i);
-    if (directProfile) {
-      history.replaceState({ screen: "profile", route: directProfile[1] }, "", initialHash);
-      loadProfile(false);
-    } else if (directMember) {
-      history.replaceState({ screen: "member-profile", memberId: directMember[1] }, "", initialHash);
-      showMemberProfile(directMember[1], false);
-    } else if (presentationId === "T02") {
-      showCatalogFilters(false);
-    } else if (presentationId === "T04B") {
-      beginTaskCreationFlow(false);
-    } else if (["T05", "T06", "T08"].includes(presentationId)) {
-      const forceEdit = presentationId === "T05";
-      const screenId = forceEdit ? "T05" : "T06";
-      history.replaceState(
-        { screen: forceEdit ? "task-creation" : "task-preview", draftId: resourceId },
-        "",
-        presentationLocationFor(screenId, resourceId),
-      );
-      openTaskCreation(forceEdit, forceEdit ? null : "stale");
-    } else if (presentationId === "P01" || presentationId === "P05") {
-      loadParticipants(presentationId === "P05" ? "leaderboard" : "members");
-    } else if (presentationId === "P06" || presentationId === "P07") {
-      history.replaceState({ screen: "profile" }, "", presentationLocationFor("P06"));
-      loadProfile(false);
-    } else if (presentationId === "M01" || presentationId === "M02") {
-      history.replaceState({ screen: "assignments" }, "", presentationLocationFor("M01"));
-      loadAssignments(false);
-    } else if (presentationId === "M09" || presentationId === "M10") {
-      const scope = new URLSearchParams(initialHash.split("?", 2)[1] || "").get("scope");
-      history.replaceState(
-        { screen: "created-assignments", scope: scope === "archive" ? "archive" : "active" },
-        "",
-        location.hash,
-      );
-      loadCreatedReviews(false, scope === "archive" ? "archive" : "active");
-    } else if (presentationId === "S01") {
-      history.replaceState({ screen: "moderation" }, "", presentationLocationFor("S01"));
-      loadModeration(false);
-    } else if (["T03", "T03A"].includes(presentationId) && resourceId) {
-      const task = tasks.find((item) => item.id === resourceId);
-      if (task) {
-        history.replaceState({ screen: "task", taskId: task.id }, "", presentationLocationFor("T03", task.id));
-        showTaskDetail(task, false);
-      }
-    } else if (["P02", "P03", "P04"].includes(presentationId) && resourceId) {
-      history.replaceState({ screen: "member-profile", memberId: resourceId }, "", presentationLocationFor("P02", resourceId));
-      showMemberProfile(resourceId, false);
-    } else if (["M03", "M04", "M05", "M06", "M07", "M08", "M14", "M15"].includes(presentationId) && resourceId) {
-      history.replaceState({ screen: "assignment", assignmentId: resourceId }, "", presentationLocationFor("M03", resourceId));
-      showAssignmentDetail(resourceId, false);
-    } else if (["M11", "M12", "M13"].includes(presentationId) && resourceId) {
-      history.replaceState({ screen: "assignment-review", assignmentId: resourceId }, "", presentationLocationFor("M11", resourceId));
-      showCreatedReview(resourceId, false);
-    } else if (["S02", "S03", "S04"].includes(presentationId) && resourceId) {
-      history.replaceState({ screen: "moderation-case", caseId: resourceId }, "", presentationLocationFor("S02", resourceId));
-      showModerationCase(resourceId, false);
-    }
-  } catch {
-    replaceContent(
-      element(
-        "p",
-        "Не удалось загрузить задания. Откройте Mini App ещё раз.",
-        "status",
-      ),
-    );
-  }
-}
 
 const taskHomeActionLabels = {
   submit_result: "Сдать результат",
@@ -6708,7 +5990,6 @@ function renderTaskHomeHero(hero, home) {
 
 function showTaskHome(home, revision = ++screenRevision) {
   if (revision !== screenRevision) return;
-  document.body.classList.remove("ui-next-preview");
   setNavigation("task-home", false);
   title.textContent = "Задания";
   back.classList.add("hidden");
@@ -6824,7 +6105,6 @@ async function loadTaskHome(push = true) {
   }
   if (cached) showTaskHome(cached, revision);
   else {
-    document.body.classList.remove("ui-next-preview");
     setNavigation("task-home", false);
     title.textContent = "Задания";
     back.classList.add("hidden");
@@ -7250,7 +6530,6 @@ function showOnboarding(view) {
     applyPreviewTheme("light");
   }
   history.replaceState({ screen: "onboarding" }, "", onboardingUrl);
-  document.body.classList.remove("ui-next-preview");
   setNavigation("onboarding", false);
   const canGoBack = view.application_status === "draft" && onboardingStepsWithBack.has(view.step);
   setHeaderControl(canGoBack ? "back" : null, {
@@ -7375,16 +6654,74 @@ async function bootstrapTaskHome(authAttempted = false) {
     currentMemberId = profile.member_id;
     setMemberTimezone(profile.timezone || "UTC");
     void configureRoleNavigation();
-    if (location.hash === "#/settings") showSettings(false);
-    else if (/^#\/profile(?:\/.*)?$/.test(location.hash)) loadProfile(false);
-    else {
-      const presentationId = presentationFromLocation()?.screen.id;
-      if (presentationId === "M01" || presentationId === "M02") await loadAssignments(false);
-      else if (presentationId === "M09" || presentationId === "M10") {
-        const scope = new URLSearchParams(location.hash.split("?", 2)[1] || "").get("scope");
-        await loadCreatedReviews(false, scope === "archive" ? "archive" : "active");
+    const initialHash = location.hash;
+    const presentation = presentationFromLocation();
+    const presentationId = presentation?.screen.id;
+    const resourceId = presentation?.resourceId;
+    const directMember = initialHash.match(/^#\/members\/([0-9a-f-]{36})$/i);
+    if (initialHash === "#/settings") showSettings(false);
+    else if (/^#\/profile(?:\/.*)?$/.test(initialHash)) loadProfile(false);
+    else if (directMember) {
+      history.replaceState(
+        { screen: "member-profile", memberId: directMember[1] },
+        "",
+        initialHash,
+      );
+      showMemberProfile(directMember[1], false);
+    } else if (presentationId === "T01" || presentationId === "T02") {
+      history.replaceState({ screen: "catalog" }, "", initialHash);
+      await loadCatalog(false);
+    }
+    else if (presentationId === "T04B") beginTaskCreationFlow(false);
+    else if (["T05", "T06", "T08"].includes(presentationId)) {
+      const forceEdit = presentationId === "T05";
+      history.replaceState(
+        { screen: forceEdit ? "task-creation" : "task-preview", draftId: resourceId },
+        "",
+        presentationLocationFor(forceEdit ? "T05" : "T06", resourceId),
+      );
+      openTaskCreation(forceEdit, forceEdit ? null : "stale");
+    } else if (presentationId === "P01" || presentationId === "P05") {
+      loadParticipants(presentationId === "P05" ? "leaderboard" : "members");
+    } else if (presentationId === "M01" || presentationId === "M02") {
+      history.replaceState({ screen: "assignments" }, "", initialHash);
+      await loadAssignments(false);
+      if (presentationId === "M02") showTakenAssignments();
+    } else if (presentationId === "M09" || presentationId === "M10") {
+      const scope = new URLSearchParams(initialHash.split("?", 2)[1] || "").get("scope");
+      await loadCreatedReviews(false, scope === "archive" ? "archive" : "active");
+    } else if (["T03", "T03A"].includes(presentationId) && resourceId) {
+      if (presentationId === "T03A") {
+        history.replaceState(
+          { screen: "task", taskId: resourceId },
+          "",
+          presentationLocationFor("T03", resourceId),
+        );
       }
-      else await loadTaskHome(false);
+      const page = await getJson("/api/v1/tasks");
+      tasks = page.items;
+      const task = tasks.find((item) => item.id === resourceId);
+      if (task) showTaskDetail(task, false);
+      else await loadCatalog(false);
+    } else if (["P02", "P03", "P04"].includes(presentationId) && resourceId) {
+      showMemberProfile(resourceId, false);
+    } else if (["M03", "M04", "M05", "M06", "M07", "M08", "M14", "M15"].includes(presentationId) && resourceId) {
+      showAssignmentDetail(resourceId, false);
+    } else if (["M11", "M12", "M13"].includes(presentationId) && resourceId) {
+      showCreatedReview(resourceId, false);
+    } else if (presentationId === "S01") {
+      loadModeration(false);
+    } else if (["S02", "S03", "S04"].includes(presentationId) && resourceId) {
+      if (presentationId !== "S02") {
+        history.replaceState(
+          { screen: "moderation-case", caseId: resourceId },
+          "",
+          presentationLocationFor("S02", resourceId),
+        );
+      }
+      showModerationCase(resourceId, false);
+    } else {
+      await loadTaskHome(false);
     }
   } catch {
     setNavigation("task-home", false);
@@ -7398,108 +6735,9 @@ async function bootstrapTaskHome(authAttempted = false) {
   }
 }
 
-function showUiNextPreviewGate() {
-  screenRevision += 1;
-  document.body.classList.add("ui-next-preview");
-  setNavigation("", true);
-  title.textContent = "UI vNext";
-  back.classList.add("hidden");
-
-  const boundary = connectedBoundary("UX01", "contract");
-  boundary.dataset.uiEngine = "next-preview";
-  boundary.classList.add("ui-next-gate");
-  boundary.append(
-    element("p", "Этап 2 из 7 · CB-116", "badge"),
-    element("h2", "Темы без изменения геометрии", "ui-next-gate-title"),
-    element(
-      "p",
-      "Один layout переключается между системной, светлой и тёмной темами без перерендера.",
-      "muted ui-next-gate-copy",
-    ),
-  );
-
-  const themeSetting = element("fieldset", undefined, "ui-next-theme-setting");
-  themeSetting.append(element("legend", "Тема интерфейса"));
-  const themeOptions = element("div", undefined, "ui-next-theme-options");
-  const preference = getPreviewThemePreference();
-  for (const [value, label] of [
-    ["system", "Системная"],
-    ["light", "Светлая"],
-    ["dark", "Тёмная"],
-  ]) {
-    const option = element("button", label);
-    option.type = "button";
-    option.dataset.themeChoice = value;
-    option.setAttribute("aria-pressed", String(preference === value));
-    option.addEventListener("click", () => {
-      const scroller = content.closest(".screen");
-      const scrollTop = scroller?.scrollTop ?? 0;
-      applyPreviewTheme(value);
-      const url = new URL(location.href);
-      url.searchParams.set("theme", value);
-      history.replaceState(history.state, "", url);
-      for (const button of themeOptions.querySelectorAll("button")) {
-        button.setAttribute("aria-pressed", String(button === option));
-      }
-      requestAnimationFrame(() => {
-        if (scroller) scroller.scrollTop = scrollTop;
-        option.focus({ preventScroll: true });
-      });
-    });
-    themeOptions.append(option);
-  }
-  themeSetting.append(themeOptions);
-  boundary.append(themeSetting);
-
-  const facts = element("dl", undefined, "ui-next-contract-facts");
-  for (const [label, value] of [
-    ["Режимы", "system/light/dark"],
-    ["Палитры", "dark + light"],
-    ["Layout", "единый"],
-    ["Legacy UI", "без изменений"],
-  ]) {
-    facts.append(element("dt", label), element("dd", value));
-  }
-  boundary.append(facts);
-
-  const stages = element("ol", undefined, "ui-next-stage-list");
-  for (const [name, status, state] of [
-    ["As-is parity contract и preview gate", "Готово", "completed"],
-    ["Theme foundation: system/light/dark", "Готово", "completed"],
-    ["Главный экран заданий", "В работе", "current"],
-    ["Каталог → карточка → принятие", "Запланировано", "planned"],
-    ["Создание задания", "Запланировано", "planned"],
-    ["Назначения → отправка → проверка", "Запланировано", "planned"],
-    ["Отмена, спор, архив и release-gate", "Запланировано", "planned"],
-  ]) {
-    const item = element("li", undefined, "ui-next-stage-item");
-    item.dataset.stageState = state;
-    item.append(element("span", name), element("span", status));
-    stages.append(item);
-  }
-  boundary.append(stages);
-
-  const legacy = element("button", "Открыть рабочий интерфейс", "primary");
-  legacy.type = "button";
-  legacy.addEventListener("click", () => {
-    const url = new URL(location.href);
-    url.searchParams.delete("ui");
-    location.assign(url);
-  });
-  boundary.append(legacy);
-  replaceContent(boundary);
-}
-
-catalogNav.addEventListener("click", () => {
-  if (uiNextEnabled) void loadTaskHome();
-  else void loadCatalog();
-});
-assignmentsNav.addEventListener("click", () => loadAssignments());
+catalogNav.addEventListener("click", () => void loadTaskHome());
 participantsNav.addEventListener("click", () => loadParticipants("members"));
-profileNav.addEventListener("click", () => {
-  if (uiNextEnabled) showSettings();
-  else loadProfile();
-});
+profileNav.addEventListener("click", () => showSettings());
 moderationNav.addEventListener("click", () => loadModeration());
 back.addEventListener("click", () => {
   if (headerBackAction) {
@@ -7542,6 +6780,8 @@ back.addEventListener("click", () => {
 globalThis.addEventListener("popstate", (event) => {
   if (event.state?.screen === "task-home") {
     void loadTaskHome(false);
+  } else if (event.state?.screen === "catalog") {
+    void loadCatalog(false);
   } else if (event.state?.screen === "participants") {
     loadParticipants(event.state.view || "members", event.state.period || "week");
   } else if (event.state?.screen === "task") {
@@ -7574,16 +6814,7 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "task-preview") {
     openTaskCreation(false, "stale");
   } else {
-    void loadCatalog(false);
+    void loadTaskHome(false);
   }
 });
-globalThis.addEventListener("hashchange", () => {
-  if (uiNextEnabled) return;
-  if (!presentationFromLocation() && !/^#\/profile(?:\/.*)?$/.test(location.hash) && !/^#\/members\/[0-9a-f-]{36}$/i.test(location.hash)) {
-    history.replaceState({ screen: "catalog" }, "", presentationLocationFor("T01"));
-    void loadCatalog(false);
-  }
-});
-if (uiNextEnabled && location.hash.startsWith("#/theme")) showUiNextPreviewGate();
-else if (uiNextEnabled) void bootstrapTaskHome();
-else bootstrap();
+void bootstrapTaskHome();
