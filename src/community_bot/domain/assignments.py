@@ -109,9 +109,9 @@ def partial_reward(full_reward: int) -> int:
 def require_submit_allowed(
     assignment: Assignment, *, task_deadline: datetime.datetime, now: datetime.datetime
 ) -> None:
-    """Validate a result submission or follow-up version."""
-    if assignment.status not in {AssignmentStatus.ACCEPTED, AssignmentStatus.SUBMITTED}:
-        raise AssignmentError("Assignment does not accept result versions in its current state.")
+    """Allow the performer's single result only while the assignment is accepted."""
+    if assignment.status is not AssignmentStatus.ACCEPTED:
+        raise AssignmentError("Assignment does not accept a result in its current state.")
     if now >= task_deadline:
         raise AssignmentError("Task submission deadline has passed.")
 

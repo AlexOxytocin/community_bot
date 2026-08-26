@@ -54,6 +54,12 @@ def test_submit_requires_active_assignment_and_open_deadline() -> None:
         accepted_at=now,
     )
     require_submit_allowed(accepted, task_deadline=now + datetime.timedelta(hours=1), now=now)
+    with pytest.raises(AssignmentError, match="current state"):
+        require_submit_allowed(
+            replace(accepted, status=AssignmentStatus.SUBMITTED),
+            task_deadline=now + datetime.timedelta(hours=1),
+            now=now,
+        )
     with pytest.raises(AssignmentError, match="deadline"):
         require_submit_allowed(accepted, task_deadline=now, now=now)
     with pytest.raises(AssignmentError, match="current state"):

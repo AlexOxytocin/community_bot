@@ -4352,14 +4352,65 @@ function showOwnedTask(task, push = true) {
       void loadCreatedReviews(false, returnScope);
     },
   });
-  const detail = element("article", undefined, "card detail");
-  detail.append(
-    element("h3", task.title),
-    section("Статус", createdTaskStatus(task.status)),
-    section("Слоты", `${task.assignees.length}/${task.performer_slots}`),
+  const detail = element("article", undefined, "card owned-task-detail");
+  const detailHeader = element("header", undefined, "owned-task-header");
+  const headingCopy = element("div", undefined, "owned-task-heading-copy");
+  headingCopy.append(
+    element("span", "Создано вами", "owned-task-eyebrow"),
+    element("h2", task.title),
   );
+  detailHeader.append(
+    headingCopy,
+    element("span", createdTaskStatus(task.status), "chip owned-task-status-chip"),
+  );
+
+  const summary = element("div", undefined, "owned-task-summary");
+  const assigneeCount = element("div", undefined, "owned-task-metric");
+  assigneeCount.append(
+    element("strong", `${task.assignees.length}/${task.performer_slots}`),
+    element("span", "Исполнители"),
+  );
+  const activeDisputes = task.assignees.filter((assignee) => assignee.status === "disputed").length;
+  const attention = element("div", undefined, "owned-task-metric");
+  attention.append(
+    element("strong", String(activeDisputes)),
+    element("span", activeDisputes === 1 ? "Открытый спор" : "Открытые споры"),
+  );
+  if (activeDisputes > 0) attention.classList.add("is-attention");
+  summary.append(assigneeCount, attention);
+  detail.append(detailHeader, summary);
+
+  const assigneesBlock = element("section", undefined, "owned-task-assignees");
+  assigneesBlock.append(element("h3", "Исполнители", "owned-task-section-title"));
   for (const assignee of task.assignees) {
-    detail.append(section(assignee.display_name, assignmentStatus(assignee.status)));
+    const assigneeCard = element("div", undefined, "owned-task-assignee");
+    const avatar = element(
+      "span",
+      (assignee.display_name || "?").trim().slice(0, 1).toUpperCase(),
+      "owned-task-assignee-avatar",
+    );
+    const copy = element("div", undefined, "owned-task-assignee-copy");
+    copy.append(
+      element("strong", assignee.display_name),
+      element("span", assignmentStatus(assignee.status)),
+    );
+    assigneeCard.append(avatar, copy);
+    if (assignee.status === "disputed") {
+      assigneeCard.classList.add("is-disputed");
+      assigneeCard.append(element("span", "Спор", "chip owned-task-dispute-chip"));
+    }
+    assigneesBlock.append(assigneeCard);
+  }
+  if (task.assignees.length === 0) {
+    assigneesBlock.append(element("p", "Пока никто не взял задание.", "muted owned-task-empty"));
+  }
+  detail.append(assigneesBlock);
+  if (activeDisputes > 0) {
+    detail.append(element(
+      "p",
+      "Спор передан независимому модератору. Автор и исполнитель не могут рассматривать собственное дело.",
+      "owned-task-dispute-note",
+    ));
   }
   if (task.cancellation_action) {
     const cancel = element(
