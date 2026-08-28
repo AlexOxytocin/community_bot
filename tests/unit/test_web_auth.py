@@ -997,14 +997,12 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
         index = await client.get("/")
         font = await client.get("/mini-assets/manrope.ttf")
-        loader = await client.get("/mini-assets/onboarding-loader.png")
         app_module = await client.get("/mini-assets/app.js")
         theme_bootstrap = await client.get("/mini-assets/theme-bootstrap.js")
 
     assert (
         index.status_code
         == font.status_code
-        == loader.status_code
         == app_module.status_code
         == theme_bootstrap.status_code
         == 200
@@ -1020,12 +1018,12 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     assert b"__RELEASE__" not in index.content
     assert b"/mini-assets/app.js?release=local" in index.content
     assert b"/mini-assets/styles.css?release=local" in index.content
-    assert b"/mini-assets/onboarding-loader.png?release=local" in index.content
+    assert b'class="app-loader-dots"' in index.content
+    assert b"onboarding-loader.png" not in index.content
     assert b'class="app-booting"' in index.content
     assert b'<h1 id="screen-title"></h1>' in index.content
     hidden_navigation = 'id="primary-navigation" aria-label="Основное меню" hidden'.encode()
     assert hidden_navigation in index.content
-    assert loader.headers["content-type"] == "image/png"
     assert b"platform.js?release=${encodeURIComponent(assetRelease)}" in app_module.content
     bootstrap_asset = b"/mini-assets/theme-bootstrap.js?release=local"
     assert bootstrap_asset in index.content
