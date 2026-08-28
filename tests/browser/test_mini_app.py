@@ -5005,7 +5005,41 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        for width, height, minimum_visible in ((375, 812, 4), (430, 932, 5)):
+        pulse_variants = (
+            (
+                375,
+                812,
+                4,
+                "2026-08-01T00:00:00Z",
+                (
+                    *(f"2025-{month:02d}-01" for month in range(9, 13)),
+                    *(f"2026-{month:02d}-01" for month in range(1, 9)),
+                ),
+                "Сообщения по месяцам",
+                12,
+                11,
+            ),
+            (
+                430,
+                932,
+                5,
+                "2024-03-01T00:00:00Z",
+                tuple(f"{year}-01-01" for year in range(2022, 2027)),
+                "Сообщения по годам",
+                5,
+                2,
+            ),
+        )
+        for (
+            width,
+            height,
+            minimum_visible,
+            tracking_started_at,
+            all_bucket_dates,
+            all_chart_label,
+            all_column_count,
+            all_zero_column_count,
+        ) in pulse_variants:
             page = _new_page(browser)
             page.set_viewport_size({"width": width, "height": height})
             period_requests: list[str] = []
@@ -5042,18 +5076,24 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                 lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
             )
 
-            def pulse_route(route: Route) -> None:
+            def pulse_route(
+                route: Route,
+                *,
+                bound_all_bucket_dates: tuple[str, ...] = all_bucket_dates,
+                bound_tracking_started_at: str = tracking_started_at,
+                bound_all_zero_count: int = all_zero_column_count,
+            ) -> None:
                 period = parse_qs(urlsplit(route.request.url).query)["period"][0]
                 bucket_dates = {
                     "week": [f"2026-08-{day:02d}" for day in range(22, 29)],
                     "month": [f"2026-08-{day:02d}" for day in range(1, 31)],
                     "year": [f"2025-{month:02d}-01" for month in range(1, 13)],
-                    "all": [],
+                    "all": bound_all_bucket_dates,
                 }[period]
                 route.fulfill(
                     json={
                         "member_id": member_ids[0],
-                        "tracking_started_at": "2026-08-01T00:00:00Z",
+                        "tracking_started_at": bound_tracking_started_at,
                         "calculated_at": "2026-08-28T12:00:00Z",
                         "summary": {
                             "messages": 42,
@@ -5063,9 +5103,13 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                         "series": [
                             {
                                 "bucket_start": bucket_start,
-                                "messages": index + 1,
-                                "reactions_given": index % 5,
-                                "reactions_received": index % 4,
+                                "messages": (
+                                    0
+                                    if index < (bound_all_zero_count if period == "all" else 1)
+                                    else index + 1
+                                ),
+                                "reactions_given": 0 if index == 0 else index % 5 + 1,
+                                "reactions_received": 0 if index == 0 else index % 4 + 1,
                             }
                             for index, bucket_start in enumerate(bucket_dates)
                         ],
@@ -5193,6 +5237,21 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("получено реакций", exact=True).count() == 1
             assert page.get_by_text("поставлено реакций", exact=True).count() == 1
             assert page.get_by_text("Сообщения по дням", exact=True).is_visible()
+            assert page.locator(".pulse-chart-week .pulse-chart-column.is-zero").count() == 1
+            assert (
+                page.locator(".pulse-chart-week .pulse-chart-column").nth(1)
+                .locator(".pulse-chart-bar")
+                .get_attribute("title")
+                == "2"
+            )
+            zero_geometry = page.locator(".pulse-chart-week .pulse-chart-column").first.evaluate(
+                """column => {
+                  const zero = column.querySelector('.pulse-chart-zero').getBoundingClientRect();
+                  const label = column.querySelector('.pulse-chart-label').getBoundingClientRect();
+                  return {zeroBottom: Math.round(zero.bottom), labelTop: Math.round(label.top)};
+                }"""
+            )
+            assert zero_geometry["labelTop"] - zero_geometry["zeroBottom"] <= 8
             messages_metric = page.get_by_role("button", name=re.compile(r"^\d+ сообщений$"))
             received_reactions = page.get_by_role(
                 "button", name=re.compile(r"^\d+ получено реакций$")
@@ -5216,22 +5275,11 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert messages_metric.get_attribute("aria-pressed") == "false"
             assert received_reactions.get_attribute("aria-pressed") == "true"
             assert given_reactions.get_attribute("aria-pressed") == "false"
-            assert visual_panel.get_attribute("aria-label") == "Полученные реакции"
-            reaction_grid = page.locator(".pulse-reaction-grid")
-            assert reaction_grid.get_attribute("aria-label") == "Полученные реакции по типам"
-            reaction_geometry = reaction_grid.evaluate(
-                """node => ({
-                  count: node.children.length,
-                  overflowX: getComputedStyle(node).overflowX,
-                  rows: new Set([...node.children].map(child => (
-                    Math.round(child.getBoundingClientRect().top)
-                  ))).size,
-                })"""
-            )
-            assert reaction_geometry["count"] == 8
-            assert reaction_geometry["overflowX"] == "auto"
-            assert reaction_geometry["rows"] == 2
-            received_breakdown = reaction_grid.locator(".pulse-reaction-item").all_text_contents()
+            assert visual_panel.get_attribute("aria-label") == "Полученные реакции по дням"
+            received_bar_styles = page.locator(
+                ".pulse-chart-week .pulse-chart-bar"
+            ).evaluate_all("nodes => nodes.map(node => node.getAttribute('style'))")
+            assert len(received_bar_styles) == 6
             assert (
                 visual_panel.evaluate("node => node.getBoundingClientRect().height")
                 == visual_height
@@ -5245,12 +5293,11 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert messages_metric.get_attribute("aria-pressed") == "false"
             assert received_reactions.get_attribute("aria-pressed") == "false"
             assert given_reactions.get_attribute("aria-pressed") == "true"
-            assert visual_panel.get_attribute("aria-label") == "Поставленные реакции"
-            assert reaction_grid.get_attribute("aria-label") == "Поставленные реакции по типам"
-            assert (
-                reaction_grid.locator(".pulse-reaction-item").all_text_contents()
-                != received_breakdown
-            )
+            assert visual_panel.get_attribute("aria-label") == "Поставленные реакции по дням"
+            given_bar_styles = page.locator(
+                ".pulse-chart-week .pulse-chart-bar"
+            ).evaluate_all("nodes => nodes.map(node => node.getAttribute('style'))")
+            assert given_bar_styles != received_bar_styles
             assert (
                 visual_panel.evaluate("node => node.getBoundingClientRect().height")
                 == visual_height
@@ -5317,11 +5364,21 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             page.set_viewport_size({"width": width, "height": height})
             page.get_by_role("button", name="Месяц", exact=True).click()
             page.locator(".pulse-chart-month .pulse-chart-bar").first.wait_for()
-            assert page.locator(".pulse-chart-month .pulse-chart-bar").count() == 30
+            assert page.locator(".pulse-chart-month .pulse-chart-bar").count() == 29
+            assert page.locator(".pulse-chart-month .pulse-chart-column.is-zero").count() == 1
             assert page.locator(".pulse-chart-month .pulse-chart-label").count() == 0
             assert page.get_by_text("Сообщения по дням", exact=True).is_visible()
             page.get_by_role("button", name="Год", exact=True).click()
             page.get_by_text("Сообщения по месяцам", exact=True).wait_for()
+            assert page.locator(".pulse-chart-year .pulse-chart-column.is-zero").count() == 1
+            page.get_by_role("button", name="Всё время", exact=True).click()
+            page.get_by_text(all_chart_label, exact=True).wait_for()
+            assert page.locator(".pulse-chart-all .pulse-chart-column").count() == all_column_count
+            assert (
+                page.locator(".pulse-chart-all .pulse-chart-column.is-zero").count()
+                == all_zero_column_count
+            )
+            assert page.locator(".pulse-chart-empty").count() == 0
             page.get_by_role("button", name="Неделя", exact=True).click()
 
             page.get_by_role("button", name="Лидерборд").click()
@@ -5437,7 +5494,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("Карма", exact=True).count() == 1
             assert page.get_by_text("Надёжность", exact=True).count() == 0
             assert page.get_by_text("—", exact=True).count() >= 2
-            assert page.locator("[data-profile-action]").count() == 5
+            assert page.locator("[data-profile-action]").count() == 6
             assert page.locator('[data-screen-id="P07"]').count() == 0
             page.close()
         browser.close()

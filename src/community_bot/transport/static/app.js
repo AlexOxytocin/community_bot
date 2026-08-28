@@ -3930,14 +3930,19 @@ function achievementDetailSheet(state, achievement, originButton) {
 function pulseDetails(state, revision) {
   const pulse = state.pulses[state.period];
   if (!pulse) return element("p", "Статистика пока недоступна.", "status muted");
+  const trackingStarted = new Date(pulse.tracking_started_at);
+  const calculatedAt = new Date(pulse.calculated_at);
+  const trackingAnniversary = new Date(trackingStarted);
+  trackingAnniversary.setUTCFullYear(trackingAnniversary.getUTCFullYear() + 1);
+  const allTimeYearly = state.period === "all" && calculatedAt > trackingAnniversary;
   const periodPresentation = {
-    week: ["Моя неделя", "7 дней", "Сообщения по дням"],
-    month: ["Мой месяц", "30 дней", "Сообщения по дням"],
-    year: ["Мой год", "12 месяцев", "Сообщения по месяцам"],
+    week: ["Моя неделя", "7 дней", "дням"],
+    month: ["Мой месяц", "30 дней", "дням"],
+    year: ["Мой год", "12 месяцев", "месяцам"],
     all: [
       "Всё время",
       `с ${new Date(pulse.tracking_started_at).toLocaleDateString("ru-RU")}`,
-      "Активность с начала учёта",
+      allTimeYearly ? "годам" : "месяцам",
     ],
   }[state.period];
   const pulseAchievements = pulse.achievements.map((progress) => ({
@@ -3965,62 +3970,51 @@ function pulseDetails(state, revision) {
 
   const visualPanel = element("section", undefined, "pulse-visual-panel");
   visualPanel.setAttribute("aria-live", "polite");
-  const renderMessageChart = () => {
+  const renderActivityChart = (metricName) => {
+    const metricPresentation = {
+      messages: ["Сообщения", "messages"],
+      received: ["Полученные реакции", "reactions_received"],
+      given: ["Поставленные реакции", "reactions_given"],
+    }[metricName];
+    const sectionLabel = `${metricPresentation[0]} по ${periodPresentation[2]}`;
     if (!pulse.series.length) {
       return [
-        element("strong", periodPresentation[2], "pulse-section-label"),
-        element("p", "За всё время показываем итог с даты начала учёта.", "status muted"),
+        element("strong", sectionLabel, "pulse-section-label"),
+        element("p", "График пока недоступен.", "pulse-chart-empty muted"),
       ];
     }
-    const maximum = Math.max(...pulse.series.map((item) => item.messages), 1);
+    const metricKey = metricPresentation[1];
+    const maximum = Math.max(...pulse.series.map((item) => item[metricKey]), 1);
     const chart = element("div", undefined, `pulse-chart pulse-chart-${state.period}`);
     chart.setAttribute("role", "img");
-    chart.setAttribute("aria-label", `Сообщения: ${pulse.series.map((item) => item.messages).join(", ")}`);
+    chart.style.setProperty("--pulse-columns", String(pulse.series.length));
+    const chartValues = [];
     for (const item of pulse.series) {
       const column = element("span", undefined, "pulse-chart-column");
-      const bar = element("span", undefined, "pulse-chart-bar");
-      bar.style.setProperty("--pulse-bar-height", `${Math.max(12, Math.round(item.messages / maximum * 100))}%`);
-      column.append(bar);
       const bucketDate = new Date(`${item.bucket_start}T00:00:00Z`);
+      const value = item[metricKey];
+      if (value > 0) {
+        const bar = element("span", undefined, "pulse-chart-bar");
+        bar.style.setProperty("--pulse-bar-height", `${Math.max(12, Math.round(value / maximum * 100))}%`);
+        bar.setAttribute("title", String(value));
+        column.append(bar);
+      } else {
+        column.classList.add("is-zero");
+        column.append(element("span", "—", "pulse-chart-zero"));
+      }
+      chartValues.push(String(value));
       const label = state.period === "week"
         ? bucketDate.toLocaleDateString("ru-RU", { weekday: "short", timeZone: "UTC" }).slice(0, 2)
-        : state.period === "year"
+        : state.period === "year" || (state.period === "all" && !allTimeYearly)
           ? bucketDate.toLocaleDateString("ru-RU", { month: "short", timeZone: "UTC" }).slice(0, 1)
+          : state.period === "all"
+            ? String(bucketDate.getUTCFullYear())
           : "";
       if (label) column.append(element("span", label, "pulse-chart-label"));
       chart.append(column);
     }
-    return [element("strong", periodPresentation[2], "pulse-section-label"), chart];
-  };
-  const renderReactionGrid = (direction) => {
-    const received = direction === "received";
-    const label = received ? "Полученные реакции по типам" : "Поставленные реакции по типам";
-    const grid = element("div", undefined, "pulse-reaction-grid");
-    grid.setAttribute("role", "list");
-    grid.setAttribute("aria-label", label);
-    grid.setAttribute("tabindex", "0");
-    const breakdown = pulse.reaction_breakdown
-      .map((item) => ({ reaction: item.reaction, count: item[direction === "received" ? "received" : "given"] }))
-      .filter((item) => item.count > 0);
-    if (!breakdown.length) {
-      grid.append(element("span", "Пока нет реакций за этот период.", "status muted"));
-    }
-    for (const item of breakdown) {
-      const reaction = element("span", undefined, "pulse-reaction-item");
-      reaction.setAttribute("role", "listitem");
-      reaction.append(
-        element(
-          "span",
-          typeof item.reaction === "string"
-            ? item.reaction
-            : item.reaction?.emoji || "◈",
-          "pulse-reaction-emoji",
-        ),
-        element("strong", String(item.count)),
-      );
-      grid.append(reaction);
-    }
-    return [element("strong", label, "pulse-section-label"), grid];
+    chart.setAttribute("aria-label", `${sectionLabel}: ${chartValues.join(", ")}`);
+    return [element("strong", sectionLabel, "pulse-section-label"), chart];
   };
   const renderPulseMetric = (metricName) => {
     const selected = Object.hasOwn(metricButtons, metricName) ? metricName : "messages";
@@ -4029,13 +4023,8 @@ function pulseDetails(state, revision) {
       button.setAttribute("aria-pressed", String(name === selected));
     }
     const content = element("div", undefined, "pulse-visual-content");
-    content.append(...(selected === "messages" ? renderMessageChart() : renderReactionGrid(selected)));
-    visualPanel.setAttribute(
-      "aria-label",
-      selected === "messages"
-        ? periodPresentation[2]
-        : selected === "received" ? "Полученные реакции" : "Поставленные реакции",
-    );
+    content.append(...renderActivityChart(selected));
+    visualPanel.setAttribute("aria-label", content.querySelector(".pulse-section-label")?.textContent || "График активности");
     visualPanel.replaceChildren(content);
   };
   for (const [metricName, button] of Object.entries(metricButtons)) {

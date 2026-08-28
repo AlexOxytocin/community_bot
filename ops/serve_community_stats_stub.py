@@ -14,15 +14,16 @@ _PULSE_PATH = re.compile(r"^/v1/chats/-?\d+/users/\d+/pulse$")
 _LEADERBOARD_PATH = re.compile(r"^/v1/chats/-?\d+/leaderboard$")
 
 
-def _activity_series(period: str) -> list[dict[str, int | str]]:
+def _activity_series(period: str) -> list[dict[str, bool | int | str]]:
     today = datetime.datetime.now(datetime.UTC).date()
+    tracking_started = datetime.date(2026, 8, 1)
     if period == "week":
         dates = [today - datetime.timedelta(days=offset) for offset in range(6, -1, -1)]
         messages = (4, 7, 5, 11, 8, 13, 10)
     elif period == "month":
         dates = [today - datetime.timedelta(days=offset) for offset in range(29, -1, -1)]
         messages = tuple(2 + (index * 7) % 13 for index in range(30))
-    elif period == "year":
+    elif period in {"year", "all"}:
         dates = [
             (today.replace(day=1) - datetime.timedelta(days=32 * offset)).replace(day=1)
             for offset in range(11, -1, -1)
@@ -30,15 +31,23 @@ def _activity_series(period: str) -> list[dict[str, int | str]]:
         messages = tuple(24 + (index * 17) % 61 for index in range(12))
     else:
         return []
-    return [
-        {
-            "bucket_start": bucket.isoformat(),
-            "messages": message_count,
-            "reactions_given": max(1, message_count // 2),
-            "reactions_received": max(1, message_count // 3),
-        }
-        for bucket, message_count in zip(dates, messages, strict=True)
-    ]
+    series: list[dict[str, int | str]] = []
+    for bucket, message_count in zip(dates, messages, strict=True):
+        value = (
+            0
+            if period == "all" and bucket < tracking_started.replace(day=1)
+            else message_count
+        )
+        series.append(
+            {
+                "bucket_start": bucket.isoformat(),
+                "tracked": True,
+                "messages": value,
+                "reactions_given": value // 2,
+                "reactions_received": value // 3,
+            }
+        )
+    return series
 
 
 def _pulse(period: str) -> dict[str, object]:
