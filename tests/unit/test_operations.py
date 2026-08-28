@@ -108,6 +108,8 @@ def test_fast_deploy_uses_the_running_release_as_its_safety_baseline() -> None:
     assert '"diff"' in deploy
     assert '"--quiet"' in deploy
     assert "before_release," in deploy
+    assert "before_image = require_release_image(before_release)" in deploy
+    assert 'run("docker", "tag", before_image, PREVIOUS_IMAGE)' in deploy
     assert "if target_head != live_head:" in deploy
     assert 'manifest["commit_sha"]' not in deploy
     assert 'manifest["migration_head"]' not in deploy

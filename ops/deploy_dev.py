@@ -257,6 +257,22 @@ def require_database_head(
         raise RuntimeError("Migration did not reach the exact target head.")
 
 
+def require_release_image(release: str) -> str:
+    """Resolve a tagged image whose embedded identity matches the release."""
+    image = f"community-bot:{release}"
+    image_release = run(
+        "docker",
+        "image",
+        "inspect",
+        image,
+        "--format",
+        '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
+    )
+    if image_release != release:
+        raise RuntimeError("Running release image has the wrong identity.")
+    return image
+
+
 def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
     """Execute the serialized fast deploy or restore the prior running image."""
     sha, started = command()
@@ -269,7 +285,6 @@ def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
         getattr(fcntl, "flock")(stream, getattr(fcntl, "LOCK_EX"))  # noqa: B009
         if run("git", "ls-remote", REPOSITORY, "refs/heads/main").split()[0] != sha:
             raise RuntimeError("Requested SHA is no longer main.")
-        before = run("docker", "inspect", "community-mini-app-core-web-1", "--format", "{{.Image}}")
         before_release = run(
             "docker",
             "inspect",
@@ -340,7 +355,8 @@ def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
         live_head = database_head(probe, probe_environment)
         if target_head != live_head and not migration_changed:
             raise RuntimeError("Unexpected database head mismatch.")
-        run("docker", "tag", before, PREVIOUS_IMAGE)
+        before_image = require_release_image(before_release)
+        run("docker", "tag", before_image, PREVIOUS_IMAGE)
         deploy, environment = compose(active, image, sha)
         try:
             if target_head != live_head:
