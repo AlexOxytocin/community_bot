@@ -9,12 +9,10 @@ import re
 import subprocess
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
 
 ROOT = Path("/opt/community-bot")
 REPOSITORY = "https://github.com/AlexOxytocin/community_bot.git"
-PUBLIC_READY_URL = "https://allo.godmodetools.com/readyz"
 PREVIOUS_IMAGE = "community-bot-dev:previous"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -49,7 +47,7 @@ def compose(active: Path, image: str, release: str) -> tuple[list[str], dict[str
 
 
 def prove(sha: str, deadline: float) -> None:
-    """Poll container and public readiness until both expose the exact release."""
+    """Poll private container health until it exposes the exact release."""
     while time.time() < deadline:
         state = run(
             "docker",
@@ -59,23 +57,41 @@ def prove(sha: str, deadline: float) -> None:
             '{{.State.Health.Status}} {{index .Config.Labels "org.opencontainers.image.revision"}}',
         )
         if state == f"healthy {sha}":
-            try:
-                request = urllib.request.Request(
-                    PUBLIC_READY_URL, headers={"User-Agent": "community-bot-deploy"}
-                )
-                with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
-                    if response.status == 200 and json.load(response)["release"] == sha:
-                        return
-            except (OSError, json.JSONDecodeError, KeyError):
-                pass
+            return
         time.sleep(2)
-    raise RuntimeError("Deployment exceeded 120 seconds.")
+    raise RuntimeError("Deployment exceeded its private readiness deadline.")
 
 
-def main() -> int:
+def database_head(probe: list[str], environment: dict[str, str]) -> str:
+    """Read the exact live Alembic head without exposing database credentials."""
+    migration_query = (
+        'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc '
+        '"SELECT version_num FROM alembic_version ORDER BY version_num"'
+    )
+    return run(
+        *probe,
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-c",
+        migration_query,
+        env=environment,
+    )
+
+
+def require_database_head(
+    probe: list[str], environment: dict[str, str], expected_head: str
+) -> None:
+    """Require one exact post-migration head."""
+    if database_head(probe, environment) != expected_head:
+        raise RuntimeError("Migration did not reach the exact target head.")
+
+
+def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
     """Execute the serialized fast deploy or restore the prior running image."""
     sha, started = command()
-    deadline = started + 120
+    deadline = started + 600
     releases = ROOT / "shared" / "releases"
     active_state = json.loads((releases / "active.json").read_text(encoding="utf-8"))
     active = releases / active_state["current"]["manifest_sha256"]
@@ -101,7 +117,21 @@ def main() -> int:
             run("git", "-C", str(source), "checkout", "--quiet", "--detach", "FETCH_HEAD")
             if run("git", "-C", str(source), "rev-parse", "HEAD") != sha:
                 raise RuntimeError("Fetched SHA mismatch.")
-            if subprocess.run(
+            compose_changed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "diff",
+                    "--quiet",
+                    before_release,
+                    sha,
+                    "--",
+                    "compose.production.yaml",
+                ],
+                check=False,
+            ).returncode != 0
+            migration_changed = subprocess.run(
                 [
                     "git",
                     "-C",
@@ -113,11 +143,11 @@ def main() -> int:
                     "--",
                     "migrations",
                     "alembic.ini",
-                    "compose.production.yaml",
                 ],
                 check=False,
-            ).returncode:
-                raise RuntimeError("Migration or compose change requires the slow path.")
+            ).returncode != 0
+            if compose_changed:
+                raise RuntimeError("Compose changes require a separately reviewed host package.")
             image = f"community-bot:{sha}"
             run(
                 "docker",
@@ -132,29 +162,34 @@ def main() -> int:
             )
         target_head = run("docker", "run", "--rm", image, "community-migration-head")
         probe, probe_environment = compose(active, image, sha)
-        migration_query = (
-            'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc '
-            '"SELECT version_num FROM alembic_version ORDER BY version_num"'
-        )
-        live_head = run(
-            *probe,
-            "exec",
-            "-T",
-            "postgres",
-            "sh",
-            "-c",
-            migration_query,
-            env=probe_environment,
-        )
-        if target_head != live_head:
-            raise RuntimeError("Migration head requires the slow path.")
+        live_head = database_head(probe, probe_environment)
+        if target_head != live_head and not migration_changed:
+            raise RuntimeError("Unexpected database head mismatch.")
         run("docker", "tag", before, PREVIOUS_IMAGE)
         deploy, environment = compose(active, image, sha)
         try:
+            if target_head != live_head:
+                backup = run("python3", str(active / "ops" / "backup_postgres.py"))
+                run("python3", str(active / "ops" / "restore_drill.py"), backup)
+                run(*deploy, "stop", "web", "worker", env=environment)
+                run(
+                    *deploy,
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-T",
+                    "migrate",
+                    env=environment,
+                )
+                require_database_head(probe, probe_environment, target_head)
             run(*deploy, "up", "-d", "--no-deps", "--force-recreate", "worker", env=environment)
             run(*deploy, "up", "-d", "--no-deps", "--force-recreate", "web", env=environment)
             prove(sha, deadline)
         except Exception:
+            if database_head(probe, probe_environment) != live_head:
+                raise RuntimeError(
+                    "Forward migration completed; automatic image rollback is unsafe."
+                ) from None
             rollback_release = run(
                 "docker",
                 "image",

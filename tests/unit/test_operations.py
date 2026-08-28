@@ -111,6 +111,18 @@ def test_fast_deploy_uses_the_running_release_as_its_safety_baseline() -> None:
     assert 'manifest["migration_head"]' not in deploy
 
 
+def test_migration_deploy_is_private_backup_first_and_non_interactive() -> None:
+    root = Path(__file__).parents[2]
+    deploy = (root / "ops" / "deploy_dev.py").read_text(encoding="utf-8")
+
+    assert "allo.godmodetools.com" not in deploy
+    assert "urllib.request" not in deploy
+    assert 'active / "ops" / "backup_postgres.py"' in deploy
+    assert 'active / "ops" / "restore_drill.py"' in deploy
+    assert '"--no-deps",\n                    "-T",\n                    "migrate"' in deploy
+    assert "Forward migration completed; automatic image rollback is unsafe." in deploy
+
+
 def test_host_maintenance_surface_is_python_and_data_only() -> None:
     """The manual contract adds one Python tool, not an R1 deployment surface."""
     root = Path(__file__).parents[2]
