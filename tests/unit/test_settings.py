@@ -53,9 +53,13 @@ def test_production_settings_require_full_lowercase_git_sha() -> None:
     assert Settings(_env_file=None, environment="production", release=release).release == release
 
 
-def test_community_chat_requires_id_and_join_url_together() -> None:
-    with pytest.raises(ValueError, match="must be set together"):
-        Settings(_env_file=None, community_telegram_chat_id=-100_100)
+def test_community_chat_id_can_enable_stats_without_a_join_url() -> None:
+    settings = Settings(_env_file=None, community_telegram_chat_id=-100_100)
+    assert settings.community_telegram_chat_id == -100_100
+    assert settings.community_telegram_join_url is None
+
+    with pytest.raises(ValueError, match="requires COMMUNITY_TELEGRAM_CHAT_ID"):
+        Settings(_env_file=None, community_telegram_join_url="https://t.me/allo_neural")
 
     settings = Settings(
         _env_file=None,

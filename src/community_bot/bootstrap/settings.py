@@ -109,14 +109,8 @@ class Settings(BaseSettings):
         ):
             msg = "local review invitation requires a development review identity"
             raise ValueError(msg)
-        community_values = (
-            self.community_telegram_chat_id,
-            self.community_telegram_join_url,
-        )
-        if any(value is not None for value in community_values) and not all(
-            value is not None for value in community_values
-        ):
-            msg = "COMMUNITY_TELEGRAM_CHAT_ID and COMMUNITY_TELEGRAM_JOIN_URL must be set together"
+        if self.community_telegram_join_url is not None and self.community_telegram_chat_id is None:
+            msg = "COMMUNITY_TELEGRAM_JOIN_URL requires COMMUNITY_TELEGRAM_CHAT_ID"
             raise ValueError(msg)
         stats_values = (self.community_stats_base_url, self.community_stats_token)
         if any(value is not None for value in stats_values) and not all(
