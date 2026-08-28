@@ -611,7 +611,7 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .bottom-nav button[aria-pressed="true"]::before { position: absolute; top: -1px; width: 24px; height: 2px; border-radius: 0 0 2px 2px; background: var(--app-accent); content: ""; }
 .shell.context-screen .bottom-nav { display: none; }
 .shell.context-screen { grid-template-rows: minmax(0, 1fr); }
-:root[data-telegram-fullscreen="true"] .shell.context-screen .screen { padding-top: max(12px, calc(var(--tg-content-safe-area-inset-top, 0px) + 6px)); }
+:root[data-telegram-fullscreen="true"] .screen { padding-top: max(12px, calc(var(--tg-content-safe-area-inset-top, 0px) + 6px)); }
 .bottom-nav button[hidden] { display: none; }
 .hidden { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid var(--app-focus); outline-offset: 3px; }

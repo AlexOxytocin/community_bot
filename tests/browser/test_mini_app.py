@@ -1624,6 +1624,23 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(  # 
         assert page.url.endswith("#/catalog?view_state=t01")
         catalog_back = page.get_by_role("button", name="Назад к заданиям", exact=True)
         assert catalog_back.inner_text() == "\u2039"
+        assert (
+            page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop")
+            == "12px"
+        )
+        page.evaluate(
+            "document.documentElement.dataset.telegramFullscreen = 'true'; "
+            "document.documentElement.style.setProperty("
+            "'--tg-content-safe-area-inset-top', '74px')"
+        )
+        assert (
+            page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop")
+            == "80px"
+        )
+        assert page.locator(".catalog-actions").evaluate(
+            "node => node.getBoundingClientRect().top "
+            "- document.querySelector('.screen').getBoundingClientRect().top"
+        ) == pytest.approx(80, abs=0.5)
         action_geometry = page.evaluate(
             """() => {
               const back = document.querySelector('.catalog-back-button').getBoundingClientRect();
