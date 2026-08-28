@@ -7,7 +7,7 @@ import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -2683,28 +2683,22 @@ def test_assignment_action_eligibility_is_server_projected() -> None:
 def test_telegram_profile_photo_is_round_and_keeps_initials_fallback(
     mini_app_url: str,
 ) -> None:
-    me, member = _cache_profile("00000000-0000-0000-0000-000000000133")
-    photo_url = "https://t.me/i/userpic/320/community-avatar.svg"
-    init_data = urlencode(
-        {
-            "user": json.dumps(
-                {"id": 133, "photo_url": photo_url},
-                separators=(",", ":"),
-            )
-        }
-    )
-    bridge = (
-        "globalThis.Telegram={WebApp:{"
-        f"initData:{json.dumps(init_data)},ready(){{}},expand(){{}}"
-        "}};"
-    )
+    me, _member = _cache_profile("00000000-0000-0000-0000-000000000133")
+    avatar_path = f"/api/v1/members/{me['member_id']}/avatar"
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        page = _new_page(browser, bridge=bridge)
+        page = _new_page(browser)
         page.set_viewport_size({"width": 375, "height": 812})
         page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
-        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=_member))
+        page.route(
+            f"**{avatar_path}",
+            lambda route: route.fulfill(
+                body='<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>',
+                content_type="image/svg+xml",
+            ),
+        )
         page.route(
             "**/api/v1/tasks",
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
@@ -2714,27 +2708,20 @@ def test_telegram_profile_photo_is_round_and_keeps_initials_fallback(
             "**/api/v1/moderation/cases?*",
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
-        page.route(
-            photo_url,
-            lambda route: route.fulfill(
-                body='<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>',
-                content_type="image/svg+xml",
-            ),
-        )
-
         page.goto(mini_app_url + "#/profile")
         image = page.locator(".profile-identity-card .avatar-photo")
         image.wait_for()
-        assert image.get_attribute("src") == photo_url
+        assert image.get_attribute("src") == avatar_path
         assert image.evaluate("node => getComputedStyle(node).objectFit") == "cover"
         avatar = page.locator(".profile-identity-card .avatar")
         assert avatar.evaluate("node => getComputedStyle(node).borderRadius") == "50%"
         assert avatar.evaluate("node => node.offsetWidth === node.offsetHeight")
         assert avatar.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
 
-        page.route("https://t.me/missing-avatar.jpg", lambda route: route.abort())
+        missing_avatar = "/api/v1/members/missing/avatar"
+        page.route(f"**{missing_avatar}", lambda route: route.abort())
         page.evaluate(
-            "document.querySelector('.avatar-photo').src='https://t.me/missing-avatar.jpg'"
+            f"document.querySelector('.avatar-photo').src='{missing_avatar}'"
         )
         image.wait_for(state="detached")
         assert avatar.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"

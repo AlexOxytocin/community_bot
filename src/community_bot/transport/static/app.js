@@ -2526,28 +2526,12 @@ const valueOrDash = (value) => value == null ? "—" : String(value);
 const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
-const telegramProfilePhotoUrl = () => {
-  const initData = globalThis.Telegram?.WebApp?.initData;
-  if (!initData) return null;
-  try {
-    const user = JSON.parse(new URLSearchParams(initData).get("user") || "null");
-    const photoUrl = new URL(user?.photo_url);
-    const telegramHost = photoUrl.hostname === "t.me" || photoUrl.hostname.endsWith(".telegram.org");
-    return photoUrl.protocol === "https:" && telegramHost && !photoUrl.username && !photoUrl.password
-      ? photoUrl.href
-      : null;
-  } catch {
-    return null;
-  }
-};
-
-const profileAvatar = (displayName) => {
+const profileAvatar = (displayName, memberId) => {
   const avatar = element("span", initialsFor(displayName), "avatar");
-  const photoUrl = telegramProfilePhotoUrl();
-  if (!photoUrl) return avatar;
+  if (!memberId) return avatar;
   const image = document.createElement("img");
   image.className = "avatar-photo";
-  image.src = photoUrl;
+  image.src = `/api/v1/members/${encodeURIComponent(memberId)}/avatar`;
   image.alt = "";
   image.decoding = "async";
   image.referrerPolicy = "no-referrer";
@@ -2863,7 +2847,7 @@ function ownProfileOverview(state, revision) {
   copy.append(element("h2", me.display_name));
   if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(profileAvatar(me.display_name), copy);
+  identity.append(profileAvatar(me.display_name, me.member_id), copy);
   identity.append(element("span", "›", "profile-edit-chevron"));
   const city = profileEditTrigger(
     "город",
@@ -4123,7 +4107,7 @@ function safeMemberDetails(member, pulse = null) {
     copy.append(username);
   }
   copy.append(element("p", [member.city, `Уровень ${member.level_number}`].filter(Boolean).join(" · "), "muted"));
-  identity.append(element("span", initialsFor(member.display_name), "avatar"), copy);
+  identity.append(profileAvatar(member.display_name, member.member_id), copy);
   const metrics = element("div", undefined, "metric-grid foreign-metrics");
   for (const [value, label] of [[member.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
     const metric = element("article", undefined, "metric-card");

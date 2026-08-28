@@ -30,7 +30,7 @@ from community_bot.application.community_stats import (
     StatsLeaderboardItem,
 )
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
-from community_bot.application.membership import ResolvedTelegramResource
+from community_bot.application.membership import ResolvedTelegramResource, TelegramProfilePhoto
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
@@ -107,6 +107,8 @@ class FakeMembershipChecker:
         """Start available and retain exact outbound request arguments."""
         """Start with no confirmed chat members."""
         self.members: set[tuple[int, int]] = set()
+        self.profile_photos: dict[int, TelegramProfilePhoto] = {}
+        self.profile_photo_requests: list[int] = []
         self.resolved_chat = ResolvedTelegramResource(
             telegram_chat_id=-100_200,
             telegram_username="extra_resource",
@@ -121,6 +123,11 @@ class FakeMembershipChecker:
         """Return one pre-validated chat."""
         del reference
         return self.resolved_chat
+
+    async def profile_photo(self, telegram_user_id: int) -> TelegramProfilePhoto | None:
+        """Return a configured profile photo and record the server-side lookup."""
+        self.profile_photo_requests.append(telegram_user_id)
+        return self.profile_photos.get(telegram_user_id)
 
     async def close(self) -> None:
         """Match the production adapter lifecycle."""
@@ -1098,6 +1105,45 @@ async def test_web_profile_update_is_exact_concurrent_and_conversation_safe(
             )
         )
         assert profile_audits == web_receipts == 12
+    await database.dispose()
+
+
+async def test_member_avatar_is_authenticated_authorized_and_server_proxied(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await active_member(database, 52_091)
+    checker = FakeMembershipChecker()
+    photo_content = b"\xff\xd8\xfftelegram-profile-photo\xff\xd9"
+    checker.profile_photos[member.telegram_user_id] = TelegramProfilePhoto(photo_content)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+        membership_checker=checker,
+    )
+    avatar_path = f"/api/v1/members/{member.id}/avatar"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        assert (await client.get(avatar_path)).status_code == 401
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(member.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+
+        avatar = await client.get(avatar_path)
+        assert avatar.status_code == 200
+        assert avatar.content == photo_content
+        assert avatar.headers["content-type"] == "image/jpeg"
+        assert avatar.headers["cache-control"] == "private, max-age=900"
+        assert checker.profile_photo_requests == [member.telegram_user_id]
+
+        checker.profile_photos.clear()
+        absent = await client.get(avatar_path)
+        assert absent.status_code == 404
+        assert absent.headers["cache-control"] == "private, max-age=300"
+        assert (await client.get(f"/api/v1/members/{uuid4()}/avatar")).status_code == 404
+
     await database.dispose()
 
 

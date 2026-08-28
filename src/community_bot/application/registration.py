@@ -628,6 +628,15 @@ class RegistrationService:
                 raise LookupError(message)
             return member.telegram_user_id
 
+    async def telegram_user_id_for_member(self, member_id: UUID) -> int:
+        """Resolve a member's Telegram identity after caller-side authorization."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(member_id)
+            if member is None:
+                message = "Member does not exist."
+                raise LookupError(message)
+            return member.telegram_user_id
+
     async def personal_invitations_for_actor(
         self,
         *,

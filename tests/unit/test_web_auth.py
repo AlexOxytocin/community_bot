@@ -370,6 +370,7 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/me/profile", ("PUT",)),
         ("/api/v1/members", ("GET",)),
         ("/api/v1/members/{member_id}", ("GET",)),
+        ("/api/v1/members/{member_id}/avatar", ("GET",)),
         ("/api/v1/members/{member_id}/karma-vote", ("POST",)),
         ("/api/v1/administration", ("GET",)),
         ("/api/v1/administration/credits/self", ("GET",)),
@@ -1010,10 +1011,8 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     )
     assert "default-src 'self'" in index.headers["content-security-policy"]
     assert "script-src 'self' https://telegram.org" in index.headers["content-security-policy"]
-    assert (
-        "img-src 'self' https://t.me https://*.telegram.org"
-        in index.headers["content-security-policy"]
-    )
+    assert "img-src 'self'" in index.headers["content-security-policy"]
+    assert "https://t.me" not in index.headers["content-security-policy"]
     bridge = b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
     assert index.content.index(bridge) < index.content.index(b"</head>")
     assert index.content.index(bridge) < index.content.index(b"/mini-assets/app.js")

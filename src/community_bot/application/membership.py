@@ -10,6 +10,10 @@ class MembershipCheckUnavailableError(RuntimeError):
     """Telegram could not confirm membership at this moment."""
 
 
+class ProfilePhotoUnavailableError(RuntimeError):
+    """Telegram could not return a profile photo at this moment."""
+
+
 class InvalidMembershipResourceError(ValueError):
     """A Telegram chat cannot be used as a membership requirement."""
 
@@ -23,6 +27,14 @@ class ResolvedTelegramResource:
     title: str
 
 
+@dataclass(frozen=True, slots=True)
+class TelegramProfilePhoto:
+    """Downloaded Telegram profile photo safe to return from the web boundary."""
+
+    content: bytes
+    content_type: str = "image/jpeg"
+
+
 class TelegramMembershipChecker(Protocol):
     """Minimal Telegram API required by the membership gate."""
 
@@ -32,6 +44,10 @@ class TelegramMembershipChecker(Protocol):
 
     async def resolve_chat(self, reference: str) -> ResolvedTelegramResource:
         """Resolve and validate a chat that the bot is able to inspect."""
+        ...
+
+    async def profile_photo(self, telegram_user_id: int) -> TelegramProfilePhoto | None:
+        """Return the current Telegram profile photo when one is available."""
         ...
 
     async def close(self) -> None:

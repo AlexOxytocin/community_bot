@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import (
+    TelegramAPIError,
     TelegramBadRequest,
     TelegramForbiddenError,
     TelegramNetworkError,
@@ -14,9 +17,12 @@ from aiogram.exceptions import (
 from community_bot.application.membership import (
     InvalidMembershipResourceError,
     MembershipCheckUnavailableError,
+    ProfilePhotoUnavailableError,
     ResolvedTelegramResource,
+    TelegramProfilePhoto,
 )
 
+_PROFILE_PHOTO_MAX_BYTES = 5 * 1024 * 1024
 _MEMBER_STATUSES = {
     ChatMemberStatus.CREATOR,
     ChatMemberStatus.ADMINISTRATOR,
@@ -72,6 +78,37 @@ class AiogramTelegramMembershipChecker:
             telegram_username=chat.username,
             title=title,
         )
+
+    async def profile_photo(self, telegram_user_id: int) -> TelegramProfilePhoto | None:
+        """Download the best available static Telegram profile photo."""
+        try:
+            profile_photos = await self._bot.get_user_profile_photos(
+                user_id=telegram_user_id,
+                offset=0,
+                limit=1,
+                request_timeout=10,
+            )
+            if not profile_photos.photos:
+                return None
+            largest = max(
+                profile_photos.photos[0],
+                key=lambda item: item.width * item.height,
+            )
+            telegram_file = await self._bot.get_file(largest.file_id, request_timeout=10)
+            if not telegram_file.file_path:
+                return None
+            destination = BytesIO()
+            await self._bot.download_file(
+                telegram_file.file_path,
+                destination=destination,
+                timeout=10,
+            )
+        except TelegramAPIError as error:
+            raise ProfilePhotoUnavailableError from error
+        content = destination.getvalue()
+        if not content or len(content) > _PROFILE_PHOTO_MAX_BYTES:
+            raise ProfilePhotoUnavailableError
+        return TelegramProfilePhoto(content=content)
 
     async def close(self) -> None:
         """Close the owned aiogram client session."""

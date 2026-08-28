@@ -68,6 +68,7 @@ from community_bot.application.identity import ActorContext
 from community_bot.application.membership import (
     InvalidMembershipResourceError,
     MembershipCheckUnavailableError,
+    ProfilePhotoUnavailableError,
     TelegramMembershipChecker,
 )
 from community_bot.application.moderation import (
@@ -1402,6 +1403,30 @@ def create_web_app(
             raise HTTPException(status_code=404, detail="not_found") from error
         dto = MemberDetailDto(**_member_dto(profile).model_dump(), can_rate_karma=can_rate_karma)
         return _json_response(dto)
+
+    @app.get("/api/v1/members/{member_id}/avatar")
+    async def member_avatar(
+        member_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> Response:
+        try:
+            await reputation.profile(actor=actor, target_id=member_id)
+            telegram_user_id = await registration.telegram_user_id_for_member(member_id)
+        except (LookupError, PermissionError, ProfileUnavailableError) as error:
+            raise HTTPException(status_code=404, detail="not_found") from error
+        try:
+            photo = await membership_checker.profile_photo(telegram_user_id)
+        except ProfilePhotoUnavailableError:
+            return Response(status_code=503, headers={"Cache-Control": "no-store"})
+        if photo is None:
+            return Response(status_code=404, headers={"Cache-Control": "private, max-age=300"})
+        return Response(
+            content=photo.content,
+            media_type=photo.content_type,
+            headers={
+                "Cache-Control": "private, max-age=900",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get("/api/v1/administration", response_model=AdministrationDto)
     async def administration_overview(
@@ -2848,8 +2873,7 @@ def create_web_app(
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (
                     "default-src 'self'; script-src 'self' https://telegram.org; "
-                    "style-src 'self'; font-src 'self'; img-src 'self' https://t.me "
-                    "https://*.telegram.org; object-src 'none'; "
+                    "style-src 'self'; font-src 'self'; img-src 'self'; object-src 'none'; "
                     "base-uri 'none'; frame-ancestors https://web.telegram.org "
                     "https://*.telegram.org"
                 ),
