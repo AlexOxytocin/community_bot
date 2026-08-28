@@ -940,7 +940,22 @@ def test_ui_next_onboarding_starts_light_and_confirms_catalog_city(mini_app_url:
             name="Расскажите о себе",  # noqa: RUF001
             exact=True,
         ).wait_for()
-        assert not page.locator('textarea[name="short_bio"]').evaluate("node => node.required")
+        short_bio = page.locator('textarea[name="short_bio"]')
+        assert not short_bio.evaluate("node => node.required")
+        placeholder_style = short_bio.evaluate(
+            """node => {
+              const field = getComputedStyle(node);
+              const placeholder = getComputedStyle(node, '::placeholder');
+              return {
+                background: field.backgroundColor,
+                text: field.color,
+                placeholder: placeholder.color,
+                placeholderFill: placeholder.webkitTextFillColor,
+              };
+            }"""
+        )
+        assert placeholder_style["placeholderFill"] == placeholder_style["placeholder"]
+        assert placeholder_style["placeholder"] != placeholder_style["text"]
         assert page.get_by_role("button", name="Заполнить позже", exact=True).is_visible()
         page.get_by_role("button", name="Предыдущий шаг", exact=True).click()
         page.get_by_role(
@@ -5091,6 +5106,28 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_role("button", name="Всё время", exact=True).is_visible()
             assert page.locator(".achievement-tile.is-unlocked").count() == 3
             assert page.locator(".achievement-tile.is-locked").count() == 3
+            achievement_geometry = page.locator(".achievements-card").evaluate(
+                """card => {
+                  const tiles = [...card.querySelectorAll('.achievement-tile')];
+                  const icons = [...card.querySelectorAll('.achievement-icon')];
+                  return {
+                    cardHeight: Math.round(card.getBoundingClientRect().height),
+                    tileHeights: [...new Set(tiles.map(tile => (
+                      Math.round(tile.getBoundingClientRect().height)
+                    )))],
+                    iconSizes: [...new Set(icons.map(icon => (
+                      Math.round(icon.getBoundingClientRect().height)
+                    )))],
+                    rows: new Set(tiles.map(tile => (
+                      Math.round(tile.getBoundingClientRect().top)
+                    ))).size,
+                  };
+                }"""
+            )
+            assert achievement_geometry["cardHeight"] <= 230
+            assert achievement_geometry["tileHeights"] == [72]
+            assert achievement_geometry["iconSizes"] == [34]
+            assert achievement_geometry["rows"] == 2
             assert page.locator(".achievement-detail-sheet").count() == 0
             achievement = page.get_by_role("button", name="Магнит, уровень 1", exact=True)
             page.set_viewport_size({"width": width, "height": 620})
@@ -5217,7 +5254,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             achievement_filter.click()
             page.get_by_role("dialog", name="Рейтинг по").get_by_role("radio", name="Опыт").click()
             experience_filter = page.get_by_role("button", name="Рейтинг по: Опыт")
-            assert experience_filter.evaluate("node => document.activeElement === node") is True
+            expect(experience_filter).to_be_focused()
             assert (
                 page.get_by_role("button", name="Месяц", exact=True).get_attribute("aria-pressed")
                 == "true"
@@ -5226,7 +5263,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                 assert page.get_by_role("button", name=active_period, exact=True).is_enabled()
 
             page.get_by_role("button", name="Параметры", exact=True).click()
-            page.locator(".settings-link-row").click()
+            page.locator(".settings-link-row:not(.settings-theme-row)").click()
             page.locator(".profile-overview").wait_for()
             assert page.url.endswith("#/profile")
             heading_box = page.locator("#screen-title").bounding_box()

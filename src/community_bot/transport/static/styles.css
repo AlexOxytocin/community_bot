@@ -536,13 +536,13 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .pulse-reaction-item { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); place-items: center; gap: 4px; padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent); border-radius: 11px; background: color-mix(in srgb, var(--app-surface-raised) 78%, transparent); scroll-snap-align: start; }
 .pulse-reaction-item strong { justify-self: start; font-size: 13px; line-height: 1; }
 .pulse-reaction-emoji { font-size: 16px; line-height: 1; }
-.achievements-card { display: grid; gap: 12px; padding: 15px; border: 1px solid var(--app-border); border-radius: 20px; background: var(--app-surface); }
-.achievement-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.achievement-tile { display: grid; min-width: 0; min-height: 112px; place-items: center; align-content: center; gap: 5px; padding: 9px 5px; border: 1px solid var(--app-border); border-radius: 15px; background: var(--app-surface-raised); color: var(--app-text); cursor: pointer; text-align: center; }
+.achievements-card { display: grid; gap: 10px; padding: 13px; border: 1px solid var(--app-border); border-radius: 20px; background: var(--app-surface); }
+.achievement-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.achievement-tile { display: grid; min-width: 0; height: 72px; min-height: 72px; place-items: center; align-content: center; gap: 2px; padding: 4px 3px; border: 1px solid var(--app-border); border-radius: 12px; background: var(--app-surface-raised); color: var(--app-text); cursor: pointer; text-align: center; }
 .achievement-tile.is-unlocked { border-color: color-mix(in srgb, var(--app-accent) 34%, var(--app-border)); }
 .achievement-tile.is-locked { opacity: .43; filter: grayscale(1); }
 .achievement-tile.is-selected { border-color: var(--app-accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent) 55%, transparent); }
-.achievement-icon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 13px; background: color-mix(in srgb, var(--app-accent) 11%, var(--app-surface)); font-size: 23px; }
+.achievement-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 11px; background: color-mix(in srgb, var(--app-accent) 11%, var(--app-surface)); font-size: 20px; }
 .achievement-tile strong { overflow: hidden; max-width: 100%; font-size: 11px; line-height: 1.15; text-overflow: ellipsis; white-space: nowrap; }
 .achievement-level { color: var(--app-text-muted); font-size: 9px; font-weight: 800; }
 .achievement-detail-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; align-items: end; padding: 14px max(14px, calc((100vw - 430px) / 2 + 14px)); background: rgb(0 0 0 / .58); }
@@ -1244,6 +1244,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .onboarding-form { gap: 13px; }
 .onboarding-field { display: grid; gap: 7px; font-size: 12px; font-weight: 800; }
 .onboarding-field input, .onboarding-field textarea { box-sizing: border-box; width: 100%; min-height: 52px; padding: 13px 14px; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface-raised); color: var(--app-text); font: inherit; line-height: 1.4; }
+.onboarding-field input::placeholder, .onboarding-field textarea::placeholder { color: color-mix(in srgb, var(--app-text-muted) 58%, var(--app-surface-raised)); -webkit-text-fill-color: color-mix(in srgb, var(--app-text-muted) 58%, var(--app-surface-raised)); opacity: 1; }
 .onboarding-field textarea { min-height: 104px; max-height: 240px; resize: vertical; }
 .onboarding-field input:focus-visible, .onboarding-field textarea:focus-visible { border-color: var(--app-accent); outline: 0; box-shadow: inset 0 0 0 1px var(--app-accent); }
 .onboarding-counter { margin-top: -3px; color: var(--app-text-muted); font-size: 10px; font-weight: 650; text-align: right; }

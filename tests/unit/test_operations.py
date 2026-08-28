@@ -159,6 +159,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "release_contract.py",
         "restore_drill.py",
         "seed_task_home_local.py",
+        "serve_community_stats_stub.py",
     }
     assert list((root / "ops").glob("*.sh")) == []
     assert list((root / "ops" / "systemd").glob("*")) == []
