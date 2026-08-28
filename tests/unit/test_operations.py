@@ -117,8 +117,9 @@ def test_migration_deploy_is_private_backup_first_and_non_interactive() -> None:
 
     assert "allo.godmodetools.com" not in deploy
     assert "urllib.request" not in deploy
-    assert 'active / "ops" / "backup_postgres.py"' in deploy
-    assert 'active / "ops" / "restore_drill.py"' in deploy
+    assert "def backup_restore_drill(" in deploy
+    assert 'Path("/var/backups/community-bot")' in deploy
+    assert 'RESTORE_DATABASE = "community_bot_restore_drill"' in deploy
     assert '"--no-deps",\n                    "-T",\n                    "migrate"' in deploy
     assert "Forward migration completed; automatic image rollback is unsafe." in deploy
 

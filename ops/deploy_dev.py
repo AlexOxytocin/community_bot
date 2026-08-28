@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
 import subprocess
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path("/opt/community-bot")
 REPOSITORY = "https://github.com/AlexOxytocin/community_bot.git"
 PREVIOUS_IMAGE = "community-bot-dev:previous"
 SHA = re.compile(r"^[0-9a-f]{40}$")
+RESTORE_DATABASE = "community_bot_restore_drill"
 
 
 def run(*command: str, env: dict[str, str] | None = None) -> str:
@@ -64,20 +67,160 @@ def prove(sha: str, deadline: float) -> None:
 
 def database_head(probe: list[str], environment: dict[str, str]) -> str:
     """Read the exact live Alembic head without exposing database credentials."""
-    migration_query = (
-        'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc '
-        '"SELECT version_num FROM alembic_version ORDER BY version_num"'
+    values = environment_values(ROOT / "shared" / ".env")
+    return database_head_for(
+        probe,
+        environment,
+        values["POSTGRES_USER"],
+        values["POSTGRES_DB"],
     )
+
+
+def database_head_for(
+    probe: list[str], environment: dict[str, str], postgres_user: str, database: str
+) -> str:
+    """Read one exact database head through the existing PostgreSQL container."""
     return run(
         *probe,
         "exec",
         "-T",
         "postgres",
-        "sh",
-        "-c",
-        migration_query,
+        "psql",
+        "--username",
+        postgres_user,
+        "--dbname",
+        database,
+        "--tuples-only",
+        "--no-align",
+        "--command",
+        "SELECT version_num FROM alembic_version ORDER BY version_num",
         env=environment,
     )
+
+
+def environment_values(path: Path) -> dict[str, str]:
+    """Read required simple dotenv values without expansion or logging."""
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        values[key.strip()] = value.strip().strip('"\'')
+    missing = [name for name in ("POSTGRES_USER", "POSTGRES_DB") if not values.get(name)]
+    if missing:
+        raise RuntimeError("Production database identity is incomplete.")
+    return values
+
+
+def backup_restore_drill(
+    probe: list[str], environment: dict[str, str], expected_head: str
+) -> tuple[Path, str]:
+    """Back up the live database and prove an isolated exact-head restore."""
+    values = environment_values(ROOT / "shared" / ".env")
+    postgres_user = values["POSTGRES_USER"]
+    database = values["POSTGRES_DB"]
+    backup_dir = Path("/var/backups/community-bot")
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup_dir.chmod(0o700)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    target = backup_dir / f"{database}-{timestamp}.dump"
+    temporary = backup_dir / f".{database}-{timestamp}.dump.part"
+    previous_umask = os.umask(0o077)
+    try:
+        with temporary.open("wb") as output:
+            subprocess.run(
+                [
+                    *probe,
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_dump",
+                    "--username",
+                    postgres_user,
+                    "--dbname",
+                    database,
+                    "--format",
+                    "custom",
+                    "--no-owner",
+                    "--no-privileges",
+                ],
+                check=True,
+                env=environment,
+                stdout=output,
+            )
+            output.flush()
+            os.fsync(output.fileno())
+        if temporary.stat().st_size == 0:
+            raise RuntimeError("Production backup is empty.")
+        temporary.replace(target)
+    finally:
+        os.umask(previous_umask)
+        temporary.unlink(missing_ok=True)
+
+    run(
+        *probe,
+        "exec",
+        "-T",
+        "postgres",
+        "dropdb",
+        "--username",
+        postgres_user,
+        "--if-exists",
+        RESTORE_DATABASE,
+        env=environment,
+    )
+    try:
+        run(
+            *probe,
+            "exec",
+            "-T",
+            "postgres",
+            "createdb",
+            "--username",
+            postgres_user,
+            RESTORE_DATABASE,
+            env=environment,
+        )
+        with target.open("rb") as backup:
+            subprocess.run(
+                [
+                    *probe,
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_restore",
+                    "--username",
+                    postgres_user,
+                    "--dbname",
+                    RESTORE_DATABASE,
+                    "--no-owner",
+                    "--no-privileges",
+                ],
+                check=True,
+                env=environment,
+                stdin=backup,
+            )
+        if database_head_for(
+            probe, environment, postgres_user, RESTORE_DATABASE
+        ) != expected_head:
+            raise RuntimeError("Restored database has the wrong migration head.")
+    finally:
+        run(
+            *probe,
+            "exec",
+            "-T",
+            "postgres",
+            "dropdb",
+            "--username",
+            postgres_user,
+            "--if-exists",
+            RESTORE_DATABASE,
+            env=environment,
+        )
+    return target, hashlib.sha256(target.read_bytes()).hexdigest()
 
 
 def require_database_head(
@@ -169,8 +312,7 @@ def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
         deploy, environment = compose(active, image, sha)
         try:
             if target_head != live_head:
-                backup = run("python3", str(active / "ops" / "backup_postgres.py"))
-                run("python3", str(active / "ops" / "restore_drill.py"), backup)
+                backup_restore_drill(probe, probe_environment, live_head)
                 run(*deploy, "stop", "web", "worker", env=environment)
                 run(
                     *deploy,
