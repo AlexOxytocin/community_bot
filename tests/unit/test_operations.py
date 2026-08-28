@@ -28,7 +28,7 @@ def test_production_compose_contains_internal_web_without_public_ports() -> None
     assert services["postgres"]["networks"] == ["internal"]
     assert manifest["networks"]["internal"]["internal"] is True
     assert services["worker"]["networks"] == ["internal", "egress"]
-    assert services["web"]["networks"] == ["internal"]
+    assert services["web"]["networks"] == ["internal", "egress"]
     assert {services[name]["image"] for name in ("migrate", "worker", "web")} == {
         "${COMMUNITY_BOT_IMAGE}"
     }

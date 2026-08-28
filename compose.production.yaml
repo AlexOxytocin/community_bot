@@ -79,7 +79,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    networks: [internal]
+    networks: [internal, egress]
     logging: *logging
 
 volumes:
