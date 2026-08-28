@@ -4426,13 +4426,14 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         browser.close()
 
 
-def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa: C901, PLR0915
+def test_moderation_disputes_detail_confirm_retry_conflict_and_back_focus(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:
     malicious = "<img src=x onerror=alert(1)><script>bad()</script>"
     mode: dict[str, Any] = {"name": "pending"}
     pending: list[Route] = []
     requests: list[tuple[str, str]] = []
+    registration_requests: list[str] = []
     resolution_keys: list[str] = []
     resolution_mode = {"name": "retry"}
 
@@ -4469,6 +4470,10 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
             }
         )
 
+    def registration_route(route: Route) -> None:
+        registration_requests.append(route.request.url)
+        route.fulfill(json={"items": []})
+
     def resolution_route(route: Route) -> None:
         assert route.request.method == "POST"
         resolution_keys.append(route.request.headers["idempotency-key"])
@@ -4503,14 +4508,14 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.route("**/api/v1/moderation/cases?*", moderation_route)
         page.route(
             "**/api/v1/moderation/registrations?*",
-            lambda route: route.fulfill(json={"items": []}),
+            registration_route,
         )
         page.route("**/api/v1/moderation/cases/*/resolution", resolution_route)
         page.route("**/api/v1/moderation/cases/*", detail_route)
 
         page.goto(mini_app_url + "#/moderation?view_state=s01")
         moderation_nav = page.get_by_role("button", name="Модерация")
-        page.get_by_text("Загружаем очередь…").wait_for()
+        page.get_by_text("Загружаем споры…").wait_for()
         assert len(pending) == 1
         pending.pop().fulfill(
             json={
@@ -4530,8 +4535,10 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
                 ]
             }
         )
-        page.get_by_role("button", name="Обращения · 1").click()
+        page.get_by_role("button", name="Споры · 1").wait_for()
         page.get_by_text("Спор по заданию").wait_for()
+        assert page.get_by_role("button", name=re.compile("Регистрации|Обращения")).count() == 0
+        assert registration_requests == []
         assert "PRIVATE_REASON" not in page.locator("body").inner_text()
         assert "PRIVATE_EVIDENCE" not in page.locator("body").inner_text()
         assert page.locator("#content img, #content [onerror], #content [onclick]").count() == 0
@@ -4571,9 +4578,8 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.get_by_text("Не удалось применить решение.").wait_for()  # noqa: RUF001
         resolution_before = len(resolution_keys)
         _connected_control(page, "PE-068", "authoritative_resolution_success").click()
-        page.get_by_role("button", name="К очереди").click()  # noqa: RUF001
-        page.get_by_role("button", name="Обращения · 0").click()
-        page.get_by_text("Открытых обращений нет.").wait_for()
+        page.get_by_role("button", name="К спорам").click()  # noqa: RUF001
+        page.get_by_text("Открытых споров нет").wait_for()
         assert len(resolution_keys) == resolution_before + 1
         assert len(resolution_keys) == 2
         assert resolution_keys[0] == resolution_keys[1]
@@ -4603,14 +4609,14 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
                 ]
             }
         )
-        page.get_by_role("button", name="Обращения · 1").click()
+        page.get_by_role("button", name="Споры · 1").wait_for()
         page.get_by_role("button", name="Спор по заданию").click()
         page.get_by_role("combobox", name="Решение").select_option("partial_payment")
         page.get_by_role("textbox", name="Причина решения").fill("Подтверждена половина результата")
         page.get_by_role("button", name="Проверить решение").click()
         assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s03")
         page.get_by_role("button", name="Применить решение").click()
-        page.get_by_text("Кейс уже изменился").wait_for()
+        page.get_by_text("Спор уже изменился").wait_for()
         page.get_by_role("button", name="Изменить").click()
         page.locator('[data-screen-id="S02"]').wait_for()
         assert page.url.endswith("#/moderation/00000000-0000-0000-0000-000000000061?view_state=s02")
@@ -4643,7 +4649,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         mode["name"] = "empty"
         page.evaluate("advanceCacheClock(60001)")
         moderation_nav.click()
-        page.get_by_text("Открытых обращений нет.").wait_for()
+        page.get_by_text("Открытых споров нет").wait_for()
         page.get_by_role("button", name="Задания", exact=True).click()
         page.get_by_role("heading", name="Задания").wait_for()
 
@@ -4651,8 +4657,8 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.evaluate("advanceCacheClock(60001)")
         with page.expect_response(lambda response: response.status == 403):
             moderation_nav.click()
-        page.get_by_text("Открытых обращений нет.").wait_for()
-        assert page.get_by_text("Очередь модерации недоступна").count() == 0
+        page.get_by_text("Открытых споров нет").wait_for()
+        assert page.get_by_text("Споры недоступны").count() == 0
         assert "Moderator" not in page.locator("body").inner_text()
         page.get_by_role("button", name="Задания", exact=True).click()
         page.get_by_role("heading", name="Задания").wait_for()
@@ -4661,7 +4667,7 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
         page.evaluate("advanceCacheClock(60001)")
         with page.expect_response(lambda response: response.status == 401):
             moderation_nav.click()
-        page.get_by_text("Открытых обращений нет.").wait_for()
+        page.get_by_text("Открытых споров нет").wait_for()
         moderation_nav.click()
         page.get_by_text("Сессия истекла. Закройте и снова откройте Mini App.").wait_for()
         page.get_by_role("button", name="Задания", exact=True).click()
@@ -4669,10 +4675,11 @@ def test_moderation_queue_detail_confirm_retry_conflict_and_back_focus(  # noqa:
 
         mode["name"] = "network"
         moderation_nav.click()
-        page.get_by_text("Не удалось загрузить очередь модерации.").wait_for()  # noqa: RUF001
+        page.get_by_text("Не удалось загрузить споры.").wait_for()  # noqa: RUF001
         assert page.get_by_role("button", name="Повторить").count() == 1
         assert requests
         assert all(method == "GET" for method, _url in requests)
+        assert registration_requests == []
         browser.close()
 
 
@@ -6341,6 +6348,27 @@ def test_context_transitions_reset_both_scroll_axes_at_supported_viewports(
 
             page.goto(mini_app_url + f"#/work/{assignment_id}?view_state=m03")
             page.locator('[data-screen-id="M03"]').wait_for()
+            assert (
+                page.locator(".screen").evaluate(
+                    "node => getComputedStyle(node).paddingTop"
+                )
+                == "12px"
+            )
+            page.evaluate(
+                "document.documentElement.dataset.telegramFullscreen = 'true'; "
+                "document.documentElement.style.setProperty("
+                "'--tg-content-safe-area-inset-top', '74px')"
+            )
+            assert (
+                page.locator(".screen").evaluate(
+                    "node => getComputedStyle(node).paddingTop"
+                )
+                == "80px"
+            )
+            assert page.locator("#back").evaluate(
+                "node => node.getBoundingClientRect().top "
+                "- document.querySelector('.screen').getBoundingClientRect().top"
+            ) == pytest.approx(80, abs=0.5)
             assert_top_left(page)
             page.get_by_role("button", name="Отправить результат").click()
             sheet = page.get_by_role("dialog", name="Отправить результат")

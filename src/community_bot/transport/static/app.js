@@ -90,7 +90,6 @@ let returnFocusReviewId = null;
 let returnFocusOwnedTaskId = null;
 let returnFocusModeration = false;
 let returnFocusModerationCaseId = null;
-let activeModerationQueue = "registrations";
 let returnFocusProfile = false;
 let returnFocusLeaderboardTab = false;
 let screenRevision = 0;
@@ -402,7 +401,7 @@ const configureRoleNavigation = async () => {
     canGrantCredits = Boolean(overview.can_grant_credits);
     if (canGrantCredits) {
       for (const tabs of document.querySelectorAll(".admin-tabs:not(.has-credits)")) {
-        const count = tabs.dataset.queueCount === undefined ? null : Number(tabs.dataset.queueCount);
+        const count = tabs.dataset.disputeCount === undefined ? null : Number(tabs.dataset.disputeCount);
         tabs.replaceWith(moderationTabs(tabs.dataset.active, count));
       }
     }
@@ -6713,10 +6712,10 @@ const moderationError = (code, retry) => {
     return [element("p", "Сессия истекла. Закройте и снова откройте Mini App.", "status")];
   }
   if (code === "account_unavailable") {
-    return [element("p", "Очередь модерации недоступна для этого аккаунта.", "status")];
+    return [element("p", "Споры недоступны для этого аккаунта.", "status")];
   }
   return [
-    element("p", "Не удалось загрузить очередь модерации.", "status"),
+    element("p", "Не удалось загрузить споры.", "status"),
     retry,
   ];
 };
@@ -6745,12 +6744,12 @@ const administratorPermissionNames = (permissions) => administratorPermissionDet
   .filter(([id]) => permissions.includes(id))
   .map(([, name]) => name);
 
-function moderationTabs(active, queueCount = null) {
+function moderationTabs(active, disputeCount = null) {
   const tabs = element("div", undefined, "admin-tabs");
   tabs.dataset.active = active;
-  if (queueCount !== null) tabs.dataset.queueCount = String(queueCount);
+  if (disputeCount !== null) tabs.dataset.disputeCount = String(disputeCount);
   const options = [
-    ["queue", queueCount === null ? "Очередь" : `Очередь · ${queueCount}`, () => loadModeration()],
+    ["disputes", disputeCount === null ? "Споры" : `Споры · ${disputeCount}`, () => loadModeration()],
     ["access", "Доступ", () => loadAdministrationAccess()],
     ["team", "Команда", () => loadAdministrationTeam()],
   ];
@@ -7876,8 +7875,9 @@ function confirmAdministratorDemotion(trigger, person) {
   });
 }
 
-function showModerationCases(cases, registrations, revision) {
+function showModerationCases(cases, revision) {
   if (revision !== screenRevision) return;
+  const disputes = cases.filter((item) => item.case_type === "dispute" && item.status === "open");
   const focusedCaseId = returnFocusModerationCaseId
     || document.activeElement?.closest?.(".moderation-card")?.dataset.caseId;
   setNavigation("moderation", false);
@@ -7886,60 +7886,17 @@ function showModerationCases(cases, registrations, revision) {
   const boundary = element("section", undefined, "state-view");
   boundary.dataset.screenId = "S01";
   boundary.dataset.uiEngine = "concept-05";
-  boundary.dataset.state = cases.length || registrations.length ? "content" : "empty";
-  boundary.append(moderationTabs("queue", cases.length + registrations.length));
-  const tabs = element("div", undefined, "root-tabs moderation-queue-tabs");
-  const registrationTab = element("button");
-  registrationTab.append(
-    document.createTextNode("Регистрации · "),
-    element("span", String(registrations.length), "moderation-queue-count"),
-  );
-  const casesTab = element("button");
-  casesTab.append(
-    document.createTextNode("Обращения · "),
-    element("span", String(cases.length), "moderation-queue-count"),
-  );
-  registrationTab.type = casesTab.type = "button";
-  registrationTab.classList.toggle("active-tab", activeModerationQueue === "registrations");
-  casesTab.classList.toggle("active-tab", activeModerationQueue === "cases");
-  registrationTab.setAttribute("aria-pressed", String(activeModerationQueue === "registrations"));
-  casesTab.setAttribute("aria-pressed", String(activeModerationQueue === "cases"));
-  registrationTab.addEventListener("click", () => {
-    activeModerationQueue = "registrations";
-    showModerationCases(cases, registrations, revision);
-  });
-  casesTab.addEventListener("click", () => {
-    activeModerationQueue = "cases";
-    showModerationCases(cases, registrations, revision);
-  });
-  tabs.append(registrationTab, casesTab);
-  boundary.append(tabs);
+  boundary.dataset.state = disputes.length ? "content" : "empty";
+  boundary.append(moderationTabs("disputes", disputes.length));
 
-  if (activeModerationQueue === "registrations" && !registrations.length) {
-    boundary.append(element("p", "Новых анкет нет.", "compact-empty"));
-  } else if (activeModerationQueue === "registrations") {
-    const registrationList = element("ul", undefined, "list moderation-registration-list");
-    for (const item of registrations) {
-      const card = element("button", undefined, "card moderation-card moderation-registration-card");
-      card.type = "button";
-      const username = item.telegram_username ? `@${item.telegram_username}` : "Без username";
-      const copy = element("span", undefined, "moderation-card-copy");
-      copy.append(element("h3", item.display_name), element("span", `${username} · ${item.city}`, "meta"));
-      card.append(copy, element("span", "›", "moderation-card-chevron"));
-      card.addEventListener("click", () => showRegistrationModerationSheet(card, item));
-      const row = element("li");
-      row.append(card);
-      registrationList.append(row);
-    }
-    boundary.append(registrationList);
-  } else if (!cases.length) {
-    boundary.append(element("p", "Открытых обращений нет.", "compact-empty"));
+  if (!disputes.length) {
+    boundary.append(element("p", "Открытых споров нет", "compact-empty"));
     replaceContent(boundary);
     return;
   } else {
     const list = element("ul", undefined, "list moderation-case-list");
     let focusTarget = null;
-    for (const item of cases) {
+    for (const item of disputes) {
       const actionable = item.case_type === "dispute" && item.status === "open";
       const card = element(actionable ? "button" : "article", undefined, "card moderation-card moderation-case-card");
       card.dataset.caseId = item.id;
@@ -7972,74 +7929,6 @@ function showModerationCases(cases, registrations, revision) {
   returnFocusModerationCaseId = null;
 }
 
-function showRegistrationModerationSheet(trigger, item) {
-  const sheet = showAssignmentActionSheet(trigger, {
-    title: "Проверка регистрации",
-    description: "Проверьте анкету перед допуском участника в сообщество.",
-  });
-  const profile = element("div", undefined, "registration-review-profile");
-  const addRow = (label, value) => {
-    const row = element("div", undefined, "registration-review-row");
-    row.append(element("span", label), element("strong", value || "Не указано"));
-    profile.append(row);
-  };
-  addRow("Имя", item.display_name);
-  addRow("Telegram", item.telegram_username ? `@${item.telegram_username}` : "Не указан");
-  addRow("Город", item.city);
-  addRow("Часовой пояс", item.timezone);
-  addRow("О себе", item.short_bio);
-  addRow("Навыки", item.skill_tags.length ? item.skill_tags.join(", ") : "Не указаны");
-  const commentLabel = element("label", undefined, "assignment-action-field");
-  commentLabel.append(element("span", "Комментарий при отклонении"));
-  const comment = element("textarea");
-  comment.maxLength = 500;
-  comment.rows = 3;
-  comment.placeholder = "Что нужно исправить в анкете";
-  commentLabel.append(comment);
-  sheet.body.append(profile, commentLabel);
-  const approve = element("button", "Одобрить", "primary");
-  const reject = element("button", "Отклонить", "secondary danger");
-  approve.type = reject.type = "button";
-  sheet.actions.append(reject, approve);
-  let operationKey = null;
-  const decide = async (decision) => {
-    const reason = comment.value.trim();
-    if (decision === "reject" && !reason) {
-      sheet.status.className = "assignment-action-status is-error";
-      sheet.status.textContent = "Укажите, что участнику нужно исправить.";
-      comment.focus();
-      return;
-    }
-    approve.disabled = reject.disabled = sheet.close.disabled = true;
-    sheet.status.className = "assignment-action-status";
-    sheet.status.textContent = decision === "approve" ? "Одобряем анкету…" : "Возвращаем анкету…";
-    operationKey ||= newOperationKey();
-    try {
-      const response = await apiFetch(
-        `/api/v1/moderation/registrations/${encodeURIComponent(item.member_id)}/decision`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Idempotency-Key": operationKey },
-          body: JSON.stringify({ decision, comment: reason || null }),
-          credentials: "same-origin",
-        },
-      );
-      if (!response.ok) throw new Error(requestError(response));
-      sheet.dismiss(false);
-      await loadModeration(false);
-    } catch (error) {
-      sheet.status.className = "assignment-action-status is-error";
-      sheet.status.textContent = error instanceof TypeError
-        ? "Сеть недоступна. Повторите решение."
-        : "Не удалось сохранить решение. Обновите очередь и повторите.";
-      approve.disabled = reject.disabled = sheet.close.disabled = false;
-    }
-  };
-  approve.addEventListener("click", () => decide("approve"));
-  reject.addEventListener("click", () => decide("reject"));
-  approve.focus({ preventScroll: true });
-}
-
 async function loadModeration(push = true) {
   const revision = ++screenRevision;
   returnFocusModeration = true;
@@ -8048,35 +7937,22 @@ async function loadModeration(push = true) {
   title.textContent = "Модерация";
   back.classList.add("hidden");
   replaceContent(
-    moderationTabs("queue"),
-    element("p", "Загружаем очередь…", "compact-empty"),
+    moderationTabs("disputes"),
+    element("p", "Загружаем споры…", "compact-empty"),
   );
   try {
-    let casePage;
-    let registrationPage;
-    const showRefreshedQueue = () => {
-      if (revision === screenRevision && casePage && registrationPage) {
-        showModerationCases(casePage.items, registrationPage.items, revision);
-      }
-    };
-    [casePage, registrationPage] = await Promise.all([
-      getJson("/api/v1/moderation/cases?limit=20", (refreshed) => {
-        casePage = refreshed;
-        showRefreshedQueue();
-      }),
-      getJson("/api/v1/moderation/registrations?limit=20", (refreshed) => {
-        registrationPage = refreshed;
-        showRefreshedQueue();
-      }),
-    ]);
+    let casePage = await getJson("/api/v1/moderation/cases?limit=20", (refreshed) => {
+      casePage = refreshed;
+      if (revision === screenRevision) showModerationCases(casePage.items, revision);
+    });
     if (revision !== screenRevision) return;
-    showModerationCases(casePage.items, registrationPage.items, revision);
+    showModerationCases(casePage.items, revision);
   } catch (error) {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadModeration(false));
-    replaceContent(moderationTabs("queue"), element("p", "Открытые обращения", "screen-subtitle"), ...moderationError(error.message, retry));
+    replaceContent(moderationTabs("disputes"), element("p", "Открытые споры", "screen-subtitle"), ...moderationError(error.message, retry));
   }
 }
 
@@ -8171,13 +8047,13 @@ async function showModerationCase(caseId, push = true) {
           );
           history.replaceState({ screen: "moderation-outcome" }, "", presentationLocationFor("S04", caseId));
           title.textContent = "Решение сохранено";
-          const queue = element("button", "К очереди", "primary");
+          const queue = element("button", "К спорам", "primary");
           queue.type = "button";
           queue.addEventListener("click", () => loadModeration(false));
           replaceContent(connectedBoundary("S04", "success", element("p", "Решение применено.", "status success"), queue));
         } catch (error) {
           actionStatus.textContent = error?.status === 409
-            ? "Кейс уже изменился или больше недоступен. Вернитесь в очередь."
+            ? "Спор уже изменился или больше недоступен. Вернитесь к списку споров."
             : "Не удалось применить решение. Повторите запрос — ключ останется тем же.";
           if (!retryableSubmissionError(error)) operationKey = null;
           edit.disabled = false;
@@ -8197,7 +8073,7 @@ async function showModerationCase(caseId, push = true) {
         "p",
         error.message === "not_found"
           ? "Спор больше не доступен для решения."
-          : "Не удалось загрузить спор. Вернитесь в очередь и повторите.",
+          : "Не удалось загрузить спор. Вернитесь к списку споров и повторите.",
         "status",
       ),
     );
