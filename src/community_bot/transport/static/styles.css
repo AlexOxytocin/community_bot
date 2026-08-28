@@ -1018,7 +1018,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reserve-summary.is-over-limit .reserve-meter > span { background: var(--app-danger); }
 .task-size-backdrop { position: fixed; z-index: 20; top: calc(var(--app-visual-viewport-offset-top, 0px) + 12px + var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px))); left: var(--app-visual-viewport-center-x, 50%); display: grid; width: min(calc(var(--app-visual-viewport-width, 100vw) - 24px - var(--app-safe-area-inset-left, var(--tg-safe-area-inset-left, 0px)) - var(--app-safe-area-inset-right, var(--tg-safe-area-inset-right, 0px))), 430px); height: calc(var(--app-visual-viewport-height, 100dvh) - 24px - var(--app-safe-area-inset-top, var(--tg-safe-area-inset-top, 0px)) - var(--app-safe-area-inset-bottom, var(--tg-safe-area-inset-bottom, 0px))); align-items: start; padding: 62px 10px 10px; overflow: hidden; transform: translateX(-50%); border-radius: 20px; background: var(--app-overlay); }
 .task-size-sheet { display: grid; overflow: hidden; width: min(100%, 380px); max-height: calc(100% - 72px); justify-self: end; padding: 10px 12px 12px; border: 1px solid var(--app-border); border-radius: 16px; background: var(--app-surface-raised); box-shadow: 0 16px 40px var(--app-shadow-popover); }
-.deadline-choice-sheet { align-content: start; gap: 8px; }
+.deadline-choice-sheet { grid-template-rows: auto minmax(0, 1fr) auto; align-content: stretch; gap: 8px; overflow: hidden; }
+.deadline-choice-content { display: grid; min-height: 0; align-content: start; gap: 8px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; scrollbar-gutter: stable; }
 .deadline-month-navigation { display: grid; grid-template-columns: 38px minmax(0, 1fr) 38px; align-items: center; gap: 6px; }
 .deadline-month-button { display: grid; width: 38px; height: 38px; place-items: center; padding: 0; border: 1px solid var(--app-border); border-radius: 10px; background: transparent; color: var(--app-text); font-size: 22px; cursor: pointer; }
 .deadline-month-button:disabled { opacity: .32; cursor: default; }
@@ -1035,7 +1036,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .deadline-time-field input { min-height: 44px; }
 .deadline-sheet-error { color: var(--app-danger); font-size: 10px; font-weight: 700; }
 .deadline-sheet-error.is-note { color: var(--app-text-muted); }
-.deadline-choice-done { width: 100%; min-height: 44px; margin-top: 1px; }
+.deadline-choice-done { position: relative; z-index: 1; width: 100%; min-height: 44px; margin-top: 1px; }
 .content-editor-sheet { align-content: start; gap: 8px; overflow: auto; }
 .content-editor-hint { margin: 0; color: var(--app-text-muted); font-size: 11px; line-height: 1.35; }
 .content-editor-input { box-sizing: border-box; min-height: 82px; max-height: 260px; resize: none; line-height: 1.4; }

@@ -6951,6 +6951,78 @@ def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noq
         browser.close()
 
 
+def test_deadline_dialog_keeps_done_visible_on_short_desktop(mini_app_url: str) -> None:
+    category_id = "00000000-0000-0000-0000-000000000138"
+
+    def creation(route: Route) -> None:
+        route.fulfill(
+            json={
+                "categories": [
+                    {
+                        "id": category_id,
+                        "name": "Практическая помощь",
+                        "icon": "⭐",
+                    }
+                ],
+                "credit_balance": 7,
+                "time_sizes": [
+                    {
+                        "value": "s",
+                        "label": "15-40 минут",
+                        "reward_options": [2, 3, 4],
+                        "minimum_reward": 2,
+                    }
+                ],
+                "draft": None,
+                "preview": None,
+                "needs_edit": False,
+            }
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(
+            browser,
+            bridge="globalThis.Telegram={WebApp:{colorScheme:'light',ready(){},expand(){}}};",
+        )
+        page.set_viewport_size({"width": 489, "height": 650})
+        page.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(json={"display_name": "Алекс"}),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload()),
+        )
+        page.route("**/api/v1/task-creation", creation)
+        page.goto(mini_app_url)
+
+        _open_blank_task_creation(page)
+        page.get_by_role("button", name="Выбрать срок", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Срок", exact=True)
+        dialog.locator(".deadline-day:not(:disabled)").first.click()
+        done = dialog.get_by_role("button", name="Готово", exact=True)
+        content = dialog.locator(".deadline-choice-content")
+
+        assert done.is_visible()
+        assert done.is_enabled()
+        assert done.evaluate(
+            "node => { const dialog = node.closest('[role=dialog]').getBoundingClientRect(); "
+            "const button = node.getBoundingClientRect(); "
+            "return button.top >= dialog.top && button.bottom <= dialog.bottom; }"
+        )
+        assert content.evaluate("node => getComputedStyle(node).overflowY === 'auto'")
+        assert content.evaluate("node => node.scrollHeight >= node.clientHeight")
+
+        done.click()
+        assert page.get_by_label("Срок *", exact=True).input_value()
+        browser.close()
+
+
 def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:

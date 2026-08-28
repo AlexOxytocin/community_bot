@@ -1973,7 +1973,9 @@ function showTaskCreation(state, forceEdit = false) {
         first.focus();
       }
     });
-    dialog.append(header, monthNavigation, calendar, timeField, sheetError, done);
+    const deadlineContent = element("div", undefined, "deadline-choice-content");
+    deadlineContent.append(monthNavigation, calendar, timeField, sheetError);
+    dialog.append(header, deadlineContent, done);
     backdrop.append(dialog);
     shell.append(backdrop);
     renderCalendar();
