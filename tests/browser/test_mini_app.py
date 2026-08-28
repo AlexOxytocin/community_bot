@@ -373,6 +373,7 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
     mutations: list[dict[str, Any]] = []
     invitation_mutations: list[dict[str, Any]] = []
     invitations: list[dict[str, Any]] = []
+    invitation_failures = [503, 403]
     optional_resource_id = "00000000-0000-0000-0000-000000000205"
 
     def administration_route(route: Route) -> None:  # noqa: C901, PLR0911
@@ -423,6 +424,12 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
             )
             return
         if path == "/api/v1/administration/invitations" and method == "POST":
+            if invitation_failures:
+                route.fulfill(
+                    status=invitation_failures.pop(0),
+                    json={"code": "invitation_unavailable"},
+                )
+                return
             body = route.request.post_data_json
             assert body is not None
             invitation_mutations.append({"method": method, "path": path, "body": body})
@@ -511,6 +518,10 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
         )
         resource_row.get_by_role("checkbox").check()
         page.get_by_placeholder("username или @username").fill("Marina_Orlova")
+        page.get_by_role("button", name="Создать ссылку").click()
+        page.get_by_text("Приглашения временно недоступны. Попробуйте позже.").wait_for()
+        page.get_by_role("button", name="Создать ссылку").click()
+        page.get_by_text("У вас нет права приглашать участников.").wait_for()  # noqa: RUF001
         page.get_by_role("button", name="Создать ссылку").click()
         page.get_by_role("heading", name="Приглашение готово").wait_for()
         page.get_by_text("@marina_orlova", exact=True).wait_for()

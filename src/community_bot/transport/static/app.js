@@ -6683,9 +6683,11 @@ function showPersonalInvitationCreate(push = true, invitation = null) {
       clearJsonCache();
       showPersonalInvitationCreate(false, invitation);
     } catch (error) {
-      status.textContent = error.message === "invitation_unavailable"
-        ? "Приглашения недоступны для этого аккаунта."
-        : "Не удалось создать приглашение. Повторите попытку.";
+      status.textContent = error.status === 403
+        ? "У вас нет права приглашать участников."
+        : error.status === 503
+          ? "Приглашения временно недоступны. Попробуйте позже."
+          : "Не удалось создать приглашение. Повторите попытку.";
       submit.disabled = false;
     }
   });

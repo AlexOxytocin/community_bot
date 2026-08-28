@@ -880,9 +880,27 @@ def create_web_app(
             expected_release=settings.release,
             heartbeat_not_before=started_at,
         )
+        invitation_configured = all(
+            value is not None
+            for value in (
+                settings.telegram_bot_username,
+                settings.invite_token_secret,
+                settings.community_telegram_chat_id,
+                settings.community_telegram_join_url,
+            )
+        )
+        runtime_config_healthy = settings.environment != "production" or invitation_configured
+        payload = {
+            **report.as_dict(),
+            "invitation_config": invitation_configured,
+            "release": settings.release,
+        }
+        payload["healthy"] = report.healthy and runtime_config_healthy
+        if report.healthy and not runtime_config_healthy:
+            payload["code"] = "invitation_config_missing"
         return JSONResponse(
-            {**report.as_dict(), "release": settings.release},
-            status_code=200 if report.healthy else 503,
+            payload,
+            status_code=200 if payload["healthy"] else 503,
             headers={"Cache-Control": "no-store"},
         )
 

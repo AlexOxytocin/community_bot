@@ -163,7 +163,15 @@ async def test_operational_routes_are_private_safe_and_fail_closed(
         )
 
     monkeypatch.setattr("community_bot.transport.web.readiness_report", fake_readiness_report)
-    settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, release="a" * 40)
+    settings = Settings(
+        bot_token=BOT_TOKEN,
+        mini_app_origin=ORIGIN,
+        release="a" * 40,
+        telegram_bot_username="humanquest_bot",
+        invite_token_secret="personal-invitation-secret-that-is-long-enough",  # noqa: S106
+        community_telegram_chat_id=-1002237685639,
+        community_telegram_join_url="https://t.me/+private-community-link",
+    )
     app = create_web_app(
         settings=settings,
         database=cast("Database", FakeDatabase()),
@@ -177,11 +185,74 @@ async def test_operational_routes_are_private_safe_and_fail_closed(
     assert live.json() == {"status": "alive"}
     assert ready.status_code == 503
     assert ready.json()["code"] == "heartbeat_before_deploy"
+    assert ready.json()["invitation_config"] is True
     assert ready.headers["cache-control"] == "no-store"
     assert captured["expected_release"] == "a" * 40
     assert captured["heartbeat_not_before"] == started_at
     assert "database_url" not in ready.text
     assert ready.json()["release"] == settings.release
+
+
+@pytest.mark.asyncio
+async def test_production_readiness_requires_personal_invitation_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_readiness_report(_database_url: str, **_kwargs: object) -> object:
+        return SimpleNamespace(
+            healthy=True,
+            as_dict=lambda: {
+                "healthy": True,
+                "database": True,
+                "migration": True,
+                "product_config": True,
+                "heartbeat": True,
+                "failed_outbox_events": 0,
+                "code": "ready",
+            },
+        )
+
+    monkeypatch.setattr("community_bot.transport.web.readiness_report", fake_readiness_report)
+    app = create_web_app(
+        settings=Settings(
+            environment="production",
+            release="a" * 40,
+            bot_token=BOT_TOKEN,
+            mini_app_origin=ORIGIN,
+            _env_file=None,
+        ),
+        database=cast("Database", FakeDatabase()),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        ready = await client.get("/readyz")
+
+    assert ready.status_code == 503
+    assert ready.json()["healthy"] is False
+    assert ready.json()["invitation_config"] is False
+    assert ready.json()["code"] == "invitation_config_missing"
+
+    configured_app = create_web_app(
+        settings=Settings(
+            environment="production",
+            release="a" * 40,
+            bot_token=BOT_TOKEN,
+            mini_app_origin=ORIGIN,
+            telegram_bot_username="humanquest_bot",
+            invite_token_secret="personal-invitation-secret-that-is-long-enough",  # noqa: S106
+            community_telegram_chat_id=-1002237685639,
+            community_telegram_join_url="https://t.me/+private-community-link",
+            _env_file=None,
+        ),
+        database=cast("Database", FakeDatabase()),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=configured_app), base_url=ORIGIN
+    ) as client:
+        configured = await client.get("/readyz")
+
+    assert configured.status_code == 200
+    assert configured.json()["healthy"] is True
+    assert configured.json()["invitation_config"] is True
+    assert configured.json()["code"] == "ready"
 
 
 @pytest.mark.asyncio
