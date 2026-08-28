@@ -221,23 +221,11 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
     return member
 
 
-async def test_community_stats_access_mapping_topic_and_degradation(database_url: str) -> None:
+async def test_community_stats_connects_history_after_member_registration(
+    database_url: str,
+) -> None:
     database = Database(database_url)
     actor = await active_member(database, 52_080)
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
-    async with sessions.begin() as session:
-        target = MemberModel(
-            id=uuid4(),
-            telegram_user_id=52_081,
-            telegram_username="stats_target",
-            display_name="Stats Target",
-            timezone="UTC",
-            role=MemberRole.MEMBER.value,
-            status=MemberStatus.ACTIVE.value,
-            permissions_json=[],
-        )
-        session.add(target)
-
     gateway = FakeCommunityStatsGateway()
     app = create_web_app(
         settings=Settings(
@@ -257,6 +245,27 @@ async def test_community_stats_access_mapping_topic_and_degradation(database_url
             headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
         )
         assert authenticated.status_code == 204
+
+        before_registration = await client.get(
+            "/api/v1/community-stats/leaderboard",
+            params={"period": "all", "metric": "messages"},
+        )
+        assert before_registration.status_code == 200, before_registration.text
+        assert before_registration.json()["items"] == []
+
+        sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+        async with sessions.begin() as session:
+            target = MemberModel(
+                id=uuid4(),
+                telegram_user_id=52_081,
+                telegram_username="stats_target",
+                display_name="Stats Target",
+                timezone="UTC",
+                role=MemberRole.MEMBER.value,
+                status=MemberStatus.ACTIVE.value,
+                permissions_json=[],
+            )
+            session.add(target)
 
         pulse = await client.get(
             "/api/v1/community-stats/pulse",
@@ -298,7 +307,7 @@ async def test_community_stats_access_mapping_topic_and_degradation(database_url
                 "rank": 1,
             }
         ]
-        assert gateway.leaderboard_requests[0]["topic_id"] == 321
+        assert gateway.leaderboard_requests[1]["topic_id"] == 321
         native = await client.get(
             "/api/v1/community-stats/leaderboard",
             params={"period": "all", "metric": "karma"},
@@ -308,7 +317,7 @@ async def test_community_stats_access_mapping_topic_and_degradation(database_url
             str(actor.id),
             str(target.id),
         }
-        assert len(gateway.leaderboard_requests) == 1
+        assert len(gateway.leaderboard_requests) == 2
         assert (
             await client.get(
                 "/api/v1/community-stats/leaderboard",
