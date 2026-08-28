@@ -115,6 +115,21 @@ def test_fast_deploy_uses_the_running_release_as_its_safety_baseline() -> None:
     assert 'manifest["migration_head"]' not in deploy
 
 
+def test_compose_change_deploy_is_bounded_and_rollback_protected() -> None:
+    """The slow Compose path validates topology and restores the prior runtime."""
+    root = Path(__file__).parents[2]
+    deploy = (root / "ops" / "deploy_compose_change.py").read_text(encoding="utf-8")
+
+    assert "shell=True" not in deploy
+    assert 'set(services) != {"postgres", "migrate", "worker", "web"}' in deploy
+    assert '{"internal", "egress"}' in deploy
+    assert '"migrations",\n            "alembic.ini"' in deploy
+    assert "exclusive_backup(backup, old_content)" in deploy
+    assert "durable_replace(config, old_content)" in deploy
+    assert 'run("docker", "network", "connect", EGRESS, WEB)' in deploy
+    assert "prove(target, time.time() + 90)" in deploy
+
+
 def test_migration_deploy_is_private_backup_first_and_non_interactive() -> None:
     root = Path(__file__).parents[2]
     deploy = (root / "ops" / "deploy_dev.py").read_text(encoding="utf-8")
@@ -138,6 +153,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "__init__.py",
         "_runtime.py",
         "backup_postgres.py",
+        "deploy_compose_change.py",
         "deploy_dev.py",
         "prepare_onboarding_local.py",
         "release_contract.py",
