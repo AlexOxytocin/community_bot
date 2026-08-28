@@ -3396,8 +3396,8 @@ function showLeaderboardMetricSheet(state, revision, trigger) {
       }
       option.addEventListener("click", () => {
         dismiss(false);
+        state.restoreLeaderboardFilterFocus = true;
         selectLeaderboardMetric(state, revision, metric.value);
-        queueMicrotask(() => content.querySelector(".leaderboard-filter-trigger")?.focus({ preventScroll: true }));
       });
       options.append(option);
     }
@@ -3827,7 +3827,9 @@ function showParticipantsState(state, revision) {
     boundary.append(memberListDetails(state.members || []));
   }
   replaceContent(boundary);
-  if (state.focusHeading) {
+  if (state.restoreLeaderboardFilterFocus && state.view === "leaderboard") {
+    content.querySelector(".leaderboard-filter-trigger")?.focus({ preventScroll: true });
+  } else if (state.focusHeading) {
     state.focusHeading = false;
     title.tabIndex = -1;
     title.focus({ preventScroll: true });
@@ -3934,6 +3936,7 @@ async function loadParticipantsPulse(state, revision) {
 function selectCommunityPeriod(state, revision, period) {
   if (state.view === "leaderboard" && state.metric.startsWith("achievement:") && period !== "all") return;
   if (state.period === period) return;
+  state.restoreLeaderboardFilterFocus = false;
   state.period = period;
   state.activityPeriod = period;
   state.achievementOpen = false;
@@ -3984,6 +3987,7 @@ function selectLeaderboardMetric(state, revision, metric) {
 }
 
 function switchParticipantsView(state, revision, view) {
+  state.restoreLeaderboardFilterFocus = false;
   const previousView = state.view;
   if (view === "leaderboard" && state.metric.startsWith("achievement:")) {
     if (state.period !== "all") state.activityPeriod = state.period;

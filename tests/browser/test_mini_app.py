@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -4866,7 +4866,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             leaderboard_filter = page.get_by_role("button", name="Рейтинг по: Сообщения")
             assert page.locator(".leaderboard-filter-sheet").count() == 0
             assert page.locator(".screen").evaluate("node => node.scrollTop") == leaderboard_scroll
-            assert leaderboard_filter.evaluate("node => document.activeElement === node") is True
+            expect(leaderboard_filter).to_be_focused()
             page.get_by_role("button", name="Месяц").click()
             page.get_by_text("20 сообщ.").wait_for()
             pending_week[0].fulfill(
@@ -4917,7 +4917,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             metric_dialog = page.get_by_role("dialog", name="Рейтинг по")
             metric_dialog.get_by_role("radio", name="Магнит").click()
             achievement_filter = page.get_by_role("button", name="Рейтинг по: Магнит")
-            assert achievement_filter.evaluate("node => document.activeElement === node") is True
+            expect(achievement_filter).to_be_focused()
             assert (
                 page.get_by_role("button", name="Всё время", exact=True).get_attribute(
                     "aria-pressed"
