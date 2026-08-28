@@ -303,16 +303,16 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/members/{member_id}", ("GET",)),
         ("/api/v1/members/{member_id}/karma-vote", ("POST",)),
         ("/api/v1/administration", ("GET",)),
-            ("/api/v1/administration/candidates", ("GET",)),
-            ("/api/v1/administration/invitations", ("GET",)),
-            ("/api/v1/administration/invitations", ("POST",)),
-            ("/api/v1/administration/membership-resources", ("GET",)),
-            ("/api/v1/administration/membership-resources", ("POST",)),
-            (
-                "/api/v1/administration/invitations/{invitation_id}/revoke",
-                ("POST",),
-            ),
-            ("/api/v1/administration/{member_id}", ("GET",)),
+        ("/api/v1/administration/candidates", ("GET",)),
+        ("/api/v1/administration/invitations", ("GET",)),
+        ("/api/v1/administration/invitations", ("POST",)),
+        ("/api/v1/administration/membership-resources", ("GET",)),
+        ("/api/v1/administration/membership-resources", ("POST",)),
+        (
+            "/api/v1/administration/invitations/{invitation_id}/revoke",
+            ("POST",),
+        ),
+        ("/api/v1/administration/{member_id}", ("GET",)),
         ("/api/v1/administration/{member_id}", ("POST",)),
         ("/api/v1/administration/{member_id}", ("PUT",)),
         ("/api/v1/administration/{member_id}/demote", ("POST",)),
@@ -340,13 +340,13 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/moderation/cases/{case_id}", ("GET",)),
         ("/api/v1/moderation/cases/{case_id}/resolution", ("POST",)),
         ("/api/v1/leaderboard", ("GET",)),
+        ("/api/v1/community-stats/pulse", ("GET",)),
+        ("/api/v1/community-stats/leaderboard", ("GET",)),
         ("/", ("GET",)),
     }
     assert any(getattr(route, "path", None) == "/mini-assets" for route in app.routes)
     assert Settings(_env_file=None).mini_app_origin is None
-    normalized_settings = Settings(
-        telegram_bot_username="@Community_Bot", _env_file=None
-    )
+    normalized_settings = Settings(telegram_bot_username="@Community_Bot", _env_file=None)
     assert normalized_settings.telegram_bot_username == "Community_Bot"
     with pytest.raises(ValueError):
         Settings(telegram_bot_username="bad-name", _env_file=None)

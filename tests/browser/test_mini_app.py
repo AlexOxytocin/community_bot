@@ -418,9 +418,7 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
             route.fulfill(
                 json={
                     "items": invitations,
-                    "pending_count": sum(
-                        item["status"] == "waiting" for item in invitations
-                    ),
+                    "pending_count": sum(item["status"] == "waiting" for item in invitations),
                 }
             )
             return
@@ -4243,10 +4241,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
                 "rank": 1,
                 "member_id": private_marker,
                 "display_name": malicious,
-                "experience": 12,
-                "unique_recipients": 3,
-                "reliability": None,
-                "no_show": 1,
+                "value": 12,
                 "unknown": private_marker,
             }
         ],
@@ -4314,7 +4309,11 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "**/api/v1/members?*",
             lambda route: route.fulfill(json={"items": [member]}),
         )
-        page.route("**/api/v1/leaderboard?*", leaderboard_route)
+        page.route("**/api/v1/community-stats/leaderboard?*", leaderboard_route)
+        page.route(
+            "**/api/v1/community-stats/pulse?*",
+            lambda route: route.fulfill(status=503, json={"code": "community_stats_unavailable"}),
+        )
         page.route(
             "**/api/v1/task-cities?*",
             lambda route: route.fulfill(
@@ -4447,8 +4446,9 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         page.get_by_role("button", name="Комьюнити", exact=True).click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
         page.get_by_role("button", name="Лидерборд").click()
-        page.get_by_text("Не удалось загрузить данные.").wait_for()  # noqa: RUF001
-        page.get_by_role("button", name="Сообщения", exact=True).click()
+        page.get_by_text("Статистика временно недоступна.", exact=False).wait_for()
+        page.get_by_role("button", name="Рейтинг по: Опыт").click()
+        page.get_by_role("dialog", name="Рейтинг по").get_by_role("radio", name="Сообщения").click()
         modes["leaderboard"] = "success"
         page.get_by_role("button", name="Повторить").click()
         page.get_by_text("12 сообщ.").wait_for()
@@ -4491,7 +4491,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             ("GET", "/api/v1/me"),
             ("GET", "/api/v1/members"),
             ("GET", f"/api/v1/members/{member_id}"),
-            ("GET", "/api/v1/leaderboard"),
+            ("GET", "/api/v1/community-stats/leaderboard"),
             ("GET", "/api/v1/task-cities"),
             ("GET", "/api/v1/task-home"),
         } == set(requests)
@@ -4499,7 +4499,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "/api/v1/me",
             "/api/v1/members",
             f"/api/v1/members/{member_id}",
-            "/api/v1/leaderboard",
+            "/api/v1/community-stats/leaderboard",
             "/api/v1/task-cities",
             "/api/v1/task-home",
             "/api/v1/me/profile",
@@ -4582,6 +4582,65 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                 lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
             )
 
+            def pulse_route(route: Route) -> None:
+                period = parse_qs(urlsplit(route.request.url).query)["period"][0]
+                bucket_dates = {
+                    "week": [f"2026-08-{day:02d}" for day in range(22, 29)],
+                    "month": [f"2026-08-{day:02d}" for day in range(1, 31)],
+                    "year": [f"2025-{month:02d}-01" for month in range(1, 13)],
+                    "all": [],
+                }[period]
+                route.fulfill(
+                    json={
+                        "member_id": member_ids[0],
+                        "tracking_started_at": "2026-08-01T00:00:00Z",
+                        "calculated_at": "2026-08-28T12:00:00Z",
+                        "summary": {
+                            "messages": 42,
+                            "reactions_given": 20,
+                            "reactions_received": 16,
+                        },
+                        "series": [
+                            {
+                                "bucket_start": bucket_start,
+                                "messages": index + 1,
+                                "reactions_given": index % 5,
+                                "reactions_received": index % 4,
+                            }
+                            for index, bucket_start in enumerate(bucket_dates)
+                        ],
+                        "reaction_breakdown": [
+                            {
+                                "reaction": {"type": "emoji", "emoji": emoji},
+                                "given": 16 - index,
+                                "received": 8 - index,
+                            }
+                            for index, emoji in enumerate(
+                                ("👍", "🔥", "💗", "👏", "🎉", "😁", "🤝", "⚡")
+                            )
+                        ],
+                        "achievements": [
+                            {
+                                "code": code,
+                                "level": level,
+                                "current": current,
+                                "next_level_at": threshold,
+                                "unlocked": level > 0,
+                            }
+                            for code, level, current, threshold in (
+                                ("speaker", 2, 42, 50),
+                                ("magnet", 1, 26, 50),
+                                ("support", 3, 64, 200),
+                                ("regular", 0, 2, 3),
+                                ("explorer", 0, 1, 2),
+                                ("streak", 0, 2, 3),
+                            )
+                        ],
+                    }
+                )
+
+            page.route("**/api/v1/community-stats/pulse?*", pulse_route)
+
             def leaderboard_route(
                 route: Route,
                 *,
@@ -4597,7 +4656,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                 if period == "all" and not bound_pending_all:
                     bound_pending_all.append(route)
                     return
-                offset = {"week": 10, "month": 20, "all": 30}[period]
+                offset = {"week": 10, "month": 20, "year": 25, "all": 30}[period]
                 route.fulfill(
                     json={
                         "items": [
@@ -4605,17 +4664,16 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                                 "rank": index,
                                 "member_id": member_id,
                                 "display_name": names[index - 1],
-                                "experience": offset - index + 1,
-                                "unique_recipients": 1,
-                                "reliability": "0.98",
-                                "no_show": 0,
+                                "value": offset - index + 1,
                             }
                             for index, member_id in enumerate(member_ids, start=1)
-                        ]
+                        ],
+                        "tracking_started_at": "2026-08-01T00:00:00Z",
+                        "calculated_at": "2026-08-28T12:00:00Z",
                     }
                 )
 
-            page.route("**/api/v1/leaderboard?*", leaderboard_route)
+            page.route("**/api/v1/community-stats/leaderboard?*", leaderboard_route)
             page.goto(mini_app_url)
             page.get_by_role("button", name="Комьюнити", exact=True).click()
             page.locator(".member-row").nth(5).wait_for()
@@ -4675,9 +4733,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("получено реакций", exact=True).count() == 1
             assert page.get_by_text("поставлено реакций", exact=True).count() == 1
             assert page.get_by_text("Сообщения по дням", exact=True).is_visible()
-            messages_metric = page.get_by_role(
-                "button", name=re.compile(r"^\d+ сообщений$")
-            )
+            messages_metric = page.get_by_role("button", name=re.compile(r"^\d+ сообщений$"))
             received_reactions = page.get_by_role(
                 "button", name=re.compile(r"^\d+ получено реакций$")
             )
@@ -4716,10 +4772,14 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert reaction_geometry["overflowX"] == "auto"
             assert reaction_geometry["rows"] == 2
             received_breakdown = reaction_grid.locator(".pulse-reaction-item").all_text_contents()
-            assert visual_panel.evaluate("node => node.getBoundingClientRect().height") == visual_height
-            assert page.locator(".pulse-card").evaluate(
-                "node => node.getBoundingClientRect().height"
-            ) == pulse_card_height
+            assert (
+                visual_panel.evaluate("node => node.getBoundingClientRect().height")
+                == visual_height
+            )
+            assert (
+                page.locator(".pulse-card").evaluate("node => node.getBoundingClientRect().height")
+                == pulse_card_height
+            )
             given_reactions.click()
             assert page.locator(".screen").evaluate("node => node.scrollTop") == pulse_scroll_before
             assert messages_metric.get_attribute("aria-pressed") == "false"
@@ -4727,22 +4787,32 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert given_reactions.get_attribute("aria-pressed") == "true"
             assert visual_panel.get_attribute("aria-label") == "Поставленные реакции"
             assert reaction_grid.get_attribute("aria-label") == "Поставленные реакции по типам"
-            assert reaction_grid.locator(".pulse-reaction-item").all_text_contents() != received_breakdown
-            assert visual_panel.evaluate("node => node.getBoundingClientRect().height") == visual_height
-            assert page.locator(".pulse-card").evaluate(
-                "node => node.getBoundingClientRect().height"
-            ) == pulse_card_height
+            assert (
+                reaction_grid.locator(".pulse-reaction-item").all_text_contents()
+                != received_breakdown
+            )
+            assert (
+                visual_panel.evaluate("node => node.getBoundingClientRect().height")
+                == visual_height
+            )
+            assert (
+                page.locator(".pulse-card").evaluate("node => node.getBoundingClientRect().height")
+                == pulse_card_height
+            )
             messages_metric.click()
             assert messages_metric.get_attribute("aria-pressed") == "true"
             assert page.get_by_text("Сообщения по дням", exact=True).is_visible()
-            assert visual_panel.evaluate("node => node.getBoundingClientRect().height") == visual_height
+            assert (
+                visual_panel.evaluate("node => node.getBoundingClientRect().height")
+                == visual_height
+            )
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
             assert page.get_by_role("button", name="Год", exact=True).is_visible()
             assert page.get_by_role("button", name="Всё время", exact=True).is_visible()
             assert page.locator(".achievement-tile.is-unlocked").count() == 3
             assert page.locator(".achievement-tile.is-locked").count() == 3
             assert page.locator(".achievement-detail-sheet").count() == 0
-            achievement = page.get_by_role("button", name="В точку, уровень 1", exact=True)  # noqa: RUF001
+            achievement = page.get_by_role("button", name="Магнит, уровень 1", exact=True)
             page.set_viewport_size({"width": width, "height": 620})
             achievement.evaluate("node => node.scrollIntoView({block: 'center'})")
             scroll_before = page.locator(".screen").evaluate("node => node.scrollTop")
@@ -4759,11 +4829,12 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.evaluate("document.activeElement?.dataset.achievementCode") == "magnet"
             page.set_viewport_size({"width": width, "height": height})
             page.get_by_role("button", name="Месяц", exact=True).click()
+            page.locator(".pulse-chart-month .pulse-chart-bar").first.wait_for()
             assert page.locator(".pulse-chart-month .pulse-chart-bar").count() == 30
             assert page.locator(".pulse-chart-month .pulse-chart-label").count() == 0
             assert page.get_by_text("Сообщения по дням", exact=True).is_visible()
             page.get_by_role("button", name="Год", exact=True).click()
-            assert page.get_by_text("Сообщения по месяцам", exact=True).is_visible()
+            page.get_by_text("Сообщения по месяцам", exact=True).wait_for()
             page.get_by_role("button", name="Неделя", exact=True).click()
 
             page.get_by_role("button", name="Лидерборд").click()
@@ -4781,9 +4852,10 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert metric_dialog.get_by_text("Основное", exact=True).is_visible()
             assert metric_dialog.get_by_text("Активность", exact=True).is_visible()
             assert metric_dialog.get_by_text("Достижения · уровень", exact=True).is_visible()
-            assert metric_dialog.get_by_role("radio", name="Опыт").get_attribute(
-                "aria-checked"
-            ) == "true"
+            assert (
+                metric_dialog.get_by_role("radio", name="Опыт").get_attribute("aria-checked")
+                == "true"
+            )
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
             metric_dialog.get_by_role("radio", name="Сообщения").click()
             leaderboard_filter = page.get_by_role("button", name="Рейтинг по: Сообщения")
@@ -4799,10 +4871,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                             "rank": 1,
                             "member_id": member_ids[0],
                             "display_name": names[0],
-                            "experience": 10,
-                            "unique_recipients": 1,
-                            "reliability": "0.98",
-                            "no_show": 0,
+                            "value": 10,
                         }
                     ]
                 }
@@ -4821,10 +4890,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                             "rank": 1,
                             "member_id": member_ids[0],
                             "display_name": names[0],
-                            "experience": 30,
-                            "unique_recipients": 1,
-                            "reliability": "0.98",
-                            "no_show": 0,
+                            "value": 30,
                         }
                     ]
                 }
@@ -4844,35 +4910,35 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             leaderboard_scroll = page.locator(".screen").evaluate("node => node.scrollTop")
             leaderboard_filter.click()
             metric_dialog = page.get_by_role("dialog", name="Рейтинг по")
-            metric_dialog.get_by_role("radio", name="В точку").click()  # noqa: RUF001
-            achievement_filter = page.get_by_role("button", name="Рейтинг по: В точку")  # noqa: RUF001
+            metric_dialog.get_by_role("radio", name="Магнит").click()
+            achievement_filter = page.get_by_role("button", name="Рейтинг по: Магнит")
             assert achievement_filter.evaluate("node => document.activeElement === node") is True
-            assert page.get_by_role("button", name="Всё время", exact=True).get_attribute(
-                "aria-pressed"
-            ) == "true"
+            assert (
+                page.get_by_role("button", name="Всё время", exact=True).get_attribute(
+                    "aria-pressed"
+                )
+                == "true"
+            )
             assert page.get_by_role("button", name="Всё время", exact=True).is_enabled()
             for locked_period in ("Неделя", "Месяц", "Год"):
                 locked_button = page.get_by_role("button", name=locked_period, exact=True)
                 assert locked_button.is_disabled()
                 assert locked_button.get_attribute("aria-pressed") == "false"
             assert page.locator(".screen").evaluate("node => node.scrollTop") == leaderboard_scroll
-            assert page.locator(".leaderboard-value").first.text_content().startswith("Ур. ")
+            assert page.locator(".leaderboard-value").first.text_content().startswith("Ур. ")  # noqa: RUF001
             achievement_filter.click()
             page.get_by_role("button", name="Закрыть выбор рейтинга", exact=True).click()
             assert achievement_filter.evaluate("node => document.activeElement === node") is True
             achievement_filter.click()
-            page.get_by_role("dialog", name="Рейтинг по").get_by_role(
-                "radio", name="Опыт"
-            ).click()
+            page.get_by_role("dialog", name="Рейтинг по").get_by_role("radio", name="Опыт").click()
             experience_filter = page.get_by_role("button", name="Рейтинг по: Опыт")
             assert experience_filter.evaluate("node => document.activeElement === node") is True
-            assert page.get_by_role("button", name="Месяц", exact=True).get_attribute(
-                "aria-pressed"
-            ) == "true"
+            assert (
+                page.get_by_role("button", name="Месяц", exact=True).get_attribute("aria-pressed")
+                == "true"
+            )
             for active_period in ("Неделя", "Месяц", "Год", "Всё время"):
-                assert page.get_by_role(
-                    "button", name=active_period, exact=True
-                ).is_enabled()
+                assert page.get_by_role("button", name=active_period, exact=True).is_enabled()
 
             page.get_by_role("button", name="Параметры", exact=True).click()
             page.locator(".settings-link-row").click()
@@ -5001,7 +5067,7 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
             ),
         )
         page.route(
-            "**/api/v1/leaderboard?*",
+            "**/api/v1/community-stats/leaderboard?*",
             lambda route: route.fulfill(
                 json={
                     "items": [
@@ -5009,14 +5075,15 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
                             "rank": 1,
                             "member_id": target_id,
                             "display_name": "Мария",
-                            "experience": 10,
-                            "unique_recipients": 2,
-                            "reliability": "1.0",
-                            "no_show": 0,
+                            "value": 10,
                         }
                     ]
                 }
             ),
+        )
+        page.route(
+            "**/api/v1/community-stats/pulse?*",
+            lambda route: route.fulfill(status=503, json={"code": "community_stats_unavailable"}),
         )
         page.route(
             "**/api/v1/tasks",

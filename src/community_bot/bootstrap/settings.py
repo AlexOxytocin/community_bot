@@ -6,9 +6,12 @@ import datetime
 import re
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_MIN_SERVICE_TOKEN_LENGTH = 16
 
 
 class Settings(BaseSettings):
@@ -42,6 +45,9 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     worker_lease_seconds: int = 120
     heartbeat_max_age_seconds: int = 180
+    community_stats_base_url: str | None = None
+    community_stats_token: SecretStr | None = None
+    community_stats_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
 
     @field_validator("database_url")
     @classmethod
@@ -62,6 +68,27 @@ class Settings(BaseSettings):
         normalized = value.strip().removeprefix("@").strip()
         if re.fullmatch(r"[A-Za-z0-9_]{5,32}", normalized) is None:
             msg = "TELEGRAM_BOT_USERNAME must be a valid Telegram username"
+            raise ValueError(msg)
+        return normalized
+
+    @field_validator("community_stats_base_url")
+    @classmethod
+    def normalize_stats_base_url(cls, value: str | None) -> str | None:
+        """Accept only an explicit HTTP origin for the private Stats service."""
+        if value is None:
+            return None
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            msg = "COMMUNITY_STATS_BASE_URL must be an HTTP(S) origin without credentials or path"
             raise ValueError(msg)
         return normalized
 
@@ -90,6 +117,18 @@ class Settings(BaseSettings):
             value is not None for value in community_values
         ):
             msg = "COMMUNITY_TELEGRAM_CHAT_ID and COMMUNITY_TELEGRAM_JOIN_URL must be set together"
+            raise ValueError(msg)
+        stats_values = (self.community_stats_base_url, self.community_stats_token)
+        if any(value is not None for value in stats_values) and not all(
+            value is not None for value in stats_values
+        ):
+            msg = "COMMUNITY_STATS_BASE_URL and COMMUNITY_STATS_TOKEN must be set together"
+            raise ValueError(msg)
+        if (
+            self.community_stats_token is not None
+            and len(self.community_stats_token.get_secret_value()) < _MIN_SERVICE_TOKEN_LENGTH
+        ):
+            msg = "COMMUNITY_STATS_TOKEN must contain at least 16 characters"
             raise ValueError(msg)
         return self
 

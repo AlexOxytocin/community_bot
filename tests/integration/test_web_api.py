@@ -19,6 +19,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from community_bot.application import assignments as assignment_app
+from community_bot.application.community_stats import (
+    AchievementProgress,
+    ActivityBucket,
+    ActivityValues,
+    CommunityStatsUnavailableError,
+    Pulse,
+    ReactionBreakdown,
+    StatsLeaderboard,
+    StatsLeaderboardItem,
+)
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.membership import ResolvedTelegramResource
 from community_bot.application.registration import (
@@ -94,6 +104,7 @@ class FakeMembershipChecker:
     """Controllable Telegram membership boundary for integration tests."""
 
     def __init__(self) -> None:
+        """Start available and retain exact outbound request arguments."""
         """Start with no confirmed chat members."""
         self.members: set[tuple[int, int]] = set()
         self.resolved_chat = ResolvedTelegramResource(
@@ -113,6 +124,56 @@ class FakeMembershipChecker:
 
     async def close(self) -> None:
         """Match the production adapter lifecycle."""
+        return
+
+
+class FakeCommunityStatsGateway:
+    """Record authorized private reads without any external network call."""
+
+    def __init__(self) -> None:
+        """Start available and retain exact outbound request arguments."""
+        self.pulse_requests: list[dict[str, object]] = []
+        self.leaderboard_requests: list[dict[str, object]] = []
+        self.unavailable = False
+
+    async def pulse(self, **request) -> Pulse:  # noqa: ANN003
+        """Return deterministic pulse data or the configured outage."""
+        self.pulse_requests.append(request)
+        if self.unavailable:
+            raise CommunityStatsUnavailableError
+        return Pulse(
+            tracking_started_at=datetime.datetime(2026, 8, 28, tzinfo=datetime.UTC),
+            calculated_at=datetime.datetime(2026, 8, 28, 12, tzinfo=datetime.UTC),
+            summary=ActivityValues(7, 3, 4),
+            series=(ActivityBucket(7, 3, 4, datetime.date(2026, 8, 28)),),
+            reaction_breakdown=(ReactionBreakdown({"type": "emoji", "emoji": "👍"}, 3, 4),),
+            achievements=(
+                AchievementProgress(
+                    code="speaker",
+                    level=1,
+                    current=10,
+                    next_level_at=50,
+                    unlocked=True,
+                ),
+            ),
+        )
+
+    async def leaderboard(self, **request) -> StatsLeaderboard:  # noqa: ANN003
+        """Return one mapped and one unknown Telegram identity."""
+        self.leaderboard_requests.append(request)
+        if self.unavailable:
+            raise CommunityStatsUnavailableError
+        return StatsLeaderboard(
+            items=(
+                StatsLeaderboardItem(52_081, 9, 1),
+                StatsLeaderboardItem(99_999, 8, 2),
+            ),
+            tracking_started_at=datetime.datetime(2026, 8, 28, tzinfo=datetime.UTC),
+            calculated_at=datetime.datetime(2026, 8, 28, 12, tzinfo=datetime.UTC),
+        )
+
+    async def close(self) -> None:
+        """Match the production gateway lifecycle."""
         return
 
 
@@ -158,6 +219,111 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
         reason="Web API integration config.",
     )
     return member
+
+
+async def test_community_stats_access_mapping_topic_and_degradation(database_url: str) -> None:
+    database = Database(database_url)
+    actor = await active_member(database, 52_080)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        target = MemberModel(
+            id=uuid4(),
+            telegram_user_id=52_081,
+            telegram_username="stats_target",
+            display_name="Stats Target",
+            timezone="UTC",
+            role=MemberRole.MEMBER.value,
+            status=MemberStatus.ACTIVE.value,
+            permissions_json=[],
+        )
+        session.add(target)
+
+    gateway = FakeCommunityStatsGateway()
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN,
+            mini_app_origin=ORIGIN,
+            database_url=database_url,
+            community_telegram_chat_id=-100_200,
+            community_telegram_join_url="https://t.me/community_test",
+        ),
+        database=database,
+        community_stats_gateway=gateway,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(actor.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+
+        pulse = await client.get(
+            "/api/v1/community-stats/pulse",
+            params={"member_id": str(target.id), "period": "week", "topic_id": 321},
+        )
+        assert pulse.status_code == 200, pulse.text
+        assert pulse.json()["member_id"] == str(target.id)
+        assert pulse.json()["summary"] == {
+            "messages": 7,
+            "reactions_given": 3,
+            "reactions_received": 4,
+        }
+        assert gateway.pulse_requests == [
+            {
+                "chat_id": -100_200,
+                "user_id": target.telegram_user_id,
+                "period": "week",
+                "topic_id": 321,
+            }
+        ]
+
+        hidden = await client.get(
+            "/api/v1/community-stats/pulse",
+            params={"member_id": str(uuid4()), "period": "week"},
+        )
+        assert hidden.status_code == 404
+        assert len(gateway.pulse_requests) == 1
+
+        leaderboard = await client.get(
+            "/api/v1/community-stats/leaderboard",
+            params={"period": "month", "metric": "messages", "topic_id": 321},
+        )
+        assert leaderboard.status_code == 200, leaderboard.text
+        assert leaderboard.json()["items"] == [
+            {
+                "member_id": str(target.id),
+                "display_name": "Stats Target",
+                "value": 9,
+                "rank": 1,
+            }
+        ]
+        assert gateway.leaderboard_requests[0]["topic_id"] == 321
+        native = await client.get(
+            "/api/v1/community-stats/leaderboard",
+            params={"period": "all", "metric": "karma"},
+        )
+        assert native.status_code == 200, native.text
+        assert {item["member_id"] for item in native.json()["items"]} == {
+            str(actor.id),
+            str(target.id),
+        }
+        assert len(gateway.leaderboard_requests) == 1
+        assert (
+            await client.get(
+                "/api/v1/community-stats/leaderboard",
+                params={
+                    "period": "all",
+                    "metric": "achievement:speaker",
+                    "topic_id": 321,
+                },
+            )
+        ).status_code == 422
+
+        gateway.unavailable = True
+        unavailable = await client.get("/api/v1/community-stats/pulse", params={"period": "week"})
+        assert unavailable.status_code == 503
+        assert unavailable.json() == {"code": "community_stats_unavailable"}
 
 
 async def test_onboarding_uses_invitation_restricts_pending_and_activates_after_review(
@@ -406,12 +572,8 @@ async def test_personal_invitation_is_username_bound_one_use_and_auto_approves(
             if item["invitation_id"] == revoked_payload["invitation_id"]
         )
         assert revoked_item["status"] == "revoked"
-        revoked_token = parse_qs(urlsplit(revoked_payload["invitation_url"]).query)[
-            "startapp"
-        ][0]
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url=ORIGIN
-        ) as revoked_client:
+        revoked_token = parse_qs(urlsplit(revoked_payload["invitation_url"]).query)["startapp"][0]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as revoked_client:
             revoked_attempt = await revoked_client.post(
                 "/api/v1/auth/telegram",
                 content=proof(
@@ -427,9 +589,7 @@ async def test_personal_invitation_is_username_bound_one_use_and_auto_approves(
             )
             assert revoked_attempt.status_code == 403
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url=ORIGIN
-        ) as wrong_client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as wrong_client:
             mismatch = await wrong_client.post(
                 "/api/v1/auth/telegram",
                 content=proof(
@@ -447,8 +607,7 @@ async def test_personal_invitation_is_username_bound_one_use_and_auto_approves(
             assert mismatch.json() == {"code": "invalid_invitation"}
 
         contenders = [
-            AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN)
-            for _ in range(2)
+            AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) for _ in range(2)
         ]
         try:
             responses = await asyncio.gather(
@@ -513,9 +672,7 @@ async def test_personal_invitation_is_username_bound_one_use_and_auto_approves(
         assert joined_item["status"] == "joined"
         sessions = async_sessionmaker(database.engine, expire_on_commit=False)
         async with sessions() as session:
-            invitation = await session.get(
-                InvitationModel, UUID(created_payload["invitation_id"])
-            )
+            invitation = await session.get(InvitationModel, UUID(created_payload["invitation_id"]))
             assert invitation is not None
             assert invitation.code_hash != token
             assert invitation.intended_telegram_username == "new_user"
@@ -640,11 +797,14 @@ async def test_membership_requirements_do_not_consume_invite_and_recheck_on_entr
                 invitation = await session.get(InvitationModel, invitation_id)
                 assert invitation is not None
                 assert invitation.uses_count == 1
-                assert await session.scalar(
-                    select(InvitationMembershipResourceModel).where(
-                        InvitationMembershipResourceModel.invitation_id == invitation_id
+                assert (
+                    await session.scalar(
+                        select(InvitationMembershipResourceModel).where(
+                            InvitationMembershipResourceModel.invitation_id == invitation_id
+                        )
                     )
-                ) is not None
+                    is not None
+                )
                 assert await session.get(MembershipResourceModel, UUID(resource_id)) is not None
 
             checker.members.remove((-100_100, user_id))

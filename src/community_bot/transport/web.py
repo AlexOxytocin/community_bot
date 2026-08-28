@@ -50,6 +50,12 @@ from community_bot.application.cities import (
     canonical_city_and_timezone,
     search_task_cities,
 )
+from community_bot.application.community_stats import (
+    CommunityStatsGateway,
+    CommunityStatsService,
+    CommunityStatsUnavailableError,
+    StatsPeriod,
+)
 from community_bot.application.identity import ActorContext
 from community_bot.application.membership import (
     InvalidMembershipResourceError,
@@ -124,6 +130,7 @@ from community_bot.domain.tasks import (
     TaskStatus,
     TaskTimeSize,
 )
+from community_bot.infrastructure.community_stats import HttpCommunityStatsGateway
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
 from community_bot.infrastructure.telegram_membership import AiogramTelegramMembershipChecker
@@ -159,6 +166,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "profile_unavailable",
         "assignment_unavailable",
         "administration_unavailable",
+        "community_stats_unavailable",
         "task_catalog_unavailable",
         "unauthorized",
     }
@@ -743,12 +751,60 @@ class LeaderboardDto(_Dto):
     items: tuple[LeaderboardItemDto, ...]
 
 
+class CommunityActivityDto(_Dto):
+    messages: int
+    reactions_given: int
+    reactions_received: int
+
+
+class CommunityActivityBucketDto(CommunityActivityDto):
+    bucket_start: datetime.date
+
+
+class CommunityReactionDto(_Dto):
+    reaction: dict[str, object]
+    given: int
+    received: int
+
+
+class CommunityAchievementDto(_Dto):
+    code: str
+    level: int
+    current: int
+    next_level_at: int | None
+    unlocked: bool
+
+
+class CommunityPulseDto(_Dto):
+    member_id: UUID
+    tracking_started_at: datetime.datetime
+    calculated_at: datetime.datetime
+    summary: CommunityActivityDto
+    series: tuple[CommunityActivityBucketDto, ...]
+    reaction_breakdown: tuple[CommunityReactionDto, ...]
+    achievements: tuple[CommunityAchievementDto, ...]
+
+
+class CommunityLeaderboardItemDto(_Dto):
+    member_id: UUID
+    display_name: str
+    value: int
+    rank: int
+
+
+class CommunityLeaderboardDto(_Dto):
+    items: tuple[CommunityLeaderboardItemDto, ...]
+    tracking_started_at: datetime.datetime | None
+    calculated_at: datetime.datetime
+
+
 def create_web_app(
     *,
     settings: Settings,
     database: Database,
     heartbeat_not_before: datetime.datetime | None = None,
     membership_checker: TelegramMembershipChecker | None = None,
+    community_stats_gateway: CommunityStatsGateway | None = None,
 ) -> FastAPI:
     """Build the web-only application after strict config validation."""
     bot_token, origin = _web_config(settings)
@@ -768,6 +824,27 @@ def create_web_app(
     assignments = AssignmentService(database.unit_of_work)
     moderation = ModerationService(database.unit_of_work)
     administration = AdministrationService(database.unit_of_work)
+    owned_community_stats_gateway = False
+    if (
+        community_stats_gateway is None
+        and settings.community_stats_base_url is not None
+        and settings.community_stats_token is not None
+    ):
+        community_stats_gateway = HttpCommunityStatsGateway(
+            base_url=settings.community_stats_base_url,
+            token=settings.community_stats_token.get_secret_value(),
+            timeout_seconds=settings.community_stats_timeout_seconds,
+        )
+        owned_community_stats_gateway = True
+    community_stats = (
+        CommunityStatsService(
+            database.unit_of_work,
+            community_stats_gateway,
+            settings.community_telegram_chat_id,
+        )
+        if community_stats_gateway is not None and settings.community_telegram_chat_id is not None
+        else None
+    )
     owned_membership_checker = membership_checker is None
     membership_checker = membership_checker or AiogramTelegramMembershipChecker(bot_token)
     index_html = (
@@ -783,6 +860,8 @@ def create_web_app(
         finally:
             if owned_membership_checker:
                 await membership_checker.close()
+            if owned_community_stats_gateway and community_stats_gateway is not None:
+                await community_stats_gateway.close()
             await database.dispose()
 
     app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -2051,6 +2130,110 @@ def create_web_app(
                     )
                     for item in page.items
                 )
+            )
+        )
+
+    @app.get("/api/v1/community-stats/pulse", response_model=CommunityPulseDto)
+    async def community_pulse(
+        actor: ActorContext = Depends(current_actor),
+        member_id: UUID | None = None,
+        period: StatsPeriod = "week",
+        topic_id: Annotated[int | None, Query(ge=1)] = None,
+    ) -> JSONResponse:
+        if community_stats is None:
+            return _error_response(503, "community_stats_unavailable")
+        target_member_id = member_id or actor.member_id
+        try:
+            pulse = await community_stats.pulse(
+                actor=actor,
+                target_member_id=target_member_id,
+                period=period,
+                topic_id=topic_id,
+            )
+        except ProfileUnavailableError:
+            return _error_response(404, "profile_unavailable")
+        except CommunityStatsUnavailableError:
+            return _error_response(503, "community_stats_unavailable")
+        return _json_response(
+            CommunityPulseDto(
+                member_id=target_member_id,
+                tracking_started_at=pulse.tracking_started_at,
+                calculated_at=pulse.calculated_at,
+                summary=CommunityActivityDto(
+                    messages=pulse.summary.messages,
+                    reactions_given=pulse.summary.reactions_given,
+                    reactions_received=pulse.summary.reactions_received,
+                ),
+                series=tuple(
+                    CommunityActivityBucketDto(
+                        bucket_start=item.bucket_start,
+                        messages=item.messages,
+                        reactions_given=item.reactions_given,
+                        reactions_received=item.reactions_received,
+                    )
+                    for item in pulse.series
+                ),
+                reaction_breakdown=tuple(
+                    CommunityReactionDto(
+                        reaction=item.reaction,
+                        given=item.given,
+                        received=item.received,
+                    )
+                    for item in pulse.reaction_breakdown
+                ),
+                achievements=tuple(
+                    CommunityAchievementDto(
+                        code=item.code,
+                        level=item.level,
+                        current=item.current,
+                        next_level_at=item.next_level_at,
+                        unlocked=item.unlocked,
+                    )
+                    for item in pulse.achievements
+                ),
+            )
+        )
+
+    @app.get(
+        "/api/v1/community-stats/leaderboard",
+        response_model=CommunityLeaderboardDto,
+    )
+    async def community_leaderboard(
+        actor: ActorContext = Depends(current_actor),
+        period: StatsPeriod = "week",
+        metric: Annotated[str, Query(min_length=1, max_length=80)] = "messages",
+        topic_id: Annotated[int | None, Query(ge=1)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    ) -> JSONResponse:
+        if community_stats is None:
+            return _error_response(503, "community_stats_unavailable")
+        try:
+            leaderboard = await community_stats.leaderboard(
+                actor=actor,
+                period=period,
+                metric=metric,
+                topic_id=topic_id,
+                limit=limit,
+            )
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        except ProfileUnavailableError:
+            return _error_response(403, "profile_unavailable")
+        except CommunityStatsUnavailableError:
+            return _error_response(503, "community_stats_unavailable")
+        return _json_response(
+            CommunityLeaderboardDto(
+                items=tuple(
+                    CommunityLeaderboardItemDto(
+                        member_id=item.member_id,
+                        display_name=item.display_name,
+                        value=item.value,
+                        rank=item.rank,
+                    )
+                    for item in leaderboard.items
+                ),
+                tracking_started_at=leaderboard.tracking_started_at,
+                calculated_at=leaderboard.calculated_at,
             )
         )
 

@@ -3246,12 +3246,42 @@ const communityStatPeriods = [
   ["all", "Всё время"],
 ];
 const communityAchievementCatalog = [
-  { code: "speaker", icon: "💬", title: "На связи", level: 2, current: 42, next_level_at: 75, unlocked: true, hint: "Пишите регулярно и поддерживайте разговор." },
-  { code: "supporter", icon: "🙌", title: "Поддержка", level: 3, current: 64, next_level_at: 100, unlocked: true, hint: "Ставьте реакции полезным сообщениям." },
-  { code: "magnet", icon: "🎯", title: "В точку", level: 1, current: 26, next_level_at: 50, unlocked: true, hint: "Получайте реакции от участников." },
-  { code: "kind_circle", icon: "🤝", title: "Добрый круг", level: 0, current: 2, next_level_at: 5, unlocked: false, hint: "Обменяйтесь реакциями с пятью людьми." },
-  { code: "spark", icon: "✨", title: "Искра", level: 0, current: 1, next_level_at: 3, unlocked: false, hint: "Начните три активных обсуждения." },
-  { code: "weekly_rhythm", icon: "🔥", title: "Ритм недели", level: 0, current: 3, next_level_at: 7, unlocked: false, hint: "Проявляйте активность семь дней подряд." },
+  {
+    code: "speaker",
+    icon: "💬",
+    title: "Спикер",
+    hint: "Пишите сообщения и поддерживайте разговор.",
+  },
+  {
+    code: "magnet",
+    icon: "🎯",
+    title: "Магнит",
+    hint: "Получайте реакции от участников.",
+  },
+  {
+    code: "support",
+    icon: "🙌",
+    title: "Поддержка",
+    hint: "Ставьте реакции полезным сообщениям.",
+  },
+  {
+    code: "regular",
+    icon: "📅",
+    title: "Завсегдатай",
+    hint: "Проявляйте активность в разные дни.",
+  },
+  {
+    code: "explorer",
+    icon: "🧭",
+    title: "Исследователь",
+    hint: "Участвуйте в разных темах сообщества.",
+  },
+  {
+    code: "streak",
+    icon: "🔥",
+    title: "Серия",
+    hint: "Сохраняйте непрерывную серию активных дней.",
+  },
 ];
 const communityLeaderboardMetricGroups = [
   {
@@ -3279,162 +3309,6 @@ const communityLeaderboardMetricGroups = [
   },
 ];
 const communityLeaderboardMetrics = communityLeaderboardMetricGroups.flatMap((group) => group.options);
-const communityStatsDemoEnabled = ["127.0.0.1", "localhost", "::1"].includes(location.hostname);
-
-const stableMemberSeed = (memberId) => [...String(memberId || "member")]
-  .reduce((total, character) => (total * 31 + character.charCodeAt(0)) % 997, 17);
-
-const scaledSeries = (values, total) => {
-  const sourceTotal = values.reduce((sum, value) => sum + value, 0) || 1;
-  const result = values.map((value) => Math.max(1, Math.round(value * total / sourceTotal)));
-  result[result.length - 1] += total - result.reduce((sum, value) => sum + value, 0);
-  return result;
-};
-
-const scaledBreakdown = (weights, total) => {
-  const baseline = weights.map(() => 1);
-  const remaining = Math.max(0, total - baseline.length);
-  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0) || 1;
-  const shares = weights.map((weight) => remaining * weight / weightTotal);
-  const extras = shares.map(Math.floor);
-  let undistributed = remaining - extras.reduce((sum, value) => sum + value, 0);
-  const priority = shares
-    .map((share, index) => ({ index, fraction: share - extras[index] }))
-    .sort((left, right) => right.fraction - left.fraction || left.index - right.index);
-  for (const item of priority) {
-    if (undistributed === 0) break;
-    extras[item.index] += 1;
-    undistributed -= 1;
-  }
-  return baseline.map((value, index) => value + extras[index]);
-};
-
-// The returned shape mirrors the future Community Stats API. Replacing this
-// function with GET /v1/chats/{chat_id}/users/{user_id}/pulse keeps the UI intact.
-function communityPulseMock(memberId, period) {
-  const seed = stableMemberSeed(memberId);
-  const definitions = {
-    week: {
-      label: "Моя неделя",
-      range: "7 дней",
-      chart_label: "Сообщения по дням",
-      suffix: "за эту неделю",
-      labels: ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
-      values: [3, 5, 4, 8, 4, 9, 9],
-      messages: 42 + seed % 7,
-    },
-    month: {
-      label: "Мой месяц",
-      range: "30 дней",
-      chart_label: "Сообщения по дням",
-      suffix: "за этот месяц",
-      labels: Array.from({ length: 30 }, () => ""),
-      values: [5, 3, 6, 9, 4, 7, 5, 8, 4, 6, 10, 5, 7, 8, 4, 9, 6, 5, 8, 7, 9, 6, 4, 7, 5, 10, 6, 4, 7, 8],
-      messages: 163 + seed % 19,
-    },
-    year: {
-      label: "Мой год",
-      range: "12 месяцев",
-      chart_label: "Сообщения по месяцам",
-      suffix: "за этот год",
-      labels: ["С", "О", "Н", "Д", "Я", "Ф", "М", "А", "М", "И", "И", "А"],
-      values: [5, 7, 6, 8, 10, 7, 9, 11, 8, 12, 10, 13],
-      messages: 987 + seed % 83,
-    },
-    all: {
-      label: "Всё время",
-      range: "с начала учёта",
-      chart_label: "Сообщения по месяцам",
-      suffix: "с начала учёта",
-      labels: ["С", "О", "Н", "Д", "Я", "Ф", "М", "А", "М", "И", "И", "А"],
-      values: [4, 5, 6, 7, 8, 7, 9, 10, 9, 11, 12, 13],
-      messages: 1149 + seed % 97,
-    },
-  };
-  const definition = definitions[period] || definitions.week;
-  const messages = definition.messages;
-  const reactionsReceived = Math.max(4, Math.round(messages * 0.39));
-  const reactionsGiven = Math.max(3, Math.round(messages * 0.48));
-  const messageSeries = scaledSeries(definition.values, messages);
-  const receivedSeries = scaledSeries(definition.values.map((value, index) => value + index % 3), reactionsReceived);
-  const givenSeries = scaledSeries(definition.values.map((value, index) => value + (index + 1) % 4), reactionsGiven);
-  const receivedBreakdownCounts = scaledBreakdown([18, 14, 10, 8, 6, 4, 3, 3], reactionsReceived);
-  const givenBreakdownCounts = scaledBreakdown([16, 13, 11, 9, 7, 5, 4, 3], reactionsGiven);
-  const reactionTypes = ["👍", "🔥", "💗", "👏", "🎉", "😁", "🤝", "⚡"];
-  return {
-    source: "mock",
-    tracking_started_at: "2026-08-28T00:00:00Z",
-    calculated_at: new Date().toISOString(),
-    period,
-    label: definition.label,
-    range_label: definition.range,
-    chart_label: definition.chart_label,
-    summary_label: `${messages} сообщений ${definition.suffix}`,
-    summary: {
-      messages,
-      reactions_received: reactionsReceived,
-      reactions_given: reactionsGiven,
-    },
-    series: definition.labels.map((label, index) => ({
-      bucket_start: `bucket-${index + 1}`,
-      label,
-      messages: messageSeries[index],
-      reactions_received: receivedSeries[index],
-      reactions_given: givenSeries[index],
-    })),
-    reaction_breakdown: {
-      received: reactionTypes.map((reaction, index) => ({
-        reaction,
-        count: receivedBreakdownCounts[index],
-      })),
-      given: reactionTypes.map((reaction, index) => ({
-        reaction,
-        count: givenBreakdownCounts[index],
-      })),
-    },
-    achievements: communityAchievementCatalog.map((achievement) => ({ ...achievement })),
-  };
-}
-
-function communityLeaderboardMock(items, period, metric) {
-  const achievementCode = metric.startsWith("achievement:") ? metric.split(":", 2)[1] : null;
-  const achievementIndex = Math.max(
-    0,
-    communityAchievementCatalog.findIndex((achievement) => achievement.code === achievementCode),
-  );
-  const prepared = items.map((item) => {
-    const seed = stableMemberSeed(item.member_id);
-    const sourceExperience = Number(item.experience) || 1 + seed % 20;
-    const sourceRecipients = Number(item.unique_recipients) || 1 + seed % 6;
-    const sourceKarma = Number(item.karma_score ?? item.karma?.score);
-    let value;
-    if (metric === "experience") value = Math.max(0, Math.round(sourceExperience));
-    else if (metric === "karma") {
-      value = Number.isFinite(sourceKarma)
-        ? sourceKarma
-        : Math.max(0, Math.round(sourceRecipients * 1.7 + seed % 7));
-    } else if (metric === "messages") value = Math.max(1, Math.round(sourceExperience));
-    else if (metric === "reactions_given") {
-      value = Math.max(1, Math.round(sourceExperience * 0.43 + seed % 5));
-    } else if (metric === "reactions_received") {
-      value = Math.max(1, Math.round(sourceRecipients * 2.4 + sourceExperience * 0.18));
-    } else {
-      value = (Math.floor(sourceExperience / 5) + sourceRecipients + seed + achievementIndex * 3) % 5;
-    }
-    const tieBreaker = achievementCode ? (seed + sourceExperience * (achievementIndex + 1)) % 100 : 0;
-    return { ...item, value, tieBreaker };
-  });
-  prepared.sort((left, right) => (
-    right.value - left.value
-    || right.tieBreaker - left.tieBreaker
-    || left.display_name.localeCompare(right.display_name, "ru")
-  ));
-  return prepared.map((item, index) => ({ ...item, rank: index + 1 }));
-}
-
-function demoBadge() {
-  return element("span", "Демо-данные", "community-demo-badge");
-}
 
 function leaderboardDetails(items, metric, period) {
   const boundary = element("section", undefined, "leaderboard-boundary");
@@ -3450,7 +3324,7 @@ function leaderboardDetails(items, metric, period) {
     return `Ур. ${value}`;
   };
   const list = element("ol", undefined, "leaderboard-list");
-  for (const item of communityLeaderboardMock(items, period, metric)) {
+  for (const item of items) {
     const row = element("li");
     const button = element(
       "button",
@@ -3581,7 +3455,9 @@ function achievementDetailSheet(state, achievement, originButton) {
     originButton.setAttribute("aria-pressed", "false");
     originButton.focus({ preventScroll: true });
   };
-  const progress = Math.min(100, Math.round(achievement.current / achievement.next_level_at * 100));
+  const progress = achievement.next_level_at === null
+    ? 100
+    : Math.min(100, Math.round(achievement.current / achievement.next_level_at * 100));
   const dialog = element("article", undefined, "achievement-detail-sheet");
   dialog.setAttribute("role", "dialog");
   dialog.setAttribute("aria-modal", "true");
@@ -3609,7 +3485,13 @@ function achievementDetailSheet(state, achievement, originButton) {
     detailHeading,
     element("p", achievement.hint, "muted"),
     track,
-    element("span", `${achievement.current} из ${achievement.next_level_at}`, "achievement-progress-copy"),
+    element(
+      "span",
+      achievement.next_level_at === null
+        ? "Максимальный уровень"
+        : `${achievement.current} из ${achievement.next_level_at}`,
+      "achievement-progress-copy",
+    ),
   );
   backdrop.append(dialog);
   backdrop.addEventListener("click", (event) => {
@@ -3632,19 +3514,31 @@ function achievementDetailSheet(state, achievement, originButton) {
 }
 
 function pulseDetails(state, revision) {
-  if (!communityStatsDemoEnabled) {
-    const unavailable = element("section", undefined, "pulse-unavailable");
-    unavailable.append(
-      element("h2", "Статистика скоро появится"),
-      element("p", "Сейчас демо-данные доступны только в локальной версии Mini App.", "muted"),
-    );
-    return unavailable;
-  }
-  const pulse = communityPulseMock(currentMemberId, state.period);
+  const pulse = state.pulses[state.period];
+  if (!pulse) return element("p", "Статистика пока недоступна.", "status muted");
+  const periodPresentation = {
+    week: ["Моя неделя", "7 дней", "Сообщения по дням"],
+    month: ["Мой месяц", "30 дней", "Сообщения по дням"],
+    year: ["Мой год", "12 месяцев", "Сообщения по месяцам"],
+    all: [
+      "Всё время",
+      `с ${new Date(pulse.tracking_started_at).toLocaleDateString("ru-RU")}`,
+      "Активность с начала учёта",
+    ],
+  }[state.period];
+  const pulseAchievements = pulse.achievements.map((progress) => ({
+    ...(communityAchievementCatalog.find((item) => item.code === progress.code) || {
+      code: progress.code,
+      icon: "◈",
+      title: progress.code,
+      hint: "Продолжайте участвовать в жизни сообщества.",
+    }),
+    ...progress,
+  }));
   const fragment = document.createDocumentFragment();
   const card = element("section", undefined, "pulse-card");
   const eyebrow = element("div", undefined, "pulse-card-eyebrow");
-  eyebrow.append(element("strong", pulse.label), element("span", pulse.range_label));
+  eyebrow.append(element("strong", periodPresentation[0]), element("span", periodPresentation[1]));
   const metrics = element("div", undefined, "pulse-metrics");
   metrics.setAttribute("role", "group");
   metrics.setAttribute("aria-label", "Показатель активности");
@@ -3658,6 +3552,12 @@ function pulseDetails(state, revision) {
   const visualPanel = element("section", undefined, "pulse-visual-panel");
   visualPanel.setAttribute("aria-live", "polite");
   const renderMessageChart = () => {
+    if (!pulse.series.length) {
+      return [
+        element("strong", periodPresentation[2], "pulse-section-label"),
+        element("p", "За всё время показываем итог с даты начала учёта.", "status muted"),
+      ];
+    }
     const maximum = Math.max(...pulse.series.map((item) => item.messages), 1);
     const chart = element("div", undefined, `pulse-chart pulse-chart-${state.period}`);
     chart.setAttribute("role", "img");
@@ -3667,10 +3567,16 @@ function pulseDetails(state, revision) {
       const bar = element("span", undefined, "pulse-chart-bar");
       bar.style.setProperty("--pulse-bar-height", `${Math.max(12, Math.round(item.messages / maximum * 100))}%`);
       column.append(bar);
-      if (item.label) column.append(element("span", item.label, "pulse-chart-label"));
+      const bucketDate = new Date(`${item.bucket_start}T00:00:00Z`);
+      const label = state.period === "week"
+        ? bucketDate.toLocaleDateString("ru-RU", { weekday: "short", timeZone: "UTC" }).slice(0, 2)
+        : state.period === "year"
+          ? bucketDate.toLocaleDateString("ru-RU", { month: "short", timeZone: "UTC" }).slice(0, 1)
+          : "";
+      if (label) column.append(element("span", label, "pulse-chart-label"));
       chart.append(column);
     }
-    return [element("strong", pulse.chart_label, "pulse-section-label"), chart];
+    return [element("strong", periodPresentation[2], "pulse-section-label"), chart];
   };
   const renderReactionGrid = (direction) => {
     const received = direction === "received";
@@ -3679,11 +3585,23 @@ function pulseDetails(state, revision) {
     grid.setAttribute("role", "list");
     grid.setAttribute("aria-label", label);
     grid.setAttribute("tabindex", "0");
-    for (const item of pulse.reaction_breakdown[direction]) {
+    const breakdown = pulse.reaction_breakdown
+      .map((item) => ({ reaction: item.reaction, count: item[direction === "received" ? "received" : "given"] }))
+      .filter((item) => item.count > 0);
+    if (!breakdown.length) {
+      grid.append(element("span", "Пока нет реакций за этот период.", "status muted"));
+    }
+    for (const item of breakdown) {
       const reaction = element("span", undefined, "pulse-reaction-item");
       reaction.setAttribute("role", "listitem");
       reaction.append(
-        element("span", item.reaction, "pulse-reaction-emoji"),
+        element(
+          "span",
+          typeof item.reaction === "string"
+            ? item.reaction
+            : item.reaction?.emoji || "◈",
+          "pulse-reaction-emoji",
+        ),
         element("strong", String(item.count)),
       );
       grid.append(reaction);
@@ -3701,7 +3619,7 @@ function pulseDetails(state, revision) {
     visualPanel.setAttribute(
       "aria-label",
       selected === "messages"
-        ? pulse.chart_label
+        ? periodPresentation[2]
         : selected === "received" ? "Полученные реакции" : "Поставленные реакции",
     );
     visualPanel.replaceChildren(content);
@@ -3716,9 +3634,9 @@ function pulseDetails(state, revision) {
   const achievementsHeading = element("div", undefined, "community-section-heading");
   const headingCopy = element("div");
   headingCopy.append(element("h2", "Достижения"), element("p", "Коллекция будет расти вместе с сообществом.", "muted"));
-  achievementsHeading.append(headingCopy, demoBadge());
+  achievementsHeading.append(headingCopy);
   const grid = element("div", undefined, "achievement-grid");
-  for (const achievement of pulse.achievements) {
+  for (const achievement of pulseAchievements) {
     const button = element(
       "button",
       undefined,
@@ -3744,7 +3662,21 @@ function pulseDetails(state, revision) {
     grid.append(button);
   }
   achievements.append(achievementsHeading, grid);
-  fragment.append(card, achievements);
+  fragment.append(card);
+  if (
+    pulse.summary.messages === 0
+    && pulse.summary.reactions_given === 0
+    && pulse.summary.reactions_received === 0
+  ) {
+    fragment.append(
+      element(
+        "p",
+        `Сбор начался ${new Date(pulse.tracking_started_at).toLocaleDateString("ru-RU")}. Новая активность появится здесь автоматически.`,
+        "status muted",
+      ),
+    );
+  }
+  fragment.append(achievements);
   return fragment;
 }
 
@@ -3869,11 +3801,25 @@ function showParticipantsState(state, revision) {
     retry.type = "button";
     retry.addEventListener("click", () => {
       if (state.view === "leaderboard") void loadParticipantsLeaderboard(state, revision);
+      else if (state.view === "pulse") void loadParticipantsPulse(state, revision);
       else void loadMembers(state, revision);
     });
-    boundary.append(element("p", "Не удалось загрузить данные.", "status"), retry);
+    boundary.append(
+      element(
+        "p",
+        state.view === "members"
+          ? "Не удалось загрузить данные."
+          : "Статистика временно недоступна. Остальные разделы продолжают работать.",
+        "status",
+      ),
+      retry,
+    );
   } else if (state.view === "leaderboard") {
-    boundary.append(leaderboardDetails(state.leaderboards[state.period] || [], state.metric, state.period));
+    boundary.append(leaderboardDetails(
+      state.leaderboards[`${state.period}:${state.metric}`] || [],
+      state.metric,
+      state.period,
+    ));
   } else if (state.view === "pulse") {
     boundary.append(pulseDetails(state, revision));
   } else {
@@ -3920,10 +3866,11 @@ async function loadMembers(state, revision) {
 async function loadParticipantsLeaderboard(state, revision) {
   const request = ++state.leaderboardRequest;
   const period = state.period;
-  const sourcePeriod = period === "year" ? "all" : period;
-  const path = `/api/v1/leaderboard?limit=30&period=${sourcePeriod}`;
+  const metric = state.metric;
+  const key = `${period}:${metric}`;
+  const path = `/api/v1/community-stats/leaderboard?limit=30&period=${period}&metric=${encodeURIComponent(metric)}`;
   const cached = cachedJson(path);
-  if (cached) state.leaderboards[period] = cached.items;
+  if (cached) state.leaderboards[key] = cached.items;
   state.loading = !cached;
   state.error = false;
   showParticipantsState(state, revision);
@@ -3933,17 +3880,50 @@ async function loadParticipantsLeaderboard(state, revision) {
         revision !== screenRevision
         || request !== state.leaderboardRequest
         || state.period !== period
+        || state.metric !== metric
       ) return;
-      state.leaderboards[period] = refreshed.items;
+      state.leaderboards[key] = refreshed.items;
       state.loading = false;
       state.error = false;
       showParticipantsState(state, revision);
     });
     if (revision !== screenRevision || request !== state.leaderboardRequest) return;
     if (cached) return;
-    state.leaderboards[period] = page.items;
+    state.leaderboards[key] = page.items;
   } catch {
     if (revision !== screenRevision || request !== state.leaderboardRequest) return;
+    state.error = !cached;
+  }
+  state.loading = false;
+  showParticipantsState(state, revision);
+}
+
+async function loadParticipantsPulse(state, revision) {
+  const request = ++state.pulseRequest;
+  const period = state.period;
+  const path = `/api/v1/community-stats/pulse?period=${period}`;
+  const cached = cachedJson(path);
+  if (cached) state.pulses[period] = cached;
+  state.loading = !cached;
+  state.error = false;
+  showParticipantsState(state, revision);
+  try {
+    const pulse = await getJson(path, (refreshed) => {
+      if (
+        revision !== screenRevision
+        || request !== state.pulseRequest
+        || state.period !== period
+        || state.view !== "pulse"
+      ) return;
+      state.pulses[period] = refreshed;
+      state.loading = false;
+      state.error = false;
+      showParticipantsState(state, revision);
+    });
+    if (revision !== screenRevision || request !== state.pulseRequest) return;
+    if (!cached) state.pulses[period] = pulse;
+  } catch {
+    if (revision !== screenRevision || request !== state.pulseRequest) return;
     state.error = !cached;
   }
   state.loading = false;
@@ -3962,7 +3942,13 @@ function selectCommunityPeriod(state, revision, period) {
     "",
     presentationLocationFor(state.view === "leaderboard" ? "P05" : "P08"),
   );
-  if (state.view === "leaderboard" && state.leaderboards[period] === undefined) void loadParticipantsLeaderboard(state, revision);
+  if (
+    state.view === "leaderboard"
+    && state.leaderboards[`${period}:${state.metric}`] === undefined
+  ) void loadParticipantsLeaderboard(state, revision);
+  else if (state.view === "pulse" && state.pulses[period] === undefined) {
+    void loadParticipantsPulse(state, revision);
+  }
   else {
     state.leaderboardRequest += 1;
     state.loading = false;
@@ -3986,7 +3972,9 @@ function selectLeaderboardMetric(state, revision, metric) {
     "",
     presentationLocationFor("P05"),
   );
-  if (state.leaderboards[state.period] === undefined) void loadParticipantsLeaderboard(state, revision);
+  if (state.leaderboards[`${state.period}:${state.metric}`] === undefined) {
+    void loadParticipantsLeaderboard(state, revision);
+  }
   else {
     state.leaderboardRequest += 1;
     state.loading = false;
@@ -4011,8 +3999,13 @@ function switchParticipantsView(state, revision, view) {
     "",
     presentationLocationFor(view === "leaderboard" ? "P05" : view === "pulse" ? "P08" : "P01"),
   );
-  if (view === "leaderboard" && state.leaderboards[state.period] === undefined) {
+  if (
+    view === "leaderboard"
+    && state.leaderboards[`${state.period}:${state.metric}`] === undefined
+  ) {
     void loadParticipantsLeaderboard(state, revision);
+  } else if (view === "pulse" && state.pulses[state.period] === undefined) {
+    void loadParticipantsPulse(state, revision);
   } else if (view === "members" && state.members === null) {
     void loadMembers(state, revision);
   } else {
@@ -4033,6 +4026,8 @@ function loadParticipants(view = "members", period = "week", metric = "experienc
     pulseMetric: "messages",
     selectedAchievement: "speaker",
     achievementOpen: false,
+    pulses: {},
+    pulseRequest: 0,
     leaderboards: {},
     leaderboardRequest: 0,
     loading: false,
@@ -4041,28 +4036,32 @@ function loadParticipants(view = "members", period = "week", metric = "experienc
   switchParticipantsView(state, revision, view);
 }
 
-function memberActivityDetails(memberId) {
-  const pulse = communityPulseMock(memberId, "week");
+function memberActivityDetails(pulse) {
   const activity = element("section", undefined, "profile-card member-activity-card");
   const heading = element("div", undefined, "community-section-heading");
-  heading.append(element("h3", "Активность за неделю"), demoBadge());
+  heading.append(element("h3", "Активность за неделю"));
   const metrics = element("div", undefined, "pulse-metrics compact");
   metrics.append(
     statMetric(pulse.summary.messages, "сообщений"),
     statMetric(pulse.summary.reactions_received, "получено реакций"),
     statMetric(pulse.summary.reactions_given, "поставлено реакций"),
   );
-  const achievement = pulse.achievements.find((item) => item.code === "magnet");
-  const highlight = element("div", undefined, "member-achievement-highlight");
-  highlight.append(
-    element("span", achievement.icon, "achievement-icon"),
-    element("span", `${achievement.title} · ур. ${achievement.level}`),
-  );
-  activity.append(heading, metrics, highlight);
+  const progress = pulse.achievements.find((item) => item.unlocked && item.code === "magnet")
+    || pulse.achievements.find((item) => item.unlocked);
+  activity.append(heading, metrics);
+  if (progress) {
+    const definition = communityAchievementCatalog.find((item) => item.code === progress.code);
+    const highlight = element("div", undefined, "member-achievement-highlight");
+    highlight.append(
+      element("span", definition?.icon || "◈", "achievement-icon"),
+      element("span", `${definition?.title || progress.code} · ур. ${progress.level}`),
+    );
+    activity.append(highlight);
+  }
   return activity;
 }
 
-function safeMemberDetails(member) {
+function safeMemberDetails(member, pulse = null) {
   const card = element("article", undefined, "foreign-profile");
   const identity = element("section", undefined, "profile-card profile-identity-card");
   const copy = element("div", undefined, "identity-copy");
@@ -4101,7 +4100,7 @@ function safeMemberDetails(member) {
     member.profile_links.forEach((link) => links.append(publicLinkRow(link)));
     card.append(links);
   }
-  if (communityStatsDemoEnabled) card.append(memberActivityDetails(member.member_id));
+  if (pulse) card.append(memberActivityDetails(pulse));
   return card;
 }
 
@@ -4301,7 +4300,7 @@ function showMemberState(state, revision) {
   if (!state.member) {
     return replaceContent(element("p", "Загружаем профиль…", "status muted"));
   }
-  const details = safeMemberDetails(state.member);
+  const details = safeMemberDetails(state.member, state.pulse);
   const nodes = [details];
   if (state.message) nodes.push(element("p", state.message, "status success"));
   if (state.member.can_rate_karma) {
@@ -4315,7 +4314,7 @@ function showMemberState(state, revision) {
 
 async function showMemberProfile(memberId, push = true) {
   const revision = ++screenRevision;
-  const state = { member: null, error: false, karma: null, message: "" };
+  const state = { member: null, pulse: null, error: false, karma: null, message: "" };
   if (push) history.pushState({ screen: "member-profile", memberId }, "", `#/members/${encodeURIComponent(memberId)}`);
   activeProfileState = null;
   memberProfileHasInternalHistory = push;
@@ -4329,7 +4328,14 @@ async function showMemberProfile(memberId, push = true) {
   showMemberState(state, revision);
   back.focus({ preventScroll: true });
   try {
-    state.member = await getJson("/api/v1/members/" + encodeURIComponent(memberId));
+    const [member, pulse] = await Promise.all([
+      getJson("/api/v1/members/" + encodeURIComponent(memberId)),
+      getJson(
+        `/api/v1/community-stats/pulse?period=week&member_id=${encodeURIComponent(memberId)}`,
+      ).catch(() => null),
+    ]);
+    state.member = member;
+    state.pulse = pulse;
   } catch {
     state.error = true;
   }

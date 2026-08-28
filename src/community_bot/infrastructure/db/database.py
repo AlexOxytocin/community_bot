@@ -19,6 +19,7 @@ from community_bot.application.tasks import AdministratorOption
 from community_bot.domain.members import Member, MemberRole, MemberStatus
 from community_bot.infrastructure.db import assignments as assignment_store
 from community_bot.infrastructure.db import catalog as catalog_store
+from community_bot.infrastructure.db import community_stats as community_stats_store
 from community_bot.infrastructure.db import conversations as conversation_store
 from community_bot.infrastructure.db import moderation as moderation_store
 from community_bot.infrastructure.db import registration as registration_store
@@ -58,6 +59,11 @@ if TYPE_CHECKING:
 
     from community_bot.application.assignments import AssignmentCard
     from community_bot.application.catalog import CatalogPage, CatalogQuery, CatalogTemplate
+    from community_bot.application.community_stats import (
+        BotLeaderboardItem,
+        BotLeaderboardMetric,
+        StatsMemberIdentity,
+    )
     from community_bot.application.economy import (
         ActiveProductConfig,
         LedgerHistoryCursor,
@@ -1105,19 +1111,13 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), invitation_id
         )
 
-    async def list_personal_invitations(
-        self, limit: int
-    ) -> tuple[InvitationOverview, ...]:
+    async def list_personal_invitations(self, limit: int) -> tuple[InvitationOverview, ...]:
         """Return personal invitations for the administrator interface."""
-        return await registration_store.list_personal_invitations(
-            self._require_session(), limit
-        )
+        return await registration_store.list_personal_invitations(self._require_session(), limit)
 
     async def invitation_for_member(self, member_id: UUID) -> InvitationSnapshot | None:
         """Return the invitation redeemed by one registration member."""
-        return await registration_store.invitation_for_member(
-            self._require_session(), member_id
-        )
+        return await registration_store.invitation_for_member(self._require_session(), member_id)
 
     async def get_registration_context(
         self,
@@ -1328,6 +1328,22 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), model, materialize=True
         )
         return _to_domain(model, status=status)
+
+    async def community_stats_member_identities(
+        self, telegram_user_ids: tuple[int, ...]
+    ) -> tuple[StatsMemberIdentity, ...]:
+        """Batch-map Stats identities to active Community Bot profiles."""
+        return await community_stats_store.member_identities(
+            self._require_session(), telegram_user_ids
+        )
+
+    async def community_bot_leaderboard(
+        self, *, metric: BotLeaderboardMetric, limit: int
+    ) -> tuple[BotLeaderboardItem, ...]:
+        """Read a Bot-owned leaderboard metric in one SQL query."""
+        return await community_stats_store.bot_leaderboard(
+            self._require_session(), metric=metric, limit=limit
+        )
 
     async def administrator_identities(
         self, *, administrators_only: bool, query: str | None, limit: int
