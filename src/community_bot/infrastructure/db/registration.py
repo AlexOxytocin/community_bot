@@ -8,9 +8,12 @@ from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from sqlalchemy import delete, select, text
+from sqlalchemy.orm import aliased
 
 from community_bot.application.registration import (
+    InvitationOverview,
     InvitationSnapshot,
+    MembershipResource,
     ProfileData,
     RegistrationContext,
 )
@@ -27,9 +30,11 @@ from community_bot.domain.registration import (
 )
 from community_bot.infrastructure.db.models import (
     ConversationStateModel,
+    InvitationMembershipResourceModel,
     InvitationModel,
     InvitationRedemptionModel,
     MemberModel,
+    MembershipResourceModel,
     OutboxEventModel,
     RegistrationApplicationModel,
 )
@@ -64,6 +69,7 @@ async def create_invitation(  # noqa: PLR0913 - persistence fields mirror the ta
     code_hash: str,
     created_by_member_id: UUID,
     intended_telegram_user_id: int | None,
+    intended_telegram_username: str | None,
     max_uses: int,
     expires_at: datetime | None,
 ) -> UUID:
@@ -73,6 +79,7 @@ async def create_invitation(  # noqa: PLR0913 - persistence fields mirror the ta
         code_hash=code_hash,
         created_by_member_id=created_by_member_id,
         intended_telegram_user_id=intended_telegram_user_id,
+        intended_telegram_username=intended_telegram_username,
         max_uses=max_uses,
         uses_count=0,
         expires_at=expires_at,
@@ -90,7 +97,7 @@ async def revoke_invitation(session: AsyncSession, invitation_id: UUID) -> bool:
     if invitation is None:
         message = "Invitation does not exist."
         raise LookupError(message)
-    if invitation.revoked_at is not None:
+    if invitation.revoked_at is not None or invitation.uses_count > 0:
         return False
     invitation.revoked_at = datetime.now(UTC)
     await session.flush()
@@ -106,6 +113,148 @@ async def lock_invitation_by_hash(
         select(InvitationModel).where(InvitationModel.code_hash == code_hash).with_for_update()
     )
     return None if model is None else _invitation_snapshot(model)
+
+
+async def attach_invitation_resources(
+    session: AsyncSession,
+    invitation_id: UUID,
+    resource_ids: tuple[UUID, ...],
+) -> None:
+    """Attach only currently active resource rows to a new invitation."""
+    if not resource_ids:
+        return
+    resources = tuple(
+        await session.scalars(
+            select(MembershipResourceModel).where(
+                MembershipResourceModel.id.in_(resource_ids),
+                MembershipResourceModel.is_active.is_(True),
+            )
+        )
+    )
+    if len(resources) != len(resource_ids):
+        message = "A selected membership resource is unavailable."
+        raise RegistrationError(message)
+    session.add_all(
+        InvitationMembershipResourceModel(invitation_id=invitation_id, resource_id=resource_id)
+        for resource_id in resource_ids
+    )
+    await session.flush()
+
+
+async def list_membership_resources(
+    session: AsyncSession,
+) -> tuple[MembershipResource, ...]:
+    """Return active resources in deterministic creation order."""
+    models = tuple(
+        await session.scalars(
+            select(MembershipResourceModel)
+            .where(MembershipResourceModel.is_active.is_(True))
+            .order_by(MembershipResourceModel.created_at, MembershipResourceModel.id)
+        )
+    )
+    return tuple(_membership_resource(model) for model in models)
+
+
+async def create_membership_resource(  # noqa: PLR0913 - mirrors persisted resource fields.
+    session: AsyncSession,
+    *,
+    telegram_chat_id: int,
+    telegram_username: str | None,
+    title: str,
+    join_url: str,
+    created_by_member_id: UUID,
+) -> MembershipResource:
+    """Persist one Telegram resource after external verification."""
+    model = MembershipResourceModel(
+        id=uuid.uuid4(),
+        telegram_chat_id=telegram_chat_id,
+        telegram_username=telegram_username,
+        title=title,
+        join_url=join_url,
+        created_by_member_id=created_by_member_id,
+    )
+    session.add(model)
+    await session.flush()
+    return _membership_resource(model)
+
+
+async def membership_resources_for_invitation(
+    session: AsyncSession,
+    invitation_id: UUID,
+) -> tuple[MembershipResource, ...]:
+    """Return active resources selected for one invitation."""
+    models = tuple(
+        await session.scalars(
+            select(MembershipResourceModel)
+            .join(
+                InvitationMembershipResourceModel,
+                InvitationMembershipResourceModel.resource_id == MembershipResourceModel.id,
+            )
+            .where(
+                InvitationMembershipResourceModel.invitation_id == invitation_id,
+                MembershipResourceModel.is_active.is_(True),
+            )
+            .order_by(MembershipResourceModel.created_at, MembershipResourceModel.id)
+        )
+    )
+    return tuple(_membership_resource(model) for model in models)
+
+
+async def list_personal_invitations(
+    session: AsyncSession,
+    limit: int,
+) -> tuple[InvitationOverview, ...]:
+    """Return newest username-bound invitations with creator and redemption details."""
+    creator = aliased(MemberModel)
+    redeemed_member = aliased(MemberModel)
+    rows = (
+        await session.execute(
+            select(InvitationModel, creator, InvitationRedemptionModel, redeemed_member)
+            .join(creator, creator.id == InvitationModel.created_by_member_id)
+            .outerjoin(
+                InvitationRedemptionModel,
+                InvitationRedemptionModel.invitation_id == InvitationModel.id,
+            )
+            .outerjoin(
+                redeemed_member,
+                redeemed_member.id == InvitationRedemptionModel.member_id,
+            )
+            .where(InvitationModel.intended_telegram_username.is_not(None))
+            .order_by(InvitationModel.created_at.desc(), InvitationModel.id.desc())
+            .limit(max(1, min(limit, 100)))
+        )
+    ).all()
+    return tuple(
+        InvitationOverview(
+            invitation_id=invitation.id,
+            intended_telegram_username=cast("str", invitation.intended_telegram_username),
+            created_by_member_id=creator_model.id,
+            created_by_display_name=creator_model.display_name,
+            created_at=invitation.created_at,
+            expires_at=invitation.expires_at,
+            revoked_at=invitation.revoked_at,
+            redeemed_at=(None if redemption is None else redemption.redeemed_at),
+            redeemed_member_id=(None if redeemed is None else redeemed.id),
+            redeemed_display_name=(None if redeemed is None else redeemed.display_name),
+        )
+        for invitation, creator_model, redemption, redeemed in rows
+    )
+
+
+async def invitation_for_member(
+    session: AsyncSession,
+    member_id: UUID,
+) -> InvitationSnapshot | None:
+    """Return the invitation redeemed by one member registration."""
+    invitation = await session.scalar(
+        select(InvitationModel)
+        .join(
+            InvitationRedemptionModel,
+            InvitationRedemptionModel.invitation_id == InvitationModel.id,
+        )
+        .where(InvitationRedemptionModel.member_id == member_id)
+    )
+    return None if invitation is None else _invitation_snapshot(invitation)
 
 
 async def get_registration_context(
@@ -166,7 +315,9 @@ async def create_pending_registration(
                 member_id=member.id,
                 flow_type="registration",
                 current_step=RegistrationStep.CONSENT.value,
-                payload_json={},
+                payload_json={
+                    "_personal_invitation": invitation.intended_telegram_username is not None
+                },
             ),
         ]
     )
@@ -666,6 +817,7 @@ def _registration_context(
         current_step=RegistrationStep(state.current_step),
         payload=dict(state.payload_json),
         review_comment=application.review_comment,
+        personal_invitation=bool(state.payload_json.get("_personal_invitation", False)),
     )
 
 
@@ -674,10 +826,21 @@ def _invitation_snapshot(model: InvitationModel) -> InvitationSnapshot:
         id=model.id,
         created_by_member_id=model.created_by_member_id,
         intended_telegram_user_id=model.intended_telegram_user_id,
+        intended_telegram_username=model.intended_telegram_username,
         max_uses=model.max_uses,
         uses_count=model.uses_count,
         expires_at=model.expires_at,
         revoked_at=model.revoked_at,
+    )
+
+
+def _membership_resource(model: MembershipResourceModel) -> MembershipResource:
+    return MembershipResource(
+        id=model.id,
+        telegram_chat_id=model.telegram_chat_id,
+        telegram_username=model.telegram_username,
+        title=model.title,
+        join_url=model.join_url,
     )
 
 

@@ -68,7 +68,9 @@ if TYPE_CHECKING:
         ReconciliationMismatch,
     )
     from community_bot.application.registration import (
+        InvitationOverview,
         InvitationSnapshot,
+        MembershipResource,
         ProfileData,
         RegistrationContext,
     )
@@ -1035,12 +1037,13 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             outcome_code=outcome_code,
         )
 
-    async def create_invitation(
+    async def create_invitation(  # noqa: PLR0913 - fields mirror persisted invitation.
         self,
         *,
         code_hash: str,
         created_by_member_id: UUID,
         intended_telegram_user_id: int | None,
+        intended_telegram_username: str | None,
         max_uses: int,
         expires_at: datetime.datetime | None,
     ) -> UUID:
@@ -1050,6 +1053,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             code_hash=code_hash,
             created_by_member_id=created_by_member_id,
             intended_telegram_user_id=intended_telegram_user_id,
+            intended_telegram_username=intended_telegram_username,
             max_uses=max_uses,
             expires_at=expires_at,
         )
@@ -1061,6 +1065,59 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
     async def lock_invitation_by_hash(self, code_hash: str) -> InvitationSnapshot | None:
         """Lock one invitation by its irreversible token hash."""
         return await registration_store.lock_invitation_by_hash(self._require_session(), code_hash)
+
+    async def attach_invitation_resources(
+        self, invitation_id: UUID, resource_ids: tuple[UUID, ...]
+    ) -> None:
+        """Attach selected active resources to an invitation."""
+        await registration_store.attach_invitation_resources(
+            self._require_session(), invitation_id, resource_ids
+        )
+
+    async def list_membership_resources(self) -> tuple[MembershipResource, ...]:
+        """Return active Telegram membership resources."""
+        return await registration_store.list_membership_resources(self._require_session())
+
+    async def create_membership_resource(
+        self,
+        *,
+        telegram_chat_id: int,
+        telegram_username: str | None,
+        title: str,
+        join_url: str,
+        created_by_member_id: UUID,
+    ) -> MembershipResource:
+        """Persist one owner-approved membership resource."""
+        return await registration_store.create_membership_resource(
+            self._require_session(),
+            telegram_chat_id=telegram_chat_id,
+            telegram_username=telegram_username,
+            title=title,
+            join_url=join_url,
+            created_by_member_id=created_by_member_id,
+        )
+
+    async def membership_resources_for_invitation(
+        self, invitation_id: UUID
+    ) -> tuple[MembershipResource, ...]:
+        """Return optional resources selected for an invitation."""
+        return await registration_store.membership_resources_for_invitation(
+            self._require_session(), invitation_id
+        )
+
+    async def list_personal_invitations(
+        self, limit: int
+    ) -> tuple[InvitationOverview, ...]:
+        """Return personal invitations for the administrator interface."""
+        return await registration_store.list_personal_invitations(
+            self._require_session(), limit
+        )
+
+    async def invitation_for_member(self, member_id: UUID) -> InvitationSnapshot | None:
+        """Return the invitation redeemed by one registration member."""
+        return await registration_store.invitation_for_member(
+            self._require_session(), member_id
+        )
 
     async def get_registration_context(
         self,

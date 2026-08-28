@@ -90,6 +90,60 @@
   пользователем. Commit, push и server deployment выполняй только по прямому
   запросу или после явного согласования финального релиза.
 
+## Production deployment Telegram-продукта
+
+- Это Telegram-приложение, запускаемое через бота, а не публичное web-приложение.
+  Deployment означает доставку backend/runtime и Telegram Mini App, доступного
+  из production-бота. Корень `https://allo.godmodetools.com/`, его redirect и
+  marketing/landing page не являются продуктовым экраном или acceptance URL.
+- Никогда не открывай и не используй корень `allo.godmodetools.com` для проверки
+  интерфейса, маршрутов или успешности Telegram-релиза. Не анализируй landing
+  page и не меняй его nginx/redirect в рамках Telegram-задачи без отдельного
+  прямого запроса пользователя.
+- `https://allo.godmodetools.com/readyz` разрешён только как инфраструктурный
+  health-check exact release, PostgreSQL, migration и worker heartbeat. Зелёный
+  `/readyz` не доказывает, что Telegram Mini App запускается и работает.
+- Production UI acceptance выполняй только реальным запуском Mini App из
+  production-бота в Telegram с настоящим `initData` и Telegram-совместимым
+  мобильным viewport. Проверяй вход через бота, авторизацию и изменённый экран.
+  Перед этим прочитай Telegram rule и используй только канонический wrapper;
+  не читай чаты и не отправляй сообщения без прямого запроса.
+- Если доступной production Telegram-сессии нет, прямо сообщи: runtime
+  развёрнут, но Telegram acceptance не выполнен. Не подменяй её обычным
+  браузером, landing page, прямым URL, локальным review-входом или моками и не
+  называй Telegram deployment полностью проверенным.
+
+## Release preflight и ограничение импровизации
+
+- До начала реализации выполни `git fetch` и сравни `HEAD` с `origin/main`.
+  Не начинай значимую реализацию на отстающей ветке: сначала перенеси работу на
+  актуальный `main`, чтобы не разрешать большие конфликты непосредственно перед
+  release.
+- До server mutation зафиксируй только измеренные значения: полный SHA через
+  `git rev-parse`, running image/revision, live Alembic head, фактический Compose
+  package из labels работающих контейнеров, список services, backup path и
+  rollback target. Не угадывай SHA, path, service или release state.
+- Если release меняет Alembic head, fast deploy запрещён. Сначала должен
+  существовать один проверенный migration/cutover path с остановкой writers,
+  fresh backup, isolated restore drill, миграцией, rollback до mutation и exact
+  readiness. Если такого пути нет, не импровизируй на production: сначала
+  реализуй и локально проверь переиспользуемый release tool/runbook.
+- Не передавай production-скрипт через `ssh ... bash -s`/stdin. Команда внутри
+  такого скрипта может прочитать остаток stdin. В частности, для Compose
+  one-shot запрещён `docker compose run` без `-T`. Выполняй versioned script из
+  файла с проверенным digest; перед mutation проверь его syntax/dry preflight.
+- До остановки процессов `docker compose config --services` обязан подтвердить
+  точный production package и services `postgres`, `migrate`, `worker`, `web`.
+  Не используй `/opt/community-bot/current` или legacy `active.json`, пока их
+  соответствие фактически работающим container labels не доказано.
+- После двух ошибок preflight/quoting останови попытки и не продолжай собирать
+  ad-hoc shell-команды. Устрани причину локально и переходи к одному проверенному
+  сценарию. Целевой бюджет release до mutation — 10 минут; если безопасный путь
+  за это время не подтверждён, сервер не изменяй и сообщи blocker.
+- После mutation приоритет — немедленно вернуть healthy runtime или выполнить
+  заранее подготовленный rollback. Эксперименты, исследование edge/landing и
+  несвязанные исправления во время cutover запрещены.
+
 ## Внешние системы и безопасность
 
 - Любое внешнее изменение требует ясного намерения пользователя. Перед

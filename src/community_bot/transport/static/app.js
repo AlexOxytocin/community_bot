@@ -136,7 +136,7 @@ const replaceContent = (...nodes) => {
 
 const connectedScreenIds = new Set(`
 T01 T02 T03 T03A T04B T05 T06 T08
-P01 P02 P03 P04 P05 P06 P07
+P01 P02 P03 P04 P05 P06 P07 P08
 M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15
 S01 S02 S03 S04
 `.trim().split(/\s+/));
@@ -146,7 +146,7 @@ const productRouteFor = (id) => {
   if (id.startsWith("T")) return "#/compose/tasks/:draft_id?";
   if (["M01", "M02", "M09"].includes(id)) return "#/work";
   if (id.startsWith("M")) return "#/work/:resource_id";
-  if (["P01", "P05"].includes(id)) return "#/members";
+  if (["P01", "P05", "P08"].includes(id)) return "#/members";
   if (["P02", "P03", "P04"].includes(id)) return "#/members/:member_id";
   if (id.startsWith("P")) return "#/profile";
   return "#/moderation/:case_id?";
@@ -222,6 +222,7 @@ const setHeaderControl = (
 const setNavigation = (screen, context) => {
   if (screen !== "profile") activeProfileState = null;
   heading.querySelector(".heading-action")?.remove();
+  heading.classList.remove("admin-rights-heading");
   const screenNode = content.closest(".screen");
   if (screen === "settings") {
     screenNode.removeAttribute("aria-labelledby");
@@ -3238,14 +3239,218 @@ function openProfileRoute(state, revision, route, push) {
   showProfileState(state, revision);
 }
 
-function leaderboardDetails(items) {
+const communityStatPeriods = [
+  ["week", "Неделя"],
+  ["month", "Месяц"],
+  ["year", "Год"],
+  ["all", "Всё время"],
+];
+const communityAchievementCatalog = [
+  { code: "speaker", icon: "💬", title: "На связи", level: 2, current: 42, next_level_at: 75, unlocked: true, hint: "Пишите регулярно и поддерживайте разговор." },
+  { code: "supporter", icon: "🙌", title: "Поддержка", level: 3, current: 64, next_level_at: 100, unlocked: true, hint: "Ставьте реакции полезным сообщениям." },
+  { code: "magnet", icon: "🎯", title: "В точку", level: 1, current: 26, next_level_at: 50, unlocked: true, hint: "Получайте реакции от участников." },
+  { code: "kind_circle", icon: "🤝", title: "Добрый круг", level: 0, current: 2, next_level_at: 5, unlocked: false, hint: "Обменяйтесь реакциями с пятью людьми." },
+  { code: "spark", icon: "✨", title: "Искра", level: 0, current: 1, next_level_at: 3, unlocked: false, hint: "Начните три активных обсуждения." },
+  { code: "weekly_rhythm", icon: "🔥", title: "Ритм недели", level: 0, current: 3, next_level_at: 7, unlocked: false, hint: "Проявляйте активность семь дней подряд." },
+];
+const communityLeaderboardMetricGroups = [
+  {
+    label: "Основное",
+    options: [
+      { value: "experience", label: "Опыт", icon: "⚡" },
+      { value: "karma", label: "Карма", icon: "◆" },
+    ],
+  },
+  {
+    label: "Активность",
+    options: [
+      { value: "messages", label: "Сообщения", icon: "💬" },
+      { value: "reactions_given", label: "Поставленные реакции", icon: "🙌" },
+      { value: "reactions_received", label: "Полученные реакции", icon: "🎯" },
+    ],
+  },
+  {
+    label: "Достижения · уровень",
+    options: communityAchievementCatalog.map((achievement) => ({
+      value: `achievement:${achievement.code}`,
+      label: achievement.title,
+      icon: achievement.icon,
+    })),
+  },
+];
+const communityLeaderboardMetrics = communityLeaderboardMetricGroups.flatMap((group) => group.options);
+const communityStatsDemoEnabled = ["127.0.0.1", "localhost", "::1"].includes(location.hostname);
+
+const stableMemberSeed = (memberId) => [...String(memberId || "member")]
+  .reduce((total, character) => (total * 31 + character.charCodeAt(0)) % 997, 17);
+
+const scaledSeries = (values, total) => {
+  const sourceTotal = values.reduce((sum, value) => sum + value, 0) || 1;
+  const result = values.map((value) => Math.max(1, Math.round(value * total / sourceTotal)));
+  result[result.length - 1] += total - result.reduce((sum, value) => sum + value, 0);
+  return result;
+};
+
+const scaledBreakdown = (weights, total) => {
+  const baseline = weights.map(() => 1);
+  const remaining = Math.max(0, total - baseline.length);
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0) || 1;
+  const shares = weights.map((weight) => remaining * weight / weightTotal);
+  const extras = shares.map(Math.floor);
+  let undistributed = remaining - extras.reduce((sum, value) => sum + value, 0);
+  const priority = shares
+    .map((share, index) => ({ index, fraction: share - extras[index] }))
+    .sort((left, right) => right.fraction - left.fraction || left.index - right.index);
+  for (const item of priority) {
+    if (undistributed === 0) break;
+    extras[item.index] += 1;
+    undistributed -= 1;
+  }
+  return baseline.map((value, index) => value + extras[index]);
+};
+
+// The returned shape mirrors the future Community Stats API. Replacing this
+// function with GET /v1/chats/{chat_id}/users/{user_id}/pulse keeps the UI intact.
+function communityPulseMock(memberId, period) {
+  const seed = stableMemberSeed(memberId);
+  const definitions = {
+    week: {
+      label: "Моя неделя",
+      range: "7 дней",
+      chart_label: "Сообщения по дням",
+      suffix: "за эту неделю",
+      labels: ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
+      values: [3, 5, 4, 8, 4, 9, 9],
+      messages: 42 + seed % 7,
+    },
+    month: {
+      label: "Мой месяц",
+      range: "30 дней",
+      chart_label: "Сообщения по дням",
+      suffix: "за этот месяц",
+      labels: Array.from({ length: 30 }, () => ""),
+      values: [5, 3, 6, 9, 4, 7, 5, 8, 4, 6, 10, 5, 7, 8, 4, 9, 6, 5, 8, 7, 9, 6, 4, 7, 5, 10, 6, 4, 7, 8],
+      messages: 163 + seed % 19,
+    },
+    year: {
+      label: "Мой год",
+      range: "12 месяцев",
+      chart_label: "Сообщения по месяцам",
+      suffix: "за этот год",
+      labels: ["С", "О", "Н", "Д", "Я", "Ф", "М", "А", "М", "И", "И", "А"],
+      values: [5, 7, 6, 8, 10, 7, 9, 11, 8, 12, 10, 13],
+      messages: 987 + seed % 83,
+    },
+    all: {
+      label: "Всё время",
+      range: "с начала учёта",
+      chart_label: "Сообщения по месяцам",
+      suffix: "с начала учёта",
+      labels: ["С", "О", "Н", "Д", "Я", "Ф", "М", "А", "М", "И", "И", "А"],
+      values: [4, 5, 6, 7, 8, 7, 9, 10, 9, 11, 12, 13],
+      messages: 1149 + seed % 97,
+    },
+  };
+  const definition = definitions[period] || definitions.week;
+  const messages = definition.messages;
+  const reactionsReceived = Math.max(4, Math.round(messages * 0.39));
+  const reactionsGiven = Math.max(3, Math.round(messages * 0.48));
+  const messageSeries = scaledSeries(definition.values, messages);
+  const receivedSeries = scaledSeries(definition.values.map((value, index) => value + index % 3), reactionsReceived);
+  const givenSeries = scaledSeries(definition.values.map((value, index) => value + (index + 1) % 4), reactionsGiven);
+  const receivedBreakdownCounts = scaledBreakdown([18, 14, 10, 8, 6, 4, 3, 3], reactionsReceived);
+  const givenBreakdownCounts = scaledBreakdown([16, 13, 11, 9, 7, 5, 4, 3], reactionsGiven);
+  const reactionTypes = ["👍", "🔥", "💗", "👏", "🎉", "😁", "🤝", "⚡"];
+  return {
+    source: "mock",
+    tracking_started_at: "2026-08-28T00:00:00Z",
+    calculated_at: new Date().toISOString(),
+    period,
+    label: definition.label,
+    range_label: definition.range,
+    chart_label: definition.chart_label,
+    summary_label: `${messages} сообщений ${definition.suffix}`,
+    summary: {
+      messages,
+      reactions_received: reactionsReceived,
+      reactions_given: reactionsGiven,
+    },
+    series: definition.labels.map((label, index) => ({
+      bucket_start: `bucket-${index + 1}`,
+      label,
+      messages: messageSeries[index],
+      reactions_received: receivedSeries[index],
+      reactions_given: givenSeries[index],
+    })),
+    reaction_breakdown: {
+      received: reactionTypes.map((reaction, index) => ({
+        reaction,
+        count: receivedBreakdownCounts[index],
+      })),
+      given: reactionTypes.map((reaction, index) => ({
+        reaction,
+        count: givenBreakdownCounts[index],
+      })),
+    },
+    achievements: communityAchievementCatalog.map((achievement) => ({ ...achievement })),
+  };
+}
+
+function communityLeaderboardMock(items, period, metric) {
+  const achievementCode = metric.startsWith("achievement:") ? metric.split(":", 2)[1] : null;
+  const achievementIndex = Math.max(
+    0,
+    communityAchievementCatalog.findIndex((achievement) => achievement.code === achievementCode),
+  );
+  const prepared = items.map((item) => {
+    const seed = stableMemberSeed(item.member_id);
+    const sourceExperience = Number(item.experience) || 1 + seed % 20;
+    const sourceRecipients = Number(item.unique_recipients) || 1 + seed % 6;
+    const sourceKarma = Number(item.karma_score ?? item.karma?.score);
+    let value;
+    if (metric === "experience") value = Math.max(0, Math.round(sourceExperience));
+    else if (metric === "karma") {
+      value = Number.isFinite(sourceKarma)
+        ? sourceKarma
+        : Math.max(0, Math.round(sourceRecipients * 1.7 + seed % 7));
+    } else if (metric === "messages") value = Math.max(1, Math.round(sourceExperience));
+    else if (metric === "reactions_given") {
+      value = Math.max(1, Math.round(sourceExperience * 0.43 + seed % 5));
+    } else if (metric === "reactions_received") {
+      value = Math.max(1, Math.round(sourceRecipients * 2.4 + sourceExperience * 0.18));
+    } else {
+      value = (Math.floor(sourceExperience / 5) + sourceRecipients + seed + achievementIndex * 3) % 5;
+    }
+    const tieBreaker = achievementCode ? (seed + sourceExperience * (achievementIndex + 1)) % 100 : 0;
+    return { ...item, value, tieBreaker };
+  });
+  prepared.sort((left, right) => (
+    right.value - left.value
+    || right.tieBreaker - left.tieBreaker
+    || left.display_name.localeCompare(right.display_name, "ru")
+  ));
+  return prepared.map((item, index) => ({ ...item, rank: index + 1 }));
+}
+
+function demoBadge() {
+  return element("span", "Демо-данные", "community-demo-badge");
+}
+
+function leaderboardDetails(items, metric, period) {
   const boundary = element("section", undefined, "leaderboard-boundary");
   if (!items.length) {
     boundary.append(element("p", "В лидерборде пока никого нет.", "status muted"));
     return boundary;
   }
+  const formatValue = (value) => {
+    if (metric === "experience") return `${value} XP`;
+    if (metric === "karma") return `${value} кармы`;
+    if (metric === "messages") return `${value} сообщ.`;
+    if (metric === "reactions_given" || metric === "reactions_received") return `${value} реакц.`;
+    return `Ур. ${value}`;
+  };
   const list = element("ol", undefined, "leaderboard-list");
-  for (const item of items) {
+  for (const item of communityLeaderboardMock(items, period, metric)) {
     const row = element("li");
     const button = element(
       "button",
@@ -3256,7 +3461,7 @@ function leaderboardDetails(items) {
     button.append(
       element("span", String(item.rank), "leaderboard-rank"),
       element("strong", item.display_name, "leaderboard-name"),
-      element("span", `${item.experience} XP`, "leaderboard-value"),
+      element("span", formatValue(item.value), "leaderboard-value"),
     );
     button.addEventListener("click", () => showMemberProfile(item.member_id));
     row.append(button);
@@ -3264,6 +3469,283 @@ function leaderboardDetails(items) {
   }
   boundary.append(list);
   return boundary;
+}
+
+function showLeaderboardMetricSheet(state, revision, trigger) {
+  shell.querySelector(".leaderboard-filter-backdrop")?.remove();
+  trigger.setAttribute("aria-expanded", "true");
+  const backdrop = element("section", undefined, "leaderboard-filter-backdrop");
+  const shellBox = shell.getBoundingClientRect();
+  const triggerBox = trigger.getBoundingClientRect();
+  backdrop.style.setProperty(
+    "--leaderboard-filter-top",
+    `${Math.max(10, Math.round(triggerBox.bottom - shellBox.top + 8))}px`,
+  );
+  const dialog = element("div", undefined, "leaderboard-filter-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "leaderboard-filter-title");
+  const header = element("div", undefined, "leaderboard-filter-heading");
+  const heading = element("h2", "Рейтинг по");
+  heading.id = "leaderboard-filter-title";
+  const close = element("button", "×", "leaderboard-filter-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть выбор рейтинга");
+  header.append(heading, close);
+  const groups = element("div", undefined, "leaderboard-filter-groups");
+  let selectedOption = null;
+  const dismiss = (restoreFocus = true) => {
+    trigger.setAttribute("aria-expanded", "false");
+    backdrop.remove();
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  };
+  for (const group of communityLeaderboardMetricGroups) {
+    const section = element("section", undefined, "leaderboard-filter-group");
+    section.append(element("h3", group.label));
+    const options = element("div", undefined, "leaderboard-filter-options");
+    options.setAttribute("role", "radiogroup");
+    options.setAttribute("aria-label", group.label);
+    for (const metric of group.options) {
+      const option = element("button", undefined, "leaderboard-filter-option");
+      option.type = "button";
+      option.setAttribute("role", "radio");
+      option.setAttribute("aria-label", metric.label);
+      option.setAttribute("aria-checked", String(metric.value === state.metric));
+      option.append(
+        element("span", metric.icon, "leaderboard-filter-option-icon"),
+        element("span", metric.label),
+        element("span", metric.value === state.metric ? "✓" : "", "leaderboard-filter-check"),
+      );
+      if (metric.value === state.metric) {
+        option.classList.add("is-selected");
+        selectedOption = option;
+      }
+      option.addEventListener("click", () => {
+        dismiss(false);
+        selectLeaderboardMetric(state, revision, metric.value);
+        queueMicrotask(() => content.querySelector(".leaderboard-filter-trigger")?.focus({ preventScroll: true }));
+      });
+      options.append(option);
+    }
+    section.append(options);
+    groups.append(section);
+  }
+  close.addEventListener("click", () => dismiss());
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [close, ...groups.querySelectorAll("button")];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, groups);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  queueMicrotask(() => (selectedOption || close).focus({ preventScroll: true }));
+}
+
+function statMetric(value, label) {
+  const metric = element("article", undefined, "pulse-metric");
+  metric.append(element("strong", String(value)), element("span", label));
+  return metric;
+}
+
+function pulseMetricButton(value, label, metricName) {
+  const metric = element("button", undefined, "pulse-metric");
+  metric.type = "button";
+  metric.dataset.pulseMetric = metricName;
+  metric.append(element("strong", String(value)), element("span", label));
+  return metric;
+}
+
+function achievementDetailSheet(state, achievement, originButton) {
+  const backdrop = element("section", undefined, "achievement-detail-backdrop");
+  const closeSheet = () => {
+    state.achievementOpen = false;
+    backdrop.remove();
+    originButton.classList.remove("is-selected");
+    originButton.setAttribute("aria-pressed", "false");
+    originButton.focus({ preventScroll: true });
+  };
+  const progress = Math.min(100, Math.round(achievement.current / achievement.next_level_at * 100));
+  const dialog = element("article", undefined, "achievement-detail-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "achievement-detail-title");
+  const handle = element("span", undefined, "achievement-detail-handle");
+  handle.setAttribute("aria-hidden", "true");
+  const close = element("button", "×", "achievement-detail-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть достижение");
+  close.addEventListener("click", closeSheet);
+  const detailHeading = element("div", undefined, "achievement-detail-heading");
+  const detailTitle = element("strong", `${achievement.icon} ${achievement.title}`);
+  detailTitle.id = "achievement-detail-title";
+  detailHeading.append(
+    detailTitle,
+    element("span", achievement.unlocked ? `Уровень ${achievement.level}` : "Пока закрыто"),
+  );
+  const track = element("span", undefined, "achievement-progress-track");
+  const fill = element("span", undefined, "achievement-progress-fill");
+  fill.style.setProperty("--achievement-progress", `${progress}%`);
+  track.append(fill);
+  dialog.append(
+    handle,
+    close,
+    detailHeading,
+    element("p", achievement.hint, "muted"),
+    track,
+    element("span", `${achievement.current} из ${achievement.next_level_at}`, "achievement-progress-copy"),
+  );
+  backdrop.append(dialog);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) closeSheet();
+  });
+  backdrop.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSheet();
+  });
+  let touchStartY = null;
+  dialog.addEventListener("touchstart", (event) => {
+    touchStartY = event.touches[0]?.clientY ?? null;
+  }, { passive: true });
+  dialog.addEventListener("touchend", (event) => {
+    const touchEndY = event.changedTouches[0]?.clientY;
+    if (touchStartY !== null && touchEndY !== undefined && touchEndY - touchStartY > 60) closeSheet();
+    touchStartY = null;
+  }, { passive: true });
+  queueMicrotask(() => close.focus({ preventScroll: true }));
+  return backdrop;
+}
+
+function pulseDetails(state, revision) {
+  if (!communityStatsDemoEnabled) {
+    const unavailable = element("section", undefined, "pulse-unavailable");
+    unavailable.append(
+      element("h2", "Статистика скоро появится"),
+      element("p", "Сейчас демо-данные доступны только в локальной версии Mini App.", "muted"),
+    );
+    return unavailable;
+  }
+  const pulse = communityPulseMock(currentMemberId, state.period);
+  const fragment = document.createDocumentFragment();
+  const card = element("section", undefined, "pulse-card");
+  const eyebrow = element("div", undefined, "pulse-card-eyebrow");
+  eyebrow.append(element("strong", pulse.label), element("span", pulse.range_label));
+  const metrics = element("div", undefined, "pulse-metrics");
+  metrics.setAttribute("role", "group");
+  metrics.setAttribute("aria-label", "Показатель активности");
+  const metricButtons = {
+    messages: pulseMetricButton(pulse.summary.messages, "сообщений", "messages"),
+    received: pulseMetricButton(pulse.summary.reactions_received, "получено реакций", "received"),
+    given: pulseMetricButton(pulse.summary.reactions_given, "поставлено реакций", "given"),
+  };
+  metrics.append(metricButtons.messages, metricButtons.received, metricButtons.given);
+
+  const visualPanel = element("section", undefined, "pulse-visual-panel");
+  visualPanel.setAttribute("aria-live", "polite");
+  const renderMessageChart = () => {
+    const maximum = Math.max(...pulse.series.map((item) => item.messages), 1);
+    const chart = element("div", undefined, `pulse-chart pulse-chart-${state.period}`);
+    chart.setAttribute("role", "img");
+    chart.setAttribute("aria-label", `Сообщения: ${pulse.series.map((item) => item.messages).join(", ")}`);
+    for (const item of pulse.series) {
+      const column = element("span", undefined, "pulse-chart-column");
+      const bar = element("span", undefined, "pulse-chart-bar");
+      bar.style.setProperty("--pulse-bar-height", `${Math.max(12, Math.round(item.messages / maximum * 100))}%`);
+      column.append(bar);
+      if (item.label) column.append(element("span", item.label, "pulse-chart-label"));
+      chart.append(column);
+    }
+    return [element("strong", pulse.chart_label, "pulse-section-label"), chart];
+  };
+  const renderReactionGrid = (direction) => {
+    const received = direction === "received";
+    const label = received ? "Полученные реакции по типам" : "Поставленные реакции по типам";
+    const grid = element("div", undefined, "pulse-reaction-grid");
+    grid.setAttribute("role", "list");
+    grid.setAttribute("aria-label", label);
+    grid.setAttribute("tabindex", "0");
+    for (const item of pulse.reaction_breakdown[direction]) {
+      const reaction = element("span", undefined, "pulse-reaction-item");
+      reaction.setAttribute("role", "listitem");
+      reaction.append(
+        element("span", item.reaction, "pulse-reaction-emoji"),
+        element("strong", String(item.count)),
+      );
+      grid.append(reaction);
+    }
+    return [element("strong", label, "pulse-section-label"), grid];
+  };
+  const renderPulseMetric = (metricName) => {
+    const selected = Object.hasOwn(metricButtons, metricName) ? metricName : "messages";
+    state.pulseMetric = selected;
+    for (const [name, button] of Object.entries(metricButtons)) {
+      button.setAttribute("aria-pressed", String(name === selected));
+    }
+    const content = element("div", undefined, "pulse-visual-content");
+    content.append(...(selected === "messages" ? renderMessageChart() : renderReactionGrid(selected)));
+    visualPanel.setAttribute(
+      "aria-label",
+      selected === "messages"
+        ? pulse.chart_label
+        : selected === "received" ? "Полученные реакции" : "Поставленные реакции",
+    );
+    visualPanel.replaceChildren(content);
+  };
+  for (const [metricName, button] of Object.entries(metricButtons)) {
+    button.addEventListener("click", () => renderPulseMetric(metricName));
+  }
+  renderPulseMetric(state.pulseMetric);
+  card.append(eyebrow, metrics, visualPanel);
+
+  const achievements = element("section", undefined, "achievements-card");
+  const achievementsHeading = element("div", undefined, "community-section-heading");
+  const headingCopy = element("div");
+  headingCopy.append(element("h2", "Достижения"), element("p", "Коллекция будет расти вместе с сообществом.", "muted"));
+  achievementsHeading.append(headingCopy, demoBadge());
+  const grid = element("div", undefined, "achievement-grid");
+  for (const achievement of pulse.achievements) {
+    const button = element(
+      "button",
+      undefined,
+      `achievement-tile${achievement.unlocked ? " is-unlocked" : " is-locked"}`,
+    );
+    button.type = "button";
+    button.dataset.achievementCode = achievement.code;
+    button.setAttribute("aria-pressed", "false");
+    button.setAttribute("aria-label", `${achievement.title}, ${achievement.unlocked ? `уровень ${achievement.level}` : "не открыто"}`);
+    button.append(
+      element("span", achievement.unlocked ? achievement.icon : "◈", "achievement-icon"),
+      element("strong", achievement.title),
+      element("span", achievement.unlocked ? `Ур. ${achievement.level}` : "Закрыто", "achievement-level"),
+    );
+    button.addEventListener("click", () => {
+      state.selectedAchievement = achievement.code;
+      state.achievementOpen = true;
+      button.classList.add("is-selected");
+      button.setAttribute("aria-pressed", "true");
+      content.querySelector(".achievement-detail-backdrop")?.remove();
+      content.append(achievementDetailSheet(state, achievement, button));
+    });
+    grid.append(button);
+  }
+  achievements.append(achievementsHeading, grid);
+  fragment.append(card, achievements);
+  return fragment;
 }
 
 function memberListDetails(items) {
@@ -3306,25 +3788,29 @@ function showParticipantsState(state, revision) {
   if (revision !== screenRevision) return;
   setNavigation("participants", false);
   back.classList.add("hidden");
-  title.textContent = state.view === "leaderboard" ? "Лидерборд" : "Участники";
+  title.textContent = "Комьюнити";
   const boundary = element("section", undefined, "state-view participants-view");
-  boundary.dataset.screenId = state.view === "leaderboard" ? "P05" : "P01";
+  boundary.dataset.screenId = state.view === "leaderboard" ? "P05" : state.view === "pulse" ? "P08" : "P01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = state.loading ? "loading" : state.error ? "error" : "content";
   const tabs = element("div", undefined, "segmented participants-tabs");
-  const membersTab = element("button", "Участники");
+  tabs.setAttribute("aria-label", "Раздел сообщества");
+  const membersTab = element("button", "Люди");
+  const pulseTab = element("button", "Пульс");
   const leaderboardTab = element("button", "Лидерборд");
-  membersTab.type = leaderboardTab.type = "button";
+  membersTab.type = pulseTab.type = leaderboardTab.type = "button";
   leaderboardTab.dataset.transitionId = "PE-057";
   leaderboardTab.dataset.transitionTrigger = "open_leaderboard";
   membersTab.setAttribute("aria-pressed", String(state.view === "members"));
+  pulseTab.setAttribute("aria-pressed", String(state.view === "pulse"));
   leaderboardTab.setAttribute("aria-pressed", String(state.view === "leaderboard"));
   membersTab.addEventListener("click", () => switchParticipantsView(state, revision, "members"));
+  pulseTab.addEventListener("click", () => switchParticipantsView(state, revision, "pulse"));
   leaderboardTab.addEventListener(
     "click",
     () => switchParticipantsView(state, revision, "leaderboard"),
   );
-  tabs.append(membersTab, leaderboardTab);
+  tabs.append(membersTab, pulseTab, leaderboardTab);
   boundary.append(tabs);
   if (state.view === "members") {
     const search = element("form", undefined, "participant-search");
@@ -3343,19 +3829,38 @@ function showParticipantsState(state, revision) {
     boundary.append(search);
   } else {
     const periods = element("div", undefined, "segmented period-tabs");
-    periods.setAttribute("aria-label", "Период лидерборда");
-    for (const [period, label] of [
-      ["week", "Неделя"],
-      ["month", "Месяц"],
-      ["all", "Всё время"],
-    ]) {
+    periods.setAttribute("aria-label", "Период статистики");
+    const achievementPeriodLocked = state.view === "leaderboard"
+      && state.metric.startsWith("achievement:");
+    for (const [period, label] of communityStatPeriods) {
       const button = element("button", label);
       button.type = "button";
       button.setAttribute("aria-pressed", String(state.period === period));
-      button.addEventListener("click", () => selectLeaderboardPeriod(state, revision, period));
+      button.disabled = achievementPeriodLocked && period !== "all";
+      button.addEventListener("click", () => selectCommunityPeriod(state, revision, period));
       periods.append(button);
     }
     boundary.append(periods);
+    if (state.view === "leaderboard") {
+      const selectedMetric = communityLeaderboardMetrics.find((metric) => metric.value === state.metric)
+        || communityLeaderboardMetrics[0];
+      state.metric = selectedMetric.value;
+      const filter = element("button", undefined, "leaderboard-filter-trigger");
+      filter.type = "button";
+      filter.setAttribute("aria-label", `Рейтинг по: ${selectedMetric.label}`);
+      filter.setAttribute("aria-haspopup", "dialog");
+      filter.setAttribute("aria-expanded", "false");
+      const filterIcon = element("span", undefined, "leaderboard-filter-trigger-icon");
+      filterIcon.append(slidersIcon());
+      const filterCopy = element("span", undefined, "leaderboard-filter-trigger-copy");
+      filterCopy.append(
+        element("span", "Рейтинг по", "leaderboard-filter-trigger-label"),
+        element("strong", selectedMetric.label),
+      );
+      filter.append(filterIcon, filterCopy, element("span", "⌄", "leaderboard-filter-chevron"));
+      filter.addEventListener("click", () => showLeaderboardMetricSheet(state, revision, filter));
+      boundary.append(filter);
+    }
   }
   if (state.loading) {
     boundary.append(element("p", "Загружаем данные…", "status muted"));
@@ -3368,7 +3873,9 @@ function showParticipantsState(state, revision) {
     });
     boundary.append(element("p", "Не удалось загрузить данные.", "status"), retry);
   } else if (state.view === "leaderboard") {
-    boundary.append(leaderboardDetails(state.leaderboards[state.period] || []));
+    boundary.append(leaderboardDetails(state.leaderboards[state.period] || [], state.metric, state.period));
+  } else if (state.view === "pulse") {
+    boundary.append(pulseDetails(state, revision));
   } else {
     boundary.append(memberListDetails(state.members || []));
   }
@@ -3413,7 +3920,8 @@ async function loadMembers(state, revision) {
 async function loadParticipantsLeaderboard(state, revision) {
   const request = ++state.leaderboardRequest;
   const period = state.period;
-  const path = `/api/v1/leaderboard?limit=30&period=${period}`;
+  const sourcePeriod = period === "year" ? "all" : period;
+  const path = `/api/v1/leaderboard?limit=30&period=${sourcePeriod}`;
   const cached = cachedJson(path);
   if (cached) state.leaderboards[period] = cached.items;
   state.loading = !cached;
@@ -3442,16 +3950,43 @@ async function loadParticipantsLeaderboard(state, revision) {
   showParticipantsState(state, revision);
 }
 
-function selectLeaderboardPeriod(state, revision, period) {
+function selectCommunityPeriod(state, revision, period) {
+  if (state.view === "leaderboard" && state.metric.startsWith("achievement:") && period !== "all") return;
   if (state.period === period) return;
   state.period = period;
+  state.activityPeriod = period;
+  state.achievementOpen = false;
   state.error = false;
   history.replaceState(
-    { screen: "participants", view: "leaderboard", period },
+    { screen: "participants", view: state.view, period, metric: state.metric },
+    "",
+    presentationLocationFor(state.view === "leaderboard" ? "P05" : "P08"),
+  );
+  if (state.view === "leaderboard" && state.leaderboards[period] === undefined) void loadParticipantsLeaderboard(state, revision);
+  else {
+    state.leaderboardRequest += 1;
+    state.loading = false;
+    showParticipantsState(state, revision);
+  }
+}
+
+function selectLeaderboardMetric(state, revision, metric) {
+  if (state.metric === metric) return;
+  const wasAchievementMetric = state.metric.startsWith("achievement:");
+  const isAchievementMetric = metric.startsWith("achievement:");
+  if (isAchievementMetric && !wasAchievementMetric) {
+    state.activityPeriod = state.period;
+    state.period = "all";
+  } else if (!isAchievementMetric && wasAchievementMetric) {
+    state.period = state.activityPeriod || "week";
+  }
+  state.metric = metric;
+  history.replaceState(
+    { screen: "participants", view: state.view, period: state.period, metric },
     "",
     presentationLocationFor("P05"),
   );
-  if (state.leaderboards[period] === undefined) void loadParticipantsLeaderboard(state, revision);
+  if (state.leaderboards[state.period] === undefined) void loadParticipantsLeaderboard(state, revision);
   else {
     state.leaderboardRequest += 1;
     state.loading = false;
@@ -3460,13 +3995,21 @@ function selectLeaderboardPeriod(state, revision, period) {
 }
 
 function switchParticipantsView(state, revision, view) {
+  const previousView = state.view;
+  if (view === "leaderboard" && state.metric.startsWith("achievement:")) {
+    if (state.period !== "all") state.activityPeriod = state.period;
+    state.period = "all";
+  } else if (view === "pulse" && previousView === "leaderboard" && state.metric.startsWith("achievement:")) {
+    state.period = state.activityPeriod || "week";
+  }
   state.view = view;
+  if (view !== "pulse") state.achievementOpen = false;
   state.error = false;
-  state.focusHeading = view === "leaderboard";
+  state.focusHeading = view !== "members";
   history.replaceState(
-    { screen: "participants", view, period: state.period },
+    { screen: "participants", view, period: state.period, metric: state.metric },
     "",
-    presentationLocationFor(view === "leaderboard" ? "P05" : "P01"),
+    presentationLocationFor(view === "leaderboard" ? "P05" : view === "pulse" ? "P08" : "P01"),
   );
   if (view === "leaderboard" && state.leaderboards[state.period] === undefined) {
     void loadParticipantsLeaderboard(state, revision);
@@ -3477,19 +4020,46 @@ function switchParticipantsView(state, revision, view) {
   }
 }
 
-function loadParticipants(view = "members", period = "week") {
+function loadParticipants(view = "members", period = "week", metric = "experience") {
   const revision = ++screenRevision;
+  const achievementMetric = metric.startsWith("achievement:");
   const state = {
     view,
     query: "",
     members: null,
-    period,
+    period: achievementMetric && view === "leaderboard" ? "all" : period,
+    activityPeriod: achievementMetric ? "week" : period,
+    metric,
+    pulseMetric: "messages",
+    selectedAchievement: "speaker",
+    achievementOpen: false,
     leaderboards: {},
     leaderboardRequest: 0,
     loading: false,
     error: false,
   };
   switchParticipantsView(state, revision, view);
+}
+
+function memberActivityDetails(memberId) {
+  const pulse = communityPulseMock(memberId, "week");
+  const activity = element("section", undefined, "profile-card member-activity-card");
+  const heading = element("div", undefined, "community-section-heading");
+  heading.append(element("h3", "Активность за неделю"), demoBadge());
+  const metrics = element("div", undefined, "pulse-metrics compact");
+  metrics.append(
+    statMetric(pulse.summary.messages, "сообщений"),
+    statMetric(pulse.summary.reactions_received, "получено реакций"),
+    statMetric(pulse.summary.reactions_given, "поставлено реакций"),
+  );
+  const achievement = pulse.achievements.find((item) => item.code === "magnet");
+  const highlight = element("div", undefined, "member-achievement-highlight");
+  highlight.append(
+    element("span", achievement.icon, "achievement-icon"),
+    element("span", `${achievement.title} · ур. ${achievement.level}`),
+  );
+  activity.append(heading, metrics, highlight);
+  return activity;
 }
 
 function safeMemberDetails(member) {
@@ -3531,6 +4101,7 @@ function safeMemberDetails(member) {
     member.profile_links.forEach((link) => links.append(publicLinkRow(link)));
     card.append(links);
   }
+  if (communityStatsDemoEnabled) card.append(memberActivityDetails(member.member_id));
   return card;
 }
 
@@ -5621,7 +6192,7 @@ const moderationError = (code, retry) => {
 
 const administratorPermissionDetails = [
   ["interaction_review", "Модерация споров", "Просмотр дел и принятие решений"],
-  ["member_invitation", "Приглашение участников", "Создание и отзыв персональных кодов"],
+  ["member_invitation", "Приглашение участников", "Создание и отзыв персональных приглашений"],
   ["member_blocking", "Блокировка пользователей", "Ограничение и восстановление доступа"],
   ["administrator_management", "Назначение администраторов", "Повышенное право: только в пределах своих полномочий"],
 ];
@@ -5805,11 +6376,47 @@ async function loadAdministrationTeam(push = true) {
     );
     summary.append(copy, element("span", String(overview.items.length), "admin-count"));
     const nodes = [moderationTabs("team"), summary];
+    const canInvite = overview.actor_permissions.includes("member_invitation");
+    let invitationOverview = null;
+    if (canInvite) {
+      try {
+        invitationOverview = await getJson("/api/v1/administration/invitations?limit=50");
+      } catch {
+        invitationOverview = null;
+      }
+      if (revision !== screenRevision) return;
+      const invite = element("button", "+ Пригласить участника", "primary admin-full");
+      invite.type = "button";
+      invite.addEventListener("click", () => showPersonalInvitationCreate());
+      nodes.push(invite);
+    }
     if (overview.can_appoint) {
-      const add = element("button", "+ Назначить администратора", "primary admin-full");
+      const add = element(
+        "button",
+        "+ Назначить администратора",
+        `${canInvite ? "secondary" : "primary"} admin-full`,
+      );
       add.type = "button";
       add.addEventListener("click", () => loadAdministratorCandidates());
       nodes.push(add);
+    }
+    if (canInvite) {
+      const invitations = element("button", undefined, "admin-invitation-summary");
+      invitations.type = "button";
+      const icon = element("span", "↗", "admin-invitation-icon");
+      const invitationCopy = element("span", undefined, "admin-invitation-copy");
+      invitationCopy.append(
+        element("strong", "Приглашения"),
+        element(
+          "span",
+          invitationOverview === null
+            ? "Открыть список"
+            : `${invitationOverview.pending_count} ожидают ответа`,
+        ),
+      );
+      invitations.append(icon, invitationCopy, element("span", "›", "admin-chevron"));
+      invitations.addEventListener("click", () => loadPersonalInvitations());
+      nodes.push(invitations);
     }
     const list = element("div", undefined, "admin-list");
     for (const person of overview.items) list.append(administratorCard(person));
@@ -5828,6 +6435,349 @@ async function loadAdministrationTeam(push = true) {
         moderationTabs("team"),
         element("p", "Управление командой недоступно для этого аккаунта.", "status"),
       );
+    }
+  }
+}
+
+const personalInvitationStatus = {
+  waiting: "Ожидает",
+  joined: "Вступил",
+  expired: "Истекло",
+  revoked: "Отозвано",
+};
+
+const personalInvitationDate = (value) => new Intl.DateTimeFormat("ru", {
+  day: "numeric",
+  month: "long",
+}).format(new Date(value));
+
+function renderInvitationMembershipResources(container, state) {
+  container.replaceChildren();
+  const heading = element("div", undefined, "admin-invitation-condition-heading");
+  const hasCoreResource = state.items.some((resource) => resource.required);
+  heading.append(
+    element("strong", "Условия вступления"),
+    element(
+      "span",
+      hasCoreResource ? "Обязательный чат уже включён" : "При необходимости добавьте ресурс",
+    ),
+  );
+  container.append(heading);
+  for (const resource of state.items) {
+    const row = element("label", undefined, "admin-invitation-condition");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.disabled = resource.required;
+    input.checked = resource.required || state.selected.has(resource.resource_id);
+    if (resource.resource_id) {
+      input.addEventListener("change", () => {
+        if (input.checked) state.selected.add(resource.resource_id);
+        else state.selected.delete(resource.resource_id);
+      });
+    }
+    const copy = element("span");
+    copy.append(
+      element("strong", resource.title),
+      element("small", resource.required ? "Обязательно для всех" : "Добавить к приглашению"),
+    );
+    row.append(input, copy);
+    container.append(row);
+  }
+  if (state.canAdd) {
+    const add = element("button", "+ Добавить ресурс", "admin-text-action admin-resource-add");
+    add.type = "button";
+    add.addEventListener("click", () => {
+      administratorSheet(add, (sheet, close) => {
+        sheet.append(
+          element("h2", "Добавить Telegram-ресурс"),
+          element("p", "Бот должен быть администратором этого чата или канала."),
+        );
+        const chat = document.createElement("input");
+        chat.className = "admin-search";
+        chat.placeholder = "@username чата или его ID";
+        const link = document.createElement("input");
+        link.className = "admin-search";
+        link.placeholder = "https://t.me/...";
+        const status = element("p", "", "status hidden");
+        const controls = element("div", undefined, "admin-sheet-actions");
+        const cancel = element("button", "Отмена", "secondary");
+        const save = element("button", "Добавить", "primary");
+        cancel.type = save.type = "button";
+        cancel.addEventListener("click", close);
+        save.addEventListener("click", async () => {
+          save.disabled = cancel.disabled = true;
+          status.className = "status";
+          status.textContent = "Проверяем доступ бота…";
+          try {
+            const resource = await submissionRequest(
+              "/api/v1/administration/membership-resources",
+              "POST",
+              newOperationKey(),
+              { telegram_chat: chat.value.trim(), join_url: link.value.trim() },
+            );
+            state.items.push(resource);
+            state.selected.add(resource.resource_id);
+            close();
+            renderInvitationMembershipResources(container, state);
+          } catch (error) {
+            status.textContent = error.message === "membership_check_unavailable"
+              ? "Telegram временно не отвечает. Повторите позже."
+              : "Не удалось добавить. Проверьте чат, ссылку и права бота.";
+            save.disabled = cancel.disabled = false;
+          }
+        });
+        controls.append(cancel, save);
+        sheet.append(chat, link, status, controls);
+        queueMicrotask(() => chat.focus({ preventScroll: true }));
+      });
+    });
+    container.append(add);
+  }
+}
+
+async function loadInvitationMembershipResources(container, state) {
+  try {
+    const response = await fetchJson("/api/v1/administration/membership-resources");
+    state.items = [...response.items];
+    state.canAdd = response.can_add;
+    renderInvitationMembershipResources(container, state);
+  } catch {
+    container.replaceChildren(
+      element("p", "Не удалось загрузить условия вступления.", "status"),
+    );
+  }
+}
+
+function showPersonalInvitationCreate(push = true, invitation = null) {
+  screenRevision += 1;
+  if (push) {
+    history.pushState(
+      { screen: "personal-invitation-create" },
+      "",
+      "#/moderation/invitations/new",
+    );
+  }
+  setNavigation("moderation", true);
+  heading.classList.add("admin-rights-heading");
+  title.textContent = "Пригласить участника";
+  if (invitation) {
+    history.replaceState(
+      { screen: "personal-invitation-create", invitation },
+      "",
+      "#/moderation/invitations/new",
+    );
+    const card = element("section", undefined, "admin-invitation-ready");
+    card.append(
+      element("span", "✓", "admin-invitation-ready-icon"),
+      element("h2", "Приглашение готово"),
+      element("strong", `@${invitation.telegram_username}`),
+      element(
+        "p",
+        `Одно использование · действует до ${personalInvitationDate(invitation.expires_at)}`,
+      ),
+    );
+    const send = element(
+      "button",
+      `Написать @${invitation.telegram_username}`,
+      "primary admin-full",
+    );
+    const copy = element("button", "Скопировать ссылку", "secondary admin-full");
+    const list = element("button", "Все приглашения", "admin-text-action");
+    const status = element("p", "", "admin-invitation-action-status");
+    status.setAttribute("aria-live", "polite");
+    send.type = copy.type = list.type = "button";
+    send.addEventListener("click", () => {
+      const message = `Вас приглашают в Комьюнити\n${invitation.invitation_url}`;
+      const directUrl = `https://t.me/${encodeURIComponent(invitation.telegram_username)}?text=${encodeURIComponent(message)}`;
+      if (globalThis.Telegram?.WebApp?.openTelegramLink) {
+        globalThis.Telegram.WebApp.openTelegramLink(directUrl);
+      } else {
+        globalThis.open(directUrl, "_blank", "noopener,noreferrer");
+      }
+      status.textContent = `Открываем чат с @${invitation.telegram_username}.`;
+    });
+    copy.addEventListener("click", async () => {
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable");
+        await navigator.clipboard.writeText(invitation.invitation_url);
+        copy.textContent = "Ссылка скопирована";
+        status.textContent = "Можно вставить её в любое сообщение.";
+      } catch {
+        status.textContent = "Не удалось скопировать. Откройте чат кнопкой выше.";
+      }
+    });
+    list.addEventListener("click", () => loadPersonalInvitations());
+    replaceContent(
+      card,
+      send,
+      copy,
+      status,
+      list,
+      element("div", "После регистрации участник войдёт сразу, без ожидания модератора.", "admin-notice"),
+    );
+    return;
+  }
+  const form = element("form", undefined, "admin-invitation-form");
+  const label = element("label", undefined, "admin-field-label");
+  label.append(element("span", "Telegram username"));
+  const input = document.createElement("input");
+  input.className = "admin-search";
+  input.name = "telegram_username";
+  input.placeholder = "username или @username";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  label.append(input);
+  const helper = element(
+    "p",
+    "Можно ввести имя с @ или без. Ссылка сработает только для этого аккаунта.",
+    "admin-invitation-helper",
+  );
+  const notice = element(
+    "div",
+    "Пользователь просто откроет ссылку. Вводить код и ждать одобрения не потребуется.",
+    "admin-notice",
+  );
+  const resourceState = { items: [], selected: new Set(), canAdd: false };
+  const resources = element("section", undefined, "admin-invitation-conditions");
+  resources.append(element("p", "Загружаем условия…", "compact-empty"));
+  void loadInvitationMembershipResources(resources, resourceState);
+  const submit = element("button", "Создать ссылку", "primary admin-full");
+  submit.type = "submit";
+  const status = element("p", "", "status hidden");
+  status.setAttribute("aria-live", "polite");
+  let operationKey = null;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = input.value.trim();
+    if (!/^@?[A-Za-z0-9_]{5,32}$/.test(username)) {
+      status.className = "status";
+      status.textContent = "Введите Telegram username: от 5 до 32 символов.";
+      input.focus();
+      return;
+    }
+    submit.disabled = true;
+    status.className = "status";
+    status.textContent = "Создаём персональную ссылку…";
+    operationKey ||= newOperationKey();
+    try {
+      const invitation = await submissionRequest(
+        "/api/v1/administration/invitations",
+        "POST",
+        operationKey,
+        {
+          telegram_username: username,
+          required_resource_ids: [...resourceState.selected],
+        },
+      );
+      clearJsonCache();
+      showPersonalInvitationCreate(false, invitation);
+    } catch (error) {
+      status.textContent = error.message === "invitation_unavailable"
+        ? "Приглашения недоступны для этого аккаунта."
+        : "Не удалось создать приглашение. Повторите попытку.";
+      submit.disabled = false;
+    }
+  });
+  form.append(label, helper, resources, notice, submit, status);
+  replaceContent(form, element("div", "Ссылка действует 7 дней и только один раз.", "admin-notice"));
+  queueMicrotask(() => input.focus({ preventScroll: true }));
+}
+
+function personalInvitationRow(invitation, refresh) {
+  const row = element("article", undefined, "admin-invitation-row");
+  const copy = element("div", undefined, "admin-invitation-row-copy");
+  copy.append(
+    element("strong", `@${invitation.telegram_username}`),
+    element(
+      "span",
+      invitation.status === "joined"
+        ? `${invitation.redeemed_display_name || "Участник"} · вступил ${personalInvitationDate(invitation.redeemed_at)}`
+        : `Создал(а) ${invitation.created_by_display_name} · ${personalInvitationDate(invitation.created_at)}`,
+    ),
+  );
+  const actions = element("div", undefined, "admin-invitation-row-actions");
+  const badge = element(
+    "span",
+    personalInvitationStatus[invitation.status] || invitation.status,
+    `admin-invitation-status is-${invitation.status}`,
+  );
+  actions.append(badge);
+  if (invitation.status === "waiting") {
+    const revoke = element("button", "Отозвать", "admin-invitation-revoke");
+    revoke.type = "button";
+    let operationKey = null;
+    revoke.addEventListener("click", () => {
+      administratorSheet(revoke, (sheet, close) => {
+        sheet.append(
+          element("h2", "Отозвать приглашение?"),
+          element("p", `Ссылка для @${invitation.telegram_username} перестанет работать.`),
+        );
+        const controls = element("div", undefined, "admin-sheet-actions");
+        const cancel = element("button", "Оставить", "secondary");
+        const confirm = element("button", "Отозвать", "admin-danger-button");
+        cancel.type = confirm.type = "button";
+        cancel.addEventListener("click", close);
+        confirm.addEventListener("click", async () => {
+          cancel.disabled = confirm.disabled = true;
+          operationKey ||= newOperationKey();
+          try {
+            await submissionRequest(
+              `/api/v1/administration/invitations/${encodeURIComponent(invitation.invitation_id)}/revoke`,
+              "POST",
+              operationKey,
+              {},
+            );
+            clearJsonCache();
+            close();
+            await refresh();
+            showAdministratorToast("Приглашение отозвано");
+          } catch {
+            confirm.disabled = cancel.disabled = false;
+          }
+        });
+        controls.append(cancel, confirm);
+        sheet.append(controls);
+      });
+    });
+    actions.append(revoke);
+  }
+  row.append(copy, actions);
+  return row;
+}
+
+async function loadPersonalInvitations(push = true) {
+  const revision = ++screenRevision;
+  if (push) {
+    history.pushState(
+      { screen: "personal-invitations" },
+      "",
+      "#/moderation/invitations",
+    );
+  }
+  setNavigation("moderation", true);
+  heading.classList.add("admin-rights-heading");
+  title.textContent = "Приглашения";
+  replaceContent(element("p", "Загружаем приглашения…", "compact-empty"));
+  try {
+    const overview = await fetchJson("/api/v1/administration/invitations?limit=50");
+    if (revision !== screenRevision) return;
+    const rows = element("div", undefined, "admin-invitation-list");
+    const refresh = () => loadPersonalInvitations(false);
+    for (const invitation of overview.items) rows.append(personalInvitationRow(invitation, refresh));
+    if (!overview.items.length) {
+      rows.append(element("p", "Приглашений пока нет.", "compact-empty"));
+    }
+    replaceContent(
+      rows,
+      element(
+        "div",
+        "Потеряли ссылку — отзовите приглашение и создайте новое.",
+        "admin-notice",
+      ),
+    );
+  } catch {
+    if (revision === screenRevision) {
+      replaceContent(element("p", "Не удалось загрузить приглашения.", "status"));
     }
   }
 }
@@ -5899,7 +6849,8 @@ async function showAdministratorRights(memberId, isNew = false, candidate = null
     );
   }
   setNavigation("moderation", true);
-  title.textContent = isNew ? "Права администратора" : "Права администратора";
+  heading.classList.add("admin-rights-heading");
+  title.textContent = "Права";
   replaceContent(element("p", "Загружаем права…", "compact-empty"));
   try {
     const [person, overview] = await Promise.all([
@@ -5908,7 +6859,6 @@ async function showAdministratorRights(memberId, isNew = false, candidate = null
     ]);
     if (revision !== screenRevision || !person) return;
     const owner = !isNew && person.is_owner;
-    if (owner) title.textContent = "Права владельца";
     const allowed = owner
       ? person.permissions
       : overview.actor_permissions.filter((permission) => (
@@ -5989,6 +6939,7 @@ function confirmAdministratorChange(trigger, person, isNew) {
           { permissions },
         );
         close();
+        history.replaceState({ screen: "moderation-team" }, "", "#/moderation/team");
         await loadAdministrationTeam(false);
         showAdministratorToast(isNew ? `${person.display_name} назначен администратором` : "Права администратора сохранены");
       } catch (error) {
@@ -6040,6 +6991,7 @@ function confirmAdministratorDemotion(trigger, person) {
           { reason: reason.value.trim() },
         );
         close();
+        history.replaceState({ screen: "moderation-team" }, "", "#/moderation/team");
         await loadAdministrationTeam(false);
         showAdministratorToast("Права администратора сняты");
       } catch (error) {
@@ -7087,7 +8039,13 @@ const onboardingPreview = (view) => {
   card.append(
     element("p", "Почти готово", "onboarding-eyebrow"),
     element("h2", "Проверьте анкету"),
-    element("p", "После отправки анкету проверит модератор.", "onboarding-hint"),
+    element(
+      "p",
+      view.personal_invitation
+        ? "После подтверждения вы сразу станете участником Комьюнити."
+        : "После отправки анкету проверит модератор.",
+      "onboarding-hint",
+    ),
   );
   if (view.application_status === "rejected") {
     const rejected = element("div", undefined, "onboarding-review-note is-rejected");
@@ -7111,7 +8069,9 @@ const onboardingPreview = (view) => {
   const rejected = view.application_status === "rejected";
   const submit = element(
     "button",
-    rejected ? "Исправить анкету" : "Отправить на проверку",
+    rejected
+      ? "Исправить анкету"
+      : view.personal_invitation ? "Вступить в Комьюнити" : "Отправить на проверку",
     "primary onboarding-primary",
   );
   submit.type = "button";
@@ -7119,7 +8079,9 @@ const onboardingPreview = (view) => {
   submit.addEventListener("click", async () => {
     submit.disabled = true;
     status.className = "status onboarding-status";
-    status.textContent = rejected ? "Открываем анкету…" : "Отправляем анкету…";
+    status.textContent = rejected
+      ? "Открываем анкету…"
+      : view.personal_invitation ? "Завершаем регистрацию…" : "Отправляем анкету…";
     try {
       showOnboarding(
         await onboardingMutation(
@@ -7153,6 +8115,29 @@ const onboardingSubmitted = (view) => {
   const state = element("div", undefined, "onboarding-review-note");
   state.append(element("strong", "Статус"), element("span", "На проверке"));
   card.append(state);
+  return card;
+};
+
+const onboardingApproved = () => {
+  const card = element("section", undefined, "onboarding-card onboarding-outcome");
+  card.append(
+    element("span", "✓", "onboarding-outcome-icon"),
+    element("p", "Регистрация завершена", "onboarding-eyebrow"),
+    element("h2", "Вы в Комьюнити"),
+    element(
+      "p",
+      "Профиль активирован. Теперь вам доступны участники и задания сообщества.",
+      "onboarding-hint",
+    ),
+  );
+  const open = element("button", "Перейти к заданиям", "primary onboarding-primary");
+  open.type = "button";
+  open.addEventListener("click", () => {
+    clearJsonCache();
+    location.hash = "/tasks";
+    location.reload();
+  });
+  card.append(open);
   return card;
 };
 
@@ -7195,7 +8180,9 @@ function showOnboarding(view) {
   const boundary = connectedBoundary("UX03", view.application_status);
   boundary.dataset.uiEngine = "next-onboarding";
   boundary.classList.add("onboarding");
-  if (view.application_status === "submitted" || view.step === "submitted") {
+  if (view.application_status === "approved") {
+    boundary.append(onboardingApproved());
+  } else if (view.application_status === "submitted" || view.step === "submitted") {
     boundary.append(onboardingSubmitted(view));
   } else {
     boundary.append(onboardingProgress(view.step));
@@ -7206,7 +8193,9 @@ function showOnboarding(view) {
         element("h2", "Вступление в сообщество"),
         element(
           "p",
-          "Заполните короткую анкету. Данные профиля будут видны другим участникам после проверки модератором.",
+          view.personal_invitation
+            ? "Заполните короткую анкету. После подтверждения вы сразу вступите в Комьюнити."
+            : "Заполните короткую анкету. Данные профиля будут видны другим участникам после проверки модератором.",
           "onboarding-hint",
         ),
       );
@@ -7271,6 +8260,77 @@ function showOnboardingAccessRequired() {
   replaceContent(boundary);
 }
 
+function showMembershipGate(payload, retry) {
+  screenRevision += 1;
+  history.replaceState({ screen: "membership-required" }, "", "#/membership");
+  setNavigation("onboarding", false);
+  title.textContent = "Комьюнити";
+  back.classList.add("hidden");
+  const unavailable = payload.code === "membership_check_unavailable";
+  const card = element("section", undefined, "onboarding-card onboarding-outcome");
+  card.append(
+    element("span", unavailable ? "↻" : "✓", "onboarding-outcome-icon"),
+    element("p", unavailable ? "Проверка недоступна" : "Условие вступления", "onboarding-eyebrow"),
+    element("h2", unavailable ? "Не удалось связаться с Telegram" : "Вступите в сообщество"),
+    element(
+      "p",
+      unavailable
+        ? "Ничего не потеряно. Попробуйте проверить участие ещё раз."
+        : "Вступите в обязательные чаты, затем вернитесь и нажмите «Проверить».",
+      "onboarding-hint",
+    ),
+  );
+  for (const resource of payload.resources || []) {
+    const row = element("div", undefined, "membership-gate-resource");
+    const copy = element("span");
+    copy.append(
+      element("strong", resource.title),
+      element("small", resource.joined ? "Участие подтверждено" : "Нужно вступить"),
+    );
+    row.append(copy);
+    if (!resource.joined) {
+      const open = element("button", "Открыть", "secondary");
+      open.type = "button";
+      open.addEventListener("click", () => {
+        if (globalThis.Telegram?.WebApp?.openTelegramLink) {
+          globalThis.Telegram.WebApp.openTelegramLink(resource.join_url);
+        } else {
+          globalThis.open(resource.join_url, "_blank", "noopener,noreferrer");
+        }
+      });
+      row.append(open);
+    }
+    card.append(row);
+  }
+  const check = element("button", "Проверить", "primary admin-full");
+  const status = element("p", "", "status hidden");
+  check.type = "button";
+  check.addEventListener("click", async () => {
+    check.disabled = true;
+    status.className = "status";
+    status.textContent = "Проверяем участие…";
+    try {
+      await retry();
+    } catch {
+      status.textContent = "Не удалось проверить. Попробуйте ещё раз.";
+      check.disabled = false;
+    }
+  });
+  const boundary = connectedBoundary("UX03", "membership-required", card, check, status);
+  boundary.dataset.uiEngine = "next-onboarding";
+  boundary.classList.add("onboarding");
+  replaceContent(boundary);
+}
+
+async function membershipPayload(response) {
+  try {
+    const payload = await response.json();
+    return payload?.code?.startsWith("membership_") ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 async function bootstrapTaskHome(authAttempted = false) {
   try {
     const me = await apiFetch("/api/v1/me", { credentials: "same-origin" });
@@ -7289,15 +8349,23 @@ async function bootstrapTaskHome(authAttempted = false) {
         credentials: "same-origin",
       });
       if (!auth.ok) {
+        const gate = await membershipPayload(auth);
+        if (gate) return showMembershipGate(gate, () => bootstrapTaskHome(false));
         if (auth.status === 401 || auth.status === 403) return showOnboardingAccessRequired();
         throw new Error("telegram_auth_failed");
       }
       return bootstrapTaskHome(true);
     }
     if (me.status === 403) {
+      const gate = await membershipPayload(me);
+      if (gate) return showMembershipGate(gate, () => bootstrapTaskHome(true));
       const onboarding = await apiFetch("/api/v1/onboarding", { credentials: "same-origin" });
       if (!onboarding.ok) throw new Error("onboarding_failed");
       return showOnboarding(await onboarding.json());
+    }
+    if (me.status === 503) {
+      const gate = await membershipPayload(me);
+      if (gate) return showMembershipGate(gate, () => bootstrapTaskHome(true));
     }
     if (!me.ok) throw new Error("bootstrap_failed");
     const profile = await me.json();
@@ -7310,6 +8378,7 @@ async function bootstrapTaskHome(authAttempted = false) {
     const presentationId = presentation?.screen.id;
     const resourceId = presentation?.resourceId;
     const directMember = initialHash.match(/^#\/members\/([0-9a-f-]{36})$/i);
+    const directInvitation = initialHash.match(/^#\/moderation\/invitations(?:\/(new))?$/i);
     const directAdministration = initialHash.match(
       /^#\/moderation\/(access|team|administrators(?:\/([0-9a-f-]{36}))?|administrators\/new)$/i,
     );
@@ -7328,6 +8397,12 @@ async function bootstrapTaskHome(authAttempted = false) {
     } else if (directAdministration?.[1] === "team") {
       history.replaceState({ screen: "moderation-team" }, "", initialHash);
       loadAdministrationTeam(false);
+    } else if (directInvitation?.[1] === "new") {
+      history.replaceState({ screen: "personal-invitation-create" }, "", initialHash);
+      showPersonalInvitationCreate(false);
+    } else if (directInvitation) {
+      history.replaceState({ screen: "personal-invitations" }, "", "#/moderation/invitations");
+      loadPersonalInvitations(false);
     } else if (directAdministration?.[1] === "administrators/new") {
       history.replaceState({ screen: "administrator-candidates" }, "", initialHash);
       loadAdministratorCandidates(false);
@@ -7351,8 +8426,8 @@ async function bootstrapTaskHome(authAttempted = false) {
         presentationLocationFor(forceEdit ? "T05" : "T06", resourceId),
       );
       openTaskCreation(forceEdit, forceEdit ? null : "stale");
-    } else if (presentationId === "P01" || presentationId === "P05") {
-      loadParticipants(presentationId === "P05" ? "leaderboard" : "members");
+    } else if (["P01", "P05", "P08"].includes(presentationId)) {
+      loadParticipants(presentationId === "P05" ? "leaderboard" : presentationId === "P08" ? "pulse" : "members");
     } else if (presentationId === "M01" || presentationId === "M02") {
       history.replaceState({ screen: "assignments" }, "", initialHash);
       await loadAssignments(false);
@@ -7453,7 +8528,11 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "catalog") {
     void loadCatalog(false);
   } else if (event.state?.screen === "participants") {
-    loadParticipants(event.state.view || "members", event.state.period || "week");
+    loadParticipants(
+      event.state.view || "members",
+      event.state.period || "week",
+      event.state.metric || "experience",
+    );
   } else if (event.state?.screen === "task") {
     const task = tasks.find((item) => item.id === event.state.taskId);
     if (task) showTaskDetail(task, false);
@@ -7479,6 +8558,10 @@ globalThis.addEventListener("popstate", (event) => {
     loadAdministrationAccess(false);
   } else if (event.state?.screen === "moderation-team") {
     loadAdministrationTeam(false);
+  } else if (event.state?.screen === "personal-invitations") {
+    loadPersonalInvitations(false);
+  } else if (event.state?.screen === "personal-invitation-create") {
+    showPersonalInvitationCreate(false, event.state.invitation || null);
   } else if (event.state?.screen === "administrator-candidates") {
     loadAdministratorCandidates(false);
   } else if (event.state?.screen === "administrator-rights") {

@@ -18,6 +18,7 @@ from community_bot.domain.registration import (
     ProfileListSizeError,
     RegistrationError,
     RegistrationStep,
+    normalize_invitation_username,
     normalize_profile_link_command,
     normalize_profile_value,
     normalize_registration_answer,
@@ -210,3 +211,10 @@ def test_invitation_and_moderation_authorization_are_distinct() -> None:
         require_registration_moderator(
             member(role=MemberRole.ADMINISTRATOR, status=MemberStatus.PAUSED)
         )
+
+
+def test_personal_invitation_username_is_normalized_and_strict() -> None:
+    assert normalize_invitation_username("  @Alex_2026 ") == "alex_2026"
+    for value in ("alex", "@", "@имя", "@name-with-dash", "@" + "x" * 33):
+        with pytest.raises(RegistrationError):
+            normalize_invitation_username(value)

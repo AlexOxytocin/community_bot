@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from community_bot.application import assignments as assignment_app
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
+from community_bot.application.membership import ResolvedTelegramResource
 from community_bot.application.registration import (
     InvitationCreateCommand,
     InviteTokenCodec,
@@ -47,11 +48,14 @@ from community_bot.infrastructure.db.models import (
     ConversationStateModel,
     DisputeEvidenceModel,
     DisputeResolutionModel,
+    InvitationMembershipResourceModel,
+    InvitationModel,
     InvitationRedemptionModel,
     KarmaVoteHistoryModel,
     KarmaVoteModel,
     MemberModel,
     MemberSanctionModel,
+    MembershipResourceModel,
     ModerationCaseModel,
     NotificationModel,
     OutboxEventModel,
@@ -84,6 +88,32 @@ PROJECT_ROOT = Path(__file__).parents[2]
 
 
 _USERNAME_ABSENT = object()
+
+
+class FakeMembershipChecker:
+    """Controllable Telegram membership boundary for integration tests."""
+
+    def __init__(self) -> None:
+        """Start with no confirmed chat members."""
+        self.members: set[tuple[int, int]] = set()
+        self.resolved_chat = ResolvedTelegramResource(
+            telegram_chat_id=-100_200,
+            telegram_username="extra_resource",
+            title="Дополнительный ресурс",  # noqa: RUF001
+        )
+
+    async def is_member(self, *, chat_id: int, telegram_user_id: int) -> bool:
+        """Return the configured membership decision."""
+        return (chat_id, telegram_user_id) in self.members
+
+    async def resolve_chat(self, reference: str) -> ResolvedTelegramResource:
+        """Return one pre-validated chat."""
+        del reference
+        return self.resolved_chat
+
+    async def close(self) -> None:
+        """Match the production adapter lifecycle."""
+        return
 
 
 def proof(
@@ -308,6 +338,328 @@ async def test_onboarding_uses_invitation_restricts_pending_and_activates_after_
         assert profile.json()["short_bio"] is None
         assert profile.json()["skill_tags"] == []
         assert (await client.get("/api/v1/tasks")).status_code == 200
+
+    await database.dispose()
+
+
+async def test_personal_invitation_is_username_bound_one_use_and_auto_approves(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    administrator = await active_member(database, 52_090)
+    secret = "personal-invitation-secret-that-is-long-enough"
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN,
+            telegram_bot_username="community_test_bot",
+            mini_app_origin=ORIGIN,
+            database_url=database_url,
+            invite_token_secret=secret,
+        ),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as admin_client:
+        assert (
+            await admin_client.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    administrator.telegram_user_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                    username="web_member",
+                ),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        created = await admin_client.post(
+            "/api/v1/administration/invitations",
+            json={"telegram_username": "New_User"},
+            headers={"origin": ORIGIN, "idempotency-key": "90001"},
+        )
+        assert created.status_code == 201, created.text
+        created_payload = created.json()
+        assert created_payload["telegram_username"] == "new_user"
+        assert created_payload["invitation_url"].startswith(
+            "https://t.me/community_test_bot?startapp="
+        )
+        token = parse_qs(urlsplit(created_payload["invitation_url"]).query)["startapp"][0]
+        listed = (await admin_client.get("/api/v1/administration/invitations")).json()
+        assert listed["pending_count"] == 1
+        assert listed["items"][0]["status"] == "waiting"
+
+        revoked_created = await admin_client.post(
+            "/api/v1/administration/invitations",
+            json={"telegram_username": "@revoked_user"},
+            headers={"origin": ORIGIN, "idempotency-key": "90002"},
+        )
+        assert revoked_created.status_code == 201
+        revoked_payload = revoked_created.json()
+        revoked = await admin_client.post(
+            f"/api/v1/administration/invitations/{revoked_payload['invitation_id']}/revoke",
+            json={},
+            headers={"origin": ORIGIN, "idempotency-key": "90003"},
+        )
+        assert revoked.status_code == 204
+        after_revoke = (await admin_client.get("/api/v1/administration/invitations")).json()
+        revoked_item = next(
+            item
+            for item in after_revoke["items"]
+            if item["invitation_id"] == revoked_payload["invitation_id"]
+        )
+        assert revoked_item["status"] == "revoked"
+        revoked_token = parse_qs(urlsplit(revoked_payload["invitation_url"]).query)[
+            "startapp"
+        ][0]
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url=ORIGIN
+        ) as revoked_client:
+            revoked_attempt = await revoked_client.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    52_094,
+                    now=datetime.datetime.now(datetime.UTC),
+                    username="revoked_user",
+                ),
+                headers={
+                    "content-type": "text/plain; charset=utf-8",
+                    "origin": ORIGIN,
+                    "x-community-invitation": revoked_token,
+                },
+            )
+            assert revoked_attempt.status_code == 403
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url=ORIGIN
+        ) as wrong_client:
+            mismatch = await wrong_client.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    52_091,
+                    now=datetime.datetime.now(datetime.UTC),
+                    username="other_user",
+                ),
+                headers={
+                    "content-type": "text/plain; charset=utf-8",
+                    "origin": ORIGIN,
+                    "x-community-invitation": token,
+                },
+            )
+            assert mismatch.status_code == 403
+            assert mismatch.json() == {"code": "invalid_invitation"}
+
+        contenders = [
+            AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN)
+            for _ in range(2)
+        ]
+        try:
+            responses = await asyncio.gather(
+                *(
+                    contender.post(
+                        "/api/v1/auth/telegram",
+                        content=proof(
+                            52_092 + index,
+                            now=datetime.datetime.now(datetime.UTC),
+                            username="NEW_USER",
+                        ),
+                        headers={
+                            "content-type": "text/plain; charset=utf-8",
+                            "origin": ORIGIN,
+                            "x-community-invitation": token,
+                        },
+                    )
+                    for index, contender in enumerate(contenders)
+                )
+            )
+            assert sorted(response.status_code for response in responses) == [204, 403]
+            winner_index = next(
+                index for index, response in enumerate(responses) if response.status_code == 204
+            )
+            member_client = contenders[winner_index]
+            state = (await member_client.get("/api/v1/onboarding")).json()
+            assert state["personal_invitation"] is True
+
+            async def answer(step: str, value: str, key: int) -> dict[str, object]:
+                response = await member_client.post(
+                    "/api/v1/onboarding/answer",
+                    json={"step": step, "value": value},
+                    headers={"origin": ORIGIN, "idempotency-key": str(key)},
+                )
+                assert response.status_code == 200, response.text
+                return response.json()
+
+            await answer("consent", "accept", 90_010)
+            await answer("display_name", "Новый участник", 90_011)
+            await answer("city", "Buenos Aires — Argentina", 90_012)
+            await answer("short_bio", "", 90_013)
+            preview = await answer("skill_tags", "", 90_014)
+            assert preview["step"] == "preview"
+            activated = await member_client.post(
+                "/api/v1/onboarding/submit",
+                headers={"origin": ORIGIN, "idempotency-key": "90015"},
+            )
+            assert activated.status_code == 200, activated.text
+            assert activated.json()["application_status"] == "approved"
+            assert (await member_client.get("/api/v1/me")).status_code == 200
+        finally:
+            for contender in contenders:
+                await contender.aclose()
+
+        refreshed = (await admin_client.get("/api/v1/administration/invitations")).json()
+        assert refreshed["pending_count"] == 0
+        joined_item = next(
+            item
+            for item in refreshed["items"]
+            if item["invitation_id"] == created_payload["invitation_id"]
+        )
+        assert joined_item["status"] == "joined"
+        sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+        async with sessions() as session:
+            invitation = await session.get(
+                InvitationModel, UUID(created_payload["invitation_id"])
+            )
+            assert invitation is not None
+            assert invitation.code_hash != token
+            assert invitation.intended_telegram_username == "new_user"
+            redemption = await session.scalar(
+                select(InvitationRedemptionModel).where(
+                    InvitationRedemptionModel.invitation_id == invitation.id
+                )
+            )
+            assert redemption is not None
+            member = await session.get(MemberModel, redemption.member_id)
+            application = await session.get(RegistrationApplicationModel, redemption.member_id)
+            assert member is not None
+            assert member.status == MemberStatus.ACTIVE.value
+            assert member.invited_by_member_id == administrator.id
+            assert application is not None
+            assert application.status == "approved"
+            audit = await session.scalar(
+                select(AuditEventModel).where(
+                    AuditEventModel.action == "registration_auto_approved",
+                    AuditEventModel.entity_id == str(member.id),
+                )
+            )
+            assert audit is not None
+
+    await database.dispose()
+
+
+async def test_membership_requirements_do_not_consume_invite_and_recheck_on_entry(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    owner = await active_member(database, 52_190)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        model = await session.get(MemberModel, owner.id)
+        assert model is not None
+        model.permissions_json = sorted(ADMINISTRATOR_PERMISSIONS | {SUPERADMINISTRATOR_PERMISSION})
+
+    checker = FakeMembershipChecker()
+    secret = "membership-invitation-secret-that-is-long-enough"
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN,
+            telegram_bot_username="community_test_bot",
+            mini_app_origin=ORIGIN,
+            database_url=database_url,
+            invite_token_secret=secret,
+            community_telegram_chat_id=-100_100,
+            community_telegram_join_url="https://t.me/allo_neural",
+        ),
+        database=database,
+        membership_checker=checker,
+    )
+    checker.members.add((-100_100, owner.telegram_user_id))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as owner_client:
+        authenticated = await owner_client.post(
+            "/api/v1/auth/telegram",
+            content=proof(owner.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        resources = await owner_client.get("/api/v1/administration/membership-resources")
+        assert resources.status_code == 200
+        assert resources.json()["items"][0]["title"] == "Алло, Нейросеточная?"
+        assert resources.json()["items"][0]["required"] is True
+        assert resources.json()["can_add"] is True
+
+        added = await owner_client.post(
+            "/api/v1/administration/membership-resources",
+            json={
+                "telegram_chat": "@extra_resource",
+                "join_url": "https://t.me/extra_resource",
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "91001"},
+        )
+        assert added.status_code == 201, added.text
+        resource_id = added.json()["resource_id"]
+        created = await owner_client.post(
+            "/api/v1/administration/invitations",
+            json={
+                "telegram_username": "member_check",
+                "required_resource_ids": [resource_id],
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "91002"},
+        )
+        assert created.status_code == 201, created.text
+        invitation_id = UUID(created.json()["invitation_id"])
+        token = parse_qs(urlsplit(created.json()["invitation_url"]).query)["startapp"][0]
+
+        user_id = 52_191
+        request_headers = {
+            "content-type": "text/plain; charset=utf-8",
+            "origin": ORIGIN,
+            "x-community-invitation": token,
+        }
+        signed_proof = proof(
+            user_id,
+            now=datetime.datetime.now(datetime.UTC),
+            username="member_check",
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as member_client:
+            denied = await member_client.post(
+                "/api/v1/auth/telegram", content=signed_proof, headers=request_headers
+            )
+            assert denied.status_code == 403
+            assert denied.json()["code"] == "membership_required"
+            assert {item["title"] for item in denied.json()["resources"]} == {
+                "Алло, Нейросеточная?",
+                "Дополнительный ресурс",  # noqa: RUF001
+            }
+            async with sessions() as session:
+                invitation = await session.get(InvitationModel, invitation_id)
+                assert invitation is not None
+                assert invitation.uses_count == 0
+
+            checker.members.update({(-100_100, user_id), (-100_200, user_id)})
+            accepted = await member_client.post(
+                "/api/v1/auth/telegram", content=signed_proof, headers=request_headers
+            )
+            assert accepted.status_code == 204, accepted.text
+            async with sessions() as session:
+                invitation = await session.get(InvitationModel, invitation_id)
+                assert invitation is not None
+                assert invitation.uses_count == 1
+                assert await session.scalar(
+                    select(InvitationMembershipResourceModel).where(
+                        InvitationMembershipResourceModel.invitation_id == invitation_id
+                    )
+                ) is not None
+                assert await session.get(MembershipResourceModel, UUID(resource_id)) is not None
+
+            checker.members.remove((-100_100, user_id))
+            entry = await member_client.get("/api/v1/me")
+            assert entry.status_code == 403
+            assert entry.json()["code"] == "membership_required"
+            assert entry.json()["resources"] == [
+                {
+                    "resource_id": None,
+                    "title": "Алло, Нейросеточная?",
+                    "join_url": "https://t.me/allo_neural",
+                    "required": True,
+                    "joined": False,
+                }
+            ]
 
     await database.dispose()
 

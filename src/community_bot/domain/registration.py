@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
 _MAX_PROFILE_LINK_URL_LENGTH = 2048
+_TELEGRAM_USERNAME = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 
 
 class RegistrationError(ValueError):
@@ -31,6 +32,15 @@ class RegistrationError(ValueError):
 
 class InvitationError(RegistrationError):
     """Raised when an invitation cannot be accepted or changed."""
+
+
+def normalize_invitation_username(raw_value: str) -> str:
+    """Return one lowercase Telegram username without its optional at-sign."""
+    username = raw_value.strip().removeprefix("@").strip()
+    if _TELEGRAM_USERNAME.fullmatch(username) is None:
+        message = "Invitation Telegram username is invalid."
+        raise InvitationError(message)
+    return username.casefold()
 
 
 class StaleRegistrationStepError(RegistrationError):

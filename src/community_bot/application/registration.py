@@ -13,7 +13,7 @@ from uuid import UUID
 from community_bot.application.cities import TaskCityError, canonical_city_and_timezone
 from community_bot.application.economy import EconomyUnitOfWork
 from community_bot.domain.economy import ResolvedLevel, starting_grant
-from community_bot.domain.members import Member, MemberStatus
+from community_bot.domain.members import Member, MemberStatus, is_superadministrator
 from community_bot.domain.registration import (
     InvitationError,
     ModerationDecision,
@@ -24,6 +24,7 @@ from community_bot.domain.registration import (
     RegistrationError,
     RegistrationStep,
     StaleRegistrationStepError,
+    normalize_invitation_username,
     normalize_profile_link_command,
     normalize_profile_value,
     normalize_registration_answer,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 _MIN_TOKEN_SECRET_BYTES = 32
 _MAX_INVITATION_USES = 100
+_MAX_MEMBERSHIP_RESOURCES = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,10 +51,48 @@ class InvitationSnapshot:
     id: UUID
     created_by_member_id: UUID
     intended_telegram_user_id: int | None
+    intended_telegram_username: str | None
     max_uses: int
     uses_count: int
     expires_at: datetime | None
     revoked_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class InvitationOverview:
+    """One invitation row rendered in the administrator interface."""
+
+    invitation_id: UUID
+    intended_telegram_username: str
+    created_by_member_id: UUID
+    created_by_display_name: str
+    created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    redeemed_at: datetime | None
+    redeemed_member_id: UUID | None
+    redeemed_display_name: str | None
+
+    def status_at(self, now: datetime) -> str:
+        """Return the current status without persisting derived clock state."""
+        if self.redeemed_at is not None:
+            return "joined"
+        if self.revoked_at is not None:
+            return "revoked"
+        if self.expires_at is not None and self.expires_at <= now:
+            return "expired"
+        return "waiting"
+
+
+@dataclass(frozen=True, slots=True)
+class MembershipResource:
+    """Owner-approved Telegram resource selectable for an invitation."""
+
+    id: UUID
+    telegram_chat_id: int
+    telegram_username: str | None
+    title: str
+    join_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +107,7 @@ class RegistrationContext:
     current_step: RegistrationStep
     payload: dict[str, object]
     review_comment: str | None
+    personal_invitation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,10 +123,13 @@ class InvitationCreateCommand:
     """Create one invitation through an idempotent Telegram update."""
 
     update_id: int
-    actor_telegram_user_id: int
+    actor_telegram_user_id: int | None = None
+    actor_member_id: UUID | None = None
     max_uses: int = 1
     expires_at: datetime | None = None
     intended_telegram_user_id: int | None = None
+    intended_telegram_username: str | None = None
+    required_resource_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +138,8 @@ class InvitationCreateResult:
 
     invitation_id: UUID
     token: str
+    intended_telegram_username: str | None
+    expires_at: datetime | None
     replayed: bool
 
 
@@ -181,12 +227,13 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         """Stage a complete Telegram receipt."""
         ...
 
-    async def create_invitation(
+    async def create_invitation(  # noqa: PLR0913 - fields mirror persisted invitation.
         self,
         *,
         code_hash: str,
         created_by_member_id: UUID,
         intended_telegram_user_id: int | None,
+        intended_telegram_username: str | None,
         max_uses: int,
         expires_at: datetime | None,
     ) -> UUID:
@@ -199,6 +246,42 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
 
     async def lock_invitation_by_hash(self, code_hash: str) -> InvitationSnapshot | None:
         """Lock one invitation by exact token hash."""
+        ...
+
+    async def attach_invitation_resources(
+        self, invitation_id: UUID, resource_ids: tuple[UUID, ...]
+    ) -> None:
+        """Attach active owner-approved resources to one new invitation."""
+        ...
+
+    async def list_membership_resources(self) -> tuple[MembershipResource, ...]:
+        """Return active Telegram resources in stable display order."""
+        ...
+
+    async def create_membership_resource(
+        self,
+        *,
+        telegram_chat_id: int,
+        telegram_username: str | None,
+        title: str,
+        join_url: str,
+        created_by_member_id: UUID,
+    ) -> MembershipResource:
+        """Persist one verified Telegram resource."""
+        ...
+
+    async def membership_resources_for_invitation(
+        self, invitation_id: UUID
+    ) -> tuple[MembershipResource, ...]:
+        """Return optional Telegram resources selected for an invitation."""
+        ...
+
+    async def list_personal_invitations(self, limit: int) -> tuple[InvitationOverview, ...]:
+        """Return newest username-bound invitations first."""
+        ...
+
+    async def invitation_for_member(self, member_id: UUID) -> InvitationSnapshot | None:
+        """Return the invitation redeemed by one registration member."""
         ...
 
     async def get_registration_context(
@@ -394,6 +477,17 @@ class RegistrationService:
         if expires_at is not None and expires_at <= datetime.now(UTC):
             message = "Invitation expiry must be in the future."
             raise InvitationError(message)
+        intended_username = (
+            None
+            if command.intended_telegram_username is None
+            else normalize_invitation_username(command.intended_telegram_username)
+        )
+        resource_ids = tuple(dict.fromkeys(command.required_resource_ids))
+        if len(resource_ids) != len(command.required_resource_ids) or len(resource_ids) > (
+            _MAX_MEMBERSHIP_RESOURCES
+        ):
+            message = "Invitation membership resources must be unique and limited to five."
+            raise InvitationError(message)
         token_codec = self._require_token_codec()
         token = token_codec.token_for_update(command.update_id)
         code_hash = token_codec.hash_token(token)
@@ -404,11 +498,19 @@ class RegistrationService:
                 return InvitationCreateResult(
                     invitation_id=_outcome_uuid(stored, "invitation_created"),
                     token=token,
+                    intended_telegram_username=intended_username,
+                    expires_at=expires_at,
                     replayed=True,
                 )
-            actor = await unit_of_work.get_member_by_telegram_user_id(
-                command.actor_telegram_user_id
-            )
+            if command.actor_member_id is None:
+                if command.actor_telegram_user_id is None:
+                    message = "Invitation actor identity is required."
+                    raise PermissionError(message)
+                actor = await unit_of_work.get_member_by_telegram_user_id(
+                    command.actor_telegram_user_id
+                )
+            else:
+                actor = await unit_of_work.get_member(command.actor_member_id)
             if actor is None:
                 message = "Invitation actor is not a registered member."
                 raise PermissionError(message)
@@ -418,16 +520,18 @@ class RegistrationService:
                 code_hash=code_hash,
                 created_by_member_id=actor.id,
                 intended_telegram_user_id=command.intended_telegram_user_id,
+                intended_telegram_username=intended_username,
                 max_uses=command.max_uses,
                 expires_at=expires_at,
             )
+            await unit_of_work.attach_invitation_resources(invitation_id, resource_ids)
             outcome = f"invitation_created:{invitation_id}"
             await unit_of_work.append_audit_event(
                 actor_member_id=actor.id,
                 action="invitation_created",
                 entity_type="invitation",
                 entity_id=str(invitation_id),
-                reason=None,
+                reason=(None if intended_username is None else f"for:@{intended_username}"),
             )
             await unit_of_work.add_registration_receipt(
                 update_id=command.update_id,
@@ -436,22 +540,132 @@ class RegistrationService:
                 outcome_code=outcome,
             )
             await unit_of_work.commit()
-        return InvitationCreateResult(invitation_id=invitation_id, token=token, replayed=False)
+        return InvitationCreateResult(
+            invitation_id=invitation_id,
+            token=token,
+            intended_telegram_username=intended_username,
+            expires_at=expires_at,
+            replayed=False,
+        )
+
+    async def membership_resources_for_actor(
+        self, *, actor: ActorContext
+    ) -> tuple[tuple[MembershipResource, ...], bool]:
+        """List selectable resources and whether the actor may add another."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None:
+                message = "Invitation actor is not a registered member."
+                raise PermissionError(message)
+            require_invitation_manager(member)
+            return await unit_of_work.list_membership_resources(), is_superadministrator(member)
+
+    async def add_membership_resource(
+        self,
+        *,
+        actor: ActorContext,
+        telegram_chat_id: int,
+        telegram_username: str | None,
+        title: str,
+        join_url: str,
+    ) -> MembershipResource:
+        """Add one Telegram resource as the community owner."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None or not is_superadministrator(member):
+                message = "Only the owner may add membership resources."
+                raise PermissionError(message)
+            resource = await unit_of_work.create_membership_resource(
+                telegram_chat_id=telegram_chat_id,
+                telegram_username=telegram_username,
+                title=title,
+                join_url=join_url,
+                created_by_member_id=member.id,
+            )
+            await unit_of_work.append_audit_event(
+                actor_member_id=member.id,
+                action="membership_resource_created",
+                entity_type="membership_resource",
+                entity_id=str(resource.id),
+                reason=f"telegram_chat:{telegram_chat_id}",
+            )
+            await unit_of_work.commit()
+            return resource
+
+    async def resources_for_invitation_identity(
+        self,
+        *,
+        invitation_token: str,
+        telegram_user_id: int,
+        telegram_username: str | None,
+    ) -> tuple[MembershipResource, ...]:
+        """Validate an invite without consuming it and return its optional resources."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            invitation = await unit_of_work.lock_invitation_by_hash(
+                self._require_token_codec().hash_token(invitation_token)
+            )
+            invitation = _validated_invitation(
+                invitation,
+                telegram_user_id,
+                telegram_username,
+            )
+            return await unit_of_work.membership_resources_for_invitation(invitation.id)
+
+    async def resources_for_member(self, member_id: UUID) -> tuple[MembershipResource, ...]:
+        """Return optional resources attached to the invitation redeemed by a member."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            invitation = await unit_of_work.invitation_for_member(member_id)
+            if invitation is None:
+                return ()
+            return await unit_of_work.membership_resources_for_invitation(invitation.id)
+
+    async def telegram_user_id_for_actor(self, actor: ActorContext) -> int:
+        """Resolve the immutable Telegram identity behind a web session actor."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None:
+                message = "Member does not exist."
+                raise LookupError(message)
+            return member.telegram_user_id
+
+    async def personal_invitations_for_actor(
+        self,
+        *,
+        actor: ActorContext,
+        limit: int = 50,
+    ) -> tuple[InvitationOverview, ...]:
+        """List personal invitations after checking current server-side permission."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            member = await unit_of_work.get_member(actor.member_id)
+            if member is None:
+                message = "Invitation actor is not a registered member."
+                raise PermissionError(message)
+            require_invitation_manager(member)
+            return await unit_of_work.list_personal_invitations(limit)
 
     async def revoke_invitation(
         self,
         *,
         update_id: int,
-        actor_telegram_user_id: int,
         invitation_id: UUID,
+        actor_telegram_user_id: int | None = None,
+        actor_member_id: UUID | None = None,
     ) -> str:
-        """Revoke an invitation idempotently as an active administrator."""
+        """Revoke one invitation idempotently using bot or web actor identity."""
         async with self._unit_of_work_factory() as unit_of_work:
             await unit_of_work.acquire_update_gate(update_id)
             stored = await unit_of_work.get_receipt_outcome(update_id)
             if stored is not None:
                 return stored
-            actor = await unit_of_work.get_member_by_telegram_user_id(actor_telegram_user_id)
+            if actor_member_id is None:
+                if actor_telegram_user_id is None:
+                    message = "Invitation actor identity is required."
+                    raise PermissionError(message)
+                actor = await unit_of_work.get_member_by_telegram_user_id(
+                    actor_telegram_user_id
+                )
+            else:
+                actor = await unit_of_work.get_member(actor_member_id)
             if actor is None:
                 message = "Invitation actor is not a registered member."
                 raise PermissionError(message)
@@ -505,7 +719,11 @@ class RegistrationService:
                 invitation = await unit_of_work.lock_invitation_by_hash(
                     self._require_token_codec().hash_token(command.invitation_token)
                 )
-                invitation = _validated_invitation(invitation, command.telegram_user_id)
+                invitation = _validated_invitation(
+                    invitation,
+                    command.telegram_user_id,
+                    command.telegram_username,
+                )
                 context = await unit_of_work.create_pending_registration(
                     invitation=invitation,
                     telegram_user_id=command.telegram_user_id,
@@ -708,8 +926,31 @@ class RegistrationService:
                 outcome = f"stale_step:{context.current_step.value}"
             else:
                 context = await unit_of_work.submit_registration(context.member_id)
-                await unit_of_work.add_registration_submitted_outbox(context.member_id)
-                outcome = "registration_submitted"
+                invitation = await unit_of_work.invitation_for_member(context.member_id)
+                if invitation is not None and invitation.intended_telegram_username is not None:
+                    prepared = await unit_of_work.economy.prepare_batch(
+                        (starting_grant(context.member_id),),
+                        additional_member_ids=(invitation.created_by_member_id,),
+                    )
+                    await prepared.apply()
+                    context = await unit_of_work.decide_registration(
+                        member_id=context.member_id,
+                        actor_member_id=invitation.created_by_member_id,
+                        decision=ModerationDecision.APPROVE,
+                        comment="Personal invitation",
+                    )
+                    await unit_of_work.append_audit_event(
+                        actor_member_id=invitation.created_by_member_id,
+                        action="registration_auto_approved",
+                        entity_type="member",
+                        entity_id=str(context.member_id),
+                        reason=f"invitation:{invitation.id}",
+                    )
+                    await unit_of_work.add_registration_approved_outbox(context.member_id)
+                    outcome = "registration_approved"
+                else:
+                    await unit_of_work.add_registration_submitted_outbox(context.member_id)
+                    outcome = "registration_submitted"
             await unit_of_work.add_registration_receipt(
                 update_id=update_id,
                 update_type="registration_submit",
@@ -1194,6 +1435,7 @@ def _require_web_profile_replay(
 def _validated_invitation(
     invitation: InvitationSnapshot | None,
     telegram_user_id: int,
+    telegram_username: str | None,
 ) -> InvitationSnapshot:
     if invitation is None:
         message = "Invitation is invalid."
@@ -1213,6 +1455,12 @@ def _validated_invitation(
         and invitation.intended_telegram_user_id != telegram_user_id
     ):
         message = "Invitation is intended for another Telegram user."
+        raise InvitationError(message)
+    if invitation.intended_telegram_username is not None and (
+        telegram_username is None
+        or telegram_username.casefold() != invitation.intended_telegram_username
+    ):
+        message = "Invitation is intended for another Telegram username."
         raise InvitationError(message)
     return invitation
 

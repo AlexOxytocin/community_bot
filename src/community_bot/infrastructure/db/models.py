@@ -166,6 +166,11 @@ class InvitationModel(Base):
             "uses_count >= 0 AND uses_count <= max_uses",
             name="ck_invitations_uses_count",
         ),
+        CheckConstraint(
+            "intended_telegram_username IS NULL OR "
+            "intended_telegram_username ~ '^[a-z0-9_]{5,32}$'",
+            name="ck_invitations_intended_username",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -176,6 +181,7 @@ class InvitationModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
     intended_telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    intended_telegram_username: Mapped[str | None] = mapped_column(Text)
     max_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     uses_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -204,6 +210,42 @@ class InvitationRedemptionModel(Base):
     )
     redeemed_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MembershipResourceModel(Base):
+    """Owner-approved Telegram chat that may be required by an invitation."""
+
+    __tablename__ = "membership_resources"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    telegram_username: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    join_url: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by_member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class InvitationMembershipResourceModel(Base):
+    """Optional Telegram resources selected for one invitation."""
+
+    __tablename__ = "invitation_membership_resources"
+
+    invitation_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("invitations.id", ondelete="CASCADE"), primary_key=True
+    )
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("membership_resources.id"),
+        primary_key=True,
     )
 
 

@@ -51,6 +51,11 @@ from community_bot.application.cities import (
     search_task_cities,
 )
 from community_bot.application.identity import ActorContext
+from community_bot.application.membership import (
+    InvalidMembershipResourceError,
+    MembershipCheckUnavailableError,
+    TelegramMembershipChecker,
+)
 from community_bot.application.moderation import (
     ModerationApplicationError,
     ModerationCase,
@@ -59,7 +64,10 @@ from community_bot.application.moderation import (
     ResolveCaseCommand,
 )
 from community_bot.application.registration import (
+    InvitationCreateCommand,
+    InvitationOverview,
     InviteTokenCodec,
+    MembershipResource,
     ProfileSnapshot,
     RegistrationAnswerCommand,
     RegistrationContext,
@@ -118,6 +126,7 @@ from community_bot.domain.tasks import (
 )
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
+from community_bot.infrastructure.telegram_membership import AiogramTelegramMembershipChecker
 
 _COOKIE_NAME = "__Host-community_session"
 _LOCAL_COOKIE_NAME = "community_session_local"
@@ -139,8 +148,11 @@ _PUBLIC_ERROR_CODES = frozenset(
         "invalid_origin",
         "invalid_request",
         "invalid_invitation",
+        "membership_check_unavailable",
+        "membership_required",
         "invalid_task_city",
         "invitation_required",
+        "invitation_unavailable",
         "karma_vote_unavailable",
         "not_found",
         "onboarding_unavailable",
@@ -203,6 +215,7 @@ class OnboardingDto(_Dto):
     step: RegistrationStep
     payload: dict[str, object]
     review_comment: str | None
+    personal_invitation: bool
 
 
 class OnboardingAnswerRequest(_Dto):
@@ -328,6 +341,79 @@ class AdministrationDto(_Dto):
 
 class AdministratorCandidatesDto(_Dto):
     items: tuple[AdministratorIdentityDto, ...]
+
+
+class PersonalInvitationCreateRequest(_Dto):
+    telegram_username: str = Field(min_length=5, max_length=33)
+    required_resource_ids: tuple[UUID, ...] = Field(default=(), max_length=5)
+
+    @field_validator("required_resource_ids")
+    @classmethod
+    def unique_required_resources(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        """Reject repeated membership requirements."""
+        if len(set(value)) != len(value):
+            raise ValueError("Membership resources must be unique.")
+        return value
+
+
+class MembershipResourceCreateRequest(_Dto):
+    telegram_chat: str = Field(min_length=2, max_length=80)
+    join_url: str = Field(min_length=12, max_length=300)
+
+    @field_validator("join_url")
+    @classmethod
+    def telegram_join_url(cls, value: str) -> str:
+        """Allow only direct Telegram HTTPS links."""
+        normalized = value.strip()
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or parsed.hostname not in {"t.me", "telegram.me"}:
+            raise ValueError("A Telegram join URL is required.")
+        return normalized
+
+
+class MembershipResourceDto(_Dto):
+    resource_id: UUID | None
+    title: str
+    join_url: str
+    required: bool
+    joined: bool | None = None
+
+
+class MembershipResourcesDto(_Dto):
+    items: tuple[MembershipResourceDto, ...]
+    can_add: bool
+
+
+class MembershipGateDto(_Dto):
+    code: Literal["membership_required", "membership_check_unavailable"]
+    resources: tuple[MembershipResourceDto, ...]
+
+
+PersonalInvitationStatus = Literal["waiting", "joined", "expired", "revoked"]
+
+
+class PersonalInvitationDto(_Dto):
+    invitation_id: UUID
+    telegram_username: str
+    created_by_display_name: str
+    status: PersonalInvitationStatus
+    created_at: datetime.datetime
+    expires_at: datetime.datetime | None
+    redeemed_at: datetime.datetime | None
+    redeemed_member_id: UUID | None
+    redeemed_display_name: str | None
+
+
+class PersonalInvitationsDto(_Dto):
+    items: tuple[PersonalInvitationDto, ...]
+    pending_count: int
+
+
+class PersonalInvitationCreatedDto(_Dto):
+    invitation_id: UUID
+    telegram_username: str
+    expires_at: datetime.datetime
+    invitation_url: str
 
 
 class AdministratorPermissionsRequest(_Dto):
@@ -662,6 +748,7 @@ def create_web_app(
     settings: Settings,
     database: Database,
     heartbeat_not_before: datetime.datetime | None = None,
+    membership_checker: TelegramMembershipChecker | None = None,
 ) -> FastAPI:
     """Build the web-only application after strict config validation."""
     bot_token, origin = _web_config(settings)
@@ -681,6 +768,8 @@ def create_web_app(
     assignments = AssignmentService(database.unit_of_work)
     moderation = ModerationService(database.unit_of_work)
     administration = AdministrationService(database.unit_of_work)
+    owned_membership_checker = membership_checker is None
+    membership_checker = membership_checker or AiogramTelegramMembershipChecker(bot_token)
     index_html = (
         (_STATIC_DIR / "index.html")
         .read_text(encoding="utf-8")
@@ -692,6 +781,8 @@ def create_web_app(
         try:
             yield
         finally:
+            if owned_membership_checker:
+                await membership_checker.close()
             await database.dispose()
 
     app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -777,6 +868,78 @@ def create_web_app(
         )
         return response
 
+    def core_membership_resource() -> MembershipResourceDto | None:
+        if (
+            settings.community_telegram_chat_id is None
+            or settings.community_telegram_join_url is None
+        ):
+            return None
+        return MembershipResourceDto(
+            resource_id=None,
+            title=settings.community_telegram_chat_title,
+            join_url=settings.community_telegram_join_url,
+            required=True,
+        )
+
+    async def membership_gate(
+        telegram_user_id: int,
+        optional_resources: tuple[MembershipResource, ...] = (),
+    ) -> JSONResponse | None:
+        resources = tuple(
+            item
+            for item in (
+                core_membership_resource(),
+                *(
+                    MembershipResourceDto(
+                        resource_id=resource.id,
+                        title=resource.title,
+                        join_url=resource.join_url,
+                        required=True,
+                    )
+                    for resource in optional_resources
+                ),
+            )
+            if item is not None
+        )
+        if not resources:
+            return None
+        checked: list[MembershipResourceDto] = []
+        try:
+            for item in resources:
+                chat_id = (
+                    cast("int", settings.community_telegram_chat_id)
+                    if item.resource_id is None
+                    else next(
+                        resource.telegram_chat_id
+                        for resource in optional_resources
+                        if resource.id == item.resource_id
+                    )
+                )
+                checked.append(
+                    item.model_copy(
+                        update={
+                            "joined": await membership_checker.is_member(
+                                chat_id=chat_id,
+                                telegram_user_id=telegram_user_id,
+                            )
+                        }
+                    )
+                )
+        except MembershipCheckUnavailableError:
+            return _json_response(
+                MembershipGateDto(
+                    code="membership_check_unavailable",
+                    resources=tuple(checked) or resources,
+                ),
+                status_code=503,
+            )
+        if all(item.joined for item in checked):
+            return None
+        return _json_response(
+            MembershipGateDto(code="membership_required", resources=tuple(checked)),
+            status_code=403,
+        )
+
     @app.post("/api/v1/auth/telegram", status_code=204)
     async def authenticate(request: Request) -> Response:
         _require_origin(request, origin)
@@ -797,6 +960,14 @@ def create_web_app(
             if _INVITATION_TOKEN.fullmatch(invitation_token) is None:
                 return _error_response(422, "invalid_request")
             try:
+                optional_resources = await registration.resources_for_invitation_identity(
+                    invitation_token=invitation_token,
+                    telegram_user_id=identity.user_id,
+                    telegram_username=identity.username,
+                )
+                gate = await membership_gate(identity.user_id, optional_resources)
+                if gate is not None:
+                    return gate
                 await registration.start(
                     RegistrationStartCommand(
                         update_id=_registration_update_id(raw),
@@ -876,6 +1047,11 @@ def create_web_app(
     @app.get("/api/v1/me", response_model=MeDto)
     async def me(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
         try:
+            if core_membership_resource() is not None:
+                telegram_user_id = await registration.telegram_user_id_for_actor(actor)
+                gate = await membership_gate(telegram_user_id)
+                if gate is not None:
+                    return gate
             profile = await registration.own_profile(actor)
             statistics = await reputation.own_statistics(actor)
         except (PermissionError, ProfileUnavailableError) as error:
@@ -930,6 +1106,10 @@ def create_web_app(
         try:
             current = await registration.status_for_actor(actor)
             context = _required_registration_context(current)
+            optional_resources = await registration.resources_for_member(actor.member_id)
+            gate = await membership_gate(context.telegram_user_id, optional_resources)
+            if gate is not None:
+                return gate
             view = await registration.submit(
                 update_id=_submission_update_id(
                     actor.member_id,
@@ -1114,6 +1294,167 @@ def create_web_app(
                 items=tuple(_administrator_identity_dto(item) for item in candidates)
             )
         )
+
+    @app.get(
+        "/api/v1/administration/invitations",
+        response_model=PersonalInvitationsDto,
+    )
+    async def personal_invitations(
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> JSONResponse:
+        try:
+            items = await registration.personal_invitations_for_actor(
+                actor=actor,
+                limit=limit,
+            )
+        except PermissionError:
+            return _error_response(403, "invitation_unavailable")
+        return _json_response(_personal_invitations_dto(items))
+
+    @app.get(
+        "/api/v1/administration/membership-resources",
+        response_model=MembershipResourcesDto,
+    )
+    async def membership_resources(
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            resources, can_add = await registration.membership_resources_for_actor(actor=actor)
+        except PermissionError:
+            return _error_response(403, "invitation_unavailable")
+        core = core_membership_resource()
+        items = (() if core is None else (core,)) + tuple(
+            MembershipResourceDto(
+                resource_id=resource.id,
+                title=resource.title,
+                join_url=resource.join_url,
+                required=False,
+            )
+            for resource in resources
+        )
+        return _json_response(MembershipResourcesDto(items=items, can_add=can_add))
+
+    @app.post(
+        "/api/v1/administration/membership-resources",
+        response_model=MembershipResourceDto,
+    )
+    async def create_membership_resource(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        payload = cast(
+            "MembershipResourceCreateRequest | None",
+            await _submission_request(request, MembershipResourceCreateRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        try:
+            resolved = await membership_checker.resolve_chat(payload.telegram_chat)
+            resource = await registration.add_membership_resource(
+                actor=actor,
+                telegram_chat_id=resolved.telegram_chat_id,
+                telegram_username=resolved.telegram_username,
+                title=resolved.title,
+                join_url=payload.join_url,
+            )
+        except PermissionError:
+            return _error_response(403, "invitation_unavailable")
+        except InvalidMembershipResourceError:
+            return _error_response(422, "invalid_request")
+        except MembershipCheckUnavailableError:
+            return _error_response(503, "membership_check_unavailable")
+        except SQLAlchemyError:
+            return _error_response(409, "invalid_request")
+        return _json_response(
+            MembershipResourceDto(
+                resource_id=resource.id,
+                title=resource.title,
+                join_url=resource.join_url,
+                required=False,
+            ),
+            status_code=201,
+        )
+
+    @app.post(
+        "/api/v1/administration/invitations",
+        response_model=PersonalInvitationCreatedDto,
+    )
+    async def create_personal_invitation(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "PersonalInvitationCreateRequest | None",
+            await _submission_request(request, PersonalInvitationCreateRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        bot_username = settings.telegram_bot_username
+        if bot_username is None:
+            return _error_response(503, "invitation_unavailable")
+        expires_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=7)
+        update_id = _submission_update_id(
+            actor.member_id,
+            actor.member_id,
+            f"invitation:create:{payload.telegram_username.casefold()}",
+            operation_key,
+            namespace=b"personal-invitations-v1",
+        )
+        try:
+            result = await registration.create_invitation(
+                InvitationCreateCommand(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    max_uses=1,
+                    expires_at=expires_at,
+                    intended_telegram_username=payload.telegram_username,
+                    required_resource_ids=payload.required_resource_ids,
+                )
+            )
+        except PermissionError:
+            return _error_response(403, "invitation_unavailable")
+        except RegistrationError:
+            return _error_response(422, "invalid_request")
+        username = cast("str", result.intended_telegram_username)
+        return _json_response(
+            PersonalInvitationCreatedDto(
+                invitation_id=result.invitation_id,
+                telegram_username=username,
+                expires_at=cast("datetime.datetime", result.expires_at),
+                invitation_url=f"https://t.me/{bot_username}?startapp={result.token}",
+            ),
+            status_code=201,
+        )
+
+    @app.post(
+        "/api/v1/administration/invitations/{invitation_id}/revoke",
+        status_code=204,
+    )
+    async def revoke_personal_invitation(
+        invitation_id: UUID,
+        request: Request,
+    ) -> Response:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        update_id = _submission_update_id(
+            actor.member_id,
+            invitation_id,
+            "invitation:revoke",
+            operation_key,
+            namespace=b"personal-invitations-v1",
+        )
+        try:
+            await registration.revoke_invitation(
+                update_id=update_id,
+                invitation_id=invitation_id,
+                actor_member_id=actor.member_id,
+            )
+        except PermissionError:
+            return _error_response(403, "invitation_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/administration/{member_id}", response_model=AdministratorDto)
     async def administrator_detail(
@@ -2404,6 +2745,8 @@ async def _submission_request(
         | RegistrationModerationDecisionRequest
         | AdministratorPermissionsRequest
         | AdministratorDemotionRequest
+        | PersonalInvitationCreateRequest
+        | MembershipResourceCreateRequest
     ],
 ) -> (
     SaveSubmissionDraftRequest
@@ -2415,6 +2758,8 @@ async def _submission_request(
     | RegistrationModerationDecisionRequest
     | AdministratorPermissionsRequest
     | AdministratorDemotionRequest
+    | PersonalInvitationCreateRequest
+    | MembershipResourceCreateRequest
     | None
 ):
     if request.headers.get("content-type", "").lower() != "application/json":
@@ -2558,6 +2903,38 @@ def _administrator_dto(card: AdministratorCard) -> AdministratorDto:
     )
 
 
+def _personal_invitation_dto(
+    invitation: InvitationOverview,
+    status: str,
+) -> PersonalInvitationDto:
+    return PersonalInvitationDto(
+        invitation_id=invitation.invitation_id,
+        telegram_username=invitation.intended_telegram_username,
+        created_by_display_name=invitation.created_by_display_name,
+        status=cast("PersonalInvitationStatus", status),
+        created_at=invitation.created_at,
+        expires_at=invitation.expires_at,
+        redeemed_at=invitation.redeemed_at,
+        redeemed_member_id=invitation.redeemed_member_id,
+        redeemed_display_name=invitation.redeemed_display_name,
+    )
+
+
+def _personal_invitations_dto(
+    invitations: tuple[InvitationOverview, ...],
+) -> PersonalInvitationsDto:
+    """Serialize invitation history and its waiting count once."""
+    now = datetime.datetime.now(datetime.UTC)
+    statuses = tuple(invitation.status_at(now) for invitation in invitations)
+    return PersonalInvitationsDto(
+        items=tuple(
+            _personal_invitation_dto(invitation, status)
+            for invitation, status in zip(invitations, statuses, strict=True)
+        ),
+        pending_count=sum(status == "waiting" for status in statuses),
+    )
+
+
 def _me_dto(profile: ProfileSnapshot, statistics: PersonalStatistics) -> MeDto:
     return MeDto(
         member_id=profile.member_id,
@@ -2596,8 +2973,9 @@ def _onboarding_dto(view: RegistrationView) -> OnboardingDto:
         outcome=view.outcome_code,
         application_status=context.application_status,
         step=context.current_step,
-        payload=context.payload,
+        payload={key: value for key, value in context.payload.items() if not key.startswith("_")},
         review_comment=context.review_comment,
+        personal_invitation=context.personal_invitation,
     )
 
 

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://community_bot:community_bot@localhost:5432/community_bot"
     )
     bot_token: SecretStr | None = None
+    telegram_bot_username: str | None = None
+    community_telegram_chat_id: int | None = None
+    community_telegram_chat_title: str = "Алло, Нейросеточная?"
+    community_telegram_join_url: str | None = None
     mini_app_origin: str | None = None
     local_review_telegram_user_id: int | None = None
     local_review_invitation_token: SecretStr | None = None
@@ -49,6 +53,18 @@ class Settings(BaseSettings):
             return value.replace("postgres://", "postgresql+asyncpg://", 1)
         return value
 
+    @field_validator("telegram_bot_username")
+    @classmethod
+    def normalize_bot_username(cls, value: str | None) -> str | None:
+        """Store a Telegram bot username without its optional at-sign."""
+        if value is None:
+            return None
+        normalized = value.strip().removeprefix("@").strip()
+        if re.fullmatch(r"[A-Za-z0-9_]{5,32}", normalized) is None:
+            msg = "TELEGRAM_BOT_USERNAME must be a valid Telegram username"
+            raise ValueError(msg)
+        return normalized
+
     @model_validator(mode="after")
     def require_immutable_production_release(self) -> Settings:
         """Reject ambiguous runtime identity in the production configuration."""
@@ -65,6 +81,15 @@ class Settings(BaseSettings):
             self.environment != "development" or self.local_review_telegram_user_id is None
         ):
             msg = "local review invitation requires a development review identity"
+            raise ValueError(msg)
+        community_values = (
+            self.community_telegram_chat_id,
+            self.community_telegram_join_url,
+        )
+        if any(value is not None for value in community_values) and not all(
+            value is not None for value in community_values
+        ):
+            msg = "COMMUNITY_TELEGRAM_CHAT_ID and COMMUNITY_TELEGRAM_JOIN_URL must be set together"
             raise ValueError(msg)
         return self
 
