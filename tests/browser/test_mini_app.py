@@ -3883,16 +3883,16 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
                 }"""
             )
             assert styles == {
-                "background": "rgb(244, 241, 251)",
-                "color": "rgb(23, 21, 43)",
-                "caret": "rgb(103, 85, 255)",
+                "background": "rgb(241, 239, 252)",
+                "color": "rgb(25, 23, 39)",
+                "caret": "rgb(96, 64, 255)",
                 "height": styles["height"],
             }
             assert styles["height"] >= 44
 
         controls.first.focus()
         assert controls.first.evaluate("node => getComputedStyle(node).outlineColor") == (
-            "rgb(114, 92, 245)"
+            "rgb(109, 91, 255)"
         )
         focused = controls.first.evaluate(
             """node => {
@@ -3904,12 +3904,28 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
         assert contrast_ratio(focused["text"], focused["background"]) >= 4.5
         assert contrast_ratio(focused["border"], focused["background"]) >= 3
         assert contrast_ratio(focused["focus"], focused["background"]) >= 3
-        assert (
-            controls.nth(2).evaluate("node => getComputedStyle(node, '::placeholder').color")
-            == "rgb(111, 108, 128)"
+        placeholder_styles = page.locator("input, textarea").evaluate_all(
+            """nodes => nodes.map(node => {
+              const placeholder = getComputedStyle(node, '::placeholder');
+              const probe = document.createElement('span');
+              probe.style.color = 'var(--app-placeholder)';
+              node.after(probe);
+              const token = getComputedStyle(probe).color;
+              probe.remove();
+              return {
+                color: placeholder.color,
+                fill: placeholder.webkitTextFillColor,
+                text: getComputedStyle(node).color,
+                token,
+              };
+            })"""
         )
+        assert len(placeholder_styles) == 2
+        assert {style["color"] for style in placeholder_styles} == {placeholder_styles[0]["token"]}
+        assert all(style["fill"] == style["color"] for style in placeholder_styles)
+        assert all(style["color"] != style["text"] for style in placeholder_styles)
         assert page.locator("option").evaluate("node => getComputedStyle(node).color") == (
-            "rgb(23, 21, 43)"
+            "rgb(25, 23, 39)"
         )
         controls.nth(1).evaluate("node => { node.disabled = true; }")
         assert controls.nth(1).evaluate("node => getComputedStyle(node).backgroundColor") == (
@@ -3918,11 +3934,71 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
         assert page.evaluate("getComputedStyle(document.documentElement).colorScheme") == "light"
         assert page.evaluate("getComputedStyle(document.body).backgroundImage") != "none"
         assert (
-            page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(251, 248, 246)"
+            page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(246, 246, 251)"
         )
         assert page.evaluate("globalThis.readyCalls") == 1
         assert page.evaluate("globalThis.expandCalls") == 1
         assert page.evaluate("globalThis.fullscreenCalls") == 1
+        browser.close()
+
+
+@pytest.mark.parametrize(
+    ("preset", "theme"),
+    [("acid", "light"), ("acid", "dark"), ("neon", "light"), ("neon", "dark")],
+)
+def test_placeholders_use_one_subdued_token_in_every_theme(
+    mini_app_url: str,
+    preset: str,
+    theme: str,
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(
+                json={"member_id": "member", "display_name": "Алекс", "timezone": "UTC"}
+            ),
+        )
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+        )
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+
+        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/tasks")
+        page.locator('[data-screen-id="UX02"]').wait_for()
+        page.locator("#content").evaluate(
+            r"""node => {
+              node.innerHTML = `<form class="task-form">
+                <input placeholder="Бледная подсказка">
+                <textarea class="content-editor-input" placeholder="Бледная подсказка"></textarea>
+              </form>`;
+            }"""
+        )
+        placeholder_styles = page.locator("input, textarea").evaluate_all(
+            """nodes => nodes.map(node => {
+              const placeholder = getComputedStyle(node, '::placeholder');
+              const probe = document.createElement('span');
+              probe.style.color = 'var(--app-placeholder)';
+              node.after(probe);
+              const token = getComputedStyle(probe).color;
+              probe.remove();
+              return {
+                color: placeholder.color,
+                fill: placeholder.webkitTextFillColor,
+                text: getComputedStyle(node).color,
+                token,
+              };
+            })"""
+        )
+        assert len(placeholder_styles) == 2
+        assert all(style["color"] == style["token"] for style in placeholder_styles)
+        assert all(style["fill"] == style["color"] for style in placeholder_styles)
+        assert all(style["color"] != style["text"] for style in placeholder_styles)
         browser.close()
 
 

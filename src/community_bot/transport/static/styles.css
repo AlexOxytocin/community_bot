@@ -13,6 +13,7 @@
   --app-surface-raised: #171b26;
   --app-text: #f6f8fc;
   --app-text-muted: #a9b1c4;
+  --app-placeholder: color-mix(in srgb, var(--app-text-muted) 58%, var(--app-surface-raised));
   --app-border: #252a38;
   --app-accent: #2ee6d6;
   --app-accent-strong: #12bfb3;
@@ -332,7 +333,7 @@ button.card:hover { background: var(--app-surface-raised); }
 .submission, .submission-form, .task-form { display: grid; gap: 12px; }
 form label { display: grid; gap: 8px; font-weight: 700; overflow-wrap: anywhere; }
 input, select, textarea { width: 100%; min-height: 44px; border: 1px solid var(--app-text-muted); border-radius: 12px; padding: 12px; background: var(--app-surface-raised); color: var(--app-text); -webkit-text-fill-color: var(--app-text); caret-color: var(--app-accent); font: inherit; font-size: 16px; font-weight: 400; }
-input::placeholder, textarea::placeholder { color: var(--app-text-muted); opacity: 1; }
+input::placeholder, textarea::placeholder { color: var(--app-placeholder); -webkit-text-fill-color: var(--app-placeholder); opacity: 1; }
 select option { background: var(--app-surface-raised); color: var(--app-text); }
 input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; background: var(--app-surface); color: var(--app-text-muted); border-color: var(--app-text-muted); }
 input:user-valid, select:user-valid, textarea:user-valid { border-color: var(--app-accent); }
@@ -1244,7 +1245,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .onboarding-form { gap: 13px; }
 .onboarding-field { display: grid; gap: 7px; font-size: 12px; font-weight: 800; }
 .onboarding-field input, .onboarding-field textarea { box-sizing: border-box; width: 100%; min-height: 52px; padding: 13px 14px; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface-raised); color: var(--app-text); font: inherit; line-height: 1.4; }
-.onboarding-field input::placeholder, .onboarding-field textarea::placeholder { color: color-mix(in srgb, var(--app-text-muted) 58%, var(--app-surface-raised)); -webkit-text-fill-color: color-mix(in srgb, var(--app-text-muted) 58%, var(--app-surface-raised)); opacity: 1; }
 .onboarding-field textarea { min-height: 104px; max-height: 240px; resize: vertical; }
 .onboarding-field input:focus-visible, .onboarding-field textarea:focus-visible { border-color: var(--app-accent); outline: 0; box-shadow: inset 0 0 0 1px var(--app-accent); }
 .onboarding-counter { margin-top: -3px; color: var(--app-text-muted); font-size: 10px; font-weight: 650; text-align: right; }
