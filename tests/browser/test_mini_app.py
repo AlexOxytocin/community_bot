@@ -2815,6 +2815,12 @@ def test_profile_avatar_picker_crops_uploads_and_restores_telegram(  # noqa: PLR
         '<circle cx="450" cy="300" r="180" fill="#d9ff57"/></svg>',
         encoding="utf-8",
     )
+    telegram_source = tmp_path / "telegram-avatar.svg"
+    telegram_source.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">'
+        '<rect width="512" height="512" fill="#1ea7fd"/></svg>',
+        encoding="utf-8",
+    )
     custom = False
     avatar_mutations: list[tuple[str, str, int]] = []
 
@@ -2845,8 +2851,9 @@ def test_profile_avatar_picker_crops_uploads_and_restores_telegram(  # noqa: PLR
         page.route(
             "**/api/v1/members/*/avatar",
             lambda route: route.fulfill(
-                body=source.read_bytes(),
+                body=(source if custom else telegram_source).read_bytes(),
                 content_type="image/svg+xml",
+                headers={"Cache-Control": "private, max-age=900"},
             ),
         )
         page.route(
@@ -2859,6 +2866,11 @@ def test_profile_avatar_picker_crops_uploads_and_restores_telegram(  # noqa: PLR
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
         page.goto(mini_app_url + "#/profile")
+        profile_photo = page.locator(".profile-identity-card .person-avatar-photo")
+        profile_photo.wait_for()
+        assert "#1ea7fd" in profile_photo.evaluate(
+            "async image => await (await fetch(image.src)).text()"
+        )
         page.get_by_role("button", name="Изменить фото профиля").click()
         page.locator("#profile-editor-sheet-title").wait_for()
         page.locator(".avatar-file-input").first.set_input_files(source)
@@ -2879,6 +2891,11 @@ def test_profile_avatar_picker_crops_uploads_and_restores_telegram(  # noqa: PLR
         assert page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
+        profile_photo = page.locator(".profile-identity-card .person-avatar-photo")
+        profile_photo.wait_for()
+        assert "#6547ff" in profile_photo.evaluate(
+            "async image => await (await fetch(image.src)).text()"
+        )
 
         page.get_by_role("button", name="Изменить фото профиля").click()
         restore = page.get_by_role("button", name="Вернуть фото из Telegram")
@@ -2889,6 +2906,14 @@ def test_profile_avatar_picker_crops_uploads_and_restores_telegram(  # noqa: PLR
             restore.click()
         page.locator(".profile-editor-backdrop").wait_for(state="detached")
         assert avatar_mutations[-1][0] == "DELETE"
+        profile_photo = page.locator(".profile-identity-card .person-avatar-photo")
+        profile_photo.wait_for()
+        assert "#1ea7fd" in profile_photo.evaluate(
+            "async image => await (await fetch(image.src)).text()"
+        )
+        assert 'fetch(request, forceNetwork ? { cache: "reload" } : undefined)' in (
+            STATIC_DIR / "app.js"
+        ).read_text(encoding="utf-8")
         browser.close()
 
 
@@ -5247,11 +5272,20 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             zero_geometry = page.locator(".pulse-chart-week .pulse-chart-column").first.evaluate(
                 """column => {
                   const zero = column.querySelector('.pulse-chart-zero').getBoundingClientRect();
-                  const label = column.querySelector('.pulse-chart-label').getBoundingClientRect();
-                  return {zeroBottom: Math.round(zero.bottom), labelTop: Math.round(label.top)};
+                  const bar = column.parentElement.children[1]
+                    .querySelector('.pulse-chart-bar').getBoundingClientRect();
+                  return {
+                    zeroBottom: zero.bottom,
+                    barBottom: bar.bottom,
+                    pseudoBottom: getComputedStyle(
+                      column.querySelector('.pulse-chart-zero'),
+                      '::after',
+                    ).bottom,
+                  };
                 }"""
             )
-            assert zero_geometry["labelTop"] - zero_geometry["zeroBottom"] <= 8
+            assert abs(zero_geometry["zeroBottom"] - zero_geometry["barBottom"]) <= 0.5
+            assert zero_geometry["pseudoBottom"] == "0px"
             messages_metric = page.get_by_role("button", name=re.compile(r"^\d+ сообщений$"))
             received_reactions = page.get_by_role(
                 "button", name=re.compile(r"^\d+ получено реакций$")

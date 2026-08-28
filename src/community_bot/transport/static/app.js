@@ -2576,13 +2576,13 @@ const cachedMemberPhoto = async (request) => {
   }
 };
 
-const loadMemberPhoto = async (memberId) => {
+const loadMemberPhoto = async (memberId, { forceNetwork = false } = {}) => {
   const request = memberPhotoRequest(memberId);
-  const cached = await cachedMemberPhoto(request);
+  const cached = forceNetwork ? null : await cachedMemberPhoto(request);
   if (cached?.fresh) return cached.photo;
 
   try {
-    const response = await fetch(request);
+    const response = await fetch(request, forceNetwork ? { cache: "reload" } : undefined);
     if (!response.ok) return cached?.photo || null;
     const photo = await response.blob();
     if (!validMemberPhoto(photo)) return cached?.photo || null;
@@ -2605,12 +2605,12 @@ const loadMemberPhoto = async (memberId) => {
   }
 };
 
-const sharedMemberPhotoUrl = (memberId) => {
+const sharedMemberPhotoUrl = (memberId, { forceNetwork = false } = {}) => {
   const key = String(memberId || "").trim();
   if (!key) return Promise.resolve(null);
   if (!memberPhotoRequests.has(key)) {
     memberPhotoRequests.set(key, (async () => {
-      const photo = await loadMemberPhoto(key);
+      const photo = await loadMemberPhoto(key, { forceNetwork });
       if (!photo) return null;
       const objectUrl = URL.createObjectURL(photo);
       const previous = memberPhotoObjectUrls.get(key);
@@ -2651,7 +2651,7 @@ const refreshMemberPhoto = async (memberId) => {
   }
   const selector = `.person-avatar[data-member-id="${CSS.escape(key)}"]`;
   for (const avatar of document.querySelectorAll(selector)) applyMemberPhoto(avatar, key, null);
-  const photoUrl = await sharedMemberPhotoUrl(key);
+  const photoUrl = await sharedMemberPhotoUrl(key, { forceNetwork: true });
   for (const avatar of document.querySelectorAll(selector)) applyMemberPhoto(avatar, key, photoUrl);
 };
 
@@ -4000,7 +4000,9 @@ function pulseDetails(state, revision) {
         column.append(bar);
       } else {
         column.classList.add("is-zero");
-        column.append(element("span", "—", "pulse-chart-zero"));
+        const zero = element("span", "—", "pulse-chart-zero");
+        zero.setAttribute("aria-hidden", "true");
+        column.append(zero);
       }
       chartValues.push(String(value));
       const label = state.period === "week"

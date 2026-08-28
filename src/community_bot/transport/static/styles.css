@@ -531,7 +531,8 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .pulse-chart-column { display: grid; min-width: 0; grid-template-rows: minmax(0, 1fr) 14px; align-items: end; gap: 5px; }
 .pulse-chart-month .pulse-chart-column { grid-template-rows: minmax(0, 1fr); }
 .pulse-chart-bar { display: block; width: 100%; height: var(--pulse-bar-height); min-height: 5px; border-radius: 5px 5px 2px 2px; background: var(--app-accent); }
-.pulse-chart-zero { display: block; align-self: end; width: 100%; height: 5px; overflow: hidden; color: color-mix(in srgb, var(--app-accent) 72%, var(--app-text-muted)); font-size: 15px; font-weight: 800; line-height: 2px; text-align: center; }
+.pulse-chart-zero { position: relative; display: block; align-self: end; width: 100%; height: 5px; overflow: hidden; color: transparent; font-size: 0; line-height: 0; }
+.pulse-chart-zero::after { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; border-radius: 999px; background: color-mix(in srgb, var(--app-accent) 72%, var(--app-text-muted)); content: ""; }
 .pulse-chart-label { overflow: hidden; color: var(--app-text-muted); font-size: 8px; text-align: center; text-overflow: clip; }
 .pulse-chart-empty { display: grid; min-height: 0; place-items: center; margin: 0; font-size: 12px; }
 .achievements-card { display: grid; gap: 10px; padding: 13px; border: 1px solid var(--app-border); border-radius: 20px; background: var(--app-surface); }
