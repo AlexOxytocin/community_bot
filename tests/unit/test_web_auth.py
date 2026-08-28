@@ -1011,7 +1011,8 @@ async def test_mini_app_assets_are_packaged_with_security_headers() -> None:
     )
     assert "default-src 'self'" in index.headers["content-security-policy"]
     assert "script-src 'self' https://telegram.org" in index.headers["content-security-policy"]
-    assert "img-src 'self'" in index.headers["content-security-policy"]
+    assert "img-src 'self' blob:" in index.headers["content-security-policy"]
+    assert "script-src 'self' blob:" not in index.headers["content-security-policy"]
     assert "https://t.me" not in index.headers["content-security-policy"]
     bridge = b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
     assert index.content.index(bridge) < index.content.index(b"</head>")
