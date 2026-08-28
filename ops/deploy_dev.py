@@ -12,6 +12,7 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path("/opt/community-bot")
 REPOSITORY = "https://github.com/AlexOxytocin/community_bot.git"
@@ -25,6 +26,11 @@ def run(*command: str, env: dict[str, str] | None = None) -> str:
     return subprocess.run(
         command, check=True, capture_output=True, text=True, env=env
     ).stdout.strip()
+
+
+def run_migration(*command: str, env: dict[str, str]) -> None:
+    """Run a private migration while preserving its diagnostic output."""
+    subprocess.run(command, check=True, env=env)
 
 
 def command() -> tuple[str, float]:
@@ -108,17 +114,22 @@ def environment_values(path: Path) -> dict[str, str]:
         key, separator, value = line.partition("=")
         if not separator:
             continue
-        values[key.strip()] = value.strip().strip('"\'')
-    missing = [name for name in ("POSTGRES_USER", "POSTGRES_DB") if not values.get(name)]
+        values[key.strip()] = value.strip().strip("\"'")
+    missing = [
+        name for name in ("DATABASE_URL", "POSTGRES_USER", "POSTGRES_DB") if not values.get(name)
+    ]
     if missing:
         raise RuntimeError("Production database identity is incomplete.")
     return values
 
 
 def backup_restore_drill(
-    probe: list[str], environment: dict[str, str], expected_head: str
+    probe: list[str],
+    environment: dict[str, str],
+    expected_head: str,
+    target_head: str,
 ) -> tuple[Path, str]:
-    """Back up the live database and prove an isolated exact-head restore."""
+    """Back up, restore, and rehearse the target migration on an isolated database."""
     values = environment_values(ROOT / "shared" / ".env")
     postgres_user = values["POSTGRES_USER"]
     database = values["POSTGRES_DB"]
@@ -203,10 +214,25 @@ def backup_restore_drill(
                 env=environment,
                 stdin=backup,
             )
-        if database_head_for(
-            probe, environment, postgres_user, RESTORE_DATABASE
-        ) != expected_head:
+        if database_head_for(probe, environment, postgres_user, RESTORE_DATABASE) != expected_head:
             raise RuntimeError("Restored database has the wrong migration head.")
+        database_url = urlsplit(values["DATABASE_URL"])
+        if not database_url.scheme or not database_url.netloc:
+            raise RuntimeError("Production database URL is invalid.")
+        restore_url = urlunsplit(database_url._replace(path=f"/{RESTORE_DATABASE}"))
+        run_migration(
+            *probe,
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "--env",
+            f"DATABASE_URL={restore_url}",
+            "migrate",
+            env=environment,
+        )
+        if database_head_for(probe, environment, postgres_user, RESTORE_DATABASE) != target_head:
+            raise RuntimeError("Migration rehearsal did not reach the target head.")
     finally:
         run(
             *probe,
@@ -260,35 +286,41 @@ def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
             run("git", "-C", str(source), "checkout", "--quiet", "--detach", "FETCH_HEAD")
             if run("git", "-C", str(source), "rev-parse", "HEAD") != sha:
                 raise RuntimeError("Fetched SHA mismatch.")
-            compose_changed = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(source),
-                    "diff",
-                    "--quiet",
-                    before_release,
-                    sha,
-                    "--",
-                    "compose.production.yaml",
-                ],
-                check=False,
-            ).returncode != 0
-            migration_changed = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(source),
-                    "diff",
-                    "--quiet",
-                    before_release,
-                    sha,
-                    "--",
-                    "migrations",
-                    "alembic.ini",
-                ],
-                check=False,
-            ).returncode != 0
+            compose_changed = (
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(source),
+                        "diff",
+                        "--quiet",
+                        before_release,
+                        sha,
+                        "--",
+                        "compose.production.yaml",
+                    ],
+                    check=False,
+                ).returncode
+                != 0
+            )
+            migration_changed = (
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(source),
+                        "diff",
+                        "--quiet",
+                        before_release,
+                        sha,
+                        "--",
+                        "migrations",
+                        "alembic.ini",
+                    ],
+                    check=False,
+                ).returncode
+                != 0
+            )
             if compose_changed:
                 raise RuntimeError("Compose changes require a separately reviewed host package.")
             image = f"community-bot:{sha}"
@@ -312,9 +344,9 @@ def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
         deploy, environment = compose(active, image, sha)
         try:
             if target_head != live_head:
-                backup_restore_drill(probe, probe_environment, live_head)
+                backup_restore_drill(probe, probe_environment, live_head, target_head)
                 run(*deploy, "stop", "web", "worker", env=environment)
-                run(
+                run_migration(
                     *deploy,
                     "run",
                     "--rm",

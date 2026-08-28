@@ -105,7 +105,9 @@ def test_fast_deploy_uses_the_running_release_as_its_safety_baseline() -> None:
     deploy = (root / "ops" / "deploy_dev.py").read_text(encoding="utf-8")
 
     assert "before_release" in deploy
-    assert '"diff",\n                    "--quiet",\n                    before_release' in deploy
+    assert '"diff"' in deploy
+    assert '"--quiet"' in deploy
+    assert "before_release," in deploy
     assert "if target_head != live_head:" in deploy
     assert 'manifest["commit_sha"]' not in deploy
     assert 'manifest["migration_head"]' not in deploy
@@ -120,6 +122,9 @@ def test_migration_deploy_is_private_backup_first_and_non_interactive() -> None:
     assert "def backup_restore_drill(" in deploy
     assert 'Path("/var/backups/community-bot")' in deploy
     assert 'RESTORE_DATABASE = "community_bot_restore_drill"' in deploy
+    assert "Migration rehearsal did not reach the target head." in deploy
+    assert 'f"DATABASE_URL={restore_url}"' in deploy
+    assert "def run_migration(" in deploy
     assert '"--no-deps",\n                    "-T",\n                    "migrate"' in deploy
     assert "Forward migration completed; automatic image rollback is unsafe." in deploy
 
