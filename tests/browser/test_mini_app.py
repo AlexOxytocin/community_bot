@@ -806,6 +806,7 @@ def test_ui_next_system_theme_tracks_telegram_and_syncs_chrome(mini_app_url: str
         page.goto(mini_app_url + "?theme=system#/tasks")
         page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
         assert page.evaluate("document.documentElement.dataset.themePreference") == "system"
+        assert page.evaluate("document.documentElement.dataset.themePreset") == "acid"
         assert page.evaluate("document.documentElement.dataset.theme") == "dark"
         assert page.evaluate("typeof globalThis.themeHandlers.themeChanged") == "function"
 
@@ -817,8 +818,8 @@ def test_ui_next_system_theme_tracks_telegram_and_syncs_chrome(mini_app_url: str
         )
         assert page.evaluate("document.documentElement.dataset.theme") == "light"
         assert page.evaluate("globalThis.telegramChrome.slice(-3)") == [
-            ["header", "#fbf8f6"],
-            ["background", "#fbf8f6"],
+            ["header", "#f4f7ed"],
+            ["background", "#f4f7ed"],
             ["bottom", "#ffffff"],
         ]
         browser.close()
@@ -893,7 +894,9 @@ def test_ui_next_onboarding_starts_light_and_confirms_catalog_city(mini_app_url:
             exact=True,
         ).wait_for()
         assert page.url.endswith("#/onboarding")
+        assert "preset=neon" in page.url
         assert "theme=light" in page.url
+        assert page.evaluate("document.documentElement.dataset.themePreset") == "neon"
         assert page.evaluate("document.documentElement.dataset.theme") == "light"
         assert page.get_by_role("button", name="Предыдущий шаг", exact=True).is_visible()
         assert page.locator(".bottom-nav").is_hidden()
@@ -977,7 +980,7 @@ def test_personal_invitation_finishes_without_moderation_wait(mini_app_url: str)
 
 
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
-def test_ui_next_settings_opens_profile_and_toggles_night_mode(  # noqa: PLR0915
+def test_ui_next_settings_opens_profile_and_selects_theme(  # noqa: PLR0915
     mini_app_url: str,
     viewport: tuple[int, int],
 ) -> None:
@@ -1067,7 +1070,7 @@ def test_ui_next_settings_opens_profile_and_toggles_night_mode(  # noqa: PLR0915
             lambda route: route.fulfill(json=_task_home_payload()),
         )
 
-        page.goto(mini_app_url + "?theme=light#/settings")
+        page.goto(mini_app_url + "?theme=light&preset=neon#/settings")
         page.locator(".settings-list").wait_for()
         assert page.locator("#screen-title").is_hidden()
         assert page.locator(".screen").get_attribute("aria-label") == "Параметры"
@@ -1075,8 +1078,8 @@ def test_ui_next_settings_opens_profile_and_toggles_night_mode(  # noqa: PLR0915
         assert settings_nav.get_attribute("aria-pressed") == "true"
         assert page.evaluate("location.hash") == "#/settings"
         assert page.get_by_role("button", name="Профиль", exact=False).is_visible()
-        toggle = page.get_by_role("switch", name="Ночной режим", exact=True)
-        assert toggle.get_attribute("aria-checked") == "false"
+        theme_trigger = page.get_by_role("button", name=re.compile(r"^Оформление"))
+        assert "Неон · Светлый" in theme_trigger.inner_text()
         fullscreen_toggle = page.get_by_role("switch", name="Полноэкранный режим", exact=True)
         assert fullscreen_toggle.get_attribute("aria-checked") == "true"
         assert page.evaluate("globalThis.fullscreenCalls") == ["enter"]
@@ -1087,25 +1090,51 @@ def test_ui_next_settings_opens_profile_and_toggles_night_mode(  # noqa: PLR0915
         assert page.evaluate("localStorage.getItem('community_bot_fullscreen_enabled')") == "false"
         assert page.evaluate("globalThis.fullscreenCalls") == ["enter", "exit"]
 
-        toggle.click()
+        theme_trigger.click()
+        theme_dialog = page.get_by_role("dialog", name="Оформление", exact=True)
+        theme_dialog.wait_for()
+        acid = theme_dialog.get_by_role("radio", name="Кислота", exact=True)
+        neon = theme_dialog.get_by_role("radio", name="Неон", exact=True)
+        system_mode = theme_dialog.get_by_role("radio", name="Как в Telegram", exact=True)
+        light_mode = theme_dialog.get_by_role("radio", name="Светлый", exact=True)
+        dark_mode = theme_dialog.get_by_role("radio", name="Тёмный", exact=True)
+        assert neon.get_attribute("aria-checked") == "true"
+        assert light_mode.get_attribute("aria-checked") == "true"
+        assert system_mode.get_attribute("aria-checked") == "false"
+
+        acid.click()
+        assert page.evaluate("document.documentElement.dataset.themePreset") == "acid"
+        assert page.evaluate("document.documentElement.dataset.theme") == "light"
+        assert page.evaluate("localStorage.getItem('community_bot_ui_theme_preset')") == "acid"
+        assert "preset=acid" in page.url
+        assert acid.get_attribute("aria-checked") == "true"
+
+        dark_mode.click()
         assert page.evaluate("document.documentElement.dataset.theme") == "dark"
         assert page.evaluate("document.documentElement.dataset.themePreference") == "dark"
         assert page.evaluate("localStorage.getItem('community_bot_ui_theme')") == "dark"
+        assert dark_mode.get_attribute("aria-checked") == "true"
+
+        neon.click()
+        assert page.evaluate("document.documentElement.dataset.themePreset") == "neon"
+        assert page.evaluate("localStorage.getItem('community_bot_ui_theme_preset')") == "neon"
         assert page.evaluate("location.hash") == "#/settings"
         assert "theme=dark" in page.url
-        assert toggle.get_attribute("aria-checked") == "true"
-        assert toggle.evaluate("node => node === document.activeElement")
+        assert "preset=neon" in page.url
+        theme_dialog.get_by_role("button", name="Закрыть выбор оформления", exact=True).click()
+        assert theme_trigger.evaluate("node => node === document.activeElement")
+        assert "Неон · Тёмный" in theme_trigger.inner_text()
         assert boxes(page) == light_boxes
 
         page.reload()
         page.locator(".settings-list").wait_for()
         assert page.locator("#screen-title").is_hidden()
         assert page.locator(".screen").get_attribute("aria-label") == "Параметры"
+        assert page.evaluate("document.documentElement.dataset.themePreset") == "neon"
+        assert page.evaluate("document.documentElement.dataset.theme") == "dark"
         assert (
-            page.get_by_role("switch", name="Ночной режим", exact=True).get_attribute(
-                "aria-checked"
-            )
-            == "true"
+            "Неон · Тёмный"
+            in page.get_by_role("button", name=re.compile(r"^Оформление")).inner_text()
         )
         assert (
             page.get_by_role("switch", name="Полноэкранный режим", exact=True).get_attribute(
@@ -3557,7 +3586,10 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
         assert requests[0].headers["content-type"] == "text/plain; charset=utf-8"
         assert requests[0].headers["origin"] == mini_app_url.rstrip("/")
         assert requests[0].url == mini_app_url + "api/v1/auth/telegram"
-        assert page.evaluate("Object.keys(localStorage)") == ["community_bot_ui_theme"]
+        assert page.evaluate("Object.keys(localStorage).sort()") == [
+            "community_bot_ui_theme",
+            "community_bot_ui_theme_preset",
+        ]
         assert page.evaluate("sessionStorage.length") == 0
         assert all(init_data not in message for message in console_messages)
 

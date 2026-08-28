@@ -2,13 +2,19 @@ const assetRelease = new URL(import.meta.url).searchParams.get("release") || "lo
 const {
   applyPlatformTheme,
   applyPreviewTheme,
+  applyThemePreset,
   getFullscreenPreference,
+  getPreviewThemePreference,
+  getPreviewThemePreset,
   openExternalLink,
   setFullscreenPreference,
   watchSystemPreviewTheme,
-} = await import(`/mini-assets/platform.js?release=${encodeURIComponent(assetRelease)}`);
+} = await import(
+  `/mini-assets/platform.js?release=${encodeURIComponent(assetRelease)}&api=themes-v1`
+);
 
 applyPlatformTheme();
+applyThemePreset();
 applyPreviewTheme();
 watchSystemPreviewTheme();
 
@@ -127,7 +133,7 @@ const resetScrollPosition = () => {
 
 const replaceContent = (...nodes) => {
   shell.querySelector(
-    ".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop, .assignment-action-backdrop, .profile-editor-backdrop, .admin-sheet-backdrop",
+    ".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop, .assignment-action-backdrop, .profile-editor-backdrop, .admin-sheet-backdrop, .theme-picker-backdrop",
   )?.remove();
   content.replaceChildren(...nodes);
   revealApplication();
@@ -298,7 +304,7 @@ const settingsRowIcon = (name) => {
     ? '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0"/>'
     : name === "fullscreen"
       ? '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>'
-      : '<path d="M20 15.1A8 8 0 0 1 8.9 4 8 8 0 1 0 20 15.1Z"/>';
+      : '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/>';
   return svg;
 };
 
@@ -4509,6 +4515,140 @@ function loadProfile(push = true) {
   void loadOwnProfile(state, revision);
 }
 
+const themePresetLabels = Object.freeze({ acid: "Кислота", neon: "Неон" });
+const themeModeLabels = Object.freeze({
+  system: "Как в Telegram",
+  light: "Светлый",
+  dark: "Тёмный",
+});
+
+const themeSelectionLabel = () => (
+  `${themePresetLabels[getPreviewThemePreset()]} · ${themeModeLabels[getPreviewThemePreference()]}`
+);
+
+function updateThemeSelection({ preset, preference }) {
+  applyThemePreset(preset);
+  applyPreviewTheme(preference);
+  const url = new URL(location.href);
+  url.searchParams.set("preset", preset);
+  url.searchParams.set("theme", preference);
+  history.replaceState({ ...history.state, preset, theme: preference }, "", url);
+}
+
+function showThemePicker(trigger, summary) {
+  shell.querySelector(".theme-picker-backdrop")?.remove();
+  const backdrop = element("section", undefined, "theme-picker-backdrop");
+  const dialog = element("div", undefined, "theme-picker-sheet");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "theme-picker-title");
+  const header = element("div", undefined, "theme-picker-heading");
+  const heading = element("h2", "Оформление");
+  heading.id = "theme-picker-title";
+  const close = element("button", "×", "theme-picker-close");
+  close.type = "button";
+  close.setAttribute("aria-label", "Закрыть выбор оформления");
+  header.append(heading, close);
+
+  const presetGroup = element("div", undefined, "theme-preset-options");
+  presetGroup.setAttribute("role", "radiogroup");
+  presetGroup.setAttribute("aria-label", "Тема");
+  const presetButtons = [];
+  for (const preset of ["acid", "neon"]) {
+    const option = element("button", undefined, `theme-preset-option theme-preset-${preset}`);
+    option.type = "button";
+    option.setAttribute("role", "radio");
+    option.dataset.themePresetOption = preset;
+    const preview = element("span", undefined, "theme-preset-preview");
+    preview.setAttribute("aria-hidden", "true");
+    preview.append(
+      element("span", undefined, "theme-preview-light"),
+      element("span", undefined, "theme-preview-dark"),
+    );
+    option.append(preview, element("strong", themePresetLabels[preset]));
+    presetButtons.push(option);
+    presetGroup.append(option);
+  }
+
+  const modeHeading = element("p", "Режим", "theme-picker-label");
+  const modeGroup = element("div", undefined, "theme-mode-options");
+  modeGroup.setAttribute("role", "radiogroup");
+  modeGroup.setAttribute("aria-label", "Режим темы");
+  const modeButtons = [];
+  for (const preference of ["system", "light", "dark"]) {
+    const option = element("button", themeModeLabels[preference], "theme-mode-option");
+    option.type = "button";
+    option.setAttribute("role", "radio");
+    option.dataset.themeModeOption = preference;
+    modeButtons.push(option);
+    modeGroup.append(option);
+  }
+
+  const refresh = () => {
+    const selectedPreset = getPreviewThemePreset();
+    const selectedPreference = getPreviewThemePreference();
+    for (const option of presetButtons) {
+      option.setAttribute("aria-checked", String(option.dataset.themePresetOption === selectedPreset));
+    }
+    for (const option of modeButtons) {
+      option.setAttribute("aria-checked", String(option.dataset.themeModeOption === selectedPreference));
+    }
+    summary.textContent = themeSelectionLabel();
+  };
+  for (const option of presetButtons) {
+    option.addEventListener("click", () => {
+      updateThemeSelection({
+        preset: option.dataset.themePresetOption,
+        preference: getPreviewThemePreference(),
+      });
+      refresh();
+    });
+  }
+  for (const option of modeButtons) {
+    option.addEventListener("click", () => {
+      updateThemeSelection({
+        preset: getPreviewThemePreset(),
+        preference: option.dataset.themeModeOption,
+      });
+      refresh();
+    });
+  }
+  refresh();
+
+  const dismiss = () => {
+    backdrop.remove();
+    trigger.focus({ preventScroll: true });
+  };
+  close.addEventListener("click", dismiss);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) dismiss();
+  });
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [close, ...presetButtons, ...modeButtons];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  dialog.append(header, presetGroup, modeHeading, modeGroup);
+  backdrop.append(dialog);
+  shell.append(backdrop);
+  queueMicrotask(() => (
+    presetButtons.find((option) => option.getAttribute("aria-checked") === "true") || close
+  ).focus({ preventScroll: true }));
+}
+
 function showSettings(push = true) {
   screenRevision += 1;
   activeProfileState = null;
@@ -4531,32 +4671,18 @@ function showSettings(push = true) {
   profile.append(profileCopy, element("span", "›", "settings-chevron"));
   profile.addEventListener("click", () => loadProfile());
 
-  const theme = element("div", undefined, "settings-row settings-theme-row");
-  theme.append(settingsRowIcon("moon"));
+  const theme = element("button", undefined, "settings-row settings-link-row settings-theme-row");
+  theme.type = "button";
+  theme.append(settingsRowIcon("appearance"));
   theme.firstChild.classList.add("settings-row-icon");
   const themeCopy = element("span", undefined, "settings-row-copy");
+  const themeSummary = element("span", themeSelectionLabel());
   themeCopy.append(
-    element("strong", "Ночной режим"),
-    element("span", "Тёмное оформление интерфейса"),
+    element("strong", "Оформление"),
+    themeSummary,
   );
-  const toggle = element("button", undefined, "settings-switch");
-  toggle.type = "button";
-  toggle.setAttribute("role", "switch");
-  toggle.setAttribute("aria-label", "Ночной режим");
-  toggle.append(element("span", undefined, "settings-switch-thumb"));
-  const updateToggle = () => {
-    toggle.setAttribute("aria-checked", String(document.documentElement.dataset.theme === "dark"));
-  };
-  updateToggle();
-  toggle.addEventListener("click", () => {
-    const preference = toggle.getAttribute("aria-checked") === "true" ? "light" : "dark";
-    applyPreviewTheme(preference);
-    const url = new URL(location.href);
-    url.searchParams.set("theme", preference);
-    history.replaceState({ ...history.state, theme: preference }, "", url);
-    updateToggle();
-  });
-  theme.append(themeCopy, toggle);
+  theme.append(themeCopy, element("span", "›", "settings-chevron"));
+  theme.addEventListener("click", () => showThemePicker(theme, themeSummary));
 
   const fullscreen = element("div", undefined, "settings-row settings-fullscreen-row");
   fullscreen.append(settingsRowIcon("fullscreen"));
@@ -8574,7 +8700,9 @@ function showOnboarding(view) {
   onboardingUrl.hash = "/onboarding";
   if (!onboardingThemeInitialized) {
     onboardingThemeInitialized = true;
+    onboardingUrl.searchParams.set("preset", "neon");
     onboardingUrl.searchParams.set("theme", "light");
+    applyThemePreset("neon");
     applyPreviewTheme("light");
   }
   history.replaceState({ screen: "onboarding" }, "", onboardingUrl);

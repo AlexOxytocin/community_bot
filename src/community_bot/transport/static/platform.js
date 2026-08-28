@@ -103,7 +103,9 @@ export function applyPlatformTheme(webApp = globalThis.Telegram?.WebApp) {
 }
 
 const THEME_STORAGE_KEY = "community_bot_ui_theme";
+const THEME_PRESET_STORAGE_KEY = "community_bot_ui_theme_preset";
 export const PREVIEW_THEME_PREFERENCES = Object.freeze(["system", "light", "dark"]);
+export const PREVIEW_THEME_PRESETS = Object.freeze(["acid", "neon"]);
 
 const validThemePreference = (value) => (
   PREVIEW_THEME_PREFERENCES.includes(value) ? value : "system"
@@ -116,6 +118,19 @@ export function getPreviewThemePreference() {
     return validThemePreference(localStorage.getItem(THEME_STORAGE_KEY));
   } catch {
     return "system";
+  }
+}
+
+export function getPreviewThemePreset() {
+  const requested = new URLSearchParams(location.search).get("preset");
+  if (PREVIEW_THEME_PRESETS.includes(requested)) return requested;
+  const fromDocument = document.documentElement.dataset.themePreset;
+  if (PREVIEW_THEME_PRESETS.includes(fromDocument)) return fromDocument;
+  try {
+    const stored = localStorage.getItem(THEME_PRESET_STORAGE_KEY);
+    return PREVIEW_THEME_PRESETS.includes(stored) ? stored : "acid";
+  } catch {
+    return "acid";
   }
 }
 
@@ -159,6 +174,19 @@ export function applyPreviewTheme(
   } catch { /* Theme remains active for the current document. */ }
   syncTelegramChrome(webApp);
   return { preference: normalized, resolved };
+}
+
+export function applyThemePreset(
+  preset = getPreviewThemePreset(),
+  webApp = globalThis.Telegram?.WebApp,
+) {
+  const normalized = PREVIEW_THEME_PRESETS.includes(preset) ? preset : "acid";
+  document.documentElement.dataset.themePreset = normalized;
+  try {
+    localStorage.setItem(THEME_PRESET_STORAGE_KEY, normalized);
+  } catch { /* Theme remains active for the current document. */ }
+  syncTelegramChrome(webApp);
+  return normalized;
 }
 
 export function watchSystemPreviewTheme(webApp = globalThis.Telegram?.WebApp) {
