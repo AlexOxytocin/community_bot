@@ -130,7 +130,12 @@ async def _owned_task_cards(
     assignees: dict[uuid.UUID, list[OwnedTaskAssignee]] = {}
     for assignment, display_name in assignment_rows:
         assignees.setdefault(assignment.task_id, []).append(
-            OwnedTaskAssignee(assignment.id, str(display_name), assignment.status)
+            OwnedTaskAssignee(
+                assignment.id,
+                assignment.performer_id,
+                str(display_name),
+                assignment.status,
+            )
         )
     pending = {row[0]: row[1] for row in pending_rows}
     return tuple(

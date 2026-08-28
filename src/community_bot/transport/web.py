@@ -563,6 +563,7 @@ class TaskHomeDto(_Dto):
 
 
 class OwnedTaskAssigneeDto(_Dto):
+    member_id: UUID
     display_name: str
     status: str
 
@@ -3489,7 +3490,11 @@ def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
         deadline_at=card.task.deadline_at,
         archived_at=archived_at,
         assignees=tuple(
-            OwnedTaskAssigneeDto(display_name=item.display_name, status=item.status)
+            OwnedTaskAssigneeDto(
+                member_id=item.member_id,
+                display_name=item.display_name,
+                status=item.status,
+            )
             for item in card.assignees
         ),
         cancellation_status=card.cancellation_status,

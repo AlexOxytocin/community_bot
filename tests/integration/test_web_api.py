@@ -2765,6 +2765,7 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
         cards = {item["id"]: item for item in response.json()["items"]}
         assert cards[str(owned.id)]["cancellation_action"] == "request"
         assert cards[str(owned.id)]["archived_at"] is None
+        assert cards[str(owned.id)]["assignees"][0]["member_id"] == str(performer.id)
         assert cards[str(empty_owned_id)]["cancellation_action"] == "cancel"
         assert str(hidden_owned_id) not in cards
         cancel_path = f"/api/v1/owned-tasks/{empty_owned_id}/cancellation"

@@ -2526,17 +2526,117 @@ const valueOrDash = (value) => value == null ? "—" : String(value);
 const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
-const profileAvatar = (displayName, memberId) => {
-  const avatar = element("span", initialsFor(displayName), "avatar");
+const memberPhotoRequests = new Map();
+const memberPhotoObjectUrls = new Set();
+const memberPhotoCacheTtlMs = 24 * 60 * 60 * 1000;
+
+const memberPhotoCacheName = () => (
+  `community-member-avatars-v1-${String(currentMemberId || "anonymous")}`
+);
+
+const validMemberPhoto = (photo) => (
+  photo?.size > 0 && photo.type.startsWith("image/")
+);
+
+const cachedMemberPhoto = async (request) => {
+  if (!("caches" in globalThis)) return null;
+  try {
+    const cache = await caches.open(memberPhotoCacheName());
+    const response = await cache.match(request);
+    if (!response) return { cache, photo: null, fresh: false };
+    const photo = await response.blob();
+    if (!validMemberPhoto(photo)) {
+      await cache.delete(request);
+      return { cache, photo: null, fresh: false };
+    }
+    const cachedAt = Number(response.headers.get("x-community-avatar-cached-at"));
+    return {
+      cache,
+      photo,
+      fresh: Number.isFinite(cachedAt) && Date.now() - cachedAt < memberPhotoCacheTtlMs,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const loadMemberPhoto = async (memberId) => {
+  const endpoint = new URL(
+    `/api/v1/members/${encodeURIComponent(memberId)}/avatar`,
+    globalThis.location.origin,
+  ).href;
+  const request = new Request(endpoint, {
+    credentials: "same-origin",
+    headers: { Accept: "image/*" },
+  });
+  const cached = await cachedMemberPhoto(request);
+  if (cached?.fresh) return cached.photo;
+
+  try {
+    const response = await fetch(request);
+    if (!response.ok) return cached?.photo || null;
+    const photo = await response.blob();
+    if (!validMemberPhoto(photo)) return cached?.photo || null;
+    if (cached?.cache) {
+      try {
+        await cached.cache.put(request, new Response(photo, {
+          status: 200,
+          headers: {
+            "Content-Type": photo.type,
+            "X-Community-Avatar-Cached-At": String(Date.now()),
+          },
+        }));
+      } catch {
+        // Cache Storage is optional; the in-memory cache below still avoids duplicates.
+      }
+    }
+    return photo;
+  } catch {
+    return cached?.photo || null;
+  }
+};
+
+const sharedMemberPhotoUrl = (memberId) => {
+  const key = String(memberId || "").trim();
+  if (!key) return Promise.resolve(null);
+  if (!memberPhotoRequests.has(key)) {
+    memberPhotoRequests.set(key, (async () => {
+      const photo = await loadMemberPhoto(key);
+      if (!photo) return null;
+      const objectUrl = URL.createObjectURL(photo);
+      memberPhotoObjectUrls.add(objectUrl);
+      return objectUrl;
+    })());
+  }
+  return memberPhotoRequests.get(key);
+};
+
+globalThis.addEventListener("pagehide", () => {
+  for (const objectUrl of memberPhotoObjectUrls) URL.revokeObjectURL(objectUrl);
+  memberPhotoObjectUrls.clear();
+}, { once: true });
+
+const personAvatar = (person, { size = "medium" } = {}) => {
+  const displayName = person?.display_name || "?";
+  const memberId = person?.member_id;
+  const avatar = element(
+    "span",
+    initialsFor(displayName),
+    `person-avatar person-avatar-${size}`,
+  );
+  avatar.setAttribute("aria-hidden", "true");
   if (!memberId) return avatar;
-  const image = document.createElement("img");
-  image.className = "avatar-photo";
-  image.src = `/api/v1/members/${encodeURIComponent(memberId)}/avatar`;
-  image.alt = "";
-  image.decoding = "async";
-  image.referrerPolicy = "no-referrer";
-  image.addEventListener("error", () => image.remove(), { once: true });
-  avatar.append(image);
+  avatar.dataset.memberId = memberId;
+  void sharedMemberPhotoUrl(memberId).then((photoUrl) => {
+    if (!photoUrl) return;
+    const image = document.createElement("img");
+    image.className = "person-avatar-photo";
+    image.src = photoUrl;
+    image.alt = "";
+    image.decoding = "async";
+    image.addEventListener("error", () => image.remove(), { once: true });
+    avatar.append(image);
+  });
   return avatar;
 };
 
@@ -2847,7 +2947,7 @@ function ownProfileOverview(state, revision) {
   copy.append(element("h2", me.display_name));
   if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(profileAvatar(me.display_name, me.member_id), copy);
+  identity.append(personAvatar(me), copy);
   identity.append(element("span", "›", "profile-edit-chevron"));
   const city = profileEditTrigger(
     "город",
@@ -3735,7 +3835,7 @@ function memberListDetails(items) {
     stats.append(element("span", `Карма ${member.karma.score}`));
     copy.append(stats);
     button.append(
-      element("span", initialsFor(member.display_name), "member-avatar"),
+      personAvatar(member, { size: "small" }),
       copy,
       element("span", "›", "member-chevron"),
     );
@@ -4107,7 +4207,7 @@ function safeMemberDetails(member, pulse = null) {
     copy.append(username);
   }
   copy.append(element("p", [member.city, `Уровень ${member.level_number}`].filter(Boolean).join(" · "), "muted"));
-  identity.append(profileAvatar(member.display_name, member.member_id), copy);
+  identity.append(personAvatar(member), copy);
   const metrics = element("div", undefined, "metric-grid foreign-metrics");
   for (const [value, label] of [[member.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
     const metric = element("article", undefined, "metric-card");
@@ -5122,11 +5222,7 @@ function showOwnedTask(task, push = true) {
   assigneesBlock.append(element("h3", "Исполнители", "owned-task-section-title"));
   for (const assignee of task.assignees) {
     const assigneeCard = element("div", undefined, "owned-task-assignee");
-    const avatar = element(
-      "span",
-      (assignee.display_name || "?").trim().slice(0, 1).toUpperCase(),
-      "owned-task-assignee-avatar",
-    );
+    const avatar = personAvatar(assignee, { size: "small" });
     const copy = element("div", undefined, "owned-task-assignee-copy");
     copy.append(
       element("strong", assignee.display_name),
@@ -6357,13 +6453,6 @@ const administratorPermissionDetails = [
   ["administrator_management", "Назначение администраторов", "Повышенное право: только в пределах своих полномочий"],
 ];
 
-const administratorInitials = (name) => name
-  .split(/\s+/)
-  .filter(Boolean)
-  .slice(0, 2)
-  .map((part) => part[0]?.toUpperCase())
-  .join("") || "?";
-
 const administratorIdentity = (person, meta) => {
   const row = element("span", undefined, "admin-person-main");
   row.append(
@@ -6376,12 +6465,6 @@ const administratorIdentity = (person, meta) => {
   );
   return row;
 };
-
-const administratorAvatar = (person) => element(
-  "span",
-  administratorInitials(person.display_name),
-  "admin-avatar",
-);
 
 const administratorPermissionNames = (permissions) => administratorPermissionDetails
   .filter(([id]) => permissions.includes(id))
@@ -6424,7 +6507,7 @@ const creditGrantStatusLabel = (status) => ({
 const creditGrantRecipientCard = (person, { selectable = false, self = false } = {}) => {
   const card = element(selectable ? "button" : "article", undefined, "credit-recipient-card");
   if (selectable) card.type = "button";
-  const avatar = administratorAvatar(person);
+  const avatar = personAvatar(person);
   const identity = administratorIdentity(
     person,
     self ? "это вы" : creditGrantStatusLabel(person.status),
@@ -6855,7 +6938,7 @@ function administratorCard(person) {
   button.dataset.administratorId = person.member_id;
   const permissionNames = administratorPermissionNames(person.permissions);
   button.append(
-    administratorAvatar(person),
+    personAvatar(person),
     administratorIdentity(
       person,
       person.is_owner
@@ -7298,7 +7381,7 @@ function candidateCard(person) {
   const button = element("button", undefined, "admin-person");
   button.type = "button";
   button.append(
-    administratorAvatar(person),
+    personAvatar(person),
     administratorIdentity(person, "активный участник"),
     element("span", "›", "admin-chevron"),
   );
@@ -7347,7 +7430,7 @@ async function loadAdministratorCandidates(push = true, initialQuery = "") {
 
 function administratorProfile(person, subtitle) {
   const card = element("section", undefined, "admin-profile-card");
-  card.append(administratorAvatar(person), administratorIdentity(person, subtitle));
+  card.append(personAvatar(person), administratorIdentity(person, subtitle));
   return card;
 }
 

@@ -161,6 +161,7 @@ class OwnedTaskAssignee:
     """Public assignee label and lifecycle state for an owned task."""
 
     assignment_id: UUID
+    member_id: UUID
     display_name: str
     status: str
 

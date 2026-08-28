@@ -375,6 +375,14 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
     invitations: list[dict[str, Any]] = []
     invitation_failures = [503, 403]
     optional_resource_id = "00000000-0000-0000-0000-000000000205"
+    avatar_requests: list[str] = []
+
+    def avatar_route(route: Route) -> None:
+        avatar_requests.append(urlsplit(route.request.url).path)
+        route.fulfill(
+            body='<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>',
+            content_type="image/svg+xml",
+        )
 
     def administration_route(route: Route) -> None:  # noqa: C901, PLR0911
         path = urlsplit(route.request.url).path
@@ -503,11 +511,19 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
         me, _member = _cache_profile(owner_id)
         page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
         page.route("**/api/v1/administration**", administration_route)
+        page.route("**/api/v1/members/*/avatar", avatar_route)
         page.goto(mini_app_url + "?ui=next&theme=light#/moderation/team")
 
         page.get_by_role("heading", name="Команда").wait_for()
+        page.locator(".admin-list .person-avatar-photo").nth(1).wait_for()
         assert page.get_by_text("Alex Clem").count() >= 1
         assert page.get_by_text("Владелец", exact=True).count() == 1
+        assert sorted(avatar_requests) == sorted(
+            [
+                f"/api/v1/members/{owner_id}/avatar",
+                f"/api/v1/members/{manager_id}/avatar",
+            ]
+        )
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
         page.get_by_role("button", name="+ Пригласить участника").click()
@@ -571,6 +587,8 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
 
         page.get_by_role("button", name=re.compile("Kristina")).click()
         page.get_by_role("heading", name="Права", exact=True).wait_for()
+        page.locator(".admin-profile-card .person-avatar-photo").wait_for()
+        assert avatar_requests.count(f"/api/v1/members/{candidate_id}/avatar") == 1
         page.get_by_role("button", name="Назад").click()
         page.get_by_role("heading", name="Команда").wait_for()
         assert page.url.endswith("#/moderation/team")
@@ -586,6 +604,8 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
 
         page.get_by_role("button", name=re.compile("Alex Clem")).click()
         page.get_by_role("heading", name="Права", exact=True).wait_for()
+        page.locator(".admin-profile-card .person-avatar-photo").wait_for()
+        assert avatar_requests.count(f"/api/v1/members/{owner_id}/avatar") == 1
         page.get_by_text("изменить или снять их нельзя").wait_for()
         assert page.locator("[data-permission]:disabled").count() == 4
         assert page.get_by_role("button", name="Снять права администратора").count() == 0
@@ -2328,6 +2348,7 @@ def test_ui_next_catalog_supports_full_filters_sorting_and_reset(  # noqa: PLR09
 def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
+    assignee_id = "00000000-0000-0000-0000-000000000310"
     assignment_id = "00000000-0000-0000-0000-000000000301"
     assignment = {
         "id": assignment_id,
@@ -2378,7 +2399,13 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         "minimum_level": 1,
         "performer_slots": 2,
         "deadline_at": "2026-08-30T20:00:00Z",
-        "assignees": [{"display_name": "Исполнитель", "status": "accepted"}],
+        "assignees": [
+            {
+                "member_id": assignee_id,
+                "display_name": "Исполнитель",
+                "status": "accepted",
+            }
+        ],
         "cancellation_status": None,
         "cancellation_action": "request",
     }
@@ -2453,6 +2480,13 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         page.route(
             "**/api/v1/moderation/cases?*",
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+        page.route(
+            f"**/api/v1/members/{assignee_id}/avatar",
+            lambda route: route.fulfill(
+                body='<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>',
+                content_type="image/svg+xml",
+            ),
         )
 
         page.goto(mini_app_url + "?theme=light#/tasks")
@@ -2532,6 +2566,7 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
 
         created_search.fill("Созданное активное")
         created.locator(".owned-work-card").click()
+        page.locator(".owned-task-assignee .person-avatar-photo").wait_for()
         assert page.get_by_role(
             "button", name="Назад к созданным заданиям", exact=True
         ).is_visible()
@@ -2680,25 +2715,31 @@ def test_assignment_action_eligibility_is_server_projected() -> None:
     assert "if (assignment.can_cancel)" in source
 
 
-def test_telegram_profile_photo_is_round_and_keeps_initials_fallback(
+def test_telegram_profile_photo_is_shared_persistent_and_keeps_initials_fallback(
     mini_app_url: str,
 ) -> None:
-    me, _member = _cache_profile("00000000-0000-0000-0000-000000000133")
+    me, member = _cache_profile("00000000-0000-0000-0000-000000000133")
     avatar_path = f"/api/v1/members/{me['member_id']}/avatar"
+    avatar_requests: list[str] = []
+
+    def avatar(route: Route) -> None:
+        avatar_requests.append(urlsplit(route.request.url).path)
+        route.fulfill(
+            body='<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>',
+            content_type="image/svg+xml",
+        )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
         page.set_viewport_size({"width": 375, "height": 812})
         page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
-        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=_member))
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
         page.route(
-            f"**{avatar_path}",
-            lambda route: route.fulfill(
-                body='<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>',
-                content_type="image/svg+xml",
-            ),
+            "**/api/v1/members?*",
+            lambda route: route.fulfill(json={"items": [member], "next_cursor": None}),
         )
+        page.route(f"**{avatar_path}", avatar)
         page.route(
             "**/api/v1/tasks",
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
@@ -2709,22 +2750,41 @@ def test_telegram_profile_photo_is_round_and_keeps_initials_fallback(
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
         page.goto(mini_app_url + "#/profile")
-        image = page.locator(".profile-identity-card .avatar-photo")
+        image = page.locator(".profile-identity-card .person-avatar-photo")
         image.wait_for()
-        assert image.get_attribute("src") == avatar_path
+        assert image.get_attribute("src", timeout=1000).startswith("blob:")
         assert image.evaluate("node => getComputedStyle(node).objectFit") == "cover"
-        avatar = page.locator(".profile-identity-card .avatar")
-        assert avatar.evaluate("node => getComputedStyle(node).borderRadius") == "50%"
-        assert avatar.evaluate("node => node.offsetWidth === node.offsetHeight")
-        assert avatar.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
+        avatar_node = page.locator(".profile-identity-card .person-avatar")
+        assert avatar_requests == [avatar_path]
+        assert avatar_node.evaluate("node => getComputedStyle(node).borderRadius") == "50%"
+        assert avatar_node.evaluate("node => node.offsetWidth === node.offsetHeight")
+        assert avatar_node.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
+
+        page.reload()
+        page.locator(".profile-identity-card .person-avatar-photo").wait_for()
+        assert avatar_requests == [avatar_path]
+
+        page.get_by_role("button", name="Комьюнити", exact=True).click()
+        page.locator(".member-row .person-avatar-photo").wait_for()
+        assert avatar_requests == [avatar_path]
+        page.locator(".member-row").click()
+        page.locator(".foreign-profile .person-avatar-photo").wait_for()
+        assert avatar_requests == [avatar_path]
+
+        avatar_node = page.locator(".foreign-profile .person-avatar")
+        image = page.locator(".foreign-profile .person-avatar-photo")
+        assert avatar_node.evaluate("node => getComputedStyle(node).borderRadius") == "50%"
+        assert avatar_node.evaluate("node => node.offsetWidth === node.offsetHeight")
+        assert avatar_node.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
 
         missing_avatar = "/api/v1/members/missing/avatar"
         page.route(f"**{missing_avatar}", lambda route: route.abort())
         page.evaluate(
-            f"document.querySelector('.avatar-photo').src='{missing_avatar}'"
+            "document.querySelector('.foreign-profile .person-avatar-photo').src="
+            f"'{missing_avatar}'"
         )
         image.wait_for(state="detached")
-        assert avatar.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
+        assert avatar_node.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
         browser.close()
 
 
@@ -5646,7 +5706,15 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
             "performer_slots": 2,
             "deadline_at": "2026-08-21T20:00:00Z",
             "assignees": (
-                [{"display_name": "Исполнитель", "status": "submitted"}] if index == 1 else []
+                [
+                    {
+                        "member_id": "00000000-0000-0000-0000-000000000410",
+                        "display_name": "Исполнитель",
+                        "status": "submitted",
+                    }
+                ]
+                if index == 1
+                else []
             ),
             "cancellation_status": None,
             "cancellation_action": "request" if index == 1 else "cancel",
