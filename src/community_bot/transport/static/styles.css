@@ -489,6 +489,7 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .achievement-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
 .achievement-detail-sheet .achievement-detail-heading { padding-right: 36px; }
 .achievement-detail-heading span { color: var(--app-accent); font-size: 10px; font-weight: 800; }
+.achievement-detail-label { margin-bottom: -6px; font-size: 11px; }
 .achievement-progress-track { display: block; overflow: hidden; height: 7px; border-radius: 999px; background: color-mix(in srgb, var(--app-text-muted) 18%, transparent); }
 .achievement-progress-fill { display: block; width: var(--achievement-progress); height: 100%; border-radius: inherit; background: var(--app-accent); }
 .achievement-progress-copy { color: var(--app-text-muted); font-size: 9px; text-align: right; }

@@ -4821,7 +4821,12 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             detail = page.locator(".achievement-detail-sheet")
             detail.wait_for()
             assert page.locator(".screen").evaluate("node => node.scrollTop") == scroll_before
-            assert detail.get_by_text("Получайте реакции от участников.", exact=True).is_visible()
+            assert detail.get_by_text("Как получить", exact=True).is_visible()
+            assert detail.get_by_text(
+                "Получайте реакции на свои сообщения. Уровни открываются после "
+                "10, 50, 200 и 1 000 реакций.",
+                exact=True,
+            ).is_visible()
             assert detail.get_by_text("26 из 50", exact=True).is_visible()
             page.get_by_role("button", name="Закрыть достижение", exact=True).click()
             assert page.locator(".achievement-detail-sheet").count() == 0
