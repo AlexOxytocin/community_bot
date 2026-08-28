@@ -117,6 +117,14 @@ const trashIcon = () => {
   return svg;
 };
 
+const cameraIcon = () => {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M4 8.5h3l1.5-2h7l1.5 2h3v10H4z"/><circle cx="12" cy="13.5" r="3.25"/>';
+  return svg;
+};
+
 const markTransition = (node, id, trigger) => {
   node.dataset.transitionId = id;
   node.dataset.transitionTrigger = trigger;
@@ -2527,7 +2535,7 @@ const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
 const memberPhotoRequests = new Map();
-const memberPhotoObjectUrls = new Set();
+const memberPhotoObjectUrls = new Map();
 const memberPhotoCacheTtlMs = 24 * 60 * 60 * 1000;
 
 const memberPhotoCacheName = () => (
@@ -2536,6 +2544,14 @@ const memberPhotoCacheName = () => (
 
 const validMemberPhoto = (photo) => (
   photo?.size > 0 && photo.type.startsWith("image/")
+);
+
+const memberPhotoRequest = (memberId) => new Request(
+  new URL(
+    `/api/v1/members/${encodeURIComponent(memberId)}/avatar`,
+    globalThis.location.origin,
+  ).href,
+  { credentials: "same-origin", headers: { Accept: "image/*" } },
 );
 
 const cachedMemberPhoto = async (request) => {
@@ -2561,14 +2577,7 @@ const cachedMemberPhoto = async (request) => {
 };
 
 const loadMemberPhoto = async (memberId) => {
-  const endpoint = new URL(
-    `/api/v1/members/${encodeURIComponent(memberId)}/avatar`,
-    globalThis.location.origin,
-  ).href;
-  const request = new Request(endpoint, {
-    credentials: "same-origin",
-    headers: { Accept: "image/*" },
-  });
+  const request = memberPhotoRequest(memberId);
   const cached = await cachedMemberPhoto(request);
   if (cached?.fresh) return cached.photo;
 
@@ -2604,15 +2613,50 @@ const sharedMemberPhotoUrl = (memberId) => {
       const photo = await loadMemberPhoto(key);
       if (!photo) return null;
       const objectUrl = URL.createObjectURL(photo);
-      memberPhotoObjectUrls.add(objectUrl);
+      const previous = memberPhotoObjectUrls.get(key);
+      if (previous) URL.revokeObjectURL(previous);
+      memberPhotoObjectUrls.set(key, objectUrl);
       return objectUrl;
     })());
   }
   return memberPhotoRequests.get(key);
 };
 
+const applyMemberPhoto = (avatar, memberId, photoUrl) => {
+  avatar.querySelector(".person-avatar-photo")?.remove();
+  if (!photoUrl || !avatar.isConnected) return;
+  const image = document.createElement("img");
+  image.className = "person-avatar-photo";
+  image.src = photoUrl;
+  image.alt = "";
+  image.decoding = "async";
+  image.addEventListener("error", () => image.remove(), { once: true });
+  avatar.append(image);
+};
+
+const refreshMemberPhoto = async (memberId) => {
+  const key = String(memberId || "").trim();
+  if (!key) return;
+  memberPhotoRequests.delete(key);
+  const previous = memberPhotoObjectUrls.get(key);
+  if (previous) URL.revokeObjectURL(previous);
+  memberPhotoObjectUrls.delete(key);
+  if ("caches" in globalThis) {
+    try {
+      const cache = await caches.open(memberPhotoCacheName());
+      await cache.delete(memberPhotoRequest(key));
+    } catch {
+      // Cache Storage is optional; a network refresh still follows.
+    }
+  }
+  const selector = `.person-avatar[data-member-id="${CSS.escape(key)}"]`;
+  for (const avatar of document.querySelectorAll(selector)) applyMemberPhoto(avatar, key, null);
+  const photoUrl = await sharedMemberPhotoUrl(key);
+  for (const avatar of document.querySelectorAll(selector)) applyMemberPhoto(avatar, key, photoUrl);
+};
+
 globalThis.addEventListener("pagehide", () => {
-  for (const objectUrl of memberPhotoObjectUrls) URL.revokeObjectURL(objectUrl);
+  for (const objectUrl of memberPhotoObjectUrls.values()) URL.revokeObjectURL(objectUrl);
   memberPhotoObjectUrls.clear();
 }, { once: true });
 
@@ -2628,14 +2672,7 @@ const personAvatar = (person, { size = "medium" } = {}) => {
   if (!memberId) return avatar;
   avatar.dataset.memberId = memberId;
   void sharedMemberPhotoUrl(memberId).then((photoUrl) => {
-    if (!photoUrl) return;
-    const image = document.createElement("img");
-    image.className = "person-avatar-photo";
-    image.src = photoUrl;
-    image.alt = "";
-    image.decoding = "async";
-    image.addEventListener("error", () => image.remove(), { once: true });
-    avatar.append(image);
+    applyMemberPhoto(avatar, memberId, photoUrl);
   });
   return avatar;
 };
@@ -2689,7 +2726,7 @@ function createProfileEditorSheet(trigger, state, revision, titleText) {
     }
     if (event.key !== "Tab") return;
     const focusable = [...dialog.querySelectorAll(
-      'button:not([disabled]), input:not([disabled]), textarea:not([disabled])',
+      'button:not([disabled]), input:not([disabled]):not([type="file"]), textarea:not([disabled])',
     )];
     const first = focusable[0];
     const last = focusable.at(-1);
@@ -2920,6 +2957,242 @@ function showProfileLinksSheet(trigger, state, revision) {
   renderManager();
 }
 
+const avatarImageFile = (input) => new Promise((resolve, reject) => {
+  const file = input?.files?.[0];
+  if (!file || !file.type.startsWith("image/")) {
+    reject(new Error("invalid_image"));
+    return;
+  }
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  image.onload = () => {
+    URL.revokeObjectURL(objectUrl);
+    resolve(image);
+  };
+  image.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    reject(new Error("invalid_image"));
+  };
+  image.src = objectUrl;
+});
+
+function showProfileAvatarSheet(trigger, state, revision) {
+  const sheet = createProfileEditorSheet(trigger, state, revision, "Фото профиля");
+  const memberId = state.profile.me.member_id;
+  const galleryInput = element("input");
+  galleryInput.type = "file";
+  galleryInput.hidden = true;
+  galleryInput.accept = "image/*";
+  galleryInput.className = "avatar-file-input";
+  galleryInput.tabIndex = -1;
+  galleryInput.setAttribute("aria-hidden", "true");
+  const cameraInput = element("input");
+  cameraInput.type = "file";
+  cameraInput.hidden = true;
+  cameraInput.accept = "image/*";
+  cameraInput.capture = "user";
+  cameraInput.className = "avatar-file-input";
+  cameraInput.tabIndex = -1;
+  cameraInput.setAttribute("aria-hidden", "true");
+
+  const finish = async () => {
+    await refreshMemberPhoto(memberId);
+    if (revision !== screenRevision) return;
+    state.returnFocus = '[data-profile-action="avatar"]';
+    sheet.dismiss(false);
+    state.route = "/profile";
+    showProfileState(state, revision);
+  };
+
+  const renderCrop = (image) => {
+    const panel = element("section", undefined, "profile-avatar-editor");
+    panel.append(
+      element("p", "Перемещайте фото и настройте масштаб", "profile-helper avatar-crop-helper"),
+    );
+    const stage = element("div", undefined, "avatar-crop-stage");
+    const canvas = element("canvas", undefined, "avatar-crop-canvas");
+    canvas.width = 512;
+    canvas.height = 512;
+    canvas.setAttribute("aria-label", "Круглый предпросмотр фотографии");
+    stage.append(canvas, element("span", undefined, "avatar-crop-ring"));
+    const context = canvas.getContext("2d", { alpha: false });
+    const zoom = element("input");
+    zoom.type = "range";
+    zoom.min = "1";
+    zoom.max = "3";
+    zoom.step = "0.01";
+    zoom.value = "1";
+    zoom.setAttribute("aria-label", "Масштаб фотографии");
+    const zoomRow = element("label", undefined, "avatar-zoom-row");
+    zoomRow.append(element("span", "−"), zoom, element("span", "+"));
+    const status = element("p", "", "status hidden");
+    status.setAttribute("aria-live", "polite");
+    const save = element("button", "Сохранить", "primary avatar-save");
+    save.type = "button";
+    const chooseAgain = element("button", "Выбрать другое фото", "secondary avatar-choose-again");
+    chooseAgain.type = "button";
+    let scale = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+    const pointers = new Map();
+    let pinchDistance = null;
+    let pinchScale = 1;
+
+    const draw = () => {
+      const baseScale = Math.max(512 / image.naturalWidth, 512 / image.naturalHeight);
+      const width = image.naturalWidth * baseScale * scale;
+      const height = image.naturalHeight * baseScale * scale;
+      const maxX = Math.max(0, (width - 512) / 2);
+      const maxY = Math.max(0, (height - 512) / 2);
+      offsetX = Math.max(-maxX, Math.min(maxX, offsetX));
+      offsetY = Math.max(-maxY, Math.min(maxY, offsetY));
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, 512, 512);
+      context.drawImage(
+        image,
+        (512 - width) / 2 + offsetX,
+        (512 - height) / 2 + offsetY,
+        width,
+        height,
+      );
+    };
+    const distance = () => {
+      const points = [...pointers.values()];
+      return points.length < 2 ? 0 : Math.hypot(
+        points[0].x - points[1].x,
+        points[0].y - points[1].y,
+      );
+    };
+    zoom.addEventListener("input", () => {
+      scale = Number(zoom.value);
+      draw();
+    });
+    canvas.addEventListener("pointerdown", (event) => {
+      canvas.setPointerCapture(event.pointerId);
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 2) {
+        pinchDistance = distance();
+        pinchScale = scale;
+      }
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      const previous = pointers.get(event.pointerId);
+      if (!previous) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 1) {
+        const ratio = 512 / Math.max(1, canvas.clientWidth);
+        offsetX += (event.clientX - previous.x) * ratio;
+        offsetY += (event.clientY - previous.y) * ratio;
+      } else if (pinchDistance) {
+        scale = Math.max(1, Math.min(3, pinchScale * distance() / pinchDistance));
+        zoom.value = String(scale);
+      }
+      draw();
+    });
+    const releasePointer = (event) => {
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinchDistance = null;
+    };
+    canvas.addEventListener("pointerup", releasePointer);
+    canvas.addEventListener("pointercancel", releasePointer);
+    chooseAgain.addEventListener("click", () => galleryInput.click());
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      chooseAgain.disabled = true;
+      zoom.disabled = true;
+      status.className = "status";
+      status.textContent = "Сохраняем фотографию…";
+      try {
+        const blob = await new Promise((resolve, reject) => canvas.toBlob(
+          (value) => value ? resolve(value) : reject(new Error("encode_failed")),
+          "image/jpeg",
+          0.86,
+        ));
+        const response = await apiFetch("/api/v1/me/avatar", {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: { "Content-Type": "image/jpeg" },
+          body: blob,
+        });
+        if (!response.ok) {
+          throw Object.assign(new Error(requestError(response)), { status: response.status });
+        }
+        await finish();
+      } catch (error) {
+        status.textContent = error?.status === 422
+          ? "Фото не подходит. Выберите другое изображение."
+          : "Не удалось сохранить фотографию. Повторите попытку.";
+        save.disabled = false;
+        chooseAgain.disabled = false;
+        zoom.disabled = false;
+      }
+    });
+    panel.append(stage, zoomRow, status, save, chooseAgain, galleryInput, cameraInput);
+    sheet.setBody("Настройка фото", panel);
+    draw();
+    queueMicrotask(() => save.focus({ preventScroll: true }));
+  };
+
+  const selectImage = async (input) => {
+    try {
+      renderCrop(await avatarImageFile(input));
+    } catch {
+      input.value = "";
+    }
+  };
+  galleryInput.addEventListener("change", () => void selectImage(galleryInput));
+  cameraInput.addEventListener("change", () => void selectImage(cameraInput));
+
+  const renderManager = async () => {
+    const panel = element("section", undefined, "profile-avatar-manager");
+    const preview = element("div", undefined, "profile-avatar-preview");
+    preview.append(personAvatar(state.profile.me));
+    const copy = element("div", undefined, "profile-avatar-copy");
+    copy.append(
+      element("p", "Оно будет видно рядом с вашим именем во всём приложении.", "profile-helper"),
+    );
+    const choose = element("button", "Выбрать из галереи", "primary avatar-source-button");
+    choose.type = "button";
+    choose.addEventListener("click", () => galleryInput.click());
+    const camera = element("button", "Сделать фото", "secondary avatar-source-button");
+    camera.type = "button";
+    camera.addEventListener("click", () => cameraInput.click());
+    const restore = element("button", "Вернуть фото из Telegram", "avatar-restore hidden");
+    restore.type = "button";
+    const status = element("p", "", "status hidden");
+    status.setAttribute("aria-live", "polite");
+    restore.addEventListener("click", async () => {
+      for (const control of panel.querySelectorAll("button")) control.disabled = true;
+      status.className = "status";
+      status.textContent = "Возвращаем фото из Telegram…";
+      try {
+        const response = await apiFetch("/api/v1/me/avatar", {
+          method: "DELETE",
+          credentials: "same-origin",
+        });
+        if (!response.ok) throw new Error(requestError(response));
+        await finish();
+      } catch {
+        status.textContent = "Не удалось вернуть фото из Telegram. Повторите попытку.";
+        for (const control of panel.querySelectorAll("button")) control.disabled = false;
+      }
+    });
+    panel.append(preview, copy, choose, camera, restore, status, galleryInput, cameraInput);
+    sheet.setBody("Фото профиля", panel);
+    try {
+      const preference = await getJson("/api/v1/me/avatar");
+      if (panel.isConnected && preference.custom) restore.classList.remove("hidden");
+    } catch {
+      if (panel.isConnected) {
+        status.className = "status";
+        status.textContent = "Не удалось проверить текущее фото.";
+      }
+    }
+    queueMicrotask(() => choose.focus({ preventScroll: true }));
+  };
+  void renderManager();
+}
+
 const openPublicUrl = (url, options = {}) => {
   if (!openExternalLink(url, options)) {
     content.append(element("p", "Не удалось открыть ссылку.", "status"));
@@ -2937,18 +3210,29 @@ const publicLinkRow = (link) => {
 function ownProfileOverview(state, revision) {
   const { me, member } = state.profile;
   const view = element("section", undefined, "profile-overview");
-  const identity = profileEditTrigger(
+  const identity = element("section", undefined, "profile-card profile-identity-card");
+  const avatarTrigger = element("button", undefined, "profile-avatar-trigger");
+  avatarTrigger.type = "button";
+  avatarTrigger.dataset.profileAction = "avatar";
+  avatarTrigger.setAttribute("aria-label", "Изменить фото профиля");
+  const cameraBadge = element("span", undefined, "profile-avatar-camera");
+  cameraBadge.append(cameraIcon());
+  avatarTrigger.append(personAvatar(me), cameraBadge);
+  avatarTrigger.addEventListener("click", () => {
+    showProfileAvatarSheet(avatarTrigger, state, revision);
+  });
+  const nameTrigger = profileEditTrigger(
     "имя",
     "name",
     (trigger) => showProfileFieldSheet(trigger, state, revision, "name"),
-    "profile-card profile-identity-card",
+    "profile-identity-name",
   );
   const copy = element("div", undefined, "identity-copy");
   copy.append(element("h2", me.display_name));
   if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(personAvatar(me), copy);
-  identity.append(element("span", "›", "profile-edit-chevron"));
+  nameTrigger.append(copy, element("span", "›", "profile-edit-chevron"));
+  identity.append(avatarTrigger, nameTrigger);
   const city = profileEditTrigger(
     "город",
     "city",

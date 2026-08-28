@@ -14,6 +14,7 @@ from community_bot.application.registration import (
     InvitationOverview,
     InvitationSnapshot,
     MembershipResource,
+    ProfileAvatar,
     ProfileData,
     RegistrationContext,
 )
@@ -33,6 +34,7 @@ from community_bot.infrastructure.db.models import (
     InvitationMembershipResourceModel,
     InvitationModel,
     InvitationRedemptionModel,
+    MemberAvatarModel,
     MemberModel,
     MembershipResourceModel,
     OutboxEventModel,
@@ -50,6 +52,53 @@ _REQUIRED_PROFILE_FIELDS = {
     ProfileField.CITY.value,
     ProfileField.TIMEZONE.value,
 }
+
+
+async def get_profile_avatar(session: AsyncSession, member_id: UUID) -> ProfileAvatar | None:
+    """Return one normalized member-owned avatar."""
+    model = await session.get(MemberAvatarModel, member_id)
+    if model is None:
+        return None
+    return ProfileAvatar(model.content, model.content_type, model.revision)
+
+
+async def upsert_profile_avatar(
+    session: AsyncSession,
+    *,
+    member_id: UUID,
+    content: bytes,
+    content_type: str,
+) -> ProfileAvatar:
+    """Insert or replace an avatar while preserving an idempotent revision."""
+    model = await session.scalar(
+        select(MemberAvatarModel).where(MemberAvatarModel.member_id == member_id).with_for_update()
+    )
+    if model is None:
+        model = MemberAvatarModel(
+            member_id=member_id,
+            content=content,
+            content_type=content_type,
+            revision=1,
+        )
+        session.add(model)
+    elif model.content != content or model.content_type != content_type:
+        model.content = content
+        model.content_type = content_type
+        model.revision += 1
+    await session.flush()
+    return ProfileAvatar(model.content, model.content_type, model.revision)
+
+
+async def delete_profile_avatar(session: AsyncSession, member_id: UUID) -> bool:
+    """Delete a member-owned avatar if it exists."""
+    model = await session.scalar(
+        select(MemberAvatarModel).where(MemberAvatarModel.member_id == member_id).with_for_update()
+    )
+    if model is None:
+        return False
+    await session.delete(model)
+    await session.flush()
+    return True
 
 
 async def acquire_registration_identity_gate(

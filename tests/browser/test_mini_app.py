@@ -2803,6 +2803,95 @@ def test_telegram_profile_photo_is_shared_persistent_and_keeps_initials_fallback
         browser.close()
 
 
+def test_profile_avatar_picker_crops_uploads_and_restores_telegram(  # noqa: PLR0915
+    mini_app_url: str,
+    tmp_path: Path,
+) -> None:
+    me, member = _cache_profile("00000000-0000-0000-0000-000000000134")
+    source = tmp_path / "wide-avatar.svg"
+    source.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">'
+        '<rect width="900" height="600" fill="#6547ff"/>'
+        '<circle cx="450" cy="300" r="180" fill="#d9ff57"/></svg>',
+        encoding="utf-8",
+    )
+    custom = False
+    avatar_mutations: list[tuple[str, str, int]] = []
+
+    def preference(route: Route) -> None:
+        nonlocal custom
+        method = route.request.method
+        if method == "PUT":
+            body = route.request.post_data_buffer or b""
+            avatar_mutations.append(
+                (method, route.request.headers.get("content-type", ""), len(body))
+            )
+            custom = True
+            route.fulfill(json={"custom": True, "revision": 1})
+        elif method == "DELETE":
+            avatar_mutations.append((method, "", 0))
+            custom = False
+            route.fulfill(json={"custom": False, "revision": None})
+        else:
+            route.fulfill(json={"custom": custom, "revision": 1 if custom else None})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 375, "height": 812})
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/me/avatar", preference)
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
+        page.route(
+            "**/api/v1/members/*/avatar",
+            lambda route: route.fulfill(
+                body=source.read_bytes(),
+                content_type="image/svg+xml",
+            ),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route("**/api/v1/task-home", lambda route: route.fulfill(json=_task_home_payload()))
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+        page.goto(mini_app_url + "#/profile")
+        page.get_by_role("button", name="Изменить фото профиля").click()
+        page.locator("#profile-editor-sheet-title").wait_for()
+        page.locator(".avatar-file-input").first.set_input_files(source)
+        crop = page.locator(".avatar-crop-canvas")
+        crop.wait_for()
+        assert crop.evaluate("node => node.offsetWidth === node.offsetHeight")
+        page.get_by_role("slider", name="Масштаб фотографии").fill("1.45")
+        with page.expect_request(
+            lambda request: request.url.endswith("/api/v1/me/avatar") and request.method == "PUT"
+        ):
+            page.get_by_role("button", name="Сохранить", exact=True).click()
+        page.locator(".profile-editor-backdrop").wait_for(state="detached")
+
+        assert len(avatar_mutations) == 1
+        assert avatar_mutations[0][0] == "PUT"
+        assert avatar_mutations[0][1].startswith("image/jpeg")
+        assert avatar_mutations[0][2] > 1000
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+
+        page.get_by_role("button", name="Изменить фото профиля").click()
+        restore = page.get_by_role("button", name="Вернуть фото из Telegram")
+        restore.wait_for()
+        with page.expect_request(
+            lambda request: request.url.endswith("/api/v1/me/avatar") and request.method == "DELETE"
+        ):
+            restore.click()
+        page.locator(".profile-editor-backdrop").wait_for(state="detached")
+        assert avatar_mutations[-1][0] == "DELETE"
+        browser.close()
+
+
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
 def test_profile_contract_links_back_focus_and_no_visible_reliability(  # noqa: C901, PLR0915
     mini_app_url: str,

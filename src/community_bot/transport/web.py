@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import datetime
@@ -139,6 +140,10 @@ from community_bot.domain.tasks import (
     TaskStatus,
     TaskTimeSize,
 )
+from community_bot.infrastructure.avatar_images import (
+    InvalidProfileAvatarError,
+    normalize_profile_avatar,
+)
 from community_bot.infrastructure.community_stats import HttpCommunityStatsGateway
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
@@ -156,6 +161,7 @@ _TELEGRAM_USERNAME = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 _INVITATION_TOKEN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _MAX_IDEMPOTENCY_KEY = 2**63 - 1
 _SUBMISSION_BODY_MAX_BYTES = 4096
+_AVATAR_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
 _STATIC_DIR = Path(__file__).with_name("static")
 _PUBLIC_ERROR_CODES = frozenset(
     {
@@ -270,6 +276,11 @@ class ProfileUpdateRequest(_Dto):
             raise ValueError("Invalid profile link update shape.")
         normalize_profile_link_command(command)
         return self
+
+
+class AvatarPreferenceDto(_Dto):
+    custom: bool
+    revision: int | None
 
 
 class KarmaDto(_Dto):
@@ -1379,6 +1390,52 @@ def create_web_app(
             return _error_response(403, "profile_unavailable")
         return _json_response(_me_dto(profile, statistics))
 
+    @app.get("/api/v1/me/avatar", response_model=AvatarPreferenceDto)
+    async def own_avatar_preference(
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        avatar = await registration.profile_avatar(actor.member_id)
+        return _json_response(
+            AvatarPreferenceDto(
+                custom=avatar is not None,
+                revision=None if avatar is None else avatar.revision,
+            )
+        )
+
+    @app.put("/api/v1/me/avatar", response_model=AvatarPreferenceDto)
+    async def update_own_avatar(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        content_type = request.headers.get("content-type", "").partition(";")[0].lower()
+        if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            return _error_response(422, "invalid_request")
+        try:
+            source = await _bounded_body(request, limit=_AVATAR_UPLOAD_MAX_BYTES)
+            content = await asyncio.to_thread(normalize_profile_avatar, source)
+            avatar = await registration.update_own_avatar(
+                actor_member_id=actor.member_id,
+                content=content,
+                content_type="image/jpeg",
+            )
+        except (InvalidProfileAvatarError, OverflowError):
+            return _error_response(422, "invalid_request")
+        except PermissionError:
+            return _error_response(403, "profile_unavailable")
+        return _json_response(AvatarPreferenceDto(custom=True, revision=avatar.revision))
+
+    @app.delete("/api/v1/me/avatar", response_model=AvatarPreferenceDto)
+    async def delete_own_avatar(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        try:
+            await _bounded_body(request, limit=0)
+            await registration.delete_own_avatar(actor_member_id=actor.member_id)
+        except OverflowError:
+            return _error_response(422, "invalid_request")
+        except PermissionError:
+            return _error_response(403, "profile_unavailable")
+        return _json_response(AvatarPreferenceDto(custom=False, revision=None))
+
     @app.get("/api/v1/members", response_model=MembersDto)
     async def members(
         actor: ActorContext = Depends(current_actor),
@@ -1414,6 +1471,17 @@ def create_web_app(
             telegram_user_id = await registration.telegram_user_id_for_member(member_id)
         except (LookupError, PermissionError, ProfileUnavailableError) as error:
             raise HTTPException(status_code=404, detail="not_found") from error
+        custom_avatar = await registration.profile_avatar(member_id)
+        if custom_avatar is not None:
+            return Response(
+                content=custom_avatar.content,
+                media_type=custom_avatar.content_type,
+                headers={
+                    "Cache-Control": "private, max-age=900",
+                    "X-Community-Avatar-Source": "custom",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
         try:
             photo = await membership_checker.profile_photo(telegram_user_id)
         except ProfilePhotoUnavailableError:
@@ -1425,6 +1493,7 @@ def create_web_app(
             media_type=photo.content_type,
             headers={
                 "Cache-Control": "private, max-age=900",
+                "X-Community-Avatar-Source": "telegram",
                 "X-Content-Type-Options": "nosniff",
             },
         )

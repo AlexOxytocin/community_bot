@@ -82,6 +82,7 @@ if TYPE_CHECKING:
         InvitationOverview,
         InvitationSnapshot,
         MembershipResource,
+        ProfileAvatar,
         ProfileData,
         RegistrationContext,
     )
@@ -1311,6 +1312,25 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await registration_store.update_profile_links(
             self._require_session(), member_id=member_id, command=command
         )
+
+    async def get_profile_avatar(self, member_id: UUID) -> ProfileAvatar | None:
+        """Return one normalized member-owned avatar."""
+        return await registration_store.get_profile_avatar(self._require_session(), member_id)
+
+    async def upsert_profile_avatar(
+        self, *, member_id: UUID, content: bytes, content_type: str
+    ) -> ProfileAvatar:
+        """Insert or replace one normalized member-owned avatar."""
+        return await registration_store.upsert_profile_avatar(
+            self._require_session(),
+            member_id=member_id,
+            content=content,
+            content_type=content_type,
+        )
+
+    async def delete_profile_avatar(self, member_id: UUID) -> bool:
+        """Delete one member-owned avatar."""
+        return await registration_store.delete_profile_avatar(self._require_session(), member_id)
 
     async def get_member_by_telegram_user_id(self, telegram_user_id: int) -> Member | None:
         """Resolve a member by the immutable Telegram identity."""

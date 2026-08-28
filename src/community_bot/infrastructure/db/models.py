@@ -156,6 +156,32 @@ class MemberModel(Base):
     )
 
 
+class MemberAvatarModel(Base):
+    """Normalized member-owned profile image, independent from Telegram."""
+
+    __tablename__ = "member_avatars"
+    __table_args__ = (
+        CheckConstraint("content_type = 'image/jpeg'", name="ck_member_avatars_content_type"),
+        CheckConstraint(
+            "octet_length(content) BETWEEN 1 AND 524288",
+            name="ck_member_avatars_content_size",
+        ),
+        CheckConstraint("revision > 0", name="ck_member_avatars_revision"),
+    )
+
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("members.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class InvitationModel(Base):
     """Hashed invitation with an atomic usage allowance."""
 

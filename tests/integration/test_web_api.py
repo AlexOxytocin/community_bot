@@ -8,12 +8,14 @@ import json
 import os
 import subprocess
 import sys
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient, Response
+from PIL import Image
 from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -63,6 +65,7 @@ from community_bot.infrastructure.db.models import (
     InvitationRedemptionModel,
     KarmaVoteHistoryModel,
     KarmaVoteModel,
+    MemberAvatarModel,
     MemberModel,
     MemberSanctionModel,
     MembershipResourceModel,
@@ -1143,6 +1146,101 @@ async def test_member_avatar_is_authenticated_authorized_and_server_proxied(
         assert absent.status_code == 404
         assert absent.headers["cache-control"] == "private, max-age=300"
         assert (await client.get(f"/api/v1/members/{uuid4()}/avatar")).status_code == 404
+
+    await database.dispose()
+
+
+async def test_member_can_persist_replace_and_remove_custom_profile_avatar(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    member = await active_member(database, 52_092)
+    checker = FakeMembershipChecker()
+    telegram_photo = b"\xff\xd8\xfftelegram-fallback\xff\xd9"
+    checker.profile_photos[member.telegram_user_id] = TelegramProfilePhoto(telegram_photo)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+        membership_checker=checker,
+    )
+    source_buffer = BytesIO()
+    source = Image.new("RGB", (900, 600), (34, 139, 230))
+    source_exif = Image.Exif()
+    source_exif[0x010E] = "must not persist"
+    source.save(source_buffer, "JPEG", quality=95, exif=source_exif)
+    source_content = source_buffer.getvalue()
+    avatar_path = f"/api/v1/members/{member.id}/avatar"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(member.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        assert (await client.get("/api/v1/me/avatar")).json() == {
+            "custom": False,
+            "revision": None,
+        }
+        assert (
+            await client.put(
+                "/api/v1/me/avatar",
+                content=source_content,
+                headers={"content-type": "image/jpeg"},
+            )
+        ).status_code == 403
+        invalid = await client.put(
+            "/api/v1/me/avatar",
+            content=b"not-an-image",
+            headers={"content-type": "image/jpeg", "origin": ORIGIN},
+        )
+        assert invalid.status_code == 422
+
+        uploaded = await client.put(
+            "/api/v1/me/avatar",
+            content=source_content,
+            headers={"content-type": "image/jpeg", "origin": ORIGIN},
+        )
+        assert uploaded.status_code == 200
+        assert uploaded.json() == {"custom": True, "revision": 1}
+        repeated = await client.put(
+            "/api/v1/me/avatar",
+            content=source_content,
+            headers={"content-type": "image/jpeg", "origin": ORIGIN},
+        )
+        assert repeated.json() == {"custom": True, "revision": 1}
+
+        avatar = await client.get(avatar_path)
+        assert avatar.status_code == 200
+        assert avatar.headers["x-community-avatar-source"] == "custom"
+        assert checker.profile_photo_requests == []
+        with Image.open(BytesIO(avatar.content)) as normalized:
+            assert normalized.size == (512, 512)
+            assert normalized.format == "JPEG"
+            assert not normalized.getexif()
+
+        sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+        async with sessions() as session:
+            stored = await session.get(MemberAvatarModel, member.id)
+            assert stored is not None
+            assert stored.content == avatar.content
+            assert stored.content_type == "image/jpeg"
+            assert stored.revision == 1
+
+        await database.dispose()
+        reopened = Database(database_url)
+        persisted = await RegistrationService(reopened.unit_of_work).profile_avatar(member.id)
+        assert persisted is not None
+        assert persisted.content == avatar.content
+        await reopened.dispose()
+
+        restored = await client.delete("/api/v1/me/avatar", headers={"origin": ORIGIN})
+        assert restored.status_code == 200
+        assert restored.json() == {"custom": False, "revision": None}
+        fallback = await client.get(avatar_path)
+        assert fallback.content == telegram_photo
+        assert fallback.headers["x-community-avatar-source"] == "telegram"
+        assert checker.profile_photo_requests == [member.telegram_user_id]
 
     await database.dispose()
 

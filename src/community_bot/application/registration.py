@@ -201,6 +201,15 @@ class ProfileSnapshot(ProfileData):
     level: ResolvedLevel
 
 
+@dataclass(frozen=True, slots=True)
+class ProfileAvatar:
+    """One normalized member-owned avatar stored independently from Telegram."""
+
+    content: bytes
+    content_type: str
+    revision: int
+
+
 class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
     """Transactional persistence required by registration workflows."""
 
@@ -420,6 +429,20 @@ class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
         self, *, member_id: UUID, command: ProfileLinkCommand
     ) -> tuple[ProfileLink, ...]:
         """Mutate one ordered public profile link."""
+        ...
+
+    async def get_profile_avatar(self, member_id: UUID) -> ProfileAvatar | None:
+        """Return the member-owned avatar when one exists."""
+        ...
+
+    async def upsert_profile_avatar(
+        self, *, member_id: UUID, content: bytes, content_type: str
+    ) -> ProfileAvatar:
+        """Insert or replace one normalized member-owned avatar."""
+        ...
+
+    async def delete_profile_avatar(self, member_id: UUID) -> bool:
+        """Remove a member-owned avatar and report whether one existed."""
         ...
 
 
@@ -670,9 +693,7 @@ class RegistrationService:
                 if actor_telegram_user_id is None:
                     message = "Invitation actor identity is required."
                     raise PermissionError(message)
-                actor = await unit_of_work.get_member_by_telegram_user_id(
-                    actor_telegram_user_id
-                )
+                actor = await unit_of_work.get_member_by_telegram_user_id(actor_telegram_user_id)
             else:
                 actor = await unit_of_work.get_member(actor_member_id)
             if actor is None:
@@ -1203,6 +1224,54 @@ class RegistrationService:
                 experience_total=profile.experience_total,
                 level=level,
             )
+
+    async def profile_avatar(self, member_id: UUID) -> ProfileAvatar | None:
+        """Return a member-owned avatar before the Telegram fallback boundary."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            return await unit_of_work.get_profile_avatar(member_id)
+
+    async def update_own_avatar(
+        self, *, actor_member_id: UUID, content: bytes, content_type: str
+    ) -> ProfileAvatar:
+        """Persist one normalized avatar for an available profile owner."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            if await unit_of_work.get_own_profile(actor_member_id) is None:
+                message = "An available own profile does not exist."
+                raise PermissionError(message)
+            await unit_of_work.lock_members((actor_member_id,))
+            avatar = await unit_of_work.upsert_profile_avatar(
+                member_id=actor_member_id,
+                content=content,
+                content_type=content_type,
+            )
+            await unit_of_work.append_audit_event(
+                actor_member_id=actor_member_id,
+                action="profile_avatar_updated",
+                entity_type="member",
+                entity_id=str(actor_member_id),
+                reason=None,
+            )
+            await unit_of_work.commit()
+            return avatar
+
+    async def delete_own_avatar(self, *, actor_member_id: UUID) -> bool:
+        """Restore the Telegram fallback for an available profile owner."""
+        async with self._unit_of_work_factory() as unit_of_work:
+            if await unit_of_work.get_own_profile(actor_member_id) is None:
+                message = "An available own profile does not exist."
+                raise PermissionError(message)
+            await unit_of_work.lock_members((actor_member_id,))
+            deleted = await unit_of_work.delete_profile_avatar(actor_member_id)
+            if deleted:
+                await unit_of_work.append_audit_event(
+                    actor_member_id=actor_member_id,
+                    action="profile_avatar_deleted",
+                    entity_type="member",
+                    entity_id=str(actor_member_id),
+                    reason="telegram_fallback",
+                )
+            await unit_of_work.commit()
+            return deleted
 
     async def update_own_profile_field(
         self,
