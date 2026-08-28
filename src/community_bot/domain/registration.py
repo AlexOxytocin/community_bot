@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
-from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.domain.members import (
+    MEMBER_INVITATION_PERMISSION,
+    Member,
+    MemberRole,
+    MemberStatus,
+    is_superadministrator,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -348,7 +354,14 @@ def _pilot_city_timezone_index() -> dict[str, str]:
 
 def require_invitation_manager(actor: Member) -> None:
     """Require an active administrator for invitation management."""
-    if actor.status is not MemberStatus.ACTIVE or actor.role is not MemberRole.ADMINISTRATOR:
+    if (
+        actor.status is not MemberStatus.ACTIVE
+        or actor.role is not MemberRole.ADMINISTRATOR
+        or (
+            MEMBER_INVITATION_PERMISSION not in actor.permissions
+            and not is_superadministrator(actor)
+        )
+    ):
         message = "An active administrator is required to manage invitations."
         raise PermissionError(message)
 

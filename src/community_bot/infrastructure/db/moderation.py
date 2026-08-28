@@ -33,7 +33,14 @@ from community_bot.domain.economy import (
     earn_reward,
     refund_reward,
 )
-from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.domain.members import (
+    MEMBER_BLOCKING_PERMISSION,
+    SUPERADMINISTRATOR_PERMISSION,
+    Member,
+    MemberRole,
+    MemberStatus,
+    is_superadministrator,
+)
 from community_bot.domain.moderation import (
     AlertOutcome,
     ModerationError,
@@ -633,8 +640,16 @@ class SqlAlchemyModerationMutation:
             ends_at=command.ends_at,
             now=datetime.datetime.now(datetime.UTC),
         )
-        if command.sanction_type is SanctionType.BAN and actor.role is not MemberRole.ADMINISTRATOR:
-            raise PermissionError("Only an administrator may issue a ban.")
+        if command.sanction_type is SanctionType.BAN and (
+            actor.role is not MemberRole.ADMINISTRATOR
+            or (
+                MEMBER_BLOCKING_PERMISSION not in actor.permissions
+                and not is_superadministrator(actor)
+            )
+        ):
+            raise PermissionError(
+                "administrator member blocking permission is required to issue a ban."
+            )
         if RestrictedAction.KARMA_VOTE in actions and (
             actor.role is not MemberRole.ADMINISTRATOR or "karma_review" not in actor.permissions
         ):
@@ -652,6 +667,8 @@ class SqlAlchemyModerationMutation:
             raise LookupError("Sanction target does not exist.")
         if target.id == actor.id:
             raise PermissionError("A moderator cannot sanction themselves.")
+        if SUPERADMINISTRATOR_PERMISSION in target.permissions_json:
+            raise PermissionError("The superadministrator cannot be sanctioned.")
         applied_status = None
         if command.sanction_type is SanctionType.SUSPENSION:
             applied_status = MemberStatus.SUSPENDED.value

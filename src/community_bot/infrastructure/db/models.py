@@ -97,7 +97,8 @@ class MemberModel(Base):
         CheckConstraint(
             "jsonb_typeof(permissions_json) = 'array' AND "
             "permissions_json <@ "
-            '\'["karma_review","member_read","interaction_review","superadministrator"]\'::jsonb',
+            '\'["karma_review","member_read","interaction_review","member_invitation",'
+            '"member_blocking","administrator_management","superadministrator"]\'::jsonb',
             name="ck_members_permissions",
         ),
     )
@@ -135,6 +136,12 @@ class MemberModel(Base):
     )
     invited_by_member_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    administrator_appointed_by_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id")
+    )
+    administrator_appointed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
     registered_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

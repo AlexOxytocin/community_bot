@@ -27,7 +27,14 @@ from community_bot.application.registration import (
 )
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
-from community_bot.domain.members import MemberRole, MemberStatus
+from community_bot.domain.members import (
+    ADMINISTRATOR_MANAGEMENT_PERMISSION,
+    ADMINISTRATOR_PERMISSIONS,
+    MEMBER_INVITATION_PERMISSION,
+    SUPERADMINISTRATOR_PERMISSION,
+    MemberRole,
+    MemberStatus,
+)
 from community_bot.domain.notifications import DeliveryWindow
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
@@ -107,6 +114,7 @@ async def active_member(database: Database, telegram_user_id: int) -> MemberMode
             timezone="UTC",
             role=MemberRole.ADMINISTRATOR.value,
             status=MemberStatus.ACTIVE.value,
+            permissions_json=sorted(ADMINISTRATOR_PERMISSIONS),
         )
         session.add(member)
         await session.flush()
@@ -3188,3 +3196,151 @@ async def test_profile_links_migration_round_trip_and_constraints(database_url: 
         assert count == 0
     await engine.dispose()
     await migrate(database_url, "upgrade 0022")
+
+
+async def test_administrator_management_api_enforces_provenance_and_delegation(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    owner_id, manager_id, target_id = uuid4(), uuid4(), uuid4()
+    async with sessions.begin() as session:
+        session.add_all(
+            (
+                MemberModel(
+                    id=owner_id,
+                    telegram_user_id=91_001,
+                    telegram_username="community_owner",
+                    display_name="Alex Owner",
+                    timezone="UTC",
+                    role=MemberRole.ADMINISTRATOR.value,
+                    status=MemberStatus.ACTIVE.value,
+                    permissions_json=[SUPERADMINISTRATOR_PERMISSION],
+                ),
+                MemberModel(
+                    id=manager_id,
+                    telegram_user_id=91_002,
+                    telegram_username="future_manager",
+                    display_name="Schoonia",
+                    timezone="UTC",
+                    role=MemberRole.MEMBER.value,
+                    status=MemberStatus.ACTIVE.value,
+                ),
+                MemberModel(
+                    id=target_id,
+                    telegram_user_id=91_003,
+                    telegram_username="future_admin",
+                    display_name="Kristina",
+                    timezone="UTC",
+                    role=MemberRole.MEMBER.value,
+                    status=MemberStatus.ACTIVE.value,
+                ),
+            )
+        )
+
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN,
+            mini_app_origin=ORIGIN,
+            database_url=database_url,
+        ),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as owner_client:
+        authenticated = await owner_client.post(
+            "/api/v1/auth/telegram",
+            content=proof(91_001, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        overview = await owner_client.get("/api/v1/administration")
+        assert overview.status_code == 200
+        owner = next(item for item in overview.json()["items"] if item["is_owner"])
+        assert owner["can_edit"] is False
+        assert set(owner["permissions"]) == {
+            "interaction_review",
+            "member_invitation",
+            "member_blocking",
+            "administrator_management",
+        }
+
+        appointed = await owner_client.post(
+            f"/api/v1/administration/{manager_id}",
+            json={
+                "permissions": [
+                    ADMINISTRATOR_MANAGEMENT_PERMISSION,
+                    MEMBER_INVITATION_PERMISSION,
+                ]
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "91001"},
+        )
+        assert appointed.status_code == 201, appointed.text
+        assert appointed.json()["appointed_by"]["member_id"] == str(owner_id)
+        owner_cookies = owner_client.cookies
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as manager_client:
+        authenticated = await manager_client.post(
+            "/api/v1/auth/telegram",
+            content=proof(91_002, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        forbidden = await manager_client.post(
+            f"/api/v1/administration/{target_id}",
+            json={"permissions": [ADMINISTRATOR_MANAGEMENT_PERMISSION]},
+            headers={"origin": ORIGIN, "idempotency-key": "91002"},
+        )
+        assert forbidden.status_code == 403
+        delegated = await manager_client.post(
+            f"/api/v1/administration/{target_id}",
+            json={"permissions": [MEMBER_INVITATION_PERMISSION]},
+            headers={"origin": ORIGIN, "idempotency-key": "91003"},
+        )
+        assert delegated.status_code == 201, delegated.text
+        assert delegated.json()["appointed_by"]["member_id"] == str(manager_id)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url=ORIGIN, cookies=owner_cookies
+    ) as owner_client:
+        short_reason = await owner_client.post(
+            f"/api/v1/administration/{manager_id}/demote",
+            json={"reason": "x"},
+            headers={"origin": ORIGIN, "idempotency-key": "91004"},
+        )
+        assert short_reason.status_code == 422
+        demoted = await owner_client.post(
+            f"/api/v1/administration/{manager_id}/demote",
+            json={"reason": "Изменение зоны ответственности"},
+            headers={"origin": ORIGIN, "idempotency-key": "91005"},
+        )
+        assert demoted.status_code == 200, demoted.text
+
+    async with sessions() as session:
+        manager = await session.get(MemberModel, manager_id)
+        target = await session.get(MemberModel, target_id)
+        audits = (
+            await session.scalars(
+                select(AuditEventModel)
+                .where(
+                    AuditEventModel.entity_id.in_((str(manager_id), str(target_id))),
+                    AuditEventModel.action == "member_access_changed",
+                )
+                .order_by(AuditEventModel.created_at)
+            )
+        ).all()
+        assert manager is not None
+        assert manager.role == MemberRole.MEMBER.value
+        assert manager.permissions_json == []
+        assert target is not None
+        assert target.administrator_appointed_by_member_id == manager_id
+        assert [event.action for event in audits] == [
+            "member_access_changed",
+            "member_access_changed",
+            "member_access_changed",
+        ]
+        assert audits[0].after_json is not None
+        assert audits[1].after_json is not None
+        assert audits[0].after_json["administrator_appointed_by_member_id"] == str(owner_id)
+        assert audits[1].after_json["administrator_appointed_by_member_id"] == str(manager_id)
+        assert audits[2].reason == "Изменение зоны ответственности"
+    await database.dispose()

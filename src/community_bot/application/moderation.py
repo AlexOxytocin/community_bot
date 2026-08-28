@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, Self, cast
 from uuid import UUID
 
-from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.domain.members import (
+    DISPUTE_MODERATION_PERMISSION,
+    Member,
+    MemberRole,
+    MemberStatus,
+    is_superadministrator,
+)
 from community_bot.domain.moderation import (
     AlertOutcome,
     ResolutionCode,
@@ -327,6 +333,11 @@ class ModerationService:
                 member is None
                 or member.status is not MemberStatus.ACTIVE
                 or member.role not in {MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}
+                or (
+                    member.role is MemberRole.ADMINISTRATOR
+                    and DISPUTE_MODERATION_PERMISSION not in member.permissions
+                    and not is_superadministrator(member)
+                )
             ):
                 raise PermissionError("Only active moderation staff may view the queue.")
             return await uow.moderation.list_cases(
@@ -343,6 +354,11 @@ class ModerationService:
                 member is None
                 or member.status is not MemberStatus.ACTIVE
                 or member.role not in {MemberRole.MODERATOR, MemberRole.ADMINISTRATOR}
+                or (
+                    member.role is MemberRole.ADMINISTRATOR
+                    and DISPUTE_MODERATION_PERMISSION not in member.permissions
+                    and not is_superadministrator(member)
+                )
             ):
                 raise PermissionError("Only active moderation staff may view a case.")
             return await uow.moderation.case_detail(case_id, member)

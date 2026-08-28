@@ -1,5 +1,7 @@
 """Member roles, states, routing, and authorization rules."""
 
+# ruff: noqa: EM101, TRY003
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -7,6 +9,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import datetime
     from uuid import UUID
 
 
@@ -51,7 +54,21 @@ class AuthorizationError(PermissionError):
 
 
 SUPERADMINISTRATOR_PERMISSION = "superadministrator"
-ADMINISTRATOR_PERMISSIONS = frozenset({"interaction_review", "karma_review", "member_read"})
+DISPUTE_MODERATION_PERMISSION = "interaction_review"
+MEMBER_INVITATION_PERMISSION = "member_invitation"
+MEMBER_BLOCKING_PERMISSION = "member_blocking"
+ADMINISTRATOR_MANAGEMENT_PERMISSION = "administrator_management"
+PUBLIC_ADMINISTRATOR_PERMISSIONS = frozenset(
+    {
+        DISPUTE_MODERATION_PERMISSION,
+        MEMBER_INVITATION_PERMISSION,
+        MEMBER_BLOCKING_PERMISSION,
+        ADMINISTRATOR_MANAGEMENT_PERMISSION,
+    }
+)
+ADMINISTRATOR_PERMISSIONS = frozenset(
+    PUBLIC_ADMINISTRATOR_PERMISSIONS | {"karma_review", "member_read"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +80,8 @@ class Member:
     role: MemberRole
     status: MemberStatus
     permissions: frozenset[str] = frozenset()
+    administrator_appointed_by_member_id: UUID | None = None
+    administrator_appointed_at: datetime.datetime | None = None
 
 
 def is_superadministrator(member: Member) -> bool:
@@ -71,6 +90,105 @@ def is_superadministrator(member: Member) -> bool:
         member.role is MemberRole.ADMINISTRATOR
         and SUPERADMINISTRATOR_PERMISSION in member.permissions
     )
+
+
+def effective_administrator_permissions(member: Member) -> frozenset[str]:
+    """Return the four product permissions displayed by administrator management."""
+    if is_superadministrator(member):
+        return PUBLIC_ADMINISTRATOR_PERMISSIONS
+    return frozenset(member.permissions & PUBLIC_ADMINISTRATOR_PERMISSIONS)
+
+
+def assign_administrator(
+    *,
+    actor: Member,
+    target: Member,
+    permissions: frozenset[str],
+    appointed_at: datetime.datetime,
+) -> Member:
+    """Authorize one administrator appointment with an exact permission subset."""
+    _require_administrator_manager(actor)
+    if actor.id == target.id:
+        raise AuthorizationError("An administrator cannot appoint themselves.")
+    if target.status is not MemberStatus.ACTIVE:
+        raise AuthorizationError("Only an active member may become an administrator.")
+    if target.role is MemberRole.ADMINISTRATOR:
+        raise AuthorizationError("Target member is already an administrator.")
+    normalized = _validated_administrator_permissions(actor, permissions)
+    return replace(
+        target,
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({"member_read"} | normalized),
+        administrator_appointed_by_member_id=actor.id,
+        administrator_appointed_at=appointed_at,
+    )
+
+
+def update_administrator_permissions(
+    *, actor: Member, target: Member, permissions: frozenset[str]
+) -> Member:
+    """Authorize an exact update to one editable administrator's product permissions."""
+    _require_editable_administrator(actor=actor, target=target)
+    normalized = _validated_administrator_permissions(actor, permissions)
+    preserved = target.permissions - PUBLIC_ADMINISTRATOR_PERMISSIONS
+    return replace(target, permissions=frozenset(preserved | normalized))
+
+
+def demote_administrator(*, actor: Member, target: Member) -> Member:
+    """Authorize demotion to member while keeping the immutable audit history external."""
+    _require_editable_administrator(actor=actor, target=target)
+    return replace(
+        target,
+        role=MemberRole.MEMBER,
+        permissions=frozenset(),
+        administrator_appointed_by_member_id=None,
+        administrator_appointed_at=None,
+    )
+
+
+def can_manage_administrators(member: Member) -> bool:
+    """Return whether an active administrator may appoint delegated administrators."""
+    return bool(
+        member.status is MemberStatus.ACTIVE
+        and member.role is MemberRole.ADMINISTRATOR
+        and (
+            is_superadministrator(member)
+            or ADMINISTRATOR_MANAGEMENT_PERMISSION in member.permissions
+        )
+    )
+
+
+def can_edit_administrator(*, actor: Member, target: Member) -> bool:
+    """Return whether the current actor may edit or demote the target administrator."""
+    if not can_manage_administrators(actor) or actor.id == target.id:
+        return False
+    if target.role is not MemberRole.ADMINISTRATOR or is_superadministrator(target):
+        return False
+    return bool(
+        is_superadministrator(actor) or target.administrator_appointed_by_member_id == actor.id
+    )
+
+
+def _require_administrator_manager(actor: Member) -> None:
+    if not can_manage_administrators(actor):
+        raise AuthorizationError("Administrator management permission is required.")
+
+
+def _require_editable_administrator(*, actor: Member, target: Member) -> None:
+    if not can_edit_administrator(actor=actor, target=target):
+        raise AuthorizationError("This administrator cannot be changed by the current actor.")
+
+
+def _validated_administrator_permissions(
+    actor: Member, permissions: frozenset[str]
+) -> frozenset[str]:
+    if not permissions or not permissions <= PUBLIC_ADMINISTRATOR_PERMISSIONS:
+        raise AuthorizationError("At least one supported administrator permission is required.")
+    if not is_superadministrator(actor):
+        allowed = effective_administrator_permissions(actor) - {ADMINISTRATOR_MANAGEMENT_PERMISSION}
+        if ADMINISTRATOR_MANAGEMENT_PERMISSION in permissions or not permissions <= allowed:
+            raise AuthorizationError("An administrator may delegate only their ordinary rights.")
+    return permissions
 
 
 def route_start(member: Member | None) -> StartOutcome:
@@ -154,7 +272,17 @@ def _change_role(*, actor: Member, target: Member, requested_value: str) -> Memb
         permissions = permissions | ADMINISTRATOR_PERMISSIONS
     elif target.role is MemberRole.ADMINISTRATOR:
         permissions = permissions - ADMINISTRATOR_PERMISSIONS - {SUPERADMINISTRATOR_PERMISSION}
-    return replace(target, role=requested, permissions=frozenset(permissions))
+    return replace(
+        target,
+        role=requested,
+        permissions=frozenset(permissions),
+        administrator_appointed_by_member_id=(
+            actor.id if requested is MemberRole.ADMINISTRATOR else None
+        ),
+        administrator_appointed_at=(
+            target.administrator_appointed_at if requested is MemberRole.ADMINISTRATOR else None
+        ),
+    )
 
 
 def _change_status(*, actor: Member, target: Member, requested_value: str) -> Member:

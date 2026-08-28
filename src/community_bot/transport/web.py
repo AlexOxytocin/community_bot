@@ -28,6 +28,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
+from community_bot.application.administration import (
+    AdministrationService,
+    AdministratorCard,
+    AdministratorChange,
+    AdministratorDemotion,
+    AdministratorIdentity,
+    administrator_is_owner,
+)
 from community_bot.application.assignments import (
     AcceptAssignmentCommand,
     AssignmentCard,
@@ -138,6 +146,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "onboarding_unavailable",
         "profile_unavailable",
         "assignment_unavailable",
+        "administration_unavailable",
         "task_catalog_unavailable",
         "unauthorized",
     }
@@ -279,6 +288,64 @@ class KarmaActionDto(_Dto):
 
 class MembersDto(_Dto):
     items: tuple[MemberDto, ...]
+
+
+AdministratorPermission = Literal[
+    "interaction_review",
+    "member_invitation",
+    "member_blocking",
+    "administrator_management",
+]
+_ADMIN_PERMISSION_ORDER: tuple[AdministratorPermission, ...] = (
+    "interaction_review",
+    "member_invitation",
+    "member_blocking",
+    "administrator_management",
+)
+
+
+class AdministratorIdentityDto(_Dto):
+    member_id: UUID
+    telegram_username: str | None
+    display_name: str
+
+
+class AdministratorDto(AdministratorIdentityDto):
+    permissions: tuple[AdministratorPermission, ...]
+    is_owner: bool
+    appointed_by: AdministratorIdentityDto | None
+    appointed_at: datetime.datetime | None
+    can_edit: bool
+    can_demote: bool
+
+
+class AdministrationDto(_Dto):
+    items: tuple[AdministratorDto, ...]
+    actor_permissions: tuple[AdministratorPermission, ...]
+    can_appoint: bool
+    can_delegate_administrator_management: bool
+
+
+class AdministratorCandidatesDto(_Dto):
+    items: tuple[AdministratorIdentityDto, ...]
+
+
+class AdministratorPermissionsRequest(_Dto):
+    permissions: tuple[AdministratorPermission, ...] = Field(min_length=1, max_length=4)
+
+    @field_validator("permissions")
+    @classmethod
+    def unique_permissions(
+        cls, value: tuple[AdministratorPermission, ...]
+    ) -> tuple[AdministratorPermission, ...]:
+        """Reject repeated permission identifiers."""
+        if len(set(value)) != len(value):
+            raise ValueError("Administrator permissions must be unique.")
+        return value
+
+
+class AdministratorDemotionRequest(_Dto):
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class TaskDto(_Dto):
@@ -613,6 +680,7 @@ def create_web_app(
     tasks = TaskService(database.unit_of_work)
     assignments = AssignmentService(database.unit_of_work)
     moderation = ModerationService(database.unit_of_work)
+    administration = AdministrationService(database.unit_of_work)
     index_html = (
         (_STATIC_DIR / "index.html")
         .read_text(encoding="utf-8")
@@ -1004,6 +1072,143 @@ def create_web_app(
             raise HTTPException(status_code=404, detail="not_found") from error
         dto = MemberDetailDto(**_member_dto(profile).model_dump(), can_rate_karma=can_rate_karma)
         return _json_response(dto)
+
+    @app.get("/api/v1/administration", response_model=AdministrationDto)
+    async def administration_overview(
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            overview = await administration.overview(actor)
+        except PermissionError:
+            return _error_response(403, "administration_unavailable")
+        return _json_response(
+            AdministrationDto(
+                items=tuple(_administrator_dto(item) for item in overview.items),
+                actor_permissions=tuple(
+                    item for item in _ADMIN_PERMISSION_ORDER if item in overview.actor_permissions
+                ),
+                can_appoint=overview.can_appoint,
+                can_delegate_administrator_management=(
+                    overview.can_delegate_administrator_management
+                ),
+            )
+        )
+
+    @app.get("/api/v1/administration/candidates", response_model=AdministratorCandidatesDto)
+    async def administrator_candidates(
+        actor: ActorContext = Depends(current_actor),
+        query: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=50)] = 30,
+    ) -> JSONResponse:
+        normalized = None if query is None else " ".join(query.split())
+        if normalized is not None and len(normalized) > 80:
+            return _error_response(422, "invalid_request")
+        try:
+            candidates = await administration.candidates(
+                actor, query=normalized or None, limit=limit
+            )
+        except PermissionError:
+            return _error_response(403, "administration_unavailable")
+        return _json_response(
+            AdministratorCandidatesDto(
+                items=tuple(_administrator_identity_dto(item) for item in candidates)
+            )
+        )
+
+    @app.get("/api/v1/administration/{member_id}", response_model=AdministratorDto)
+    async def administrator_detail(
+        member_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> JSONResponse:
+        try:
+            card = await administration.detail(actor, member_id)
+        except PermissionError:
+            return _error_response(403, "administration_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_administrator_dto(card))
+
+    @app.post("/api/v1/administration/{member_id}", response_model=AdministratorDto)
+    async def appoint_administrator(member_id: UUID, request: Request) -> JSONResponse:
+        return await change_administrator(member_id, request, appoint=True)
+
+    @app.put("/api/v1/administration/{member_id}", response_model=AdministratorDto)
+    async def update_administrator(member_id: UUID, request: Request) -> JSONResponse:
+        return await change_administrator(member_id, request, appoint=False)
+
+    async def change_administrator(
+        member_id: UUID, request: Request, *, appoint: bool
+    ) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "AdministratorPermissionsRequest | None",
+            await _submission_request(request, AdministratorPermissionsRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        operation = "appoint" if appoint else "permissions"
+        command = AdministratorChange(
+            update_id=_submission_update_id(
+                actor.member_id,
+                member_id,
+                operation,
+                operation_key,
+                namespace=b"administrator-management-v1",
+            ),
+            actor_member_id=actor.member_id,
+            target_member_id=member_id,
+            permissions=frozenset(payload.permissions),
+        )
+        try:
+            card = (
+                await administration.appoint(command, actor)
+                if appoint
+                else await administration.update_permissions(command, actor)
+            )
+        except LookupError:
+            return _error_response(404, "not_found")
+        except PermissionError:
+            return _error_response(403, "administration_unavailable")
+        return _json_response(_administrator_dto(card), status_code=201 if appoint else 200)
+
+    @app.post(
+        "/api/v1/administration/{member_id}/demote",
+        response_model=AdministratorIdentityDto,
+    )
+    async def demote_administrator_route(member_id: UUID, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "AdministratorDemotionRequest | None",
+            await _submission_request(request, AdministratorDemotionRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        try:
+            identity = await administration.demote(
+                AdministratorDemotion(
+                    update_id=_submission_update_id(
+                        actor.member_id,
+                        member_id,
+                        "demote",
+                        operation_key,
+                        namespace=b"administrator-management-v1",
+                    ),
+                    actor_member_id=actor.member_id,
+                    target_member_id=member_id,
+                    reason=payload.reason,
+                ),
+                actor,
+            )
+        except LookupError:
+            return _error_response(404, "not_found")
+        except PermissionError:
+            return _error_response(403, "administration_unavailable")
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        return _json_response(_administrator_identity_dto(identity))
 
     @app.post(
         "/api/v1/members/{member_id}/karma-vote",
@@ -2197,6 +2402,8 @@ async def _submission_request(
         | AssignmentCancellationRequest
         | ModerationResolutionRequest
         | RegistrationModerationDecisionRequest
+        | AdministratorPermissionsRequest
+        | AdministratorDemotionRequest
     ],
 ) -> (
     SaveSubmissionDraftRequest
@@ -2206,6 +2413,8 @@ async def _submission_request(
     | AssignmentCancellationRequest
     | ModerationResolutionRequest
     | RegistrationModerationDecisionRequest
+    | AdministratorPermissionsRequest
+    | AdministratorDemotionRequest
     | None
 ):
     if request.headers.get("content-type", "").lower() != "application/json":
@@ -2318,6 +2527,34 @@ def _member_dto(profile: SafeProfile) -> MemberDto:
             no_show=profile.reliability.no_show,
             rate=profile.reliability.rate,
         ),
+    )
+
+
+def _administrator_identity_dto(identity: AdministratorIdentity) -> AdministratorIdentityDto:
+    return AdministratorIdentityDto(
+        member_id=identity.member.id,
+        telegram_username=identity.telegram_username,
+        display_name=identity.display_name,
+    )
+
+
+def _administrator_dto(card: AdministratorCard) -> AdministratorDto:
+    identity = card.identity
+    permissions = (
+        _ADMIN_PERMISSION_ORDER
+        if administrator_is_owner(identity)
+        else tuple(item for item in _ADMIN_PERMISSION_ORDER if item in identity.member.permissions)
+    )
+    return AdministratorDto(
+        **_administrator_identity_dto(identity).model_dump(),
+        permissions=permissions,
+        is_owner=administrator_is_owner(identity),
+        appointed_by=(
+            None if card.appointed_by is None else _administrator_identity_dto(card.appointed_by)
+        ),
+        appointed_at=identity.member.administrator_appointed_at,
+        can_edit=card.can_edit,
+        can_demote=card.can_demote,
     )
 
 

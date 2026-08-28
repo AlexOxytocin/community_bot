@@ -125,7 +125,7 @@ const resetScrollPosition = () => {
 
 const replaceContent = (...nodes) => {
   shell.querySelector(
-    ".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop, .assignment-action-backdrop, .profile-editor-backdrop",
+    ".catalog-sort-backdrop, .catalog-filter-backdrop, .task-size-backdrop, .assignment-action-backdrop, .profile-editor-backdrop, .admin-sheet-backdrop",
   )?.remove();
   content.replaceChildren(...nodes);
   revealApplication();
@@ -381,10 +381,15 @@ const apiFetch = async (path, options = {}) => {
 
 const configureRoleNavigation = async () => {
   try {
-    await getJson("/api/v1/moderation/cases?limit=1");
+    await getJson("/api/v1/administration");
     moderationNav.hidden = false;
   } catch {
-    moderationNav.hidden = true;
+    try {
+      await getJson("/api/v1/moderation/cases?limit=1");
+      moderationNav.hidden = false;
+    } catch {
+      moderationNav.hidden = true;
+    }
   }
 };
 
@@ -5614,6 +5619,441 @@ const moderationError = (code, retry) => {
   ];
 };
 
+const administratorPermissionDetails = [
+  ["interaction_review", "Модерация споров", "Просмотр дел и принятие решений"],
+  ["member_invitation", "Приглашение участников", "Создание и отзыв персональных кодов"],
+  ["member_blocking", "Блокировка пользователей", "Ограничение и восстановление доступа"],
+  ["administrator_management", "Назначение администраторов", "Повышенное право: только в пределах своих полномочий"],
+];
+
+const administratorInitials = (name) => name
+  .split(/\s+/)
+  .filter(Boolean)
+  .slice(0, 2)
+  .map((part) => part[0]?.toUpperCase())
+  .join("") || "?";
+
+const administratorIdentity = (person, meta) => {
+  const row = element("span", undefined, "admin-person-main");
+  row.append(
+    element("span", person.display_name, "admin-person-name"),
+    element(
+      "span",
+      `${person.telegram_username ? `@${person.telegram_username}` : "без username"}${meta ? ` · ${meta}` : ""}`,
+      "admin-person-meta",
+    ),
+  );
+  return row;
+};
+
+const administratorAvatar = (person) => element(
+  "span",
+  administratorInitials(person.display_name),
+  "admin-avatar",
+);
+
+const administratorPermissionNames = (permissions) => administratorPermissionDetails
+  .filter(([id]) => permissions.includes(id))
+  .map(([, name]) => name);
+
+function moderationTabs(active, queueCount = null) {
+  const tabs = element("div", undefined, "admin-tabs");
+  const options = [
+    ["queue", queueCount === null ? "Очередь" : `Очередь · ${queueCount}`, () => loadModeration()],
+    ["access", "Доступ", () => loadAdministrationAccess()],
+    ["team", "Команда", () => loadAdministrationTeam()],
+  ];
+  for (const [id, label, action] of options) {
+    const button = element("button", label, "admin-tab");
+    button.type = "button";
+    button.classList.toggle("is-active", id === active);
+    button.setAttribute("aria-pressed", String(id === active));
+    button.addEventListener("click", action);
+    tabs.append(button);
+  }
+  return tabs;
+}
+
+function administratorRights(permissions, { disabled = false, allowed = null } = {}) {
+  const rights = element("div", undefined, "admin-rights");
+  for (const [id, name, description] of administratorPermissionDetails) {
+    const row = element("label", undefined, "admin-right-row");
+    if (id === "administrator_management") row.classList.add("is-elevated");
+    const copy = element("span");
+    copy.append(
+      element("span", name, "admin-right-name"),
+      element("span", description, "admin-right-description"),
+    );
+    const control = element("span", undefined, "admin-switch");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.permission = id;
+    input.checked = permissions.includes(id);
+    input.disabled = disabled || (allowed !== null && !allowed.includes(id));
+    control.append(input, element("span", undefined, "admin-switch-track"));
+    row.append(copy, control);
+    rights.append(row);
+  }
+  return rights;
+}
+
+const selectedAdministratorPermissions = () => [
+  ...content.querySelectorAll("[data-permission]:checked"),
+].map((input) => input.dataset.permission);
+
+function showAdministratorToast(message) {
+  shell.querySelector(".admin-toast")?.remove();
+  const toast = element("div", message, "admin-toast");
+  toast.setAttribute("role", "status");
+  shell.append(toast);
+  setTimeout(() => toast.remove(), 2600);
+}
+
+function administratorSheet(trigger, build) {
+  shell.querySelector(".admin-sheet-backdrop")?.remove();
+  const backdrop = element("section", undefined, "admin-sheet-backdrop");
+  const sheet = element("section", undefined, "admin-sheet");
+  sheet.setAttribute("role", "dialog");
+  sheet.setAttribute("aria-modal", "true");
+  const close = () => {
+    backdrop.remove();
+    trigger?.focus({ preventScroll: true });
+  };
+  build(sheet, close);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) close();
+  });
+  backdrop.append(sheet);
+  shell.append(backdrop);
+  queueMicrotask(() => sheet.querySelector("button, textarea")?.focus({ preventScroll: true }));
+}
+
+async function loadAdministrationAccess(push = true) {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "moderation-access" }, "", "#/moderation/access");
+  setNavigation("moderation", false);
+  title.textContent = "Модерация";
+  back.classList.add("hidden");
+  replaceContent(moderationTabs("access"), element("p", "Загружаем права…", "compact-empty"));
+  try {
+    const overview = await getJson("/api/v1/administration");
+    if (revision !== screenRevision) return;
+    const summary = element("section", undefined, "admin-summary");
+    const copy = element("div");
+    copy.append(
+      element("h2", "Ваш доступ"),
+      element("p", "Полномочия, доступные в интерфейсе модерации"),
+    );
+    summary.append(copy);
+    const notice = element(
+      "div",
+      overview.can_appoint
+        ? "Вы можете назначать администраторов в пределах правил делегирования."
+        : "Изменить набор прав может владелец или назначивший вас администратор.",
+      "admin-notice",
+    );
+    replaceContent(
+      moderationTabs("access"),
+      summary,
+      notice,
+      administratorRights(overview.actor_permissions, { disabled: true }),
+    );
+  } catch {
+    if (revision === screenRevision) {
+      replaceContent(
+        moderationTabs("access"),
+        element("p", "Не удалось загрузить права доступа.", "status"),
+      );
+    }
+  }
+}
+
+function administratorCard(person) {
+  const button = element("button", undefined, "admin-person");
+  button.type = "button";
+  button.dataset.administratorId = person.member_id;
+  const permissionNames = administratorPermissionNames(person.permissions);
+  button.append(
+    administratorAvatar(person),
+    administratorIdentity(
+      person,
+      person.is_owner
+        ? "все права · суперадминистратор"
+        : `${permissionNames.slice(0, 2).join(", ") || "без прав"}${permissionNames.length > 2 ? ` · ${permissionNames.length} права` : ""}`,
+    ),
+    element("span", person.is_owner ? "Владелец" : "Администратор", `admin-badge${person.is_owner ? " is-owner" : ""}`),
+  );
+  button.addEventListener("click", () => showAdministratorRights(person.member_id));
+  return button;
+}
+
+async function loadAdministrationTeam(push = true) {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "moderation-team" }, "", "#/moderation/team");
+  setNavigation("moderation", false);
+  title.textContent = "Модерация";
+  back.classList.add("hidden");
+  replaceContent(moderationTabs("team"), element("p", "Загружаем команду…", "compact-empty"));
+  try {
+    const overview = await getJson("/api/v1/administration");
+    if (revision !== screenRevision) return;
+    const summary = element("section", undefined, "admin-summary");
+    const copy = element("div");
+    copy.append(
+      element("h2", "Команда"),
+      element("p", "Администраторы и их полномочия"),
+    );
+    summary.append(copy, element("span", String(overview.items.length), "admin-count"));
+    const nodes = [moderationTabs("team"), summary];
+    if (overview.can_appoint) {
+      const add = element("button", "+ Назначить администратора", "primary admin-full");
+      add.type = "button";
+      add.addEventListener("click", () => loadAdministratorCandidates());
+      nodes.push(add);
+    }
+    const list = element("div", undefined, "admin-list");
+    for (const person of overview.items) list.append(administratorCard(person));
+    nodes.push(
+      list,
+      element(
+        "div",
+        "Назначать администраторов можно только из активных участников сообщества. Владелец всегда имеет все права.",
+        "admin-notice",
+      ),
+    );
+    replaceContent(...nodes);
+  } catch {
+    if (revision === screenRevision) {
+      replaceContent(
+        moderationTabs("team"),
+        element("p", "Управление командой недоступно для этого аккаунта.", "status"),
+      );
+    }
+  }
+}
+
+function candidateCard(person) {
+  const button = element("button", undefined, "admin-person");
+  button.type = "button";
+  button.append(
+    administratorAvatar(person),
+    administratorIdentity(person, "активный участник"),
+    element("span", "›", "admin-chevron"),
+  );
+  button.addEventListener("click", () => showAdministratorRights(person.member_id, true, person));
+  return button;
+}
+
+async function loadAdministratorCandidates(push = true, initialQuery = "") {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "administrator-candidates" }, "", "#/moderation/administrators/new");
+  setNavigation("moderation", true);
+  title.textContent = "Новый администратор";
+  const intro = element("section", undefined, "admin-summary");
+  const copy = element("div");
+  copy.append(
+    element("h2", "Выберите участника"),
+    element("p", "Назначить можно только активного участника сообщества."),
+  );
+  intro.append(copy);
+  const search = document.createElement("input");
+  search.className = "admin-search";
+  search.type = "search";
+  search.placeholder = "Имя или @username";
+  search.setAttribute("aria-label", "Поиск участника");
+  search.value = initialQuery;
+  const list = element("div", undefined, "admin-list");
+  replaceContent(intro, search, element("p", "Активные участники", "admin-section-label"), list);
+  const fetchCandidates = async () => {
+    const query = search.value.trim();
+    try {
+      const page = await getJson(`/api/v1/administration/candidates?limit=30${query ? `&query=${encodeURIComponent(query)}` : ""}`);
+      if (revision !== screenRevision) return;
+      list.replaceChildren(...page.items.map(candidateCard));
+      if (!page.items.length) list.append(element("p", "Участники не найдены.", "compact-empty"));
+    } catch {
+      if (revision === screenRevision) list.replaceChildren(element("p", "Не удалось загрузить участников.", "status"));
+    }
+  };
+  let searchTimer = null;
+  search.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(fetchCandidates, 250);
+  });
+  await fetchCandidates();
+}
+
+function administratorProfile(person, subtitle) {
+  const card = element("section", undefined, "admin-profile-card");
+  card.append(administratorAvatar(person), administratorIdentity(person, subtitle));
+  return card;
+}
+
+async function showAdministratorRights(memberId, isNew = false, candidate = null, push = true) {
+  const revision = ++screenRevision;
+  if (push) {
+    history.pushState(
+      { screen: "administrator-rights", memberId, isNew, candidate },
+      "",
+      isNew ? `#/moderation/administrators/new/${memberId}` : `#/moderation/administrators/${memberId}`,
+    );
+  }
+  setNavigation("moderation", true);
+  title.textContent = isNew ? "Права администратора" : "Права администратора";
+  replaceContent(element("p", "Загружаем права…", "compact-empty"));
+  try {
+    const [person, overview] = await Promise.all([
+      isNew ? Promise.resolve(candidate) : getJson(`/api/v1/administration/${encodeURIComponent(memberId)}`),
+      getJson("/api/v1/administration"),
+    ]);
+    if (revision !== screenRevision || !person) return;
+    const owner = !isNew && person.is_owner;
+    if (owner) title.textContent = "Права владельца";
+    const allowed = owner
+      ? person.permissions
+      : overview.actor_permissions.filter((permission) => (
+        permission !== "administrator_management"
+        || overview.can_delegate_administrator_management
+      ));
+    const nodes = [
+      administratorProfile(
+        person,
+        owner ? "суперадминистратор" : isNew ? "активный участник" : "администратор",
+      ),
+    ];
+    if (owner) {
+      nodes.push(element("div", "Это владелец сообщества. У него всегда включены все права; изменить или снять их нельзя.", "admin-notice"));
+    } else if (isNew) {
+      nodes.push(element("div", "Новый администратор получит только выбранные права. Их можно изменить позже.", "admin-notice"));
+    } else if (person.appointed_by) {
+      const date = person.appointed_at ? new Date(person.appointed_at).toLocaleDateString("ru-RU") : "дата не указана";
+      nodes.push(element("div", `Назначил ${person.appointed_by.display_name} · ${date}`, "admin-audit-note"));
+    }
+    nodes.push(administratorRights(person.permissions || [], { disabled: owner || (!isNew && !person.can_edit), allowed }));
+    if (!owner && (isNew || person.can_edit)) {
+      const actions = element("div", undefined, "admin-sticky-actions");
+      const save = element("button", isNew ? "Назначить администратором" : "Сохранить права", "primary admin-full");
+      save.type = "button";
+      save.addEventListener("click", () => confirmAdministratorChange(save, person, isNew));
+      actions.append(save);
+      if (!isNew && person.can_demote) {
+        const demote = element("button", "Снять права администратора", "admin-danger-button admin-full");
+        demote.type = "button";
+        demote.addEventListener("click", () => confirmAdministratorDemotion(demote, person));
+        actions.append(demote);
+      }
+      nodes.push(actions);
+    }
+    replaceContent(...nodes);
+  } catch {
+    if (revision === screenRevision) replaceContent(element("p", "Не удалось загрузить права администратора.", "status"));
+  }
+}
+
+function confirmAdministratorChange(trigger, person, isNew) {
+  const permissions = selectedAdministratorPermissions();
+  if (!permissions.length) {
+    showAdministratorToast("Выберите хотя бы одно право");
+    return;
+  }
+  administratorSheet(trigger, (sheet, close) => {
+    const headingText = isNew ? "Назначить администратора?" : "Сохранить новые права?";
+    const headingNode = element("h2", headingText);
+    sheet.append(
+      headingNode,
+      administratorProfile(person, person.telegram_username ? `@${person.telegram_username}` : "без username"),
+      element("p", "Пользователь получит следующие права:"),
+    );
+    const list = element("ul");
+    for (const name of administratorPermissionNames(permissions)) list.append(element("li", name));
+    sheet.append(list);
+    if (permissions.includes("administrator_management")) {
+      sheet.append(element("div", "Право назначения администраторов является повышенным. Передавать его дальше пользователь не сможет.", "admin-notice"));
+    }
+    const actions = element("div", undefined, "admin-sheet-actions");
+    const cancel = element("button", "Отмена", "secondary");
+    cancel.type = "button";
+    cancel.addEventListener("click", close);
+    const confirm = element("button", isNew ? "Назначить" : "Сохранить", "primary");
+    confirm.type = "button";
+    let operationKey = null;
+    confirm.addEventListener("click", async () => {
+      cancel.disabled = true;
+      confirm.disabled = true;
+      operationKey ||= newOperationKey();
+      try {
+        await submissionRequest(
+          `/api/v1/administration/${encodeURIComponent(person.member_id)}`,
+          isNew ? "POST" : "PUT",
+          operationKey,
+          { permissions },
+        );
+        close();
+        await loadAdministrationTeam(false);
+        showAdministratorToast(isNew ? `${person.display_name} назначен администратором` : "Права администратора сохранены");
+      } catch (error) {
+        if (!retryableSubmissionError(error)) operationKey = null;
+        cancel.disabled = false;
+        confirm.disabled = false;
+        showAdministratorToast("Не удалось сохранить права");
+      }
+    });
+    actions.append(cancel, confirm);
+    sheet.append(actions);
+  });
+}
+
+function confirmAdministratorDemotion(trigger, person) {
+  administratorSheet(trigger, (sheet, close) => {
+    sheet.append(
+      element("h2", "Снять права администратора?"),
+      administratorProfile(person, "останется участником сообщества"),
+    );
+    const label = element("label", "Причина", "admin-field-label");
+    const reason = document.createElement("textarea");
+    reason.className = "admin-textarea";
+    reason.maxLength = 500;
+    reason.placeholder = "Например: изменение зоны ответственности";
+    label.append(reason);
+    sheet.append(
+      label,
+      element("div", "Административные действия станут недоступны сразу. Профиль и история участника сохранятся.", "admin-notice"),
+    );
+    const actions = element("div", undefined, "admin-sheet-actions");
+    const cancel = element("button", "Отмена", "secondary");
+    cancel.type = "button";
+    cancel.addEventListener("click", close);
+    const confirm = element("button", "Снять права", "admin-danger-button");
+    confirm.type = "button";
+    confirm.disabled = true;
+    reason.addEventListener("input", () => { confirm.disabled = reason.value.trim().length < 3; });
+    let operationKey = null;
+    confirm.addEventListener("click", async () => {
+      cancel.disabled = true;
+      confirm.disabled = true;
+      operationKey ||= newOperationKey();
+      try {
+        await submissionRequest(
+          `/api/v1/administration/${encodeURIComponent(person.member_id)}/demote`,
+          "POST",
+          operationKey,
+          { reason: reason.value.trim() },
+        );
+        close();
+        await loadAdministrationTeam(false);
+        showAdministratorToast("Права администратора сняты");
+      } catch (error) {
+        if (!retryableSubmissionError(error)) operationKey = null;
+        cancel.disabled = false;
+        confirm.disabled = false;
+        showAdministratorToast("Не удалось снять права");
+      }
+    });
+    actions.append(cancel, confirm);
+    sheet.append(actions);
+  });
+}
+
 function showModerationCases(cases, registrations, revision) {
   if (revision !== screenRevision) return;
   const focusedCaseId = returnFocusModerationCaseId
@@ -5625,6 +6065,7 @@ function showModerationCases(cases, registrations, revision) {
   boundary.dataset.screenId = "S01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = cases.length || registrations.length ? "content" : "empty";
+  boundary.append(moderationTabs("queue", cases.length + registrations.length));
   const tabs = element("div", undefined, "root-tabs moderation-queue-tabs");
   const registrationTab = element("button");
   registrationTab.append(
@@ -5784,11 +6225,27 @@ async function loadModeration(push = true) {
   setNavigation("moderation", false);
   title.textContent = "Модерация";
   back.classList.add("hidden");
-  replaceContent(element("p", "Загружаем очередь…", "compact-empty"));
+  replaceContent(
+    moderationTabs("queue"),
+    element("p", "Загружаем очередь…", "compact-empty"),
+  );
   try {
-    const [casePage, registrationPage] = await Promise.all([
-      getJson("/api/v1/moderation/cases?limit=20"),
-      getJson("/api/v1/moderation/registrations?limit=20"),
+    let casePage;
+    let registrationPage;
+    const showRefreshedQueue = () => {
+      if (revision === screenRevision && casePage && registrationPage) {
+        showModerationCases(casePage.items, registrationPage.items, revision);
+      }
+    };
+    [casePage, registrationPage] = await Promise.all([
+      getJson("/api/v1/moderation/cases?limit=20", (refreshed) => {
+        casePage = refreshed;
+        showRefreshedQueue();
+      }),
+      getJson("/api/v1/moderation/registrations?limit=20", (refreshed) => {
+        registrationPage = refreshed;
+        showRefreshedQueue();
+      }),
     ]);
     if (revision !== screenRevision) return;
     showModerationCases(casePage.items, registrationPage.items, revision);
@@ -5797,7 +6254,7 @@ async function loadModeration(push = true) {
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
     retry.addEventListener("click", () => loadModeration(false));
-    replaceContent(element("p", "Открытые обращения", "screen-subtitle"), ...moderationError(error.message, retry));
+    replaceContent(moderationTabs("queue"), element("p", "Открытые обращения", "screen-subtitle"), ...moderationError(error.message, retry));
   }
 }
 
@@ -6853,6 +7310,9 @@ async function bootstrapTaskHome(authAttempted = false) {
     const presentationId = presentation?.screen.id;
     const resourceId = presentation?.resourceId;
     const directMember = initialHash.match(/^#\/members\/([0-9a-f-]{36})$/i);
+    const directAdministration = initialHash.match(
+      /^#\/moderation\/(access|team|administrators(?:\/([0-9a-f-]{36}))?|administrators\/new)$/i,
+    );
     if (initialHash === "#/settings") showSettings(false);
     else if (/^#\/profile(?:\/.*)?$/.test(initialHash)) loadProfile(false);
     else if (directMember) {
@@ -6862,6 +7322,22 @@ async function bootstrapTaskHome(authAttempted = false) {
         initialHash,
       );
       showMemberProfile(directMember[1], false);
+    } else if (directAdministration?.[1] === "access") {
+      history.replaceState({ screen: "moderation-access" }, "", initialHash);
+      loadAdministrationAccess(false);
+    } else if (directAdministration?.[1] === "team") {
+      history.replaceState({ screen: "moderation-team" }, "", initialHash);
+      loadAdministrationTeam(false);
+    } else if (directAdministration?.[1] === "administrators/new") {
+      history.replaceState({ screen: "administrator-candidates" }, "", initialHash);
+      loadAdministratorCandidates(false);
+    } else if (directAdministration?.[2]) {
+      history.replaceState(
+        { screen: "administrator-rights", memberId: directAdministration[2], isNew: false },
+        "",
+        initialHash,
+      );
+      showAdministratorRights(directAdministration[2], false, null, false);
     } else if (presentationId === "T01" || presentationId === "T02") {
       history.replaceState({ screen: "catalog" }, "", initialHash);
       await loadCatalog(false);
@@ -6999,6 +7475,19 @@ globalThis.addEventListener("popstate", (event) => {
     showMemberProfile(event.state.memberId, false);
   } else if (event.state?.screen === "moderation") {
     loadModeration(false);
+  } else if (event.state?.screen === "moderation-access") {
+    loadAdministrationAccess(false);
+  } else if (event.state?.screen === "moderation-team") {
+    loadAdministrationTeam(false);
+  } else if (event.state?.screen === "administrator-candidates") {
+    loadAdministratorCandidates(false);
+  } else if (event.state?.screen === "administrator-rights") {
+    showAdministratorRights(
+      event.state.memberId,
+      Boolean(event.state.isNew),
+      event.state.candidate || null,
+      false,
+    );
   } else if (event.state?.screen === "moderation-case") {
     showModerationCase(event.state.caseId, false);
   } else if (event.state?.screen === "task-creation") {

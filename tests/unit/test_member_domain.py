@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -7,7 +9,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from community_bot.domain.members import (
+    ADMINISTRATOR_MANAGEMENT_PERMISSION,
     ADMINISTRATOR_PERMISSIONS,
+    DISPUTE_MODERATION_PERMISSION,
+    MEMBER_BLOCKING_PERMISSION,
+    MEMBER_INVITATION_PERMISSION,
     SUPERADMINISTRATOR_PERMISSION,
     AuthorizationError,
     ChangeKind,
@@ -15,9 +21,13 @@ from community_bot.domain.members import (
     MemberRole,
     MemberStatus,
     StartOutcome,
+    assign_administrator,
+    can_edit_administrator,
     can_read_member,
     change_member,
+    demote_administrator,
     route_start,
+    update_administrator_permissions,
 )
 
 
@@ -305,3 +315,94 @@ def test_unknown_requested_value_is_denied(kind: ChangeKind) -> None:
             kind=kind,
             requested_value="owner",
         )
+
+
+def test_owner_can_appoint_with_exact_individual_permissions() -> None:
+    owner = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+    )
+    target = member(role=MemberRole.MODERATOR)
+
+    changed = assign_administrator(
+        actor=owner,
+        target=target,
+        permissions=frozenset({DISPUTE_MODERATION_PERMISSION, ADMINISTRATOR_MANAGEMENT_PERMISSION}),
+        appointed_at=datetime.datetime.now(datetime.UTC),
+    )
+
+    assert changed.role is MemberRole.ADMINISTRATOR
+    assert changed.permissions == frozenset(
+        {"member_read", DISPUTE_MODERATION_PERMISSION, ADMINISTRATOR_MANAGEMENT_PERMISSION}
+    )
+    assert changed.administrator_appointed_by_member_id == owner.id
+
+
+def test_delegated_manager_can_grant_only_own_ordinary_rights() -> None:
+    manager = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset(
+            {
+                ADMINISTRATOR_MANAGEMENT_PERMISSION,
+                DISPUTE_MODERATION_PERMISSION,
+                MEMBER_INVITATION_PERMISSION,
+            }
+        ),
+    )
+    target = member()
+
+    with pytest.raises(AuthorizationError):
+        assign_administrator(
+            actor=manager,
+            target=target,
+            permissions=frozenset({ADMINISTRATOR_MANAGEMENT_PERMISSION}),
+            appointed_at=datetime.datetime.now(datetime.UTC),
+        )
+    with pytest.raises(AuthorizationError):
+        assign_administrator(
+            actor=manager,
+            target=target,
+            permissions=frozenset({MEMBER_BLOCKING_PERMISSION}),
+            appointed_at=datetime.datetime.now(datetime.UTC),
+        )
+
+    appointed = assign_administrator(
+        actor=manager,
+        target=target,
+        permissions=frozenset({DISPUTE_MODERATION_PERMISSION, MEMBER_INVITATION_PERMISSION}),
+        appointed_at=datetime.datetime.now(datetime.UTC),
+    )
+    assert appointed.administrator_appointed_by_member_id == manager.id
+
+
+def test_manager_can_edit_only_their_appointee_and_owner_is_immutable() -> None:
+    manager = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({ADMINISTRATOR_MANAGEMENT_PERMISSION, DISPUTE_MODERATION_PERMISSION}),
+    )
+    appointed = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({DISPUTE_MODERATION_PERMISSION}),
+    )
+    appointed = replace(appointed, administrator_appointed_by_member_id=manager.id)
+    foreign = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({DISPUTE_MODERATION_PERMISSION}),
+    )
+    owner = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+    )
+
+    assert can_edit_administrator(actor=manager, target=appointed)
+    assert not can_edit_administrator(actor=manager, target=foreign)
+    assert not can_edit_administrator(actor=manager, target=owner)
+    updated = update_administrator_permissions(
+        actor=manager,
+        target=appointed,
+        permissions=frozenset({DISPUTE_MODERATION_PERMISSION}),
+    )
+    demoted = demote_administrator(actor=manager, target=updated)
+    assert demoted.role is MemberRole.MEMBER
+    assert demoted.permissions == frozenset()
+    assert demoted.administrator_appointed_by_member_id is None

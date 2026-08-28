@@ -4,7 +4,12 @@ from uuid import uuid4
 
 import pytest
 
-from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.domain.members import (
+    MEMBER_INVITATION_PERMISSION,
+    Member,
+    MemberRole,
+    MemberStatus,
+)
 from community_bot.domain.registration import (
     ProfileField,
     ProfileLinkAction,
@@ -23,8 +28,19 @@ from community_bot.domain.registration import (
 )
 
 
-def member(*, role: MemberRole, status: MemberStatus = MemberStatus.ACTIVE) -> Member:
-    return Member(id=uuid4(), telegram_user_id=1, role=role, status=status)
+def member(
+    *,
+    role: MemberRole,
+    status: MemberStatus = MemberStatus.ACTIVE,
+    permissions: frozenset[str] = frozenset(),
+) -> Member:
+    return Member(
+        id=uuid4(),
+        telegram_user_id=1,
+        role=role,
+        status=status,
+        permissions=permissions,
+    )
 
 
 def test_registration_answers_follow_the_minimal_onboarding_order() -> None:
@@ -174,7 +190,10 @@ def test_timezone_resolver_does_not_guess_unknown_or_ambiguous_locations() -> No
 
 
 def test_invitation_and_moderation_authorization_are_distinct() -> None:
-    administrator = member(role=MemberRole.ADMINISTRATOR)
+    administrator = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({MEMBER_INVITATION_PERMISSION}),
+    )
     moderator = member(role=MemberRole.MODERATOR)
     regular = member(role=MemberRole.MEMBER)
 
@@ -183,6 +202,8 @@ def test_invitation_and_moderation_authorization_are_distinct() -> None:
     require_registration_moderator(moderator)
     with pytest.raises(PermissionError):
         require_invitation_manager(moderator)
+    with pytest.raises(PermissionError):
+        require_invitation_manager(member(role=MemberRole.ADMINISTRATOR))
     with pytest.raises(PermissionError):
         require_registration_moderator(regular)
     with pytest.raises(PermissionError):

@@ -292,6 +292,152 @@ def test_clean_mini_app_url_only_starts_current_runtime(
         browser.close()
 
 
+@pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
+def test_administrator_management_flow_matches_mobile_prototype(  # noqa: PLR0915
+    mini_app_url: str, viewport: tuple[int, int]
+) -> None:
+    owner_id = "00000000-0000-0000-0000-000000000201"
+    manager_id = "00000000-0000-0000-0000-000000000202"
+    candidate_id = "00000000-0000-0000-0000-000000000203"
+    owner = {
+        "member_id": owner_id,
+        "telegram_username": "alexclem",
+        "display_name": "Alex Clem",
+        "permissions": [
+            "interaction_review",
+            "member_invitation",
+            "member_blocking",
+            "administrator_management",
+        ],
+        "is_owner": True,
+        "appointed_by": None,
+        "appointed_at": None,
+        "can_edit": False,
+        "can_demote": False,
+    }
+    manager = {
+        "member_id": manager_id,
+        "telegram_username": "schoonia",
+        "display_name": "Schoonia",
+        "permissions": ["interaction_review", "member_invitation"],
+        "is_owner": False,
+        "appointed_by": {
+            "member_id": owner_id,
+            "telegram_username": "alexclem",
+            "display_name": "Alex Clem",
+        },
+        "appointed_at": "2026-05-21T07:58:00Z",
+        "can_edit": True,
+        "can_demote": True,
+    }
+    candidate = {
+        "member_id": candidate_id,
+        "telegram_username": "kristina_flowers",
+        "display_name": "Kristina 🌼",
+    }
+    administrators: list[dict[str, Any]] = [owner, manager]
+    mutations: list[dict[str, Any]] = []
+
+    def administration_route(route: Route) -> None:
+        path = urlsplit(route.request.url).path
+        method = route.request.method
+        if path == "/api/v1/administration" and method == "GET":
+            route.fulfill(
+                json={
+                    "items": administrators,
+                    "actor_permissions": owner["permissions"],
+                    "can_appoint": True,
+                    "can_delegate_administrator_management": True,
+                }
+            )
+            return
+        if path == "/api/v1/administration/candidates" and method == "GET":
+            route.fulfill(json={"items": [candidate]})
+            return
+        member_id = path.removeprefix("/api/v1/administration/").removesuffix("/demote")
+        person = next((item for item in administrators if item["member_id"] == member_id), None)
+        if method == "GET" and person is not None:
+            route.fulfill(json=person)
+            return
+        body = route.request.post_data_json
+        assert body is not None
+        mutations.append({"method": method, "path": path, "body": body})
+        if path.endswith("/demote"):
+            administrators[:] = [item for item in administrators if item["member_id"] != member_id]
+            route.fulfill(
+                json={
+                    key: manager[key] for key in ("member_id", "telegram_username", "display_name")
+                }
+            )
+            return
+        if method == "POST":
+            created = {
+                **candidate,
+                "permissions": body["permissions"],
+                "is_owner": False,
+                "appointed_by": {
+                    key: owner[key] for key in ("member_id", "telegram_username", "display_name")
+                },
+                "appointed_at": "2026-08-27T12:00:00Z",
+                "can_edit": True,
+                "can_demote": True,
+            }
+            administrators.append(created)
+            route.fulfill(status=201, json=created)
+            return
+        if method == "PUT" and person is not None:
+            person["permissions"] = body["permissions"]
+            route.fulfill(json=person)
+            return
+        route.fulfill(status=404, json={"code": "not_found"})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        context = browser.new_context(viewport={"width": viewport[0], "height": viewport[1]})
+        page = _new_page(context)
+        me, _member = _cache_profile(owner_id)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/administration**", administration_route)
+        page.goto(mini_app_url + "?ui=next&theme=light#/moderation/team")
+
+        page.get_by_role("heading", name="Команда").wait_for()
+        assert page.get_by_text("Alex Clem").count() >= 1
+        assert page.get_by_text("Владелец", exact=True).count() == 1
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+        page.get_by_role("button", name="+ Назначить администратора").click()
+        page.get_by_placeholder("Имя или @username").fill("Kristina")
+        page.get_by_role("button", name=re.compile("Kristina")).click()
+        page.locator('[data-permission="member_invitation"]').check(force=True)
+        page.locator('[data-permission="administrator_management"]').check(force=True)
+        page.get_by_role("button", name="Назначить администратором").click()
+        dialog = page.get_by_role("dialog")
+        dialog.get_by_text("повышенным").wait_for()
+        dialog.get_by_role("button", name="Назначить", exact=True).click()
+        page.get_by_text("Kristina 🌼 назначен администратором").wait_for()
+        assert mutations[0]["body"]["permissions"] == [
+            "member_invitation",
+            "administrator_management",
+        ]
+
+        page.get_by_role("button", name=re.compile("Schoonia")).click()
+        page.get_by_text("Назначил Alex Clem").wait_for()
+        page.get_by_role("button", name="Снять права администратора").click()
+        demotion = page.get_by_role("dialog")
+        demotion.get_by_label("Причина").fill("Изменение зоны ответственности")
+        demotion.get_by_role("button", name="Снять права", exact=True).click()
+        page.get_by_text("Права администратора сняты").wait_for()
+        assert mutations[-1]["body"] == {"reason": "Изменение зоны ответственности"}
+
+        page.get_by_role("button", name=re.compile("Alex Clem")).click()
+        page.get_by_text("изменить или снять их нельзя").wait_for()
+        assert page.locator("[data-permission]:disabled").count() == 4
+        assert page.get_by_role("button", name="Снять права администратора").count() == 0
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        context.close()
+        browser.close()
+
+
 @pytest.mark.browser_smoke
 def test_bootstrap_waits_for_late_telegram_desktop_init_data(
     mini_app_url: str,

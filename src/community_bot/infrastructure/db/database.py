@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from community_bot.application.administration import AdministratorIdentity
 from community_bot.application.member_foundation import FoundationUnitOfWork, UpdateReceipt
 from community_bot.application.tasks import AdministratorOption
 from community_bot.domain.members import Member, MemberRole, MemberStatus
@@ -1271,6 +1272,38 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         )
         return _to_domain(model, status=status)
 
+    async def administrator_identities(
+        self, *, administrators_only: bool, query: str | None, limit: int
+    ) -> tuple[AdministratorIdentity, ...]:
+        """Return administrator rows or active appointment candidates."""
+        statement = select(MemberModel)
+        if administrators_only:
+            statement = statement.where(MemberModel.role == MemberRole.ADMINISTRATOR.value)
+            statement = statement.order_by(
+                MemberModel.permissions_json.contains(["superadministrator"]).desc(),
+                MemberModel.display_name.asc(),
+                MemberModel.id.asc(),
+            )
+        else:
+            statement = statement.where(
+                MemberModel.status == MemberStatus.ACTIVE.value,
+                MemberModel.role != MemberRole.ADMINISTRATOR.value,
+            )
+            if query:
+                pattern = f"%{query}%"
+                statement = statement.where(
+                    MemberModel.display_name.ilike(pattern)
+                    | MemberModel.telegram_username.ilike(pattern)
+                )
+            statement = statement.order_by(MemberModel.display_name.asc(), MemberModel.id.asc())
+        models = (await self._require_session().scalars(statement.limit(limit))).all()
+        return tuple(_administrator_identity(model) for model in models)
+
+    async def administrator_identity(self, member_id: UUID) -> AdministratorIdentity | None:
+        """Return one administrator-management identity projection by member UUID."""
+        model = await self._require_session().get(MemberModel, member_id)
+        return None if model is None else _administrator_identity(model)
+
     async def ensure_moderation_action_allowed(
         self, member_id: UUID, action: RestrictedAction
     ) -> None:
@@ -1492,6 +1525,8 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         model.role = member.role.value
         model.status = member.status.value
         model.permissions_json = sorted(member.permissions)
+        model.administrator_appointed_by_member_id = member.administrator_appointed_by_member_id
+        model.administrator_appointed_at = member.administrator_appointed_at
 
     async def flush_member_changes(self) -> None:
         """Flush the member UPDATE while retaining the open transaction."""
@@ -1564,6 +1599,16 @@ def _to_domain(model: MemberModel, *, status: MemberStatus | None = None) -> Mem
         role=MemberRole(model.role),
         status=status or MemberStatus(model.status),
         permissions=frozenset(model.permissions_json),
+        administrator_appointed_by_member_id=model.administrator_appointed_by_member_id,
+        administrator_appointed_at=model.administrator_appointed_at,
+    )
+
+
+def _administrator_identity(model: MemberModel) -> AdministratorIdentity:
+    return AdministratorIdentity(
+        member=_to_domain(model),
+        telegram_username=model.telegram_username,
+        display_name=model.display_name,
     )
 
 
@@ -1573,4 +1618,14 @@ def _member_security_json(member: Member) -> dict[str, object]:
         "role": member.role.value,
         "status": member.status.value,
         "permissions": sorted(member.permissions),
+        "administrator_appointed_by_member_id": (
+            None
+            if member.administrator_appointed_by_member_id is None
+            else str(member.administrator_appointed_by_member_id)
+        ),
+        "administrator_appointed_at": (
+            None
+            if member.administrator_appointed_at is None
+            else member.administrator_appointed_at.isoformat()
+        ),
     }

@@ -553,7 +553,12 @@ async def test_sanction_role_matrix_keeps_ban_admin_only_and_reversible(
     """A moderator cannot ban; an administrator can issue and revoke with history."""
     database = Database(database_url)
     moderator = await add_member(database, 13_571, role=MemberRole.MODERATOR)
-    admin = await add_member(database, 13_572, role=MemberRole.ADMINISTRATOR)
+    admin = await add_member(
+        database,
+        13_572,
+        role=MemberRole.ADMINISTRATOR,
+        permissions=["member_blocking"],
+    )
     target = await add_member(database, 13_573)
     service = ModerationService(database.unit_of_work)
     with pytest.raises(PermissionError, match="administrator"):
