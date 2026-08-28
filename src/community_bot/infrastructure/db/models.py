@@ -1414,7 +1414,7 @@ class AccountTransactionModel(Base):
             "transaction_type IN ('starting_grant', 'task_reward_reserved', "
             "'task_reward_earned', 'task_reward_refunded', 'partial_task_reward', "
             "'community_task_reward', 'penalty', 'admin_adjustment', 'fraud_reversal', "
-            "'resolution_reversal')",
+            "'resolution_reversal', 'manual_credit_grant')",
             name="ck_account_transactions_type",
         ),
         CheckConstraint(
@@ -1428,6 +1428,8 @@ class AccountTransactionModel(Base):
             "(transaction_type = 'task_reward_refunded' AND credit_delta > 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'penalty' AND credit_delta < 0 "
+            "AND experience_delta = 0) OR "
+            "(transaction_type = 'manual_credit_grant' AND credit_delta > 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'admin_adjustment' "
             "AND (credit_delta <> 0 OR experience_delta <> 0)) OR "

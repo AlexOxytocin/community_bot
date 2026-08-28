@@ -21,6 +21,7 @@ from community_bot.infrastructure.db import assignments as assignment_store
 from community_bot.infrastructure.db import catalog as catalog_store
 from community_bot.infrastructure.db import community_stats as community_stats_store
 from community_bot.infrastructure.db import conversations as conversation_store
+from community_bot.infrastructure.db import credit_grants as credit_grant_store
 from community_bot.infrastructure.db import moderation as moderation_store
 from community_bot.infrastructure.db import registration as registration_store
 from community_bot.infrastructure.db import reputation as reputation_store
@@ -63,6 +64,10 @@ if TYPE_CHECKING:
         BotLeaderboardItem,
         BotLeaderboardMetric,
         StatsMemberIdentity,
+    )
+    from community_bot.application.credit_grants import (
+        CreditGrantHistoryPage,
+        CreditGrantRecipient,
     )
     from community_bot.application.economy import (
         ActiveProductConfig,
@@ -1376,6 +1381,24 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Return one administrator-management identity projection by member UUID."""
         model = await self._require_session().get(MemberModel, member_id)
         return None if model is None else _administrator_identity(model)
+
+    async def credit_grant_recipients(
+        self, *, query: str, limit: int
+    ) -> tuple[CreditGrantRecipient, ...]:
+        """Search existing accounts for a superadministrator grant."""
+        return await credit_grant_store.recipients(
+            self._require_session(), query=query, limit=limit
+        )
+
+    async def credit_grant_recipient(self, member_id: UUID) -> CreditGrantRecipient | None:
+        """Return one account with its current credit balance."""
+        return await credit_grant_store.recipient(self._require_session(), member_id)
+
+    async def credit_grant_history(
+        self, *, limit: int, cursor: LedgerHistoryCursor | None
+    ) -> CreditGrantHistoryPage:
+        """Return one immutable global manual-grant history page."""
+        return await credit_grant_store.history(self._require_session(), limit=limit, cursor=cursor)
 
     async def ensure_moderation_action_allowed(
         self, member_id: UUID, action: RestrictedAction

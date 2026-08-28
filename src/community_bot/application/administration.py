@@ -58,6 +58,7 @@ class AdministratorOverview:
     actor_permissions: frozenset[str]
     can_appoint: bool
     can_delegate_administrator_management: bool
+    can_grant_credits: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +292,7 @@ class AdministrationService:
             actor_permissions=effective_administrator_permissions(actor),
             can_appoint=can_manage_administrators(actor),
             can_delegate_administrator_management=is_superadministrator(actor),
+            can_grant_credits=is_superadministrator(actor),
         )
 
     async def _card(

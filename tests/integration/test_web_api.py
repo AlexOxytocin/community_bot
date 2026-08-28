@@ -3865,3 +3865,135 @@ async def test_administrator_management_api_enforces_provenance_and_delegation(
         assert audits[1].after_json["administrator_appointed_by_member_id"] == str(manager_id)
         assert audits[2].reason == "Изменение зоны ответственности"
     await database.dispose()
+
+
+async def test_superadministrator_credit_grants_are_credit_only_idempotent_and_audited(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    owner = await add_member(
+        database,
+        92_001,
+        telegram_username="credit_owner",
+        display_name="Alex Owner",
+        role=MemberRole.ADMINISTRATOR,
+        permissions=[SUPERADMINISTRATOR_PERMISSION],
+    )
+    ordinary_admin = await add_member(
+        database,
+        92_002,
+        telegram_username="ordinary_admin",
+        role=MemberRole.ADMINISTRATOR,
+        permissions=[MEMBER_INVITATION_PERMISSION],
+    )
+    recipient = await add_member(
+        database,
+        92_003,
+        telegram_username="credit_recipient",
+        display_name="Credit Recipient",
+        status=MemberStatus.PAUSED,
+    )
+    async with sessions.begin() as session:
+        stored = await session.get(MemberModel, recipient.id)
+        assert stored is not None
+        stored.experience_total_cached = 41
+        stored.level_number = 4
+
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN,
+            mini_app_origin=ORIGIN,
+            database_url=database_url,
+        ),
+        database=database,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(owner.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        overview = await client.get("/api/v1/administration")
+        assert overview.json()["can_grant_credits"] is True
+        own_card = await client.get("/api/v1/administration/credits/self")
+        assert own_card.status_code == 200
+        assert own_card.json()["member_id"] == str(owner.id)
+        search = await client.get(
+            "/api/v1/administration/credits/recipients",
+            params={"query": "@credit_recip", "limit": 30},
+        )
+        assert search.status_code == 200
+        assert [item["member_id"] for item in search.json()["items"]] == [str(recipient.id)]
+
+        headers = {"origin": ORIGIN, "idempotency-key": "92001"}
+        payload = {
+            "target_member_id": str(recipient.id),
+            "amount": 25,
+            "reason": "Компенсация за техническую ошибку",
+        }
+        created = await client.post(
+            "/api/v1/administration/credits/grants", json=payload, headers=headers
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["recipient"]["credit_balance"] == 25
+        assert created.json()["replayed"] is False
+        replayed = await client.post(
+            "/api/v1/administration/credits/grants", json=payload, headers=headers
+        )
+        assert replayed.status_code == 201
+        assert replayed.json()["transaction_id"] == created.json()["transaction_id"]
+        assert replayed.json()["replayed"] is True
+
+        self_grant = await client.post(
+            "/api/v1/administration/credits/grants",
+            json={
+                "target_member_id": str(owner.id),
+                "amount": 3,
+                "reason": "Проверка начисления себе",  # noqa: RUF001
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "92002"},
+        )
+        assert self_grant.status_code == 201, self_grant.text
+        history = await client.get("/api/v1/administration/credits/history?limit=30")
+        assert history.status_code == 200
+        assert len(history.json()["items"]) == 2
+        assert {item["amount"] for item in history.json()["items"]} == {3, 25}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        authenticated = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(ordinary_admin.telegram_user_id, now=datetime.datetime.now(datetime.UTC)),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert authenticated.status_code == 204
+        forbidden = await client.get("/api/v1/administration/credits/self")
+        assert forbidden.status_code == 403
+
+    async with sessions() as session:
+        stored = await session.get(MemberModel, recipient.id)
+        assert stored is not None
+        assert stored.credit_balance_cached == 25
+        assert stored.experience_total_cached == 41
+        assert stored.level_number == 4
+        transactions = (
+            await session.scalars(
+                select(AccountTransactionModel).where(
+                    AccountTransactionModel.transaction_type == "manual_credit_grant"
+                )
+            )
+        ).all()
+        assert len(transactions) == 2
+        assert all(item.experience_delta == 0 for item in transactions)
+        audits = (
+            await session.scalars(
+                select(AuditEventModel).where(
+                    AuditEventModel.action == "economy_administrative_mutation",
+                    AuditEventModel.entity_id.in_([str(item.id) for item in transactions]),
+                )
+            )
+        ).all()
+        assert len(audits) == 2
+
+    await database.dispose()

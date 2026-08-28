@@ -334,6 +334,7 @@ def _append_economy_audit(session: AsyncSession, staged: _StagedEconomyBatch) ->
     for command, transaction_id in staged.persisted:
         if command.transaction_type in {
             TransactionType.PENALTY,
+            TransactionType.MANUAL_CREDIT_GRANT,
             TransactionType.ADMIN_ADJUSTMENT,
             TransactionType.FRAUD_REVERSAL,
             TransactionType.RESOLUTION_REVERSAL,
@@ -389,6 +390,9 @@ class _SqlAlchemyPreparedEconomyBatch:
                 telegram_user_id=model.telegram_user_id,
                 role=MemberRole(model.role),
                 status=MemberStatus(model.status),
+                permissions=frozenset(model.permissions_json),
+                administrator_appointed_by_member_id=(model.administrator_appointed_by_member_id),
+                administrator_appointed_at=model.administrator_appointed_at,
             )
             for member_id, model in self._member_models.items()
         }

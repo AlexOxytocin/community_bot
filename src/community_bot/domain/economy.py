@@ -43,6 +43,7 @@ class TransactionType(StrEnum):
     PARTIAL_TASK_REWARD = "partial_task_reward"
     COMMUNITY_TASK_REWARD = "community_task_reward"
     PENALTY = "penalty"
+    MANUAL_CREDIT_GRANT = "manual_credit_grant"
     ADMIN_ADJUSTMENT = "admin_adjustment"
     FRAUD_REVERSAL = "fraud_reversal"
     RESOLUTION_REVERSAL = "resolution_reversal"
@@ -382,6 +383,27 @@ def admin_adjustment(
     return normalize_economy_command(command)
 
 
+def manual_credit_grant(
+    *,
+    member_id: UUID,
+    amount: int,
+    idempotency_key: str,
+    context: AdministrativeContext,
+) -> EconomyCommand:
+    """Build an auditable credit-only grant that never awards experience."""
+    return _amount_command(
+        spec=_AmountCommandSpec(
+            transaction_type=TransactionType.MANUAL_CREDIT_GRANT,
+            credit_sign=1,
+            gives_experience=False,
+        ),
+        member_id=member_id,
+        amount=amount,
+        idempotency_key=idempotency_key,
+        metadata=_command_metadata(context=context),
+    )
+
+
 def validate_economy_command(command: EconomyCommand) -> None:
     """Validate one fully resolved command without reading state."""
     if not command.idempotency_key.strip():
@@ -595,6 +617,14 @@ def _validate_penalty(command: EconomyCommand) -> None:
     _require_admin_metadata(command)
 
 
+def _validate_manual_credit_grant(command: EconomyCommand) -> None:
+    _require(
+        condition=command.credit_delta > 0 and command.experience_delta == 0,
+        message="Invalid manual credit grant.",
+    )
+    _require_admin_metadata(command)
+
+
 def _validate_adjustment(command: EconomyCommand) -> None:
     _require(
         condition=command.credit_delta != 0 or command.experience_delta != 0,
@@ -623,6 +653,7 @@ _DELTA_VALIDATORS: dict[TransactionType, Callable[[EconomyCommand], None]] = {
     TransactionType.PARTIAL_TASK_REWARD: _validate_reward,
     TransactionType.COMMUNITY_TASK_REWARD: _validate_reward,
     TransactionType.PENALTY: _validate_penalty,
+    TransactionType.MANUAL_CREDIT_GRANT: _validate_manual_credit_grant,
     TransactionType.ADMIN_ADJUSTMENT: _validate_adjustment,
     TransactionType.FRAUD_REVERSAL: _validate_reversal,
     TransactionType.RESOLUTION_REVERSAL: _validate_reversal,

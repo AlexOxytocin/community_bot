@@ -93,6 +93,8 @@ let currentMemberTimezone = "UTC";
 let activeProfileState = null;
 let memberProfileHasInternalHistory = false;
 let headerBackAction = null;
+let canGrantCredits = false;
+let creditGrantDraft = null;
 
 const element = (tag, text, className) => {
   const node = document.createElement(tag);
@@ -205,7 +207,7 @@ const setHeaderControl = (
 ) => {
   const normalized = kind === "back" || kind === "close" ? kind : null;
   const titleless = normalized === "close" || hideTitle;
-  headerBackAction = normalized === "back" ? onBack : null;
+  headerBackAction = normalized && onBack ? onBack : null;
   back.classList.toggle("hidden", normalized === null);
   back.dataset.navigationKind = normalized || "none";
   back.textContent = normalized === "close" ? "×" : "‹";
@@ -222,7 +224,7 @@ const setHeaderControl = (
 const setNavigation = (screen, context) => {
   if (screen !== "profile") activeProfileState = null;
   heading.querySelector(".heading-action")?.remove();
-  heading.classList.remove("admin-rights-heading");
+  heading.classList.remove("admin-rights-heading", "credit-grant-heading");
   const screenNode = content.closest(".screen");
   if (screen === "settings") {
     screenNode.removeAttribute("aria-labelledby");
@@ -382,7 +384,14 @@ const apiFetch = async (path, options = {}) => {
 
 const configureRoleNavigation = async () => {
   try {
-    await getJson("/api/v1/administration");
+    const overview = await getJson("/api/v1/administration");
+    canGrantCredits = Boolean(overview.can_grant_credits);
+    if (canGrantCredits) {
+      for (const tabs of document.querySelectorAll(".admin-tabs:not(.has-credits)")) {
+        const count = tabs.dataset.queueCount === undefined ? null : Number(tabs.dataset.queueCount);
+        tabs.replaceWith(moderationTabs(tabs.dataset.active, count));
+      }
+    }
     moderationNav.hidden = false;
   } catch {
     try {
@@ -6270,11 +6279,17 @@ const administratorPermissionNames = (permissions) => administratorPermissionDet
 
 function moderationTabs(active, queueCount = null) {
   const tabs = element("div", undefined, "admin-tabs");
+  tabs.dataset.active = active;
+  if (queueCount !== null) tabs.dataset.queueCount = String(queueCount);
   const options = [
     ["queue", queueCount === null ? "Очередь" : `Очередь · ${queueCount}`, () => loadModeration()],
     ["access", "Доступ", () => loadAdministrationAccess()],
     ["team", "Команда", () => loadAdministrationTeam()],
   ];
+  if (canGrantCredits) {
+    tabs.classList.add("has-credits");
+    options.push(["credits", "Кредиты", () => loadCreditGrantHome()]);
+  }
   for (const [id, label, action] of options) {
     const button = element("button", label, "admin-tab");
     button.type = "button";
@@ -6284,6 +6299,350 @@ function moderationTabs(active, queueCount = null) {
     tabs.append(button);
   }
   return tabs;
+}
+
+const creditGrantStatusLabel = (status) => ({
+  active: "активный участник",
+  paused: "доступ приостановлен",
+  restricted: "доступ ограничен",
+  suspended: "доступ приостановлен",
+  banned: "заблокирован",
+  left: "вышел из сообщества",
+  pending: "регистрация не завершена",
+}[status] || status);
+
+const creditGrantRecipientCard = (person, { selectable = false, self = false } = {}) => {
+  const card = element(selectable ? "button" : "article", undefined, "credit-recipient-card");
+  if (selectable) card.type = "button";
+  const avatar = administratorAvatar(person);
+  const identity = administratorIdentity(
+    person,
+    self ? "это вы" : creditGrantStatusLabel(person.status),
+  );
+  const balance = element("span", undefined, "credit-recipient-balance");
+  balance.append(
+    element("strong", String(person.credit_balance)),
+    element("small", "кредитов"),
+  );
+  card.append(avatar, identity, balance);
+  return card;
+};
+
+const creditGrantInlineSearch = (revision) => {
+  const panel = element("section", undefined, "credit-inline-search");
+  const search = element("label", undefined, "credit-search-field");
+  search.append(searchIcon());
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "Имя или @username";
+  input.autocomplete = "off";
+  input.maxLength = 80;
+  search.append(input);
+  const results = element("section", undefined, "credit-search-results");
+  let timer = null;
+  let requestNumber = 0;
+  const runSearch = async () => {
+    const query = input.value.trim();
+    const currentRequest = ++requestNumber;
+    if (!query) {
+      results.replaceChildren();
+      return;
+    }
+    results.replaceChildren(element("p", "Ищем…", "compact-empty"));
+    try {
+      const page = await getJson(
+        `/api/v1/administration/credits/recipients?limit=30&query=${encodeURIComponent(query)}`,
+      );
+      if (revision !== screenRevision || currentRequest !== requestNumber) return;
+      if (!page.items.length) {
+        results.replaceChildren(element("p", "Участники не найдены.", "compact-empty"));
+        return;
+      }
+      const list = element("div", undefined, "credit-recipient-list");
+      for (const person of page.items) {
+        const card = creditGrantRecipientCard(person, { selectable: true });
+        card.addEventListener("click", () => showCreditGrantForm(person));
+        list.append(card);
+      }
+      results.replaceChildren(list);
+    } catch {
+      if (revision !== screenRevision || currentRequest !== requestNumber) return;
+      results.replaceChildren(element("p", "Не удалось выполнить поиск. Повторите.", "compact-empty"));
+    }
+  };
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(runSearch, 250);
+  });
+  panel.append(search, results);
+  return panel;
+};
+
+async function loadCreditGrantHome(push = true) {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "credit-grant-home" }, "", "#/moderation/credits");
+  else if (location.hash !== "#/moderation/credits") {
+    history.replaceState({ screen: "credit-grant-home" }, "", "#/moderation/credits");
+  }
+  setNavigation("moderation", false);
+  title.textContent = "Модерация";
+  replaceContent(moderationTabs("credits"), element("p", "Загружаем баланс…", "compact-empty"));
+  try {
+    const self = await getJson("/api/v1/administration/credits/self");
+    if (revision !== screenRevision) return;
+    canGrantCredits = true;
+    const boundary = element("section", undefined, "state-view credit-grant-home");
+    const intro = element("section", undefined, "credit-grant-intro");
+    const introHeader = element("div", undefined, "credit-grant-intro-header");
+    const introCopy = element("div", undefined, "credit-grant-intro-copy");
+    introCopy.append(
+      element("h2", "Кому начислить"),
+      element("p", "Выберите себя или найдите участника", "muted"),
+    );
+    const historyButton = element("button", "История", "credit-history-link");
+    historyButton.type = "button";
+    historyButton.addEventListener("click", () => loadCreditGrantHistory());
+    introHeader.append(introCopy, historyButton);
+    intro.append(
+      introHeader,
+      creditGrantRecipientCard(self, { selectable: true, self: true }),
+      creditGrantInlineSearch(revision),
+    );
+    intro.querySelector(".credit-recipient-card").addEventListener("click", () => {
+      showCreditGrantForm(self);
+    });
+    boundary.append(moderationTabs("credits"), intro);
+    replaceContent(boundary);
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    const retry = element("button", "Повторить", "primary");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadCreditGrantHome(false));
+    replaceContent(
+      moderationTabs("credits"),
+      element("p", "Начисление кредитов недоступно.", "compact-empty"),
+      retry,
+    );
+  }
+}
+
+async function showCreditGrantForm(personOrId, push = true) {
+  const revision = ++screenRevision;
+  const person = typeof personOrId === "string"
+    ? await getJson(`/api/v1/administration/credits/recipients/${encodeURIComponent(personOrId)}`)
+    : personOrId;
+  if (revision !== screenRevision) return;
+  if (push) {
+    history.pushState(
+      { screen: "credit-grant-form", memberId: person.member_id },
+      "",
+      `#/moderation/credits/recipients/${encodeURIComponent(person.member_id)}`,
+    );
+  }
+  setNavigation("moderation", true);
+  heading.classList.add("credit-grant-heading");
+  title.textContent = "Начисление";
+  setHeaderControl("back", { onBack: () => loadCreditGrantHome(false) });
+  const retained = creditGrantDraft?.person?.member_id === person.member_id
+    ? creditGrantDraft
+    : { person, amount: "", reason: "", operationKey: null };
+  creditGrantDraft = { ...retained, person };
+  const form = element("form", undefined, "credit-grant-form");
+  const amountLabel = element("label", undefined, "credit-grant-field");
+  amountLabel.append(element("span", "Сколько кредитов"));
+  const amount = document.createElement("input");
+  amount.type = "number";
+  amount.inputMode = "numeric";
+  amount.min = "1";
+  amount.step = "1";
+  amount.placeholder = "0";
+  amount.required = true;
+  amount.value = creditGrantDraft.amount || "";
+  amountLabel.append(amount);
+  const reasonLabel = element("label", undefined, "credit-grant-field");
+  reasonLabel.append(element("span", "Причина начисления"));
+  const reason = document.createElement("textarea");
+  reason.rows = 3;
+  reason.minLength = 3;
+  reason.maxLength = 500;
+  reason.placeholder = "Например: компенсация за техническую ошибку";
+  reason.required = true;
+  reason.value = creditGrantDraft.reason || "";
+  reasonLabel.append(reason);
+  const note = element("p", "Баланс увеличится без начисления опыта.", "credit-grant-note");
+  const status = element("p", "", "status hidden");
+  const continueButton = element("button", "Продолжить", "primary");
+  continueButton.type = "submit";
+  form.append(
+    creditGrantRecipientCard(person),
+    amountLabel,
+    reasonLabel,
+    note,
+    status,
+    continueButton,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const amountValue = Number(amount.value);
+    const reasonValue = reason.value.trim();
+    if (!Number.isSafeInteger(amountValue) || amountValue <= 0) {
+      status.className = "status is-error";
+      status.textContent = "Введите целое количество кредитов больше нуля.";
+      amount.focus();
+      return;
+    }
+    if (reasonValue.length < 3) {
+      status.className = "status is-error";
+      status.textContent = "Коротко укажите причину начисления.";
+      reason.focus();
+      return;
+    }
+    creditGrantDraft = { person, amount: amountValue, reason: reasonValue, operationKey: null };
+    showCreditGrantConfirmation();
+  });
+  replaceContent(form);
+  amount.focus({ preventScroll: true });
+}
+
+function showCreditGrantConfirmation(push = true) {
+  if (!creditGrantDraft?.person || !creditGrantDraft.amount || !creditGrantDraft.reason) {
+    loadCreditGrantHome(false);
+    return;
+  }
+  ++screenRevision;
+  if (push) {
+    history.pushState(
+      { screen: "credit-grant-confirm", memberId: creditGrantDraft.person.member_id },
+      "",
+      "#/moderation/credits/confirm",
+    );
+  }
+  setNavigation("moderation", true);
+  heading.classList.add("credit-grant-heading");
+  title.textContent = "Подтверждение";
+  setHeaderControl("back", { onBack: () => showCreditGrantForm(creditGrantDraft.person, false) });
+  const card = element("section", undefined, "credit-grant-confirm");
+  card.append(
+    creditGrantRecipientCard(creditGrantDraft.person),
+    element("p", `+${creditGrantDraft.amount} кредитов`, "credit-grant-confirm-amount"),
+    section("Причина", creditGrantDraft.reason),
+    element("p", "Опыт и уровень участника не изменятся.", "credit-grant-note"),
+  );
+  const status = element("p", "", "status hidden");
+  const confirm = element("button", "Начислить кредиты", "primary");
+  confirm.type = "button";
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    status.className = "status";
+    status.textContent = "Начисляем…";
+    creditGrantDraft.operationKey ||= newOperationKey();
+    try {
+      const receipt = await submissionRequest(
+        "/api/v1/administration/credits/grants",
+        "POST",
+        creditGrantDraft.operationKey,
+        {
+          target_member_id: creditGrantDraft.person.member_id,
+          amount: creditGrantDraft.amount,
+          reason: creditGrantDraft.reason,
+        },
+      );
+      showCreditGrantSuccess(receipt);
+    } catch (error) {
+      status.className = "status is-error";
+      status.textContent = error instanceof TypeError
+        ? "Сеть недоступна. Повторите начисление."
+        : "Не удалось начислить кредиты. Проверьте данные и повторите.";
+      if (!retryableSubmissionError(error)) creditGrantDraft.operationKey = null;
+      confirm.disabled = false;
+    }
+  });
+  card.append(status, confirm);
+  replaceContent(card);
+}
+
+function showCreditGrantSuccess(receipt) {
+  ++screenRevision;
+  history.replaceState(
+    { screen: "credit-grant-success", memberId: receipt.recipient.member_id },
+    "",
+    "#/moderation/credits/success",
+  );
+  setNavigation("moderation", true);
+  heading.classList.add("credit-grant-heading");
+  title.textContent = "Готово";
+  setHeaderControl("close", {
+    screenLabel: "Кредиты начислены",
+    onBack: () => loadCreditGrantHome(false),
+  });
+  const card = element("section", undefined, "credit-grant-success");
+  card.append(
+    element("span", "✓", "credit-grant-success-icon"),
+    element("h2", `Начислено ${receipt.amount} кредитов`),
+    element("p", receipt.recipient.display_name, "muted"),
+    element("strong", `${receipt.recipient.credit_balance} кредитов на балансе`, "credit-grant-total"),
+    element("p", "Опыт не изменился. Операция записана в историю.", "credit-grant-note"),
+  );
+  const again = element("button", "Начислить ещё", "secondary");
+  again.type = "button";
+  again.addEventListener("click", () => loadCreditGrantHome(false));
+  const historyButton = element("button", "Открыть историю", "primary");
+  historyButton.type = "button";
+  historyButton.addEventListener("click", () => loadCreditGrantHistory());
+  card.append(historyButton, again);
+  replaceContent(card);
+  creditGrantDraft = null;
+}
+
+async function loadCreditGrantHistory(push = true, cursor = null) {
+  const revision = ++screenRevision;
+  if (push) history.pushState({ screen: "credit-grant-history" }, "", "#/moderation/credits/history");
+  setNavigation("moderation", true);
+  heading.classList.add("credit-grant-heading");
+  title.textContent = "История начислений";
+  setHeaderControl("back", { onBack: () => loadCreditGrantHome(false) });
+  replaceContent(element("p", "Загружаем операции…", "compact-empty"));
+  try {
+    const page = await getJson(
+      `/api/v1/administration/credits/history?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    );
+    if (revision !== screenRevision) return;
+    if (!page.items.length) {
+      replaceContent(element("p", "Начислений пока нет.", "compact-empty"));
+      return;
+    }
+    const list = element("div", undefined, "credit-history-list");
+    for (const item of page.items) {
+      const card = element("article", undefined, "credit-history-card");
+      const top = element("div", undefined, "credit-history-top");
+      top.append(
+        element("strong", item.recipient.display_name),
+        element("strong", `+${item.amount}`, "credit-history-amount"),
+      );
+      card.append(
+        top,
+        element(
+          "p",
+          `${item.recipient.telegram_username ? `@${item.recipient.telegram_username}` : "без username"} · ${memberDateFormatter({ dateStyle: "short", timeStyle: "short" }).format(new Date(item.created_at))}`,
+          "muted",
+        ),
+        element("p", item.reason, "credit-history-reason"),
+        element("p", `Начислил: ${item.actor_display_name}`, "muted"),
+      );
+      list.append(card);
+    }
+    const nodes = [list];
+    if (page.next_cursor) {
+      const more = element("button", "Показать ещё", "secondary");
+      more.type = "button";
+      more.addEventListener("click", () => loadCreditGrantHistory(false, page.next_cursor));
+      nodes.push(more);
+    }
+    replaceContent(...nodes);
+  } catch {
+    if (revision !== screenRevision) return;
+    replaceContent(element("p", "Не удалось загрузить историю.", "compact-empty"));
+  }
 }
 
 function administratorRights(permissions, { disabled = false, allowed = null } = {}) {
@@ -7386,6 +7745,16 @@ async function telegramInitData() {
   return null;
 }
 
+const invitationStartParameter = (initData) => {
+  const signedValue = typeof initData === "string"
+    ? new URLSearchParams(initData).get("start_param")
+    : null;
+  if (signedValue) return signedValue;
+  const unsafeValue = globalThis.Telegram?.WebApp?.initDataUnsafe?.start_param;
+  if (typeof unsafeValue === "string" && unsafeValue) return unsafeValue;
+  return new URLSearchParams(globalThis.location?.search || "").get("tgWebAppStartParam");
+};
+
 
 const taskHomeActionLabels = {
   submit_result: "Сдать результат",
@@ -8380,7 +8749,7 @@ async function bootstrapTaskHome(authAttempted = false) {
     if (me.status === 401 && !authAttempted) {
       const initData = await telegramInitData();
       if (!initData) throw new Error("telegram_init_data_missing");
-      const invitation = globalThis.Telegram?.WebApp?.initDataUnsafe?.start_param;
+      const invitation = invitationStartParameter(initData);
       const authHeaders = { "Content-Type": "text/plain; charset=utf-8" };
       if (typeof invitation === "string" && invitation) {
         authHeaders["X-Community-Invitation"] = invitation;
@@ -8425,6 +8794,9 @@ async function bootstrapTaskHome(authAttempted = false) {
     const directAdministration = initialHash.match(
       /^#\/moderation\/(access|team|administrators(?:\/([0-9a-f-]{36}))?|administrators\/new)$/i,
     );
+    const directCreditRecipient = initialHash.match(
+      /^#\/moderation\/credits\/recipients\/([0-9a-f-]{36})$/i,
+    );
     if (initialHash === "#/settings") showSettings(false);
     else if (/^#\/profile(?:\/.*)?$/.test(initialHash)) loadProfile(false);
     else if (directMember) {
@@ -8434,6 +8806,25 @@ async function bootstrapTaskHome(authAttempted = false) {
         initialHash,
       );
       showMemberProfile(directMember[1], false);
+    } else if (initialHash === "#/moderation/credits") {
+      history.replaceState({ screen: "credit-grant-home" }, "", initialHash);
+      loadCreditGrantHome(false);
+    } else if (initialHash === "#/moderation/credits/search") {
+      history.replaceState({ screen: "credit-grant-home" }, "", "#/moderation/credits");
+      loadCreditGrantHome(false);
+    } else if (initialHash === "#/moderation/credits/history") {
+      history.replaceState({ screen: "credit-grant-history" }, "", initialHash);
+      loadCreditGrantHistory(false);
+    } else if (directCreditRecipient) {
+      history.replaceState(
+        { screen: "credit-grant-form", memberId: directCreditRecipient[1] },
+        "",
+        initialHash,
+      );
+      showCreditGrantForm(directCreditRecipient[1], false);
+    } else if (/^#\/moderation\/credits\/(confirm|success)$/.test(initialHash)) {
+      history.replaceState({ screen: "credit-grant-home" }, "", "#/moderation/credits");
+      loadCreditGrantHome(false);
     } else if (directAdministration?.[1] === "access") {
       history.replaceState({ screen: "moderation-access" }, "", initialHash);
       loadAdministrationAccess(false);
@@ -8601,6 +8992,16 @@ globalThis.addEventListener("popstate", (event) => {
     loadAdministrationAccess(false);
   } else if (event.state?.screen === "moderation-team") {
     loadAdministrationTeam(false);
+  } else if (event.state?.screen === "credit-grant-home") {
+    loadCreditGrantHome(false);
+  } else if (event.state?.screen === "credit-grant-form") {
+    showCreditGrantForm(event.state.memberId, false);
+  } else if (event.state?.screen === "credit-grant-confirm") {
+    showCreditGrantConfirmation(false);
+  } else if (event.state?.screen === "credit-grant-history") {
+    loadCreditGrantHistory(false);
+  } else if (event.state?.screen === "credit-grant-success") {
+    loadCreditGrantHome(false);
   } else if (event.state?.screen === "personal-invitations") {
     loadPersonalInvitations(false);
   } else if (event.state?.screen === "personal-invitation-create") {

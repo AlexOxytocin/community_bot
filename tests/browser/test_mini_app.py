@@ -595,6 +595,133 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
 
 
 @pytest.mark.browser_smoke
+def test_superadministrator_credit_grant_searches_inline_before_confirmation(  # noqa: PLR0915
+    mini_app_url: str,
+) -> None:
+    owner_id = "00000000-0000-0000-0000-000000000301"
+    recipient_id = "00000000-0000-0000-0000-000000000302"
+    owner = {
+        "member_id": owner_id,
+        "telegram_username": "alex_owner",
+        "display_name": "Алексей Окситоцин",
+        "status": "active",
+        "credit_balance": 240,
+    }
+    recipient = {
+        "member_id": recipient_id,
+        "telegram_username": "annapetrova",
+        "display_name": "Анна Петрова",
+        "status": "active",
+        "credit_balance": 8,
+    }
+    mutations: list[dict[str, Any]] = []
+
+    def administration_route(route: Route) -> None:
+        url = urlsplit(route.request.url)
+        path = url.path
+        if path == "/api/v1/administration":
+            route.fulfill(
+                json={
+                    "items": [],
+                    "actor_permissions": [],
+                    "can_appoint": True,
+                    "can_delegate_administrator_management": True,
+                    "can_grant_credits": True,
+                }
+            )
+        elif path == "/api/v1/administration/credits/self":
+            route.fulfill(json=owner)
+        elif path == "/api/v1/administration/credits/recipients":
+            assert parse_qs(url.query)["query"] == ["Анна"]
+            route.fulfill(json={"items": [recipient]})
+        elif path == f"/api/v1/administration/credits/recipients/{recipient_id}":
+            route.fulfill(json=recipient)
+        elif path == "/api/v1/administration/credits/grants":
+            body = route.request.post_data_json
+            assert body is not None
+            mutations.append(body)
+            route.fulfill(
+                status=201,
+                json={
+                    "transaction_id": "00000000-0000-0000-0000-000000000303",
+                    "recipient": {**recipient, "credit_balance": 33},
+                    "amount": body["amount"],
+                    "reason": body["reason"],
+                    "replayed": False,
+                },
+            )
+        elif path == "/api/v1/administration/credits/history":
+            route.fulfill(json={"items": [], "next_cursor": None})
+        else:
+            route.fulfill(status=404, json={"code": "not_found"})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        context = browser.new_context(viewport={"width": 390, "height": 844})
+        page = _new_page(context)
+        me, _member = _cache_profile(owner_id)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/administration**", administration_route)
+        page.goto(mini_app_url + "?ui=next&theme=light#/moderation/credits")
+
+        page.get_by_role("heading", name="Кому начислить").wait_for()
+        assert page.get_by_text("Алексей Окситоцин", exact=True).count() == 1
+        assert page.get_by_text("Анна Петрова", exact=True).count() == 0
+        page.get_by_role("button", name="История", exact=True).click()
+        page.get_by_role("heading", name="История начислений").wait_for()
+        page.get_by_text("Начислений пока нет.").wait_for()
+        assert (
+            float(
+                page.locator("#screen-title").evaluate("node => getComputedStyle(node).fontSize")[
+                    :-2
+                ]
+            )
+            == 22
+        )
+        page.get_by_role("button", name="Назад").click()
+        page.get_by_role("heading", name="Кому начислить").wait_for()
+        page.get_by_placeholder("Имя или @username").fill("Анна")
+        assert page.url.endswith("#/moderation/credits")
+        page.get_by_role("button", name=re.compile("Анна Петрова")).wait_for()
+        page.get_by_role("button", name=re.compile("Анна Петрова")).click()
+
+        assert (
+            float(
+                page.locator("#screen-title").evaluate("node => getComputedStyle(node).fontSize")[
+                    :-2
+                ]
+            )
+            == 22
+        )
+        page.get_by_label("Сколько кредитов").fill("25")
+        page.get_by_label("Причина начисления").fill("Компенсация за техническую ошибку")
+        page.get_by_role("button", name="Продолжить").click()
+        page.get_by_role("heading", name="Подтверждение").wait_for()
+        assert (
+            float(
+                page.locator("#screen-title").evaluate("node => getComputedStyle(node).fontSize")[
+                    :-2
+                ]
+            )
+            == 22
+        )
+        page.get_by_text("+25 кредитов", exact=True).wait_for()
+        page.get_by_role("button", name="Начислить кредиты").click()
+        page.get_by_role("heading", name="Начислено 25 кредитов").wait_for()
+        page.get_by_text("33 кредитов на балансе", exact=True).wait_for()
+        assert mutations == [
+            {
+                "target_member_id": recipient_id,
+                "amount": 25,
+                "reason": "Компенсация за техническую ошибку",
+            }
+        ]
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        context.close()
+        browser.close()
+
+
+@pytest.mark.browser_smoke
 def test_bootstrap_waits_for_late_telegram_desktop_init_data(
     mini_app_url: str,
 ) -> None:
@@ -2577,7 +2704,9 @@ def test_telegram_profile_photo_is_round_and_keeps_initials_fallback(
         assert avatar.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
 
         page.route("https://t.me/missing-avatar.jpg", lambda route: route.abort())
-        page.evaluate("document.querySelector('.avatar-photo').src='https://t.me/missing-avatar.jpg'")
+        page.evaluate(
+            "document.querySelector('.avatar-photo').src='https://t.me/missing-avatar.jpg'"
+        )
         image.wait_for(state="detached")
         assert avatar.text_content() == "\N{CYRILLIC CAPITAL LETTER A}"
         browser.close()
@@ -3379,7 +3508,8 @@ def test_core_hash_routes_restore_authoritatively_and_fail_closed(
 def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
-    init_data = "query_id=AAE&user=%7B%22id%22%3A1%7D&hash=proof"
+    invitation = "first-launch-invitation"
+    init_data = f"query_id=AAE&user=%7B%22id%22%3A1%7D&start_param={invitation}&hash=proof"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
 
@@ -3403,6 +3533,7 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
 
         def auth(route: Route) -> None:
             requests.append(route.request)
+            assert route.request.headers["x-community-invitation"] == invitation
             route.fulfill(
                 status=204,
                 headers={"set-cookie": "community_session=test; Path=/; SameSite=Strict"},

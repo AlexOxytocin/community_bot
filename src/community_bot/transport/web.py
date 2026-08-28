@@ -56,6 +56,14 @@ from community_bot.application.community_stats import (
     CommunityStatsUnavailableError,
     StatsPeriod,
 )
+from community_bot.application.credit_grants import (
+    CreditGrantCommand,
+    CreditGrantHistoryPage,
+    CreditGrantReceipt,
+    CreditGrantRecipient,
+    CreditGrantService,
+)
+from community_bot.application.economy import LedgerHistoryCursor
 from community_bot.application.identity import ActorContext
 from community_bot.application.membership import (
     InvalidMembershipResourceError,
@@ -167,6 +175,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "assignment_unavailable",
         "administration_unavailable",
         "community_stats_unavailable",
+        "credit_grant_unavailable",
         "task_catalog_unavailable",
         "unauthorized",
     }
@@ -345,6 +354,49 @@ class AdministrationDto(_Dto):
     actor_permissions: tuple[AdministratorPermission, ...]
     can_appoint: bool
     can_delegate_administrator_management: bool
+    can_grant_credits: bool
+
+
+class CreditGrantRecipientDto(_Dto):
+    member_id: UUID
+    telegram_username: str | None
+    display_name: str
+    status: str
+    credit_balance: int
+
+
+class CreditGrantRecipientsDto(_Dto):
+    items: tuple[CreditGrantRecipientDto, ...]
+
+
+class CreditGrantRequest(_Dto):
+    target_member_id: UUID
+    amount: int = Field(gt=0, strict=True)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class CreditGrantReceiptDto(_Dto):
+    transaction_id: UUID
+    recipient: CreditGrantRecipientDto
+    amount: int
+    reason: str
+    replayed: bool
+
+
+class CreditGrantHistoryItemDto(_Dto):
+    transaction_id: UUID
+    recipient: CreditGrantRecipientDto
+    actor_member_id: UUID
+    actor_telegram_username: str | None
+    actor_display_name: str
+    amount: int
+    reason: str
+    created_at: datetime.datetime
+
+
+class CreditGrantHistoryDto(_Dto):
+    items: tuple[CreditGrantHistoryItemDto, ...]
+    next_cursor: str | None
 
 
 class AdministratorCandidatesDto(_Dto):
@@ -824,6 +876,7 @@ def create_web_app(
     assignments = AssignmentService(database.unit_of_work)
     moderation = ModerationService(database.unit_of_work)
     administration = AdministrationService(database.unit_of_work)
+    credit_grants = CreditGrantService(database.unit_of_work)
     owned_community_stats_gateway = False
     if (
         community_stats_gateway is None
@@ -1368,8 +1421,111 @@ def create_web_app(
                 can_delegate_administrator_management=(
                     overview.can_delegate_administrator_management
                 ),
+                can_grant_credits=overview.can_grant_credits,
             )
         )
+
+    @app.get(
+        "/api/v1/administration/credits/self",
+        response_model=CreditGrantRecipientDto,
+    )
+    async def credit_grant_self(
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            recipient = await credit_grants.self_recipient(actor)
+        except PermissionError:
+            return _error_response(403, "credit_grant_unavailable")
+        return _json_response(_credit_grant_recipient_dto(recipient))
+
+    @app.get(
+        "/api/v1/administration/credits/recipients",
+        response_model=CreditGrantRecipientsDto,
+    )
+    async def credit_grant_recipients(
+        query: str,
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=50)] = 30,
+    ) -> JSONResponse:
+        try:
+            items = await credit_grants.recipients(actor, query=query, limit=limit)
+        except PermissionError:
+            return _error_response(403, "credit_grant_unavailable")
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        return _json_response(
+            CreditGrantRecipientsDto(
+                items=tuple(_credit_grant_recipient_dto(item) for item in items)
+            )
+        )
+
+    @app.get(
+        "/api/v1/administration/credits/recipients/{member_id}",
+        response_model=CreditGrantRecipientDto,
+    )
+    async def credit_grant_recipient(
+        member_id: UUID,
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            recipient = await credit_grants.recipient(actor, member_id)
+        except PermissionError:
+            return _error_response(403, "credit_grant_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        return _json_response(_credit_grant_recipient_dto(recipient))
+
+    @app.post(
+        "/api/v1/administration/credits/grants",
+        response_model=CreditGrantReceiptDto,
+    )
+    async def create_credit_grant(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        payload = cast(
+            "CreditGrantRequest | None",
+            await _submission_request(request, CreditGrantRequest),
+        )
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        try:
+            receipt = await credit_grants.grant(
+                CreditGrantCommand(
+                    actor_member_id=actor.member_id,
+                    target_member_id=payload.target_member_id,
+                    amount=payload.amount,
+                    reason=payload.reason,
+                    operation_key=operation_key,
+                ),
+                actor,
+            )
+        except PermissionError:
+            return _error_response(403, "credit_grant_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        return _json_response(_credit_grant_receipt_dto(receipt), status_code=201)
+
+    @app.get(
+        "/api/v1/administration/credits/history",
+        response_model=CreditGrantHistoryDto,
+    )
+    async def credit_grant_history(
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=100)] = 30,
+        cursor: str | None = None,
+    ) -> JSONResponse:
+        try:
+            parsed_cursor = _parse_credit_grant_cursor(cursor)
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        try:
+            page = await credit_grants.history(actor, limit=limit, cursor=parsed_cursor)
+        except PermissionError:
+            return _error_response(403, "credit_grant_unavailable")
+        return _json_response(_credit_grant_history_dto(page))
 
     @app.get("/api/v1/administration/candidates", response_model=AdministratorCandidatesDto)
     async def administrator_candidates(
@@ -2949,6 +3105,7 @@ async def _submission_request(
         | AdministratorDemotionRequest
         | PersonalInvitationCreateRequest
         | MembershipResourceCreateRequest
+        | CreditGrantRequest
     ],
 ) -> (
     SaveSubmissionDraftRequest
@@ -2962,6 +3119,7 @@ async def _submission_request(
     | AdministratorDemotionRequest
     | PersonalInvitationCreateRequest
     | MembershipResourceCreateRequest
+    | CreditGrantRequest
     | None
 ):
     if request.headers.get("content-type", "").lower() != "application/json":
@@ -2978,6 +3136,17 @@ def _assignment_cursor(cursor: tuple[datetime.datetime, UUID]) -> str:
     timestamp = accepted_at.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
     raw = f"{timestamp}|{assignment_id}".encode("ascii")
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _credit_grant_cursor(cursor: LedgerHistoryCursor) -> str:
+    return _assignment_cursor((cursor.created_at, cursor.transaction_id))
+
+
+def _parse_credit_grant_cursor(value: str | None) -> LedgerHistoryCursor | None:
+    parsed = _parse_assignment_cursor(value)
+    if parsed is None:
+        return None
+    return LedgerHistoryCursor(created_at=parsed[0], transaction_id=parsed[1])
 
 
 def _parse_assignment_cursor(value: str | None) -> tuple[datetime.datetime, UUID] | None:
@@ -3102,6 +3271,47 @@ def _administrator_dto(card: AdministratorCard) -> AdministratorDto:
         appointed_at=identity.member.administrator_appointed_at,
         can_edit=card.can_edit,
         can_demote=card.can_demote,
+    )
+
+
+def _credit_grant_recipient_dto(
+    recipient: CreditGrantRecipient,
+) -> CreditGrantRecipientDto:
+    return CreditGrantRecipientDto(
+        member_id=recipient.member_id,
+        telegram_username=recipient.telegram_username,
+        display_name=recipient.display_name,
+        status=recipient.status,
+        credit_balance=recipient.credit_balance,
+    )
+
+
+def _credit_grant_receipt_dto(receipt: CreditGrantReceipt) -> CreditGrantReceiptDto:
+    return CreditGrantReceiptDto(
+        transaction_id=receipt.transaction_id,
+        recipient=_credit_grant_recipient_dto(receipt.recipient),
+        amount=receipt.amount,
+        reason=receipt.reason,
+        replayed=receipt.replayed,
+    )
+
+
+def _credit_grant_history_dto(page: CreditGrantHistoryPage) -> CreditGrantHistoryDto:
+    return CreditGrantHistoryDto(
+        items=tuple(
+            CreditGrantHistoryItemDto(
+                transaction_id=item.transaction_id,
+                recipient=_credit_grant_recipient_dto(item.recipient),
+                actor_member_id=item.actor_member_id,
+                actor_telegram_username=item.actor_telegram_username,
+                actor_display_name=item.actor_display_name,
+                amount=item.amount,
+                reason=item.reason,
+                created_at=item.created_at,
+            )
+            for item in page.items
+        ),
+        next_cursor=(None if page.next_cursor is None else _credit_grant_cursor(page.next_cursor)),
     )
 
 

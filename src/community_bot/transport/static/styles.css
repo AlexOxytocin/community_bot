@@ -126,6 +126,11 @@ h3 { margin: 0; font-size: 17px; }
   line-height: 1.2;
   letter-spacing: -.02em;
 }
+.screen-heading.credit-grant-heading #screen-title {
+  font-size: 22px;
+  line-height: 1.2;
+  letter-spacing: -.02em;
+}
 .heading-action { flex: 0 0 auto; margin-left: auto; }
 .heading-actions { display: flex; align-items: center; gap: 8px; }
 .icon-action {
@@ -1272,6 +1277,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   border-radius: 13px;
   background: var(--app-surface-raised);
 }
+.admin-tabs.has-credits { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .admin-tab {
   min-width: 0;
   padding: 9px 4px;
@@ -1527,6 +1533,146 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Compact superadministrator credit-grant flow. */
+.heading-text-action {
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.credit-grant-home { display: grid; gap: 18px; }
+.credit-grant-intro { display: grid; gap: 11px; }
+.credit-grant-intro-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.credit-grant-intro-copy { min-width: 0; }
+.credit-grant-intro-copy h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+.credit-grant-intro-copy .muted { margin: 2px 0 0; font-size: 11px; }
+.credit-history-link {
+  flex: 0 0 auto;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-accent);
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.credit-inline-search { display: grid; gap: 10px; }
+.credit-recipient-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-height: 70px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 46%, var(--app-border));
+  border-radius: 17px;
+  background: color-mix(in srgb, var(--app-surface) 96%, var(--app-accent) 4%);
+  color: var(--app-text);
+  text-align: left;
+}
+button.credit-recipient-card { cursor: pointer; }
+button.credit-recipient-card:active { background: var(--app-surface-raised); }
+.credit-recipient-balance { display: grid; justify-items: end; gap: 1px; white-space: nowrap; }
+.credit-recipient-balance strong { color: var(--app-accent); font-size: 17px; line-height: 1; }
+.credit-recipient-balance small { color: var(--app-text-muted); font-size: 9px; }
+.credit-search-launcher,
+.credit-search-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  padding: 0 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 15px;
+  background: var(--app-surface);
+  color: var(--app-text-muted);
+}
+.credit-search-launcher { font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.credit-search-launcher svg,
+.credit-search-field svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.credit-search-field input {
+  min-width: 0;
+  padding: 13px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+}
+.credit-search-results,
+.credit-recipient-list,
+.credit-grant-form,
+.credit-history-list { display: grid; gap: 10px; }
+.credit-grant-form > .credit-recipient-card,
+.credit-grant-confirm > .credit-recipient-card { margin-bottom: 3px; }
+.credit-grant-field { display: grid; gap: 6px; color: var(--app-text); font-size: 11px; font-weight: 750; }
+.credit-grant-field input,
+.credit-grant-field textarea {
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  outline: 0;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-weight: 500;
+  resize: vertical;
+}
+.credit-grant-field input:focus,
+.credit-grant-field textarea:focus,
+.credit-search-field:focus-within { border-color: var(--app-accent); }
+.credit-grant-note {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.credit-grant-confirm,
+.credit-grant-success { display: grid; gap: 13px; }
+.credit-grant-confirm-amount {
+  margin: 4px 0 0;
+  color: var(--app-accent);
+  font-size: 27px;
+  font-weight: 850;
+  letter-spacing: -.03em;
+}
+.credit-grant-success { justify-items: center; padding-top: 16px; text-align: center; }
+.credit-grant-success h2,
+.credit-grant-success p { margin: 0; }
+.credit-grant-success-icon {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  color: var(--app-accent-text);
+  font-size: 26px;
+  font-weight: 850;
+}
+.credit-grant-total { color: var(--app-accent); font-size: 14px; }
+.credit-grant-success > button { width: 100%; }
+.credit-history-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 15px;
+  background: var(--app-surface);
+}
+.credit-history-card p { margin: 0; font-size: 10px; line-height: 1.4; }
+.credit-history-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; }
+.credit-history-amount { color: var(--app-accent); font-size: 15px; }
+.credit-history-reason { color: var(--app-text); }
 .admin-badge {
   display: inline-flex;
   align-items: center;

@@ -24,6 +24,7 @@ from community_bot.domain.economy import (
     earn_partial_reward,
     earn_reward,
     economy_payload_hash,
+    manual_credit_grant,
     refund_reward,
     reserve_reward,
     resolve_level,
@@ -54,6 +55,12 @@ def test_named_economy_factories_produce_exact_deltas_and_metadata() -> None:
             idempotency_key="penalty:1",
             context=context,
         ),
+        manual_credit_grant(
+            member_id=member_id,
+            amount=7,
+            idempotency_key="manual-grant:1",
+            context=context,
+        ),
         admin_adjustment(
             member_id=member_id,
             credit_delta=1,
@@ -73,6 +80,7 @@ def test_named_economy_factories_produce_exact_deltas_and_metadata() -> None:
         (TransactionType.PARTIAL_TASK_REWARD, 2, 2),
         (TransactionType.COMMUNITY_TASK_REWARD, 3, 3),
         (TransactionType.PENALTY, -2, 0),
+        (TransactionType.MANUAL_CREDIT_GRANT, 7, 0),
         (TransactionType.ADMIN_ADJUSTMENT, 1, -1),
     ]
     assert commands[-1].actor_member_id == actor_id
