@@ -2511,6 +2511,36 @@ const valueOrDash = (value) => value == null ? "—" : String(value);
 const initialsFor = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2)
   .map((part) => part[0]).join("").toUpperCase() || "?";
 
+const telegramProfilePhotoUrl = () => {
+  const initData = globalThis.Telegram?.WebApp?.initData;
+  if (!initData) return null;
+  try {
+    const user = JSON.parse(new URLSearchParams(initData).get("user") || "null");
+    const photoUrl = new URL(user?.photo_url);
+    const telegramHost = photoUrl.hostname === "t.me" || photoUrl.hostname.endsWith(".telegram.org");
+    return photoUrl.protocol === "https:" && telegramHost && !photoUrl.username && !photoUrl.password
+      ? photoUrl.href
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const profileAvatar = (displayName) => {
+  const avatar = element("span", initialsFor(displayName), "avatar");
+  const photoUrl = telegramProfilePhotoUrl();
+  if (!photoUrl) return avatar;
+  const image = document.createElement("img");
+  image.className = "avatar-photo";
+  image.src = photoUrl;
+  image.alt = "";
+  image.decoding = "async";
+  image.referrerPolicy = "no-referrer";
+  image.addEventListener("error", () => image.remove(), { once: true });
+  avatar.append(image);
+  return avatar;
+};
+
 const profileEditTrigger = (label, key, onOpen, className = "profile-card") => {
   const trigger = element("button", undefined, `${className} profile-edit-trigger`);
   trigger.type = "button";
@@ -2818,7 +2848,7 @@ function ownProfileOverview(state, revision) {
   copy.append(element("h2", me.display_name));
   if (me.telegram_username) copy.append(element("p", `@${me.telegram_username}`, "profile-username"));
   copy.append(element("p", `Уровень ${me.level.number} · ${me.level.display_name}`, "muted"));
-  identity.append(element("span", initialsFor(me.display_name), "avatar"), copy);
+  identity.append(profileAvatar(me.display_name), copy);
   identity.append(element("span", "›", "profile-edit-chevron"));
   const city = profileEditTrigger(
     "город",
