@@ -342,6 +342,8 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
             "member_invitation",
             "member_blocking",
             "administrator_management",
+            "community_task_create",
+            "community_task_review",
         ],
         "is_owner": True,
         "appointed_by": None,
@@ -587,6 +589,8 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
 
         page.get_by_role("button", name=re.compile("Kristina")).click()
         page.get_by_role("heading", name="Права", exact=True).wait_for()
+        assert page.locator('[data-permission="community_task_create"]').count() == 1
+        assert page.locator('[data-permission="community_task_review"]').count() == 1
         page.locator(".admin-profile-card .person-avatar-photo").wait_for()
         assert avatar_requests.count(f"/api/v1/members/{candidate_id}/avatar") == 1
         page.get_by_role("button", name="Назад").click()
@@ -607,8 +611,84 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
         page.locator(".admin-profile-card .person-avatar-photo").wait_for()
         assert avatar_requests.count(f"/api/v1/members/{owner_id}/avatar") == 1
         page.get_by_text("изменить или снять их нельзя").wait_for()
-        assert page.locator("[data-permission]:disabled").count() == 4
+        assert page.locator("[data-permission]:disabled").count() == 6
         assert page.get_by_role("button", name="Снять права администратора").count() == 0
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        context.close()
+        browser.close()
+
+
+def test_community_task_review_queue_supports_authorized_decision(
+    mini_app_url: str,
+) -> None:
+    owner_id = "00000000-0000-0000-0000-000000000206"
+    assignment_id = "00000000-0000-0000-0000-000000000207"
+    review = {
+        "id": assignment_id,
+        "task_id": "00000000-0000-0000-0000-000000000208",
+        "task_title": "Подготовить программу встречи",
+        "performer_display_name": "Марина",
+        "submitted_at": "2026-08-29T12:00:00Z",
+        "review_deadline_at": "2026-09-01T12:00:00Z",
+        "result": "Программа встречи, темы и ответственные готовы.",
+        "available_decisions": ["full", "partial", "reject"],
+    }
+    pending = {"value": True}
+    decisions: list[dict[str, object]] = []
+
+    def community_reviews(route: Route) -> None:
+        path = urlsplit(route.request.url).path
+        if path == "/api/v1/moderation/community-reviews":
+            route.fulfill(json={"items": [review] if pending["value"] else []})
+            return
+        if path == f"/api/v1/moderation/community-reviews/{assignment_id}":
+            route.fulfill(json=review)
+            return
+        route.fulfill(status=404, json={"code": "not_found"})
+
+    def decide(route: Route) -> None:
+        body = route.request.post_data_json
+        assert body is not None
+        decisions.append(body)
+        pending["value"] = False
+        route.fulfill(status=204)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        context = browser.new_context(viewport={"width": 390, "height": 844})
+        page = _new_page(context)
+        me, _member = _cache_profile(owner_id)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route(
+            "**/api/v1/administration",
+            lambda route: route.fulfill(
+                json={
+                    "items": [],
+                    "actor_permissions": ["community_task_review"],
+                    "can_appoint": False,
+                    "can_delegate_administrator_management": False,
+                    "can_grant_credits": False,
+                }
+            ),
+        )
+        page.route("**/api/v1/moderation/community-reviews**", community_reviews)
+        page.route(
+            f"**/api/v1/assignment-reviews/{assignment_id}/decision",
+            decide,
+        )
+        page.goto(mini_app_url + "#/moderation/community-reviews")
+
+        page.get_by_role("heading", name="Задания сообщества").wait_for()
+        page.get_by_role("button", name="Проверка", exact=True).wait_for()
+        page.get_by_role("button", name=re.compile("Подготовить программу встречи")).click()
+        page.get_by_text("Программа встречи, темы и ответственные готовы.", exact=True).wait_for()
+        page.get_by_role("button", name="Принять полностью", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        dialog.get_by_role("button", name="Принять полностью", exact=True).click()
+
+        page.get_by_text("Заданий на проверку нет", exact=True).wait_for()
+        assert decisions == [{"decision": "full"}]
+        assert page.url.endswith("#/moderation/community-reviews")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         context.close()
         browser.close()
@@ -1625,8 +1705,7 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(  # 
         catalog_back = page.get_by_role("button", name="Назад к заданиям", exact=True)
         assert catalog_back.inner_text() == "\u2039"
         assert (
-            page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop")
-            == "12px"
+            page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop") == "12px"
         )
         page.evaluate(
             "document.documentElement.dataset.telegramFullscreen = 'true'; "
@@ -1634,8 +1713,7 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(  # 
             "'--tg-content-safe-area-inset-top', '74px')"
         )
         assert (
-            page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop")
-            == "80px"
+            page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop") == "80px"
         )
         assert page.locator(".catalog-actions").evaluate(
             "node => node.getBoundingClientRect().top "
@@ -5325,7 +5403,8 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_text("Сообщения по дням", exact=True).is_visible()
             assert page.locator(".pulse-chart-week .pulse-chart-column.is-zero").count() == 1
             assert (
-                page.locator(".pulse-chart-week .pulse-chart-column").nth(1)
+                page.locator(".pulse-chart-week .pulse-chart-column")
+                .nth(1)
                 .locator(".pulse-chart-bar")
                 .get_attribute("title")
                 == "2"
@@ -5371,9 +5450,9 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert received_reactions.get_attribute("aria-pressed") == "true"
             assert given_reactions.get_attribute("aria-pressed") == "false"
             assert visual_panel.get_attribute("aria-label") == "Полученные реакции по дням"
-            received_bar_styles = page.locator(
-                ".pulse-chart-week .pulse-chart-bar"
-            ).evaluate_all("nodes => nodes.map(node => node.getAttribute('style'))")
+            received_bar_styles = page.locator(".pulse-chart-week .pulse-chart-bar").evaluate_all(
+                "nodes => nodes.map(node => node.getAttribute('style'))"
+            )
             assert len(received_bar_styles) == 6
             assert (
                 visual_panel.evaluate("node => node.getBoundingClientRect().height")
@@ -5389,9 +5468,9 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert received_reactions.get_attribute("aria-pressed") == "false"
             assert given_reactions.get_attribute("aria-pressed") == "true"
             assert visual_panel.get_attribute("aria-label") == "Поставленные реакции по дням"
-            given_bar_styles = page.locator(
-                ".pulse-chart-week .pulse-chart-bar"
-            ).evaluate_all("nodes => nodes.map(node => node.getAttribute('style'))")
+            given_bar_styles = page.locator(".pulse-chart-week .pulse-chart-bar").evaluate_all(
+                "nodes => nodes.map(node => node.getAttribute('style'))"
+            )
             assert given_bar_styles != received_bar_styles
             assert (
                 visual_panel.evaluate("node => node.getBoundingClientRect().height")
@@ -6403,9 +6482,7 @@ def test_context_transitions_reset_both_scroll_axes_at_supported_viewports(
             page.goto(mini_app_url + f"#/work/{assignment_id}?view_state=m03")
             page.locator('[data-screen-id="M03"]').wait_for()
             assert (
-                page.locator(".screen").evaluate(
-                    "node => getComputedStyle(node).paddingTop"
-                )
+                page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop")
                 == "12px"
             )
             page.evaluate(
@@ -6414,9 +6491,7 @@ def test_context_transitions_reset_both_scroll_axes_at_supported_viewports(
                 "'--tg-content-safe-area-inset-top', '74px')"
             )
             assert (
-                page.locator(".screen").evaluate(
-                    "node => getComputedStyle(node).paddingTop"
-                )
+                page.locator(".screen").evaluate("node => getComputedStyle(node).paddingTop")
                 == "80px"
             )
             assert page.locator("#back").evaluate(

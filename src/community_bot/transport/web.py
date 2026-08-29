@@ -337,12 +337,16 @@ AdministratorPermission = Literal[
     "member_invitation",
     "member_blocking",
     "administrator_management",
+    "community_task_create",
+    "community_task_review",
 ]
 _ADMIN_PERMISSION_ORDER: tuple[AdministratorPermission, ...] = (
     "interaction_review",
     "member_invitation",
     "member_blocking",
     "administrator_management",
+    "community_task_create",
+    "community_task_review",
 )
 
 
@@ -489,7 +493,7 @@ class PersonalInvitationCreatedDto(_Dto):
 
 
 class AdministratorPermissionsRequest(_Dto):
-    permissions: tuple[AdministratorPermission, ...] = Field(min_length=1, max_length=4)
+    permissions: tuple[AdministratorPermission, ...] = Field(min_length=1, max_length=6)
 
     @field_validator("permissions")
     @classmethod
@@ -2231,6 +2235,7 @@ def create_web_app(
                     for item in categories
                 ],
                 "credit_balance": profile.credit_balance,
+                "community_reward_max": 10,
                 "time_sizes": [
                     {
                         "value": size.value,
@@ -2636,6 +2641,39 @@ def create_web_app(
     ) -> JSONResponse:
         try:
             cards = await assignments.creator_review_cards(actor=actor, assignment_id=assignment_id)
+        except PermissionError:
+            return _error_response(404, "not_found")
+        if not cards:
+            return _error_response(404, "not_found")
+        return _json_response(_assignment_review_dto(cards[0]))
+
+    @app.get(
+        "/api/v1/moderation/community-reviews",
+        response_model=AssignmentReviewsDto,
+    )
+    async def community_assignment_reviews(
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            cards = await assignments.community_review_cards(actor=actor)
+        except PermissionError:
+            return _error_response(403, "moderation_unavailable")
+        return _json_response(
+            AssignmentReviewsDto(items=tuple(_assignment_review_dto(card) for card in cards))
+        )
+
+    @app.get(
+        "/api/v1/moderation/community-reviews/{assignment_id}",
+        response_model=AssignmentReviewDto,
+    )
+    async def community_assignment_review(
+        assignment_id: UUID,
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            cards = await assignments.community_review_cards(
+                actor=actor, assignment_id=assignment_id
+            )
         except PermissionError:
             return _error_response(404, "not_found")
         if not cards:
@@ -3166,6 +3204,7 @@ def _task_draft_json(draft: TaskDraft) -> dict[str, object]:
     return {
         "id": str(draft.id),
         "revision": draft.revision,
+        "origin": draft.origin,
         "values": values,
     }
 
@@ -3176,6 +3215,8 @@ def _task_preview_json(preview: TaskPreview) -> dict[str, object]:
         "description": preview.draft.description,
         "completion_criteria": preview.completion_criteria,
         "reward_total": preview.reserved_credit_total,
+        "author_display_name": preview.author_display_name,
+        "origin": preview.draft.origin,
     }
 
 

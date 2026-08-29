@@ -172,27 +172,38 @@ async def list_review_cards(
     actor_id: uuid.UUID,
     *,
     member_owned: bool = False,
+    community_owned: bool = False,
     assignment_id: uuid.UUID | None = None,
 ) -> tuple[AssignmentCard, ...]:
     """List assignments owned by this member-author or community reviewer."""
-    predicate = (
-        (TaskModel.creator_id == actor_id) & TaskModel.template_id.is_(None)
-        if member_owned
-        else or_(
+    if member_owned:
+        predicate = (TaskModel.creator_id == actor_id) & TaskModel.template_id.is_(None)
+        statuses = (AssignmentStatus.SUBMITTED.value,)
+    elif community_owned:
+        predicate = (
+            (TaskModel.origin == "community")
+            & TaskModel.template_id.is_(None)
+            & (AssignmentModel.performer_id != actor_id)
+        )
+        statuses = (
+            AssignmentStatus.SUBMITTED.value,
+            AssignmentStatus.REVIEWER_REQUIRED.value,
+        )
+    else:
+        predicate = or_(
             TaskModel.creator_id == actor_id,
             TaskModel.created_by_admin_id == actor_id,
             TaskModel.reviewer_admin_id == actor_id,
         )
-    )
+        statuses = (
+            AssignmentStatus.SUBMITTED.value,
+            AssignmentStatus.REVIEWER_REQUIRED.value,
+        )
     return await _cards(
         session,
         predicate,
         scope_member_id=actor_id,
-        statuses=(
-            (AssignmentStatus.SUBMITTED.value,)
-            if member_owned
-            else (AssignmentStatus.SUBMITTED.value, AssignmentStatus.REVIEWER_REQUIRED.value)
-        ),
+        statuses=statuses,
         assignment_id=assignment_id,
     )
 

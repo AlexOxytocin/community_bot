@@ -58,16 +58,27 @@ DISPUTE_MODERATION_PERMISSION = "interaction_review"
 MEMBER_INVITATION_PERMISSION = "member_invitation"
 MEMBER_BLOCKING_PERMISSION = "member_blocking"
 ADMINISTRATOR_MANAGEMENT_PERMISSION = "administrator_management"
+COMMUNITY_TASK_CREATE_PERMISSION = "community_task_create"
+COMMUNITY_TASK_REVIEW_PERMISSION = "community_task_review"
 PUBLIC_ADMINISTRATOR_PERMISSIONS = frozenset(
     {
         DISPUTE_MODERATION_PERMISSION,
         MEMBER_INVITATION_PERMISSION,
         MEMBER_BLOCKING_PERMISSION,
         ADMINISTRATOR_MANAGEMENT_PERMISSION,
+        COMMUNITY_TASK_CREATE_PERMISSION,
+        COMMUNITY_TASK_REVIEW_PERMISSION,
     }
 )
 ADMINISTRATOR_PERMISSIONS = frozenset(
-    PUBLIC_ADMINISTRATOR_PERMISSIONS | {"karma_review", "member_read"}
+    {
+        DISPUTE_MODERATION_PERMISSION,
+        MEMBER_INVITATION_PERMISSION,
+        MEMBER_BLOCKING_PERMISSION,
+        ADMINISTRATOR_MANAGEMENT_PERMISSION,
+        "karma_review",
+        "member_read",
+    }
 )
 
 
@@ -93,10 +104,32 @@ def is_superadministrator(member: Member) -> bool:
 
 
 def effective_administrator_permissions(member: Member) -> frozenset[str]:
-    """Return the four product permissions displayed by administrator management."""
+    """Return the product permissions displayed by administrator management."""
     if is_superadministrator(member):
         return PUBLIC_ADMINISTRATOR_PERMISSIONS
     return frozenset(member.permissions & PUBLIC_ADMINISTRATOR_PERMISSIONS)
+
+
+def can_create_community_task(member: Member) -> bool:
+    """Return whether an active administrator may publish as the community."""
+    return bool(
+        member.status is MemberStatus.ACTIVE
+        and member.role is MemberRole.ADMINISTRATOR
+        and (
+            is_superadministrator(member) or COMMUNITY_TASK_CREATE_PERMISSION in member.permissions
+        )
+    )
+
+
+def can_review_community_task(member: Member) -> bool:
+    """Return whether an active administrator may review community work results."""
+    return bool(
+        member.status is MemberStatus.ACTIVE
+        and member.role is MemberRole.ADMINISTRATOR
+        and (
+            is_superadministrator(member) or COMMUNITY_TASK_REVIEW_PERMISSION in member.permissions
+        )
+    )
 
 
 def assign_administrator(

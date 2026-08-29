@@ -489,6 +489,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         actor_id: UUID,
         *,
         member_owned: bool = False,
+        community_owned: bool = False,
         assignment_id: UUID | None = None,
     ) -> tuple[AssignmentCard, ...]:
         """List reviewable assignment cards for one actor."""
@@ -496,6 +497,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(),
             actor_id,
             member_owned=member_owned,
+            community_owned=community_owned,
             assignment_id=assignment_id,
         )
 

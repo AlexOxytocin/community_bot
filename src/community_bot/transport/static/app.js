@@ -99,6 +99,7 @@ let activeProfileState = null;
 let memberProfileHasInternalHistory = false;
 let headerBackAction = null;
 let canGrantCredits = false;
+let administratorPermissions = [];
 let creditGrantDraft = null;
 
 const element = (tag, text, className) => {
@@ -399,11 +400,10 @@ const configureRoleNavigation = async () => {
   try {
     const overview = await getJson("/api/v1/administration");
     canGrantCredits = Boolean(overview.can_grant_credits);
-    if (canGrantCredits) {
-      for (const tabs of document.querySelectorAll(".admin-tabs:not(.has-credits)")) {
-        const count = tabs.dataset.disputeCount === undefined ? null : Number(tabs.dataset.disputeCount);
-        tabs.replaceWith(moderationTabs(tabs.dataset.active, count));
-      }
+    administratorPermissions = overview.actor_permissions || [];
+    for (const tabs of document.querySelectorAll(".admin-tabs")) {
+      const count = tabs.dataset.disputeCount === undefined ? null : Number(tabs.dataset.disputeCount);
+      tabs.replaceWith(moderationTabs(tabs.dataset.active, count));
     }
     moderationNav.hidden = false;
   } catch {
@@ -1007,6 +1007,9 @@ function taskListCard(task, { preview = false } = {}) {
   chips.append(element("span", preview ? "Предпросмотр" : "Открыто", "chip"));
   const category = task.category_name || (task.origin === "community" ? "Сообщество" : null);
   if (category) chips.append(element("span", category, "chip muted-chip"));
+  if (task.origin === "community" && category !== "Сообщество") {
+    chips.append(element("span", "Сообщество", "chip muted-chip"));
+  }
   const meta = element("div", undefined, "task-meta");
   if (task.created_at) {
     meta.append(element("span", `создано ${compactListDate(task.created_at)}`));
@@ -1064,6 +1067,7 @@ function showTaskCreation(state, forceEdit = false) {
       credit_reward_per_performer: values.credit_reward_per_performer,
       performer_slots: values.performer_slots,
       deadline_at: values.deadline_at,
+      origin: state.preview.origin,
     }, { preview: true });
     card.append(section("Критерии", state.preview.completion_criteria));
     const publish = element("button", "Опубликовать", "primary");
@@ -1253,6 +1257,9 @@ function showTaskCreation(state, forceEdit = false) {
     }
     return category?.description || `Задания категории «${category?.name || "Другое"}».`;
   };
+  const communityCategory = state.categories.find((item) => item.code === "community_development");
+  const isCommunityTask = () => form.category_id.value === communityCategory?.id;
+  const communityRewardMax = Number(state.community_reward_max || 10);
   const syncCategoryPresentation = () => {
     const category = state.categories.find((item) => item.id === form.category_id.value);
     form.querySelector("[data-category-icon]").textContent = category?.icon || "•";
@@ -1397,6 +1404,18 @@ function showTaskCreation(state, forceEdit = false) {
       return;
     }
     const total = slots * reward;
+    if (isCommunityTask()) {
+      reserveFormula.textContent = form.task_kind.value === "group"
+        ? `${performerLabel(slots)} × ${creditLabel(reward)}`
+        : "Выплатит сообщество";
+      reserve.textContent = creditLabel(total);
+      reserveSummary.classList.remove("is-over-limit");
+      reserveMeter.classList.add("hidden");
+      reserveMeter.setAttribute("aria-valuenow", "0");
+      reserveMeter.setAttribute("aria-valuetext", "Награда будет выпущена сообществом");
+      reserveMeterFill.style.width = "0%";
+      return;
+    }
     reserveFormula.textContent = form.task_kind.value === "group"
       ? `${performerLabel(slots)} × ${creditLabel(reward)}`
       : "Будет зарезервировано";
@@ -1427,7 +1446,7 @@ function showTaskCreation(state, forceEdit = false) {
     }
   });
   const showDeadlineValidity = (force = false) => {
-    const invalid = !form.deadline_at.checkValidity();
+    const invalid = !form.deadline_at.validity.valid;
     const reveal = invalid && force;
     form.deadline_at.setAttribute("aria-invalid", String(reveal));
     deadlineTrigger.setAttribute("aria-invalid", String(reveal));
@@ -1526,7 +1545,8 @@ function showTaskCreation(state, forceEdit = false) {
   const sizeTrigger = form.querySelector(".size-picker-trigger");
   const normalizedRewards = (spec) => (spec?.reward_options || [])
     .map(Number)
-    .filter((value) => Number.isFinite(value));
+    .filter((value) => Number.isFinite(value))
+    .filter((value) => !isCommunityTask() || value <= communityRewardMax);
   const rewardRangeLabel = (spec) => {
     const options = normalizedRewards(spec);
     if (!options.length) return `от ${Number(spec?.minimum_reward || 1)} кредитов`;
@@ -1561,7 +1581,8 @@ function showTaskCreation(state, forceEdit = false) {
     const minimum = Number(spec?.minimum_reward || options[0] || 1);
     const current = Number(form.credit_reward_per_performer.value);
     form.credit_reward_per_performer.min = String(minimum);
-    form.credit_reward_per_performer.removeAttribute("max");
+    if (isCommunityTask()) form.credit_reward_per_performer.max = String(communityRewardMax);
+    else form.credit_reward_per_performer.removeAttribute("max");
     form.credit_reward_per_performer.setCustomValidity("");
     rewardHint.textContent = `Для размера ${spec?.value.toUpperCase() || "—"} доступно ${rewardRangeLabel(spec)}`;
     rewardOptions.replaceChildren();
@@ -1583,13 +1604,15 @@ function showTaskCreation(state, forceEdit = false) {
       }
       setRewardValue(selected);
     } else {
-      setRewardValue(Number.isFinite(current) && current >= minimum ? current : minimum);
+      const fallback = Number.isFinite(current) && current >= minimum ? current : minimum;
+      setRewardValue(isCommunityTask() ? Math.min(communityRewardMax, fallback) : fallback);
     }
   };
   const changeSteppedReward = (delta) => {
     const minimum = Number(form.credit_reward_per_performer.min || 1);
     const current = Number(form.credit_reward_per_performer.value || minimum);
-    setRewardValue(Math.max(minimum, current + delta));
+    const next = Math.max(minimum, current + delta);
+    setRewardValue(isCommunityTask() ? Math.min(communityRewardMax, next) : next);
     persistDraft();
   };
   form.querySelector("[data-reward-decrease]").addEventListener("click", () => changeSteppedReward(-1));
@@ -1706,6 +1729,12 @@ function showTaskCreation(state, forceEdit = false) {
     onSelect: (value) => {
       form.category_id.value = value;
       syncCategoryPresentation();
+      if (isCommunityTask() && form.time_size.value === "xl") {
+        form.time_size.value = "l";
+        syncSizePresentation();
+      }
+      syncRewardRules();
+      updateReserve();
       persistDraft();
     },
   }));
@@ -1729,7 +1758,10 @@ function showTaskCreation(state, forceEdit = false) {
       backdrop.remove();
       if (restoreFocus) sizeTrigger.focus({ preventScroll: true });
     };
-    for (const spec of state.time_sizes) {
+    const availableSizes = isCommunityTask()
+      ? state.time_sizes.filter((spec) => Number(spec.minimum_reward) <= communityRewardMax)
+      : state.time_sizes;
+    for (const spec of availableSizes) {
       const option = element("button", undefined, "task-size-option");
       option.type = "button";
       option.setAttribute("aria-label", `${spec.value.toUpperCase()}, ${spec.label}, награда ${rewardRangeLabel(spec)}`);
@@ -6020,18 +6052,24 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
       presentationLocationFor("M11", assignmentId),
     );
   }
-  setNavigation("", true);
+  const moderationReview = returnTarget === "moderation-community";
+  setNavigation(moderationReview ? "moderation" : "", true);
   title.textContent = "Решение по результату";
   shell.classList.add("assignment-review-screen");
   setHeaderControl("back", {
     label: returnTarget === "task-home" ? "Назад к заданиям" : "Назад",
     screenLabel: "Решение по результату",
     hideTitle: true,
-    onBack: returnTarget === "task-home" ? () => loadTaskHome() : null,
+    onBack: returnTarget === "task-home"
+      ? () => loadTaskHome()
+      : moderationReview ? () => loadCommunityReviews() : null,
   });
   replaceContent(element("p", "Загружаем результат…", "status muted"));
   try {
-    const review = await getJson("/api/v1/assignment-reviews/" + encodeURIComponent(assignmentId));
+    const review = await getJson(
+      (moderationReview ? "/api/v1/moderation/community-reviews/" : "/api/v1/assignment-reviews/")
+      + encodeURIComponent(assignmentId),
+    );
     if (revision !== screenRevision) return;
     const detail = element("article", undefined, "card detail assignment-review-detail");
     const status = element("p", "", "status hidden");
@@ -6084,6 +6122,11 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
             await loadTaskHome();
             return;
           }
+          if (moderationReview) {
+            await loadCommunityReviews();
+            showAdministratorToast("Решение сохранено");
+            return;
+          }
           history.replaceState(
             { screen: "review-outcome", assignmentId },
             "",
@@ -6112,7 +6155,9 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
         const sheet = showAssignmentActionSheet(button, {
           title: decisionLabels[decision],
           description: decision === "reject"
-            ? "Резерв останется заморожен на 24 часа — исполнитель сможет открыть спор."
+            ? moderationReview
+              ? "Исполнитель сможет открыть спор в течение 24 часов."
+              : "Резерв останется заморожен на 24 часа — исполнитель сможет открыть спор."
             : decision === "partial"
               ? "Исполнитель получит частичную награду за принятый результат."
               : "Результат будет принят, а награда полностью перечислена исполнителю.",
@@ -6765,6 +6810,8 @@ const administratorPermissionDetails = [
   ["member_invitation", "Приглашение участников", "Создание и отзыв персональных приглашений"],
   ["member_blocking", "Блокировка пользователей", "Ограничение и восстановление доступа"],
   ["administrator_management", "Назначение администраторов", "Повышенное право: только в пределах своих полномочий"],
+  ["community_task_create", "Создание заданий сообщества", "Публикация заданий от имени сообщества"],
+  ["community_task_review", "Проверка заданий сообщества", "Решения по результатам в очереди модерации"],
 ];
 
 const administratorIdentity = (person, meta) => {
@@ -6790,13 +6837,19 @@ function moderationTabs(active, disputeCount = null) {
   if (disputeCount !== null) tabs.dataset.disputeCount = String(disputeCount);
   const options = [
     ["disputes", disputeCount === null ? "Споры" : `Споры · ${disputeCount}`, () => loadModeration()],
+  ];
+  if (administratorPermissions.includes("community_task_review")) {
+    options.push(["community-reviews", "Проверка", () => loadCommunityReviews()]);
+  }
+  options.push(
     ["access", "Доступ", () => loadAdministrationAccess()],
     ["team", "Команда", () => loadAdministrationTeam()],
-  ];
+  );
   if (canGrantCredits) {
     tabs.classList.add("has-credits");
     options.push(["credits", "Кредиты", () => loadCreditGrantHome()]);
   }
+  tabs.style.gridTemplateColumns = `repeat(${options.length}, minmax(0, 1fr))`;
   for (const [id, label, action] of options) {
     const button = element("button", label, "admin-tab");
     button.type = "button";
@@ -7913,6 +7966,91 @@ function confirmAdministratorDemotion(trigger, person) {
     actions.append(cancel, confirm);
     sheet.append(actions);
   });
+}
+
+function showCommunityReviewQueue(reviews, revision) {
+  if (revision !== screenRevision) return;
+  setNavigation("moderation", false);
+  title.textContent = "Модерация";
+  back.classList.add("hidden");
+  const boundary = element("section", undefined, "state-view");
+  boundary.dataset.screenId = "S04Q";
+  boundary.dataset.uiEngine = "concept-05";
+  boundary.dataset.state = reviews.length ? "content" : "empty";
+  boundary.append(moderationTabs("community-reviews"));
+  const heading = element("section", undefined, "admin-summary");
+  const copy = element("div");
+  copy.append(
+    element("h2", "Задания сообщества"),
+    element("p", "Результаты, ожидающие решения"),
+  );
+  heading.append(copy, element("span", String(reviews.length), "admin-count"));
+  boundary.append(heading);
+  if (!reviews.length) {
+    boundary.append(element("p", "Заданий на проверку нет", "compact-empty"));
+    replaceContent(boundary);
+    return;
+  }
+  const list = element("ul", undefined, "list moderation-case-list");
+  for (const review of reviews) {
+    const card = element("button", undefined, "card moderation-card moderation-case-card");
+    card.type = "button";
+    card.dataset.assignmentId = review.id;
+    const copyNode = element("span", undefined, "moderation-card-copy");
+    const top = element("span", undefined, "moderation-card-topline");
+    top.append(
+      element("span", "На проверке", "chip"),
+      element("span", "Сообщество", "chip muted-chip"),
+    );
+    const submitted = element("span", "Отправлено: ", "meta");
+    submitted.append(time(review.submitted_at));
+    copyNode.append(
+      top,
+      element("h3", review.task_title),
+      element("span", `Исполнитель: ${review.performer_display_name}`, "meta"),
+      submitted,
+    );
+    card.append(copyNode, element("span", "›", "moderation-card-chevron"));
+    card.addEventListener("click", () => showCreatedReview(review.id, true, "moderation-community"));
+    const row = element("li");
+    row.append(card);
+    list.append(row);
+  }
+  boundary.append(list);
+  replaceContent(boundary);
+}
+
+async function loadCommunityReviews(push = true) {
+  const revision = ++screenRevision;
+  if (push) {
+    history.pushState(
+      { screen: "moderation-community-reviews" },
+      "",
+      "#/moderation/community-reviews",
+    );
+  }
+  setNavigation("moderation", false);
+  title.textContent = "Модерация";
+  back.classList.add("hidden");
+  replaceContent(
+    moderationTabs("community-reviews"),
+    element("p", "Загружаем задания…", "compact-empty"),
+  );
+  try {
+    const page = await getJson("/api/v1/moderation/community-reviews");
+    if (revision !== screenRevision) return;
+    showCommunityReviewQueue(page.items, revision);
+  } catch {
+    if (revision !== screenRevision) return;
+    const retry = element("button", "Повторить", "primary");
+    retry.type = "button";
+    retry.addEventListener("click", () => loadCommunityReviews(false));
+    replaceContent(
+      moderationTabs("community-reviews"),
+      element("p", "Не удалось загрузить задания на проверку.", "status"),
+      retry,
+    );
+  }
 }
 
 function showModerationCases(cases, revision) {
@@ -9254,6 +9392,9 @@ async function bootstrapTaskHome(authAttempted = false) {
     } else if (directAdministration?.[1] === "team") {
       history.replaceState({ screen: "moderation-team" }, "", initialHash);
       loadAdministrationTeam(false);
+    } else if (initialHash === "#/moderation/community-reviews") {
+      history.replaceState({ screen: "moderation-community-reviews" }, "", initialHash);
+      loadCommunityReviews(false);
     } else if (directInvitation?.[1] === "new") {
       history.replaceState({ screen: "personal-invitation-create" }, "", initialHash);
       showPersonalInvitationCreate(false);
@@ -9400,7 +9541,7 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "created-assignments") {
     loadCreatedReviews(false, event.state.scope || "active");
   } else if (event.state?.screen === "assignment-review") {
-    showCreatedReview(event.state.assignmentId, false);
+    showCreatedReview(event.state.assignmentId, false, event.state.returnTo || null);
   } else if (event.state?.screen === "assignment") {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
@@ -9415,6 +9556,8 @@ globalThis.addEventListener("popstate", (event) => {
     loadAdministrationAccess(false);
   } else if (event.state?.screen === "moderation-team") {
     loadAdministrationTeam(false);
+  } else if (event.state?.screen === "moderation-community-reviews") {
+    loadCommunityReviews(false);
   } else if (event.state?.screen === "credit-grant-home") {
     loadCreditGrantHome(false);
   } else if (event.state?.screen === "credit-grant-form") {

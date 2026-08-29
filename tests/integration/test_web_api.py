@@ -43,6 +43,8 @@ from community_bot.bootstrap.settings import Settings
 from community_bot.domain.members import (
     ADMINISTRATOR_MANAGEMENT_PERMISSION,
     ADMINISTRATOR_PERMISSIONS,
+    COMMUNITY_TASK_CREATE_PERMISSION,
+    COMMUNITY_TASK_REVIEW_PERMISSION,
     MEMBER_INVITATION_PERMISSION,
     SUPERADMINISTRATOR_PERMISSION,
     MemberRole,
@@ -1843,6 +1845,245 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         assert await session.scalar(select(func.count()).select_from(ConversationStateModel)) == 0
 
 
+async def test_community_task_creation_and_moderation_are_permission_scoped(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    performer = await prepare_member(database, telegram_user_id=52_072)
+    creator = await add_member(
+        database,
+        52_073,
+        role=MemberRole.ADMINISTRATOR,
+        permissions=[COMMUNITY_TASK_CREATE_PERMISSION],
+    )
+    reviewer = await add_member(
+        database,
+        52_074,
+        role=MemberRole.ADMINISTRATOR,
+        permissions=[COMMUNITY_TASK_REVIEW_PERMISSION],
+    )
+    denied = await add_member(database, 52_075, role=MemberRole.ADMINISTRATOR)
+    app = create_web_app(
+        settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
+        database=database,
+    )
+    now = datetime.datetime.now(datetime.UTC)
+    authentication_sequence = 0
+
+    async def authenticate(client: AsyncClient, telegram_user_id: int) -> None:
+        nonlocal authentication_sequence
+        authentication_sequence += 1
+        response = await client.post(
+            "/api/v1/auth/telegram",
+            content=proof(
+                telegram_user_id,
+                now=now + datetime.timedelta(seconds=authentication_sequence),
+            ),
+            headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+        )
+        assert response.status_code == 204
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as creator_client:
+        await authenticate(creator_client, creator.telegram_user_id)
+        state = (await creator_client.get("/api/v1/task-creation")).json()
+        community = next(
+            item for item in state["categories"] if item["code"] == "community_development"
+        )
+        assert state["community_reward_max"] == 10
+        assert (
+            await creator_client.post(
+                "/api/v1/task-creation",
+                json={"action": "start"},
+                headers={"origin": ORIGIN, "idempotency-key": "7201"},
+            )
+        ).status_code == 204
+        draft = (await creator_client.get("/api/v1/task-creation")).json()["draft"]
+        form = {
+            "category_id": community["id"],
+            "task_kind": "solo",
+            "time_size": "l",
+            "title": "Подготовить план встречи сообщества",
+            "description": "Собрать предложения участников и оформить понятный план встречи.",
+            "completion_criteria": "План содержит темы, порядок обсуждения и ответственных.",
+            "credit_reward_per_performer": 10,
+            "deadline_at": (now + datetime.timedelta(days=2)).isoformat(),
+            "format": "online",
+            "materials": {},
+            "performer_slots": 1,
+        }
+        over_limit = await creator_client.post(
+            "/api/v1/task-creation",
+            json={
+                "action": "save",
+                "draft_id": draft["id"],
+                "expected_revision": 0,
+                "form": form | {"credit_reward_per_performer": 11},
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "7202"},
+        )
+        assert over_limit.status_code == 409
+        saved = await creator_client.post(
+            "/api/v1/task-creation",
+            json={
+                "action": "save",
+                "draft_id": draft["id"],
+                "expected_revision": 0,
+                "form": form,
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "7203"},
+        )
+        assert saved.status_code == 204, saved.text
+        preview = (await creator_client.get("/api/v1/task-creation")).json()
+        assert preview["draft"]["origin"] == "community"
+        assert preview["preview"]["origin"] == "community"
+        assert preview["preview"]["author_display_name"] == "Сообщество"
+        assert preview["preview"]["reward_total"] == 0
+        published = await creator_client.post(
+            "/api/v1/task-creation",
+            json={
+                "action": "publish",
+                "draft_id": draft["id"],
+                "expected_revision": 1,
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "7204"},
+        )
+        assert published.status_code == 200, published.text
+        task_id = UUID(published.json()["task_id"])
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as denied_client:
+        await authenticate(denied_client, denied.telegram_user_id)
+        denied_state = (await denied_client.get("/api/v1/task-creation")).json()
+        assert "community_development" not in {item["code"] for item in denied_state["categories"]}
+        assert (await denied_client.get("/api/v1/moderation/community-reviews")).status_code == 403
+        assert (
+            await denied_client.post(
+                "/api/v1/task-creation",
+                json={"action": "start"},
+                headers={"origin": ORIGIN, "idempotency-key": "7205"},
+            )
+        ).status_code == 204
+        denied_draft = (await denied_client.get("/api/v1/task-creation")).json()["draft"]
+        direct_save = await denied_client.post(
+            "/api/v1/task-creation",
+            json={
+                "action": "save",
+                "draft_id": denied_draft["id"],
+                "expected_revision": 0,
+                "form": form,
+            },
+            headers={"origin": ORIGIN, "idempotency-key": "7206"},
+        )
+        assert direct_save.status_code == 409
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        task = await session.get(TaskModel, task_id)
+        assert task is not None
+        assert (
+            task.origin,
+            task.creator_id,
+            task.created_by_admin_id,
+            task.reviewer_admin_id,
+            task.community_approved_by_admin_id,
+            task.author_display_name,
+            task.reserved_credit_total,
+        ) == ("community", None, creator.id, None, creator.id, "Сообщество", 0)
+        assignment = AssignmentModel(
+            task_id=task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="submitted",
+            accepted_at=now,
+            submitted_at=now,
+            review_deadline_at=now + datetime.timedelta(hours=72),
+        )
+        session.add(assignment)
+        await session.flush()
+        session.add(
+            AssignmentResultVersionModel(
+                assignment_id=assignment.id,
+                version=1,
+                payload_json={"result": "Готовый план встречи и список ответственных."},
+                submit_command_id=uuid4(),
+            )
+        )
+        assignment_id = assignment.id
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as denied_client:
+        await authenticate(denied_client, denied.telegram_user_id)
+        denied_decision = await denied_client.post(
+            f"/api/v1/assignment-reviews/{assignment_id}/decision",
+            json={"decision": "full"},
+            headers={"origin": ORIGIN, "idempotency-key": "7207"},
+        )
+        assert denied_decision.status_code == 409
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as reviewer_client:
+        await authenticate(reviewer_client, reviewer.telegram_user_id)
+        queue = await reviewer_client.get("/api/v1/moderation/community-reviews")
+        assert queue.status_code == 200, queue.text
+        assert [UUID(item["id"]) for item in queue.json()["items"]] == [assignment_id]
+        detail = await reviewer_client.get(f"/api/v1/moderation/community-reviews/{assignment_id}")
+        assert detail.status_code == 200
+        assert detail.json()["result"] == "Готовый план встречи и список ответственных."
+        decision_headers = {"origin": ORIGIN, "idempotency-key": "7208"}
+        decision = await reviewer_client.post(
+            f"/api/v1/assignment-reviews/{assignment_id}/decision",
+            json={"decision": "full"},
+            headers=decision_headers,
+        )
+        replay = await reviewer_client.post(
+            f"/api/v1/assignment-reviews/{assignment_id}/decision",
+            json={"decision": "full"},
+            headers=decision_headers,
+        )
+        assert decision.status_code == replay.status_code == 204
+        assert (await reviewer_client.get("/api/v1/moderation/community-reviews")).json() == {
+            "items": []
+        }
+
+    async with sessions() as session:
+        stored_assignment = await session.get(AssignmentModel, assignment_id)
+        stored_performer = await session.get(MemberModel, performer.id)
+        transactions = (
+            await session.scalars(
+                select(AccountTransactionModel).where(
+                    AccountTransactionModel.assignment_id == assignment_id
+                )
+            )
+        ).all()
+        assert stored_assignment is not None
+        assert stored_performer is not None
+        assert stored_assignment.status == "approved"
+        assert stored_assignment.terminal_outcome == "full"
+        assert stored_performer.credit_balance_cached == 20
+        assert [
+            (item.transaction_type, item.credit_delta, item.experience_delta)
+            for item in transactions
+        ] == [("community_task_reward", 10, 10)]
+    await database.dispose()
+    await migrate(database_url, "downgrade 0028")
+    downgraded = create_async_engine(database_url)
+    async with downgraded.connect() as connection:
+        creator_permissions = await connection.scalar(
+            text("SELECT permissions_json FROM members WHERE id=:id"),
+            {"id": creator.id},
+        )
+        reviewer_permissions = await connection.scalar(
+            text("SELECT permissions_json FROM members WHERE id=:id"),
+            {"id": reviewer.id},
+        )
+        retained_task = await connection.scalar(
+            text("SELECT count(*) FROM tasks WHERE id=:id AND origin='community'"),
+            {"id": task_id},
+        )
+        assert creator_permissions == []
+        assert reviewer_permissions == []
+        assert retained_task == 1
+    await downgraded.dispose()
+    await migrate(database_url, "upgrade 0029")
+
+
 async def test_task_creation_start_new_atomically_supersedes_and_replays_once(
     database_url: str,
 ) -> None:
@@ -3426,6 +3667,8 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         detail = await client.get(f"/api/v1/assignments/{first_assignment.id}")
         assert detail.status_code == 200, detail.text
         assert set(detail.json()) == list_keys | {
+            "task_creator_id",
+            "task_author_display_name",
             "category_name",
             "category_icon",
             "task_kind",
@@ -4026,6 +4269,8 @@ async def test_administrator_management_api_enforces_provenance_and_delegation(
             "member_invitation",
             "member_blocking",
             "administrator_management",
+            "community_task_create",
+            "community_task_review",
         }
 
         appointed = await owner_client.post(

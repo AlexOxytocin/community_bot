@@ -12,7 +12,13 @@ from community_bot.application.cities import canonical_task_city
 from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.catalog import TaskFormat, validate_payload
 from community_bot.domain.economy import ResolvedLevel, refund_reward, reserve_reward
-from community_bot.domain.members import Member, MemberRole, MemberStatus, is_superadministrator
+from community_bot.domain.members import (
+    Member,
+    MemberRole,
+    MemberStatus,
+    can_create_community_task,
+    is_superadministrator,
+)
 from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import (
     TASK_TIME_SIZE_SPECS,
@@ -51,6 +57,8 @@ _MAX_AVAILABLE_TASKS = 10
 _MAX_COMMUNITY_PUBLICATION_REQUESTS = 20
 _MAX_CANCELLATION_RESPONSES = 50
 _FORMAT_VALUE_SIZE = 2
+_COMMUNITY_CATEGORY_CODE = "community_development"
+_COMMUNITY_TASK_MAX_REWARD = 10
 TaskCancellationStatus = Literal["cancelled", "pending", "closed", "declined", "obsolete"]
 
 
@@ -509,7 +517,7 @@ class TaskService:
                         source is None
                         or source.creator_id != actor.id
                         or source.template_id is not None
-                        or source.origin != "member"
+                        or source.origin not in {"member", "community"}
                     ):
                         raise PermissionError("Task draft is unavailable.")
                     await uow.ensure_task_test_access(draft_id=source.id, member_id=actor.id)
@@ -519,9 +527,7 @@ class TaskService:
                 else:
                     draft = await uow.get_current_task_draft(actor.id)
                 if draft is not None and actor_member_id is not None:
-                    draft = (
-                        None if draft.template_id is not None or draft.origin != "member" else draft
-                    )
+                    draft = None if draft.template_id is not None else draft
                 if draft is not None and actor_member_id is not None:
                     try:
                         await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor.id)
@@ -552,8 +558,8 @@ class TaskService:
                     raise PermissionError("Task template is unavailable to this member.")
                 if origin not in {"member", "community"}:
                     raise TaskError("Task origin is invalid.")
-                if origin == "community" and actor.role is not MemberRole.ADMINISTRATOR:
-                    raise PermissionError("Only an administrator may create a community task.")
+                if origin == "community" and not can_create_community_task(actor):
+                    raise PermissionError("Community task creation permission is required.")
                 draft = await uow.create_task_draft(
                     creator_id=actor.id,
                     template_id=template.id,
@@ -579,13 +585,15 @@ class TaskService:
                 )
             return draft
 
-    async def web_state(
+    async def web_state(  # noqa: PLR0911
         self, actor_member_id: UUID
     ) -> tuple[tuple[TaskCategoryOption, ...], TaskDraft | None, TaskPreview | None, bool]:
         """Return the actor's scoped free-form draft and valid preview, if any."""
         async with self._unit_of_work_factory() as uow:
             actor = await _active_context_actor(uow, actor_member_id)
-            categories = await uow.list_task_categories(actor_role=actor.role)
+            categories = _categories_for_actor(
+                await uow.list_task_categories(actor_role=actor.role), actor
+            )
             draft = await uow.get_current_task_draft(actor.id)
             if draft is None:
                 return categories, None, None, False
@@ -593,8 +601,10 @@ class TaskService:
                 await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor.id)
             except PermissionError:
                 return categories, None, None, False
-            if draft.template_id is not None or draft.origin != "member":
+            if draft.template_id is not None:
                 return categories, None, None, False
+            if draft.origin == "community" and not can_create_community_task(actor):
+                return categories, draft, None, True
             if draft.current_step is not TaskDraftStep.PREVIEW:
                 return categories, draft, None, False
             category = next((item for item in categories if item.id == draft.category_id), None)
@@ -617,7 +627,7 @@ class TaskService:
                 draft is None
                 or draft.creator_id != actor.id
                 or draft.template_id is not None
-                or draft.origin != "member"
+                or draft.origin not in {"member", "community"}
             ):
                 raise PermissionError("Task draft is unavailable.")
             await uow.ensure_task_test_access(draft_id=draft.id, member_id=actor.id)
@@ -625,6 +635,10 @@ class TaskService:
             category = await uow.task_category_for_creation(
                 category_id=command.category_id, actor_role=actor.role
             )
+            category = _category_for_actor(category, actor)
+            if category is None:
+                raise PermissionError("Task category is unavailable to this administrator.")
+            draft_origin = "community" if category.code == _COMMUNITY_CATEGORY_CODE else "member"
             requested_city = (
                 canonical_task_city(command.city) if command.format is TaskFormat.OFFLINE else None
             )
@@ -648,6 +662,11 @@ class TaskService:
                 city=city,
                 materials=validate_freeform_materials(command.materials),
                 performer_slots=command.performer_slots,
+                origin=draft_origin,
+                reviewer_admin_id=None,
+                community_approval_requested_at=None,
+                community_approved_by_admin_id=None,
+                community_approved_at=None,
                 current_step=TaskDraftStep.PREVIEW,
                 revision=draft.revision + 1,
             )
@@ -679,7 +698,9 @@ class TaskService:
         """List free-form categories visible to the active creator."""
         async with self._unit_of_work_factory() as uow:
             actor = await _active_actor(uow, actor_telegram_user_id)
-            return await uow.list_task_categories(actor_role=actor.role)
+            return _categories_for_actor(
+                await uow.list_task_categories(actor_role=actor.role), actor
+            )
 
     async def pending_community_publications(
         self, *, actor_telegram_user_id: int, limit: int = 10
@@ -1053,7 +1074,7 @@ class TaskService:
                 and (
                     preliminary.creator_id != web_actor.id
                     or preliminary.template_id is not None
-                    or preliminary.origin != "member"
+                    or preliminary.origin not in {"member", "community"}
                 )
             ):
                 raise TaskError("Task draft does not exist.")
@@ -1071,6 +1092,8 @@ class TaskService:
                 if web_actor is not None
                 else await _active_actor(uow, command.actor_telegram_user_id or 0)
             )
+            if preliminary.origin == "community" and not can_create_community_task(actor_snapshot):
+                raise PermissionError("Community task creation permission is required.")
             category_before = (
                 None
                 if preliminary.category_id is None
@@ -1087,7 +1110,7 @@ class TaskService:
                 preliminary.creator_id, RestrictedAction.CREATE_TASK
             )
             prepared = None
-            if preliminary.origin == "community":
+            if preliminary.origin == "community" and preliminary.template_id is not None:
                 if preliminary.reviewer_admin_id is None:
                     raise TaskError("Community task reviewer is required.")
                 locked = await uow.lock_members(
@@ -1102,6 +1125,11 @@ class TaskService:
                     or reviewer.id == actor.id
                 ):
                     raise PermissionError("Community reviewer is no longer independent.")
+                reserve_total = 0
+            elif preliminary.origin == "community":
+                actor = (await uow.lock_members((preliminary.creator_id,)))[preliminary.creator_id]
+                if not can_create_community_task(actor):
+                    raise PermissionError("Community task creation permission is required.")
                 reserve_total = 0
             else:
                 if preliminary.template_id is None:
@@ -1206,7 +1234,11 @@ class TaskService:
                 expected_reserve = template.credit_reward * draft.performer_slots
             if expected_reserve != reserve_total:
                 raise TaskError("Task reserve changed after preview.")
-            if draft.origin == "community" and not is_superadministrator(actor):
+            if (
+                draft.origin == "community"
+                and draft.template_id is not None
+                and not is_superadministrator(actor)
+            ):
                 return await _request_community_publication(
                     uow=uow,
                     update_id=command.update_id,
@@ -2128,6 +2160,10 @@ def _validate_freeform_publishable(
         raise TaskError("Free-form validation received a template draft.")
     if category is None:
         raise TaskError("Task category is unavailable.")
+    if draft.origin == "community" and category.code != _COMMUNITY_CATEGORY_CODE:
+        raise TaskError("Community task must use the community development category.")
+    if draft.origin == "member" and category.code == _COMMUNITY_CATEGORY_CODE:
+        raise TaskError("Community development tasks must be published by the community.")
     if draft.task_kind is None or draft.time_size is None:
         raise TaskError("Task draft is incomplete.")
     if (
@@ -2144,6 +2180,11 @@ def _validate_freeform_publishable(
         raise TaskError("Task draft is incomplete.")
     validate_freeform_slots(draft.performer_slots, kind=draft.task_kind)
     validate_freeform_reward(draft.time_size, draft.credit_reward_per_performer)
+    if (
+        draft.origin == "community"
+        and draft.credit_reward_per_performer > _COMMUNITY_TASK_MAX_REWARD
+    ):
+        raise TaskError("Community task reward cannot exceed 10 credits.")
     validate_freeform_text(draft.title, field="title")
     validate_freeform_text(draft.description, field="description")
     validate_freeform_text(draft.completion_criteria, field="completion_criteria")
@@ -2158,7 +2199,11 @@ async def _freeform_preview(
     _validate_freeform_publishable(draft, category)
     return TaskPreview(
         draft,
-        await uow.member_display_name(draft.creator_id),
+        (
+            "Сообщество"
+            if draft.origin == "community"
+            else await uow.member_display_name(draft.creator_id)
+        ),
         category.name if category else None,
         category.icon if category else None,
         draft.task_kind,
@@ -2169,7 +2214,11 @@ async def _freeform_preview(
         ("description",),
         cast("str", draft.completion_criteria),
         cast("int", draft.credit_reward_per_performer),
-        cast("int", draft.credit_reward_per_performer) * cast("int", draft.performer_slots),
+        (
+            0
+            if draft.origin == "community"
+            else cast("int", draft.credit_reward_per_performer) * cast("int", draft.performer_slots)
+        ),
     )
 
 
@@ -2208,6 +2257,27 @@ def _replace_draft(draft: TaskDraft, **changes: object) -> TaskDraft:
     values = {field: getattr(draft, field) for field in draft.__dataclass_fields__}
     values.update(changes)
     return TaskDraft(**values)
+
+
+def _categories_for_actor(
+    categories: tuple[TaskCategoryOption, ...], actor: Member
+) -> tuple[TaskCategoryOption, ...]:
+    """Hide the community category unless the actor may publish as the community."""
+    if can_create_community_task(actor):
+        return categories
+    return tuple(item for item in categories if item.code != _COMMUNITY_CATEGORY_CODE)
+
+
+def _category_for_actor(
+    category: TaskCategoryOption | None, actor: Member
+) -> TaskCategoryOption | None:
+    if (
+        category is not None
+        and category.code == _COMMUNITY_CATEGORY_CODE
+        and not can_create_community_task(actor)
+    ):
+        return None
+    return category
 
 
 async def _request_community_publication(

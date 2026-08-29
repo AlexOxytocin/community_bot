@@ -11,6 +11,8 @@ from hypothesis import strategies as st
 from community_bot.domain.members import (
     ADMINISTRATOR_MANAGEMENT_PERMISSION,
     ADMINISTRATOR_PERMISSIONS,
+    COMMUNITY_TASK_CREATE_PERMISSION,
+    COMMUNITY_TASK_REVIEW_PERMISSION,
     DISPUTE_MODERATION_PERMISSION,
     MEMBER_BLOCKING_PERMISSION,
     MEMBER_INVITATION_PERMISSION,
@@ -22,8 +24,10 @@ from community_bot.domain.members import (
     MemberStatus,
     StartOutcome,
     assign_administrator,
+    can_create_community_task,
     can_edit_administrator,
     can_read_member,
+    can_review_community_task,
     change_member,
     demote_administrator,
     route_start,
@@ -336,6 +340,31 @@ def test_owner_can_appoint_with_exact_individual_permissions() -> None:
         {"member_read", DISPUTE_MODERATION_PERMISSION, ADMINISTRATOR_MANAGEMENT_PERMISSION}
     )
     assert changed.administrator_appointed_by_member_id == owner.id
+
+
+def test_community_task_permissions_are_opt_in_except_for_owner() -> None:
+    ordinary = member(role=MemberRole.ADMINISTRATOR, permissions=ADMINISTRATOR_PERMISSIONS)
+    creator = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({COMMUNITY_TASK_CREATE_PERMISSION}),
+    )
+    reviewer = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({COMMUNITY_TASK_REVIEW_PERMISSION}),
+    )
+    owner = member(
+        role=MemberRole.ADMINISTRATOR,
+        permissions=frozenset({SUPERADMINISTRATOR_PERMISSION}),
+    )
+
+    assert not can_create_community_task(ordinary)
+    assert not can_review_community_task(ordinary)
+    assert can_create_community_task(creator)
+    assert not can_review_community_task(creator)
+    assert not can_create_community_task(reviewer)
+    assert can_review_community_task(reviewer)
+    assert can_create_community_task(owner)
+    assert can_review_community_task(owner)
 
 
 def test_delegated_manager_can_grant_only_own_ordinary_rights() -> None:

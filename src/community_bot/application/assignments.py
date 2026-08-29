@@ -27,7 +27,12 @@ from community_bot.domain.economy import (
     earn_reward,
     refund_reward,
 )
-from community_bot.domain.members import Member, MemberRole, MemberStatus
+from community_bot.domain.members import (
+    Member,
+    MemberRole,
+    MemberStatus,
+    can_review_community_task,
+)
 from community_bot.domain.moderation import RestrictedAction
 from community_bot.domain.tasks import TaskStatus, validate_freeform_result_payload
 
@@ -245,6 +250,7 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
         actor_id: UUID,
         *,
         member_owned: bool = False,
+        community_owned: bool = False,
         assignment_id: UUID | None = None,
     ) -> tuple[AssignmentCard, ...]: ...
     async def list_task_assignments(
@@ -621,6 +627,20 @@ class AssignmentService:
                 assignment_id=assignment_id,
             )
 
+    async def community_review_cards(
+        self, *, actor: ActorContext, assignment_id: UUID | None = None
+    ) -> tuple[AssignmentCard, ...]:
+        """Return free-form community results visible to an authorized administrator."""
+        async with self._unit_of_work_factory() as uow:
+            member = await _context_actor(uow, actor)
+            if not can_review_community_task(member):
+                raise PermissionError("Community task review permission is required.")
+            return await uow.list_review_cards(
+                member.id,
+                community_owned=True,
+                assignment_id=assignment_id,
+            )
+
     async def begin_submission(self, command: BeginSubmissionCommand) -> SubmissionDraft:
         """Start or resume result input with all state persisted in PostgreSQL."""
         async with self._unit_of_work_factory() as uow:
@@ -968,7 +988,7 @@ class AssignmentService:
                 assignment = await uow.get_assignment(command.assignment_id)
                 if assignment is None:
                     raise LookupError("Stored assignment outcome does not exist.")
-                await _ensure_web_decision_access(uow, actor.id, assignment)
+                await _ensure_web_decision_access(uow, actor, assignment)
                 return assignment
             actor = await _command_actor(uow, command)
             await uow.acquire_task_identity_gate(actor.telegram_user_id)
@@ -981,7 +1001,15 @@ class AssignmentService:
             if task is not None and command.actor_member_id is not None:
                 await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
             authorized = task is not None and (
-                task.creator_id == actor.id
+                (task.origin == "member" and task.creator_id == actor.id)
+                or (
+                    command.actor_member_id is not None
+                    and task.origin == "community"
+                    and task.template_id is None
+                    and assignment is not None
+                    and assignment.performer_id != actor.id
+                    and can_review_community_task(actor)
+                )
                 or (
                     command.actor_member_id is None
                     and (
@@ -1011,10 +1039,17 @@ class AssignmentService:
                     raise AssignmentError("Assignment already has another review outcome.")
                 await _finish(uow, command.update_id, actor.id, assignment, command)
                 return assignment
-            if assignment.status is not AssignmentStatus.SUBMITTED:
+            if assignment.status not in {
+                AssignmentStatus.SUBMITTED,
+                AssignmentStatus.REVIEWER_REQUIRED,
+            }:
                 raise AssignmentError("Only a submitted assignment can be reviewed.")
             now = datetime.datetime.now(datetime.UTC)
-            if assignment.review_deadline_at is not None and now >= assignment.review_deadline_at:
+            if (
+                assignment.status is AssignmentStatus.SUBMITTED
+                and assignment.review_deadline_at is not None
+                and now >= assignment.review_deadline_at
+            ):
                 raise AssignmentError("Assignment review deadline has passed.")
             commands = ()
             if command.decision is AssignmentDecision.FULL:
@@ -1515,12 +1550,21 @@ async def _web_dispute_replay(
 
 
 async def _ensure_web_decision_access(
-    uow: AssignmentUnitOfWork, actor_id: UUID, assignment: Assignment
+    uow: AssignmentUnitOfWork, actor: Member, assignment: Assignment
 ) -> None:
     task = await uow.lock_task(assignment.task_id)
-    if task is None or task.creator_id != actor_id:
+    authorized = task is not None and (
+        (task.origin == "member" and task.creator_id == actor.id)
+        or (
+            task.origin == "community"
+            and task.template_id is None
+            and assignment.performer_id != actor.id
+            and can_review_community_task(actor)
+        )
+    )
+    if task is None or not authorized:
         raise PermissionError("Assignment decision is not owned by this member.")
-    await uow.ensure_task_test_access(task_id=task.id, member_id=actor_id)
+    await uow.ensure_task_test_access(task_id=task.id, member_id=actor.id)
 
 
 async def _draft_replay(

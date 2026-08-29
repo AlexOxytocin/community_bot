@@ -98,7 +98,8 @@ class MemberModel(Base):
             "jsonb_typeof(permissions_json) = 'array' AND "
             "permissions_json <@ "
             '\'["karma_review","member_read","interaction_review","member_invitation",'
-            '"member_blocking","administrator_management","superadministrator"]\'::jsonb',
+            '"member_blocking","administrator_management","community_task_create",'
+            '"community_task_review","superadministrator"]\'::jsonb',
             name="ck_members_permissions",
         ),
     )
@@ -530,10 +531,17 @@ class TaskModel(Base):
             "(origin = 'community' AND "
             "((created_by_admin_id IS NULL AND reviewer_admin_id IS NULL "
             "AND community_approved_by_admin_id IS NULL) OR "
+            "(template_id IS NULL AND created_by_admin_id IS NOT NULL "
+            "AND reviewer_admin_id IS NULL "
+            "AND community_approved_by_admin_id = created_by_admin_id) OR "
             "(created_by_admin_id IS NOT NULL AND reviewer_admin_id IS NOT NULL "
             "AND community_approved_by_admin_id IS NOT NULL "
             "AND created_by_admin_id <> reviewer_admin_id)))",
             name="ck_tasks_community_provenance",
+        ),
+        CheckConstraint(
+            "origin <> 'community' OR template_id IS NOT NULL OR credit_reward_per_performer <= 10",
+            name="ck_tasks_freeform_community_reward",
         ),
         Index("ix_tasks_creator_created", "creator_id", "created_at", "id"),
         Index("ix_tasks_status_deadline", "status", "deadline_at"),
