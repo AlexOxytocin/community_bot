@@ -6012,7 +6012,7 @@ function showNextCreatedAssignments(revision) {
       });
       archiveRoles.append(roleButton);
     }
-    boundary.append(header.actions, archiveRoles, headingRow, results);
+    boundary.append(header.actions, archiveRoles, results);
   } else {
     boundary.append(header.actions, headingRow, results);
   }

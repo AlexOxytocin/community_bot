@@ -2811,7 +2811,7 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         )
         archive.wait_for()
         assert page.url.endswith("#/work?view_state=m09&scope=archive")
-        assert archive.get_by_role("heading", name="Архив заданий", exact=True).is_visible()
+        assert archive.get_by_role("heading", name="Архив заданий", exact=True).count() == 0
         assert archive.get_by_text("Созданное архивное задание", exact=True).is_visible()
         assert archive.get_by_text("Отменённое архивное задание", exact=True).is_visible()
         assert archive.get_by_text("Созданное активное задание", exact=True).count() == 0
