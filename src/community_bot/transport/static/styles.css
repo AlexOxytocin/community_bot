@@ -1172,7 +1172,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-size-option small { grid-column: 2; grid-row: 2; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .task-size-option.is-selected { border-color: color-mix(in srgb, var(--app-accent) 62%, var(--app-border)); background: color-mix(in srgb, var(--app-accent) 8%, var(--app-surface-raised)); }
 .task-size-check { grid-column: 3; grid-row: 1 / span 2; align-self: center; color: var(--app-accent); font-size: 16px; font-weight: 800; }
-.creation-choice-options { display: grid; overflow: auto; gap: 6px; padding-top: 2px; }
+.creation-choice-sheet { grid-template-rows: auto minmax(0, 1fr); align-content: stretch; }
+.creation-choice-options { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; gap: 6px; padding: 2px 2px 0 0; scrollbar-gutter: stable; }
 .creation-choice-option { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; min-height: 58px; align-items: center; padding: 9px 10px; border: 1px solid transparent; border-radius: 12px; background: transparent; color: var(--app-text); text-align: left; cursor: pointer; }
 .creation-choice-option-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 9px; background: color-mix(in srgb, var(--app-accent) 9%, var(--app-surface)); font-size: 16px; }
 .creation-choice-option-icon:empty { display: none; }

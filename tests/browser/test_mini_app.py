@@ -107,6 +107,56 @@ def _open_blank_task_creation(page: Any, *, group: bool = False) -> None:  # noq
         )
 
 
+@pytest.mark.browser_smoke
+def test_creation_choice_sheet_scrolls_all_categories_on_compact_viewport() -> None:
+    labels = (
+        "Продвижение",
+        "Оценка и тестирование",
+        "Коммуникация",
+        "Обучение и разбор",
+        "Практическая помощь",
+        "Другое",
+        "Развитие комьюнити",
+    )
+    options = "".join(
+        f'<button class="creation-choice-option"><span class="creation-choice-option-icon">•</span>'
+        f'<span class="creation-choice-option-copy"><strong>{label}</strong>'
+        '<small>Описание категории</small></span>'
+        '<span class="creation-choice-option-check"></span></button>'
+        for label in labels
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 420, "height": 570})
+        page.set_content(
+            '<section class="task-size-backdrop">'
+            '<div class="task-size-sheet creation-choice-sheet">'
+            '<div class="catalog-sort-heading"><h2>Категория</h2></div>'
+            f'<div class="creation-choice-options">{options}</div>'
+            "</div></section>"
+        )
+        page.add_style_tag(path=str(STATIC_DIR / "styles.css"))
+        category_options = page.locator(".creation-choice-options")
+        initial = category_options.evaluate(
+            "node => ({ overflowY: getComputedStyle(node).overflowY, "
+            "clientHeight: node.clientHeight, scrollHeight: node.scrollHeight, "
+            "containerBottom: node.getBoundingClientRect().bottom, "
+            "lastBottom: node.lastElementChild.getBoundingClientRect().bottom })"
+        )
+        assert initial["overflowY"] == "auto"
+        assert initial["scrollHeight"] > initial["clientHeight"]
+        assert initial["lastBottom"] > initial["containerBottom"]
+        category_options.evaluate("node => { node.scrollTop = node.scrollHeight; }")
+        after_scroll = category_options.evaluate(
+            "node => ({ scrollTop: node.scrollTop, "
+            "containerBottom: node.getBoundingClientRect().bottom, "
+            "lastBottom: node.lastElementChild.getBoundingClientRect().bottom })"
+        )
+        assert after_scroll["scrollTop"] > 0
+        assert after_scroll["lastBottom"] <= after_scroll["containerBottom"] + 1
+        browser.close()
+
+
 def _cache_profile(member_id: str = "member-cache") -> tuple[dict[str, Any], dict[str, Any]]:
     me = {
         "member_id": member_id,
