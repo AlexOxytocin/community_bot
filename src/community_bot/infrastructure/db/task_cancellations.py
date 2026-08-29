@@ -7,7 +7,7 @@ from __future__ import annotations
 import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import exists, or_, select, tuple_, update
+from sqlalchemy import exists, func, or_, select, tuple_, update
 
 from community_bot.application.tasks import (
     OwnedTaskAssignee,
@@ -36,6 +36,9 @@ if TYPE_CHECKING:
     from community_bot.domain.tasks import TaskStatus
 
 
+SUCCESSFUL_ASSIGNMENT_STATUSES = ("approved", "partially_approved")
+
+
 async def list_owned_task_cards(
     session: AsyncSession,
     *,
@@ -45,6 +48,7 @@ async def list_owned_task_cards(
     before_created_at: datetime.datetime | None,
     before_id: uuid.UUID | None,
     creator_only: bool = False,
+    performed_only: bool = False,
     order_by_updated_at: bool = False,
 ) -> tuple[OwnedTaskCard, ...]:
     """Return tasks with active assignee labels and the pending request state."""
@@ -52,17 +56,35 @@ async def list_owned_task_cards(
     test_scope = (
         TaskModel.test_run_id.is_(None) if scope is None else TaskModel.test_run_id == scope.id
     )
-    ownership = (
-        or_(TaskModel.creator_id == creator_id, TaskModel.created_by_admin_id == creator_id)
-        if creator_only
-        else or_(
-            TaskModel.creator_id == creator_id,
-            TaskModel.created_by_admin_id == creator_id,
-            TaskModel.reviewer_admin_id == creator_id,
-            TaskModel.community_approved_by_admin_id == creator_id,
-        )
+    performed_assignment = exists().where(
+        AssignmentModel.task_id == TaskModel.id,
+        AssignmentModel.performer_id == creator_id,
+        AssignmentModel.status.in_(SUCCESSFUL_ASSIGNMENT_STATUSES),
     )
-    order_at = TaskModel.updated_at if order_by_updated_at else TaskModel.created_at
+    if performed_only:
+        ownership = performed_assignment
+        order_at = (
+            select(func.max(AssignmentModel.reviewed_at))
+            .where(
+                AssignmentModel.task_id == TaskModel.id,
+                AssignmentModel.performer_id == creator_id,
+                AssignmentModel.status.in_(SUCCESSFUL_ASSIGNMENT_STATUSES),
+            )
+            .correlate(TaskModel)
+            .scalar_subquery()
+        )
+    else:
+        ownership = (
+            or_(TaskModel.creator_id == creator_id, TaskModel.created_by_admin_id == creator_id)
+            if creator_only
+            else or_(
+                TaskModel.creator_id == creator_id,
+                TaskModel.created_by_admin_id == creator_id,
+                TaskModel.reviewer_admin_id == creator_id,
+                TaskModel.community_approved_by_admin_id == creator_id,
+            )
+        )
+        order_at = TaskModel.updated_at if order_by_updated_at else TaskModel.created_at
     statement = select(TaskModel).where(ownership, test_scope)
     if status is not None:
         statement = statement.where(TaskModel.status == status.value)
@@ -135,6 +157,7 @@ async def _owned_task_cards(
                 assignment.performer_id,
                 str(display_name),
                 assignment.status,
+                assignment.reviewed_at,
             )
         )
     pending = {row[0]: row[1] for row in pending_rows}

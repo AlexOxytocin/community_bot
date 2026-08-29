@@ -172,6 +172,7 @@ class OwnedTaskAssignee:
     member_id: UUID
     display_name: str
     status: str
+    reviewed_at: datetime.datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +381,7 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
         creator_only: bool = False,
+        performed_only: bool = False,
         order_by_updated_at: bool = False,
     ) -> tuple[OwnedTaskCard, ...]: ...
     async def get_owned_task_card(
@@ -1371,6 +1373,7 @@ class TaskService:
         status: TaskStatus | None = None,
         cursor: tuple[datetime.datetime, UUID] | None = None,
         creator_only: bool = False,
+        performed_only: bool = False,
         order_by_updated_at: bool = False,
     ) -> tuple[OwnedTaskCard, ...]:
         """Return compact-card context for tasks visible to one owner or reviewer."""
@@ -1378,6 +1381,8 @@ class TaskService:
             raise TaskError("Owned task page size must be between 1 and 20.")
         if (actor_telegram_user_id is None) == (actor is None):
             raise TaskError("Exactly one task actor identity is required.")
+        if creator_only and performed_only:
+            raise TaskError("Owned task scopes are mutually exclusive.")
         async with self._unit_of_work_factory() as uow:
             member = (
                 await _active_context_actor(uow, actor)
@@ -1391,11 +1396,17 @@ class TaskService:
                 before_created_at=None if cursor is None else cursor[0],
                 before_id=None if cursor is None else cursor[1],
                 creator_only=creator_only,
+                performed_only=performed_only,
                 order_by_updated_at=order_by_updated_at,
             )
             now = _utc_now()
             return tuple(
-                replace(card, cancellation_action=_owned_cancellation_action(card, now))
+                replace(
+                    card,
+                    cancellation_action=(
+                        None if performed_only else _owned_cancellation_action(card, now)
+                    ),
+                )
                 for card in cards
             )
 

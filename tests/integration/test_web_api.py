@@ -3106,6 +3106,7 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
     author, owned = await _published_task(database, update_base=52_610)
     foreign_author, foreign = await _published_task(database, update_base=52_620)
     performer = await prepare_member(database, telegram_user_id=52_630)
+    performed_reviewed_at = datetime.datetime.now(datetime.UTC)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
         author_model = await session.get(MemberModel, author.id)
@@ -3146,6 +3147,17 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
                 slot_number=1,
                 status="accepted",
                 accepted_at=datetime.datetime.now(datetime.UTC),
+            )
+        )
+        session.add(
+            AssignmentModel(
+                task_id=foreign.id,
+                performer_id=performer.id,
+                slot_number=1,
+                status="approved",
+                accepted_at=performed_reviewed_at - datetime.timedelta(days=1),
+                reviewed_at=performed_reviewed_at,
+                slot_ever_paid=True,
             )
         )
         empty_owned = TaskModel(
@@ -3229,6 +3241,36 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
             headers={"origin": ORIGIN, "idempotency-key": "52634"},
         )
         assert hidden_cancel.status_code == 409
+
+        assert (
+            await client.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    performer.telegram_user_id,
+                    now=datetime.datetime.now(datetime.UTC),
+                ),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+        ).status_code == 204
+        creator_cards = (await client.get("/api/v1/owned-tasks")).json()["items"]
+        assert all(item["id"] != str(foreign.id) for item in creator_cards)
+        performed_response = await client.get(
+            "/api/v1/owned-tasks",
+            params={"scope": "performed", "member_id": str(author.id)},
+        )
+        assert performed_response.status_code == 200, performed_response.text
+        performed_cards = performed_response.json()["items"]
+        assert len(performed_cards) == 1
+        assert performed_cards[0]["id"] == str(foreign.id)
+        assert performed_cards[0]["status"] == "published"
+        assert performed_cards[0]["archive_role"] == "performed"
+        assert performed_cards[0]["performed_status"] == "approved"
+        archived_at = datetime.datetime.fromisoformat(performed_cards[0]["archived_at"])
+        assert archived_at == performed_reviewed_at
+        assert performed_cards[0]["cancellation_action"] is None
+        task_home = await client.get("/api/v1/task-home")
+        assert task_home.status_code == 200, task_home.text
+        assert task_home.json()["archive_count"] == 1
 
     await database.dispose()
 

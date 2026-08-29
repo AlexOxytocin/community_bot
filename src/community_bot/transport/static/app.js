@@ -48,6 +48,7 @@ let takenTasksQuery = "";
 let createdTasksQuery = "";
 let archivedTasksQuery = "";
 let ownedTaskListScope = "active";
+let ownedArchiveRole = "created";
 let takenTasksSort = "created_desc";
 let createdTasksSort = "created_desc";
 let archivedTasksSort = "archive_desc";
@@ -586,6 +587,8 @@ const assignmentStatus = (value) => ({
   rejected_pending_dispute: "Ожидает решения",
   disputed: "Открыт спор",
   reviewer_required: "Нужен проверяющий",
+  approved: "Принято",
+  partially_approved: "Принято частично",
 }[value] || value);
 
 const newOperationKey = () => {
@@ -5499,35 +5502,41 @@ const createdTaskStatus = (value) => ({
 function showOwnedTask(task, push = true) {
   if (push) history.pushState({ screen: "owned-task", task }, "", presentationLocationFor("M10", task.id));
   setNavigation("", true);
-  title.textContent = "Созданное задание";
+  const performedArchive = task.archive_role === "performed";
+  title.textContent = performedArchive ? "Выполненное задание" : "Созданное задание";
   const returnScope = ownedTaskListScope;
+  const returnArchiveRole = ownedArchiveRole;
   setHeaderControl("back", {
-    label: "Назад к созданным заданиям",
-    screenLabel: "Созданное задание",
+    label: returnScope === "archive" ? "Назад в архив" : "Назад к созданным заданиям",
+    screenLabel: performedArchive ? "Выполненное задание" : "Созданное задание",
     hideTitle: true,
     onBack: () => {
       const baseLocation = presentationLocationFor("M09");
       const nextLocation = returnScope === "archive"
-        ? `${baseLocation}&scope=archive`
+        ? `${baseLocation}&scope=archive${returnArchiveRole === "performed" ? "&archive_view=performed" : ""}`
         : baseLocation;
       history.replaceState(
-        { screen: "created-assignments", scope: returnScope },
+        { screen: "created-assignments", scope: returnScope, archiveRole: returnArchiveRole },
         "",
         nextLocation,
       );
-      void loadCreatedReviews(false, returnScope);
+      void loadCreatedReviews(false, returnScope, returnArchiveRole);
     },
   });
   const detail = element("article", undefined, "card owned-task-detail");
   const detailHeader = element("header", undefined, "owned-task-header");
   const headingCopy = element("div", undefined, "owned-task-heading-copy");
   headingCopy.append(
-    element("span", "Создано вами", "owned-task-eyebrow"),
+    element("span", performedArchive ? "Выполнено вами" : "Создано вами", "owned-task-eyebrow"),
     element("h2", task.title),
   );
   detailHeader.append(
     headingCopy,
-    element("span", createdTaskStatus(task.status), "chip owned-task-status-chip"),
+    element(
+      "span",
+      performedArchive ? assignmentStatus(task.performed_status) : createdTaskStatus(task.status),
+      "chip owned-task-status-chip",
+    ),
   );
 
   const summary = element("div", undefined, "owned-task-summary");
@@ -5574,7 +5583,7 @@ function showOwnedTask(task, push = true) {
       "owned-task-dispute-note",
     ));
   }
-  if (task.cancellation_action) {
+  if (!performedArchive && task.cancellation_action) {
     const cancel = element(
       "button",
       task.cancellation_action === "request" ? "Запросить отмену" : "Отменить задание",
@@ -5641,9 +5650,14 @@ const nextOwnedTaskListCard = (task) => {
   const card = element("button", undefined, "card task-card work-task-card owned-work-card");
   card.type = "button";
   const chips = element("div", undefined, "card-chips");
-  const archived = archivedOwnedTaskStatuses.has(task.status);
+  const performed = task.archive_role === "performed";
+  const archived = performed || archivedOwnedTaskStatuses.has(task.status);
   chips.append(
-    element("span", createdTaskStatus(task.status), archived ? "chip muted-chip" : "chip"),
+    element(
+      "span",
+      performed ? assignmentStatus(task.performed_status) : createdTaskStatus(task.status),
+      archived ? "chip muted-chip" : "chip",
+    ),
   );
   if (task.cancellation_status === "pending") {
     chips.append(element("span", "Ждёт ответа на отмену", "chip action-chip"));
@@ -5655,7 +5669,9 @@ const nextOwnedTaskListCard = (task) => {
     element("span", `${task.assignees.length} из ${task.performer_slots} исполнителей`),
     element("span", `до ${compactListDate(task.deadline_at)}`),
   );
-  const description = task.assignees.length
+  const description = performed
+    ? `Ваш результат: ${assignmentStatus(task.performed_status)}`
+    : task.assignees.length
     ? task.assignees.map((assignee) => (
       `${assignee.display_name}: ${assignmentStatus(assignee.status)}`
     )).join(" · ")
@@ -5807,15 +5823,18 @@ function showOwnedArchiveFilterSheet(trigger) {
 function showNextCreatedAssignments(revision) {
   if (revision !== screenRevision) return;
   const archiveMode = ownedTaskListScope === "archive";
-  const scopedTasks = ownedTasks.filter((task) => (
-    archivedOwnedTaskStatuses.has(task.status) === archiveMode
-  ));
+  const performedArchive = archiveMode && ownedArchiveRole === "performed";
+  const scopedTasks = performedArchive
+    ? ownedTasks
+    : ownedTasks.filter((task) => archivedOwnedTaskStatuses.has(task.status) === archiveMode);
   const scopedReviews = archiveMode ? [] : ownedReviews;
   const scopedTaskById = new Map(scopedTasks.map((task) => [task.id, task]));
   const screenTitle = archiveMode ? "Архив заданий" : "Созданные мной";
   const currentQuery = () => archiveMode ? archivedTasksQuery : createdTasksQuery;
   const currentSort = () => archiveMode ? archivedTasksSort : createdTasksSort;
-  const activeArchiveFilterCount = Object.values(ownedArchiveFilters).filter(Boolean).length;
+  const activeArchiveFilterCount = performedArchive
+    ? 0
+    : Object.values(ownedArchiveFilters).filter(Boolean).length;
   const activeCreatedFilterCount = activeTaskFilterCount(createdTasksFilters);
   setNavigation("catalog", false);
   title.textContent = screenTitle;
@@ -5840,6 +5859,7 @@ function showNextCreatedAssignments(revision) {
         ));
       if (!queryMatches) return false;
       if (!archiveMode) return taskMatchesFilters(task, createdTasksFilters);
+      if (performedArchive) return true;
       return (
         (!ownedArchiveFilters.status || task.status === ownedArchiveFilters.status)
         && (
@@ -5944,18 +5964,21 @@ function showNextCreatedAssignments(revision) {
   let trailingControls = null;
   if (archiveMode) {
     const actionEnd = element("div", undefined, "catalog-actions-end");
-    const filter = element("button", undefined, "secondary catalog-filter-button");
-    filter.type = "button";
-    filter.setAttribute("aria-label", "Фильтры архива");
-    filter.setAttribute("aria-haspopup", "dialog");
-    filter.append(slidersIcon());
-    if (activeArchiveFilterCount) {
-      filter.classList.add("is-active");
-      filter.setAttribute("aria-label", `Фильтры архива, выбрано: ${activeArchiveFilterCount}`);
-      filter.append(element("span", String(activeArchiveFilterCount), "catalog-filter-count"));
+    if (!performedArchive) {
+      const filter = element("button", undefined, "secondary catalog-filter-button");
+      filter.type = "button";
+      filter.setAttribute("aria-label", "Фильтры архива");
+      filter.setAttribute("aria-haspopup", "dialog");
+      filter.append(slidersIcon());
+      if (activeArchiveFilterCount) {
+        filter.classList.add("is-active");
+        filter.setAttribute("aria-label", `Фильтры архива, выбрано: ${activeArchiveFilterCount}`);
+        filter.append(element("span", String(activeArchiveFilterCount), "catalog-filter-count"));
+      }
+      filter.addEventListener("click", () => showOwnedArchiveFilterSheet(filter));
+      actionEnd.append(filter);
     }
-    filter.addEventListener("click", () => showOwnedArchiveFilterSheet(filter));
-    actionEnd.append(filter, sort);
+    actionEnd.append(sort);
     trailingControls = actionEnd;
   } else {
     const actionEnd = element("div", undefined, "catalog-actions-end");
@@ -5978,7 +6001,21 @@ function showNextCreatedAssignments(revision) {
     },
     trailingControls,
   });
-  boundary.append(header.actions, headingRow, results);
+  if (archiveMode) {
+    const archiveRoles = element("div", undefined, "segmented archive-role-tabs");
+    for (const [label, value] of [["Созданные", "created"], ["Выполненные", "performed"]]) {
+      const roleButton = element("button", label);
+      roleButton.type = "button";
+      roleButton.setAttribute("aria-pressed", String(ownedArchiveRole === value));
+      roleButton.addEventListener("click", () => {
+        if (ownedArchiveRole !== value) void loadCreatedReviews(true, "archive", value);
+      });
+      archiveRoles.append(roleButton);
+    }
+    boundary.append(header.actions, archiveRoles, headingRow, results);
+  } else {
+    boundary.append(header.actions, headingRow, results);
+  }
   const focusTarget = updateResults();
   replaceContent(boundary);
   focusTarget?.focus({ preventScroll: true });
@@ -5993,21 +6030,24 @@ function renderCreatedAssignments(revision) {
   showNextCreatedAssignments(revision);
 }
 
-async function loadCreatedReviews(push = true, scope = "active") {
+async function loadCreatedReviews(push = true, scope = "active", archiveRole = "created") {
   const revision = ++screenRevision;
   ownedTaskListScope = scope === "archive" ? "archive" : "active";
+  ownedArchiveRole = archiveRole === "performed" ? "performed" : "created";
   if (push) {
     const baseLocation = presentationLocationFor("M09");
     const nextLocation = ownedTaskListScope === "archive"
-      ? `${baseLocation}&scope=archive`
+      ? `${baseLocation}&scope=archive${ownedArchiveRole === "performed" ? "&archive_view=performed" : ""}`
       : baseLocation;
     history.replaceState(
-      { screen: "created-assignments", scope: ownedTaskListScope },
+      { screen: "created-assignments", scope: ownedTaskListScope, archiveRole: ownedArchiveRole },
       "",
       nextLocation,
     );
   }
-  const ownedPath = "/api/v1/owned-tasks";
+  const ownedPath = ownedTaskListScope === "archive" && ownedArchiveRole === "performed"
+    ? "/api/v1/owned-tasks?scope=performed"
+    : "/api/v1/owned-tasks";
   const reviewsPath = "/api/v1/assignment-reviews";
   const cachedOwned = cachedJson(ownedPath);
   const cachedReviews = cachedJson(reviewsPath);
@@ -6035,7 +6075,7 @@ async function loadCreatedReviews(push = true, scope = "active") {
     if (revision !== screenRevision) return;
     const retry = element("button", "Повторить", "primary");
     retry.type = "button";
-    retry.addEventListener("click", () => loadCreatedReviews(false, ownedTaskListScope));
+    retry.addEventListener("click", () => loadCreatedReviews(false, ownedTaskListScope, ownedArchiveRole));
     replaceContent(element("p", "Не удалось загрузить созданные задания.", "status"), retry);
   }
 }
@@ -8667,7 +8707,7 @@ function showTaskHome(home, revision = ++screenRevision) {
     element("strong", taskHomeCount(home.archive_count), "task-home-archive-count"),
   );
   archive.disabled = home.archive_count === null;
-  archive.addEventListener("click", () => loadCreatedReviews(true, "archive"));
+  archive.addEventListener("click", () => loadCreatedReviews(true, "archive", "created"));
   boundary.append(archive);
 
   replaceContent(boundary);
@@ -9434,8 +9474,14 @@ async function bootstrapTaskHome(authAttempted = false) {
       await loadAssignments(false);
       if (presentationId === "M02") showTakenAssignments();
     } else if (presentationId === "M09" || presentationId === "M10") {
-      const scope = new URLSearchParams(initialHash.split("?", 2)[1] || "").get("scope");
-      await loadCreatedReviews(false, scope === "archive" ? "archive" : "active");
+      const parameters = new URLSearchParams(initialHash.split("?", 2)[1] || "");
+      const scope = parameters.get("scope");
+      const archiveRole = parameters.get("archive_view");
+      await loadCreatedReviews(
+        false,
+        scope === "archive" ? "archive" : "active",
+        archiveRole === "performed" ? "performed" : "created",
+      );
     } else if (["T03", "T03A"].includes(presentationId) && resourceId) {
       if (presentationId === "T03A") {
         history.replaceState(
@@ -9542,7 +9588,11 @@ globalThis.addEventListener("popstate", (event) => {
   } else if (event.state?.screen === "assignments-taken") {
     showTakenAssignments();
   } else if (event.state?.screen === "created-assignments") {
-    loadCreatedReviews(false, event.state.scope || "active");
+    loadCreatedReviews(
+      false,
+      event.state.scope || "active",
+      event.state.archiveRole || "created",
+    );
   } else if (event.state?.screen === "assignment-review") {
     showCreatedReview(event.state.assignmentId, false, event.state.returnTo || null);
   } else if (event.state?.screen === "assignment") {

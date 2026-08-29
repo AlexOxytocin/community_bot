@@ -864,6 +864,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         before_created_at: datetime.datetime | None,
         before_id: UUID | None,
         creator_only: bool = False,
+        performed_only: bool = False,
         order_by_updated_at: bool = False,
     ) -> tuple[OwnedTaskCard, ...]:
         """Return owned tasks with occupancy and cancellation context."""
@@ -875,6 +876,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             before_created_at=before_created_at,
             before_id=before_id,
             creator_only=creator_only,
+            performed_only=performed_only,
             order_by_updated_at=order_by_updated_at,
         )
 

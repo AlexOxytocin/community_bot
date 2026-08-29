@@ -598,6 +598,8 @@ class OwnedTaskDto(_Dto):
     performer_slots: int
     deadline_at: datetime.datetime
     archived_at: datetime.datetime | None
+    archive_role: Literal["created", "performed"]
+    performed_status: Literal["approved", "partially_approved"] | None
     assignees: tuple[OwnedTaskAssigneeDto, ...]
     cancellation_status: str | None
     cancellation_action: Literal["cancel", "request"] | None
@@ -2019,6 +2021,7 @@ def create_web_app(
         catalog = None
         active = None
         owned = None
+        performed_archive = None
         reviews = None
         cancellations = None
         can_create: bool | None = None
@@ -2040,6 +2043,7 @@ def create_web_app(
             errors.append("work")
         try:
             owned = await tasks.list_owned_cards(actor=actor, creator_only=True)
+            performed_archive = await tasks.list_owned_cards(actor=actor, performed_only=True)
         except (PermissionError, TaskError, SQLAlchemyError):
             errors.append("owned")
         try:
@@ -2192,6 +2196,12 @@ def create_web_app(
             TaskStatus.COMPLETED,
             TaskStatus.CANCELLED,
         }
+        archive_task_ids = (
+            None
+            if owned is None or performed_archive is None
+            else {card.task.id for card in owned if card.task.status in archived_statuses}
+            | {card.task.id for card in performed_archive}
+        )
         return _json_response(
             TaskHomeDto(
                 attention=attention,
@@ -2206,9 +2216,7 @@ def create_web_app(
                 else sum(card.task.status not in archived_statuses for card in owned),
                 active_count=in_progress,
                 waiting_count=waiting,
-                archive_count=None
-                if owned is None
-                else sum(card.task.status in archived_statuses for card in owned),
+                archive_count=None if archive_task_ids is None else len(archive_task_ids),
                 new_tasks=()
                 if catalog is None
                 else tuple(_task_dto(item) for item in catalog.items[:6]),
@@ -2349,12 +2357,26 @@ def create_web_app(
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/owned-tasks", response_model=OwnedTasksDto)
-    async def owned_tasks(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
+    async def owned_tasks(
+        actor: ActorContext = Depends(current_actor),
+        scope: Literal["created", "performed"] = "created",
+    ) -> JSONResponse:
         try:
-            cards = await tasks.list_owned_cards(actor=actor, creator_only=True)
+            cards = await tasks.list_owned_cards(
+                actor=actor,
+                creator_only=scope == "created",
+                performed_only=scope == "performed",
+            )
         except PermissionError:
             return _error_response(403, "task_catalog_unavailable")
-        return _json_response(OwnedTasksDto(items=tuple(_owned_task_dto(card) for card in cards)))
+        return _json_response(
+            OwnedTasksDto(
+                items=tuple(
+                    _owned_task_dto(card, archive_role=scope, actor_id=actor.member_id)
+                    for card in cards
+                )
+            )
+        )
 
     @app.post(
         "/api/v1/owned-tasks/{task_id}/cancellation",
@@ -3581,12 +3603,33 @@ def _task_dto(task: PublishedTask) -> TaskDto:
     )
 
 
-def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
-    archived_at = (
-        card.task.updated_at
-        if card.task.status.value in {"expired", "partially_completed", "completed", "cancelled"}
-        else None
+def _owned_task_dto(
+    card: OwnedTaskCard,
+    *,
+    archive_role: Literal["created", "performed"] = "created",
+    actor_id: UUID | None = None,
+) -> OwnedTaskDto:
+    performed_assignment = next(
+        (
+            item
+            for item in card.assignees
+            if item.member_id == actor_id and item.status in {"approved", "partially_approved"}
+        ),
+        None,
     )
+    if archive_role == "performed" and performed_assignment is None:
+        raise ValueError("Performed archive projection has no successful assignment.")
+    if performed_assignment is not None:
+        archived_at = performed_assignment.reviewed_at or card.task.updated_at
+    elif card.task.status.value in {
+        "expired",
+        "partially_completed",
+        "completed",
+        "cancelled",
+    }:
+        archived_at = card.task.updated_at
+    else:
+        archived_at = None
     return OwnedTaskDto(
         id=card.task.id,
         title=card.task.title,
@@ -3602,6 +3645,11 @@ def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
         performer_slots=card.task.performer_slots,
         deadline_at=card.task.deadline_at,
         archived_at=archived_at,
+        archive_role=archive_role,
+        performed_status=cast(
+            'Literal["approved", "partially_approved"] | None',
+            None if performed_assignment is None else performed_assignment.status,
+        ),
         assignees=tuple(
             OwnedTaskAssigneeDto(
                 member_id=item.member_id,
@@ -3611,7 +3659,7 @@ def _owned_task_dto(card: OwnedTaskCard) -> OwnedTaskDto:
             for item in card.assignees
         ),
         cancellation_status=card.cancellation_status,
-        cancellation_action=card.cancellation_action,
+        cancellation_action=None if archive_role == "performed" else card.cancellation_action,
     )
 
 

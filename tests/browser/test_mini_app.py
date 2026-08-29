@@ -121,7 +121,7 @@ def test_creation_choice_sheet_scrolls_all_categories_on_compact_viewport() -> N
     options = "".join(
         f'<button class="creation-choice-option"><span class="creation-choice-option-icon">•</span>'
         f'<span class="creation-choice-option-copy"><strong>{label}</strong>'
-        '<small>Описание категории</small></span>'
+        "<small>Описание категории</small></span>"
         '<span class="creation-choice-option-check"></span></button>'
         for label in labels
     )
@@ -2606,6 +2606,9 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         "minimum_level": 1,
         "performer_slots": 2,
         "deadline_at": "2026-08-30T20:00:00Z",
+        "archived_at": None,
+        "archive_role": "created",
+        "performed_status": None,
         "assignees": [
             {
                 "member_id": assignee_id,
@@ -2641,6 +2644,23 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         "status": "cancelled",
         "archived_at": "2026-08-10T12:00:00Z",
     }
+    performed_owned = {
+        **active_owned,
+        "id": "00000000-0000-0000-0000-000000000311",
+        "title": "Выполненное мной задание",
+        "status": "published",
+        "archived_at": "2026-08-12T12:00:00Z",
+        "archive_role": "performed",
+        "performed_status": "approved",
+        "cancellation_action": None,
+        "assignees": [
+            {
+                "member_id": assignee_id,
+                "display_name": "Исполнитель",
+                "status": "approved",
+            }
+        ],
+    }
     review = {
         "id": "00000000-0000-0000-0000-000000000305",
         "task_id": active_owned["id"],
@@ -2667,19 +2687,22 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
                 json={"items": [later_assignment, assignment], "next_cursor": None}
             ),
         )
-        page.route(
-            "**/api/v1/owned-tasks",
-            lambda route: route.fulfill(
-                json={
-                    "items": [
-                        later_active_owned,
-                        active_owned,
-                        archived_owned,
-                        cancelled_owned,
-                    ]
-                }
-            ),
-        )
+
+        def owned_tasks_route(route: Route) -> None:
+            scope = parse_qs(urlsplit(route.request.url).query).get("scope", ["created"])[0]
+            items = (
+                [performed_owned]
+                if scope == "performed"
+                else [
+                    later_active_owned,
+                    active_owned,
+                    archived_owned,
+                    cancelled_owned,
+                ]
+            )
+            route.fulfill(json={"items": items})
+
+        page.route("**/api/v1/owned-tasks**", owned_tasks_route)
         page.route(
             "**/api/v1/assignment-reviews",
             lambda route: route.fulfill(json={"items": [review]}),
@@ -2792,10 +2815,34 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         assert archive.get_by_text("Созданное архивное задание", exact=True).is_visible()
         assert archive.get_by_text("Отменённое архивное задание", exact=True).is_visible()
         assert archive.get_by_text("Созданное активное задание", exact=True).count() == 0
+        created_archive_tab = archive.get_by_role("button", name="Созданные", exact=True)
+        performed_archive_tab = archive.get_by_role("button", name="Выполненные", exact=True)
+        assert created_archive_tab.get_attribute("aria-pressed") == "true"
+        assert performed_archive_tab.get_attribute("aria-pressed") == "false"
         assert archive.get_by_role("button", name="Фильтры архива", exact=True).is_visible()
         assert archive.get_by_role(
             "button", name="Сортировка: Недавно в архиве", exact=True
         ).is_visible()
+        performed_archive_tab.click()
+        archive.get_by_text("Выполненное мной задание", exact=True).wait_for()
+        assert page.url.endswith("#/work?view_state=m09&scope=archive&archive_view=performed")
+        assert archive.get_by_text("Созданное архивное задание", exact=True).count() == 0
+        assert archive.get_by_role("button", name="Фильтры архива", exact=True).count() == 0
+        assert archive.get_by_text("Ваш результат: Принято", exact=True).is_visible()
+        archive.locator(".owned-work-card").click()
+        assert page.get_by_text("Выполнено вами", exact=True).is_visible()
+        assert page.get_by_role("button", name="Назад в архив", exact=True).is_visible()
+        assert page.get_by_role("button", name="Отменить задание", exact=True).count() == 0
+        page.get_by_role("button", name="Назад в архив", exact=True).click()
+        archive.get_by_text("Выполненное мной задание", exact=True).wait_for()
+        assert (
+            archive.get_by_role("button", name="Выполненные", exact=True).get_attribute(
+                "aria-pressed"
+            )
+            == "true"
+        )
+        archive.get_by_role("button", name="Созданные", exact=True).click()
+        archive.get_by_text("Созданное архивное задание", exact=True).wait_for()
         archive.get_by_role("button", name="Фильтры архива", exact=True).click()
         page.get_by_role("heading", name="Фильтры архива", exact=True).wait_for()
         page.get_by_label("Добавлено в архив до", exact=True).fill("2026-08-07")

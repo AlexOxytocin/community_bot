@@ -412,6 +412,8 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .segmented { display: grid; grid-template-columns: 1fr 1fr; padding: 4px; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface); }
 .segmented button { min-height: 44px; border: 0; border-radius: 10px; background: transparent; color: var(--app-text-muted); font-weight: 700; }
 .segmented button[aria-pressed="true"] { background: var(--app-surface-raised); color: var(--app-text); }
+.archive-role-tabs { min-height: 0; padding: 3px; border-radius: 12px; }
+.archive-role-tabs button { min-height: 36px; border-radius: 9px; font-size: 13px; }
 .participants-screen .screen { gap: 0; padding-top: max(12px, calc(var(--tg-content-safe-area-inset-top, 0px) + 6px)); }
 .participants-screen .screen-heading { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .profile-screen .screen { gap: 12px; padding-top: 14px; }
