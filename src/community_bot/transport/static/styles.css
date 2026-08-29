@@ -231,7 +231,7 @@ button.card:hover { background: var(--app-surface-raised); }
   line-height: 1.25;
 }
 .assignment-detail-customer-label { flex: 0 0 auto; color: var(--app-text-muted); }
-.assignment-detail-customer-button {
+.assignment-detail-person-button {
   position: relative;
   overflow: hidden;
   min-width: 0;
@@ -249,7 +249,7 @@ button.card:hover { background: var(--app-surface-raised); }
   white-space: nowrap;
   cursor: pointer;
 }
-.assignment-detail-customer-button::after { position: absolute; inset: -7px -5px; content: ""; }
+.assignment-detail-person-button::after { position: absolute; inset: -7px -5px; content: ""; }
 .assignment-detail-customer-name {
   overflow: hidden;
   color: var(--app-text);
@@ -280,6 +280,7 @@ button.card:hover { background: var(--app-surface-raised); }
 .assignment-detail-section h3 { color: var(--app-text-muted); font-size: 10px; line-height: 1.2; letter-spacing: .055em; text-transform: uppercase; }
 .assignment-detail-section p,
 .assignment-detail-section time { margin: 0; color: var(--app-text); font-size: 12px; line-height: 1.35; }
+.assignment-detail-section .assignment-detail-person-button { font-size: 12px; line-height: 1.35; }
 .assignment-detail .detail-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
 .assignment-detail .detail-actions button { min-width: 0; min-height: 46px; padding: 9px 11px; font-size: 12px; line-height: 1.15; }
 .assignment-review-screen .screen { gap: 10px; padding-top: 12px; }

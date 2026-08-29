@@ -618,15 +618,17 @@ def test_administrator_management_flow_matches_mobile_prototype(  # noqa: C901, 
         browser.close()
 
 
-def test_community_task_review_queue_supports_authorized_decision(
+def test_community_task_review_queue_supports_authorized_decision(  # noqa: PLR0915
     mini_app_url: str,
 ) -> None:
     owner_id = "00000000-0000-0000-0000-000000000206"
     assignment_id = "00000000-0000-0000-0000-000000000207"
+    performer_id = "00000000-0000-0000-0000-000000000209"
     review = {
         "id": assignment_id,
         "task_id": "00000000-0000-0000-0000-000000000208",
         "task_title": "Подготовить программу встречи",
+        "performer_id": performer_id,
         "performer_display_name": "Марина",
         "submitted_at": "2026-08-29T12:00:00Z",
         "review_deadline_at": "2026-09-01T12:00:00Z",
@@ -658,7 +660,17 @@ def test_community_task_review_queue_supports_authorized_decision(
         context = browser.new_context(viewport={"width": 390, "height": 844})
         page = _new_page(context)
         me, _member = _cache_profile(owner_id)
+        _, performer = _cache_profile(performer_id)
+        performer["display_name"] = "Марина"
         page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route(
+            f"**/api/v1/members/{performer_id}",
+            lambda route: route.fulfill(json=performer),
+        )
+        page.route(
+            "**/api/v1/community-stats/pulse?*",
+            lambda route: route.fulfill(status=503, json={"code": "unavailable"}),
+        )
         page.route(
             "**/api/v1/administration",
             lambda route: route.fulfill(
@@ -682,6 +694,15 @@ def test_community_task_review_queue_supports_authorized_decision(
         page.get_by_role("button", name="Проверка", exact=True).wait_for()
         page.get_by_role("button", name=re.compile("Подготовить программу встречи")).click()
         page.get_by_text("Программа встречи, темы и ответственные готовы.", exact=True).wait_for()
+        performer_link = page.get_by_role(
+            "button", name="Открыть профиль исполнителя Марина", exact=True
+        )
+        assert performer_link.is_visible()
+        performer_link.click()
+        page.locator(".foreign-profile").wait_for()
+        assert page.url.endswith(f"#/members/{performer_id}")
+        page.go_back()
+        page.get_by_role("heading", name="Подготовить программу встречи", exact=True).wait_for()
         page.get_by_role("button", name="Принять полностью", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_role("button", name="Принять полностью", exact=True).click()

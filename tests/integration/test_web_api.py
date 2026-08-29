@@ -2025,6 +2025,7 @@ async def test_community_task_creation_and_moderation_are_permission_scoped(
         assert [UUID(item["id"]) for item in queue.json()["items"]] == [assignment_id]
         detail = await reviewer_client.get(f"/api/v1/moderation/community-reviews/{assignment_id}")
         assert detail.status_code == 200
+        assert UUID(detail.json()["performer_id"]) == performer.id
         assert detail.json()["result"] == "Готовый план встречи и список ответственных."
         decision_headers = {"origin": ORIGIN, "idempotency-key": "7208"}
         decision = await reviewer_client.post(

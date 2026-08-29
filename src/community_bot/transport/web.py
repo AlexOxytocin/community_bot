@@ -654,6 +654,7 @@ class AssignmentReviewDto(_Dto):
     id: UUID
     task_id: UUID
     task_title: str
+    performer_id: UUID
     performer_display_name: str
     submitted_at: datetime.datetime
     review_deadline_at: datetime.datetime | None
@@ -3669,6 +3670,7 @@ def _assignment_review_dto(card: AssignmentCard) -> AssignmentReviewDto:
         id=card.assignment.id,
         task_id=card.assignment.task_id,
         task_title=card.task_title,
+        performer_id=card.assignment.performer_id,
         performer_display_name=card.performer_display_name,
         submitted_at=card.assignment.submitted_at,
         review_deadline_at=card.assignment.review_deadline_at,

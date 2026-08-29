@@ -215,6 +215,14 @@ const section = (heading, value) => {
   return node;
 };
 
+const memberProfileButton = (memberId, displayName, role) => {
+  const button = element("button", displayName, "assignment-detail-person-button");
+  button.type = "button";
+  button.setAttribute("aria-label", `Открыть профиль ${role} ${displayName}`);
+  button.addEventListener("click", () => showMemberProfile(memberId));
+  return button;
+};
+
 const setHeaderControl = (
   kind = null,
   { label = null, screenLabel = null, hideTitle = false, onBack = null } = {},
@@ -6084,8 +6092,11 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
     }
     detailHeader.append(element("h2", review.task_title), detailMeta);
     const detailContent = element("div", undefined, "assignment-detail-content");
-    const performer = section("Исполнитель", review.performer_display_name);
-    performer.classList.add("assignment-detail-section");
+    const performer = element("section", undefined, "section assignment-detail-section");
+    performer.append(
+      element("h3", "Исполнитель"),
+      memberProfileButton(review.performer_id, review.performer_display_name, "исполнителя"),
+    );
     const result = section("Результат", review.result);
     result.classList.add("assignment-detail-section", "assignment-review-result");
     detailContent.append(performer, result);
@@ -6679,19 +6690,11 @@ async function showAssignmentDetail(assignmentId, push = true, returnTo = null) 
       const customer = element("div", undefined, "assignment-detail-customer");
       customer.append(element("span", "Заказчик", "assignment-detail-customer-label"));
       if (assignment.task_creator_id) {
-        const customerProfile = element(
-          "button",
+        const customerProfile = memberProfileButton(
+          assignment.task_creator_id,
           assignment.task_author_display_name,
-          "assignment-detail-customer-button",
+          "заказчика",
         );
-        customerProfile.type = "button";
-        customerProfile.setAttribute(
-          "aria-label",
-          `Открыть профиль заказчика ${assignment.task_author_display_name}`,
-        );
-        customerProfile.addEventListener("click", () => {
-          showMemberProfile(assignment.task_creator_id);
-        });
         customer.append(customerProfile);
       } else {
         customer.append(
