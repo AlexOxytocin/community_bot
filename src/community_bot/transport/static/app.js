@@ -6617,7 +6617,33 @@ async function showAssignmentDetail(assignmentId, push = true, returnTo = null) 
       ),
       deadline,
     );
-    detailHeader.append(element("h2", assignment.task_title), detailMeta);
+    detailHeader.append(element("h2", assignment.task_title));
+    if (assignment.task_author_display_name) {
+      const customer = element("div", undefined, "assignment-detail-customer");
+      customer.append(element("span", "Заказчик", "assignment-detail-customer-label"));
+      if (assignment.task_creator_id) {
+        const customerProfile = element(
+          "button",
+          assignment.task_author_display_name,
+          "assignment-detail-customer-button",
+        );
+        customerProfile.type = "button";
+        customerProfile.setAttribute(
+          "aria-label",
+          `Открыть профиль заказчика ${assignment.task_author_display_name}`,
+        );
+        customerProfile.addEventListener("click", () => {
+          showMemberProfile(assignment.task_creator_id);
+        });
+        customer.append(customerProfile);
+      } else {
+        customer.append(
+          element("span", assignment.task_author_display_name, "assignment-detail-customer-name"),
+        );
+      }
+      detailHeader.append(customer);
+    }
+    detailHeader.append(detailMeta);
     const detailContent = element("div", undefined, "assignment-detail-content");
     const compactSection = (headingText, value) => {
       const node = section(headingText, value);
@@ -7978,17 +8004,49 @@ async function showModerationCase(caseId, push = true) {
       "/api/v1/moderation/cases/" + encodeURIComponent(caseId),
     );
     if (revision !== screenRevision) return;
-    const detail = element("article", undefined, "card detail");
-    detail.append(
-      element("h3", dispute.task_title),
-      section("Источник", dispute.task_origin === "community" ? "Сообщество" : "Участник"),
-      section("Награда", String(dispute.credit_reward_per_performer) + " кредитов"),
-      section("Причина спора", dispute.dispute_reason),
+    const detail = element("article", undefined, "card detail moderation-resolution-card");
+    const reward = Number(dispute.credit_reward_per_performer);
+    const rewardRemainder = Math.abs(reward) % 100;
+    const rewardLastDigit = rewardRemainder % 10;
+    const rewardUnit = rewardRemainder > 10 && rewardRemainder < 20
+      ? "кредитов"
+      : rewardLastDigit === 1
+        ? "кредит"
+        : rewardLastDigit >= 2 && rewardLastDigit <= 4 ? "кредита" : "кредитов";
+    const summary = element("header", undefined, "moderation-dispute-summary");
+    const facts = element("div", undefined, "moderation-dispute-facts");
+    facts.append(
+      element(
+        "span",
+        dispute.task_origin === "community" ? "От сообщества" : "От участника",
+        "moderation-dispute-fact",
+      ),
+      element(
+        "span",
+        `${reward} ${rewardUnit}`,
+        "moderation-dispute-fact is-reward",
+      ),
     );
-    if (dispute.result_summary) detail.append(section("Результат", dispute.result_summary));
+    summary.append(element("h2", dispute.task_title), facts);
 
-    const form = element("form", undefined, "submission");
-    const label = element("label", "Решение");
+    const context = element("section", undefined, "moderation-dispute-context");
+    const disputeReason = element("section", undefined, "moderation-dispute-copy");
+    disputeReason.append(
+      element("h3", "Причина спора"),
+      element("p", dispute.dispute_reason),
+    );
+    context.append(disputeReason);
+    if (dispute.result_summary) {
+      const result = element("section", undefined, "moderation-dispute-copy");
+      result.append(element("h3", "Результат"), element("p", dispute.result_summary));
+      context.append(result);
+    }
+    detail.append(summary, context);
+
+    const form = element("form", undefined, "moderation-decision-form");
+    form.append(element("h3", "Решение модератора", "moderation-decision-title"));
+    const label = element("label", undefined, "moderation-form-field");
+    label.append(element("span", "Решение"));
     const select = element("select");
     select.name = "resolution";
     for (const code of dispute.allowed_resolution_codes) {
@@ -7997,18 +8055,23 @@ async function showModerationCase(caseId, push = true) {
       select.append(option);
     }
     label.append(select);
-    const reasonLabel = element("label", "Причина решения");
+    const reasonLabel = element("label", undefined, "moderation-form-field");
+    reasonLabel.append(element("span", "Причина решения"));
     const reason = element("textarea");
     reason.name = "reason";
     reason.required = true;
-    reason.rows = 4;
+    reason.rows = 3;
+    reason.maxLength = 1000;
+    reason.placeholder = "Коротко объясните принятое решение";
     reasonLabel.append(reason);
     const status = element("p", "", "status hidden");
     status.setAttribute("aria-live", "polite");
     const review = element("button", "Проверить решение", "primary");
     review.type = "submit";
     let operationKey = null;
-    form.append(label, reasonLabel, review, status);
+    const actions = element("div", undefined, "moderation-decision-actions");
+    actions.append(status, review);
+    form.append(label, reasonLabel, actions);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const normalizedReason = reason.value.trim();

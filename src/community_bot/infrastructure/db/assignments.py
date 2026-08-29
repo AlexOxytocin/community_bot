@@ -9,6 +9,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, or_, select, text, tuple_
+from sqlalchemy.orm import aliased
 
 from community_bot.application.assignments import AssignmentCard
 from community_bot.domain.assignments import (
@@ -208,6 +209,8 @@ async def _cards(
     order_by_reviewed_at: bool = False,
     assignment_id: uuid.UUID | None = None,
 ) -> tuple[AssignmentCard, ...]:
+    performer = aliased(MemberModel)
+    creator = aliased(MemberModel)
     latest_payload = (
         select(AssignmentResultVersionModel.payload_json)
         .where(AssignmentResultVersionModel.assignment_id == AssignmentModel.id)
@@ -225,14 +228,16 @@ async def _cards(
         select(
             AssignmentModel,
             TaskModel,
-            MemberModel.display_name,
+            performer.display_name,
+            creator.display_name,
             ModerationCaseModel.id,
             ModerationCaseModel.status,
             ModerationCaseModel.revision,
             latest_payload,
         )
         .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
-        .join(MemberModel, MemberModel.id == AssignmentModel.performer_id)
+        .join(performer, performer.id == AssignmentModel.performer_id)
+        .outerjoin(creator, creator.id == TaskModel.creator_id)
         .outerjoin(
             ModerationCaseModel,
             ModerationCaseModel.assignment_id == AssignmentModel.id,
@@ -251,7 +256,16 @@ async def _cards(
         )
     rows = (await session.execute(statement)).all()
     cards = []
-    for assignment, task, display_name, case_id, case_status, case_revision, payload in rows:
+    for (
+        assignment,
+        task,
+        performer_display_name,
+        creator_display_name,
+        case_id,
+        case_status,
+        case_revision,
+        payload,
+    ) in rows:
         summary = None
         if isinstance(payload, dict):
             value = payload.get("result", payload.get("summary"))
@@ -264,8 +278,11 @@ async def _cards(
                 task_title=task.title,
                 task_origin=task.origin,
                 task_creator_id=task.creator_id,
+                task_creator_display_name=(
+                    None if creator_display_name is None else str(creator_display_name)
+                ),
                 reviewer_admin_id=task.reviewer_admin_id,
-                performer_display_name=str(display_name),
+                performer_display_name=str(performer_display_name),
                 result_summary=summary,
                 case_id=case_id,
                 case_status=case_status,

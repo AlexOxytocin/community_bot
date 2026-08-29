@@ -123,6 +123,7 @@ class AssignmentCard:
     task_title: str
     task_origin: str
     task_creator_id: UUID | None
+    task_creator_display_name: str | None
     reviewer_admin_id: UUID | None
     performer_display_name: str
     result_summary: str | None

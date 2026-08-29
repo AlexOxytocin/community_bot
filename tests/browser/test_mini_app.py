@@ -1859,12 +1859,15 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
 ) -> None:
     home = _task_home_payload()
     assignment_id = home["attention"][0]["items"][0]["id"]
+    creator_id = "00000000-0000-0000-0000-000000000198"
     review_assignment_id = home["attention"][1]["items"][0]["id"]
     _base_id, draft_id, _assignment, base_detail = _freeform_submission_rows()
     accepted_detail = {
         **base_detail,
         "id": assignment_id,
         "task_title": "Подготовить результат проверки",
+        "task_creator_id": creator_id,
+        "task_author_display_name": "Алексей Окситоцин",
         "assignment_status": "accepted",
         "submitted_at": None,
         "result_summary": None,
@@ -1951,6 +1954,16 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         page = _new_page(browser)
         page.set_viewport_size({"width": 375, "height": 812})
         page.route("**/api/v1/me", lambda route: route.fulfill(json={"member_id": "member"}))
+        _, creator = _cache_profile(creator_id)
+        creator["display_name"] = "Алексей Окситоцин"
+        page.route(
+            f"**/api/v1/members/{creator_id}",
+            lambda route: route.fulfill(json=creator),
+        )
+        page.route(
+            "**/api/v1/community-stats/pulse?*",
+            lambda route: route.fulfill(status=503, json={"code": "unavailable"}),
+        )
         page.route("**/api/v1/task-home", lambda route: route.fulfill(json=home))
         page.route(
             "**/api/v1/assignments?*",
@@ -1989,6 +2002,19 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         page.get_by_role("dialog", name="Сдать результат", exact=True).get_by_role(
             "button", name="Подготовить результат проверки"
         ).click()
+        page.locator('[data-screen-id="M03"]').wait_for()
+        customer = page.get_by_role(
+            "button", name="Открыть профиль заказчика Алексей Окситоцин", exact=True
+        )
+        assert customer.is_visible()
+        assert customer.evaluate(
+            "node => node.closest('.assignment-detail-header').querySelector('h2')"
+            ".compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING"
+        )
+        customer.click()
+        page.locator(".foreign-profile").wait_for()
+        assert page.url.endswith(f"#/members/{creator_id}")
+        page.go_back()
         page.locator('[data-screen-id="M03"]').wait_for()
         opened_url = page.url
         page.get_by_role("button", name="Отправить результат", exact=True).click()
@@ -4564,6 +4590,15 @@ def test_moderation_disputes_detail_confirm_retry_conflict_and_back_focus(  # no
         page.get_by_role("button", name="Спор по заданию").click()
         page.locator('[data-screen-id="S02"]').wait_for()
         page.get_by_role("combobox", name="Решение").wait_for()
+        assert page.locator(".moderation-resolution-card").count() == 1
+        assert page.locator(".moderation-dispute-fact").all_inner_texts() == [
+            "От участника",
+            "4 кредита",
+        ]
+        assert page.locator(".moderation-dispute-copy").count() == 2
+        assert page.get_by_role("textbox", name="Причина решения").evaluate(
+            "node => node.getBoundingClientRect().height <= 120"
+        )
         assert malicious in page.locator("body").inner_text()
         assert page.locator("#content img, #content [onerror], #content [onclick]").count() == 0
         resolution = page.get_by_role("combobox", name="Решение")

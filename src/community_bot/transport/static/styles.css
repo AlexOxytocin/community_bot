@@ -221,6 +221,42 @@ button.card:hover { background: var(--app-surface-raised); }
 }
 .assignment-detail-header { display: grid; gap: 10px; }
 .assignment-detail-header h2 { max-width: 30ch; font-size: 19px; line-height: 1.18; letter-spacing: -.02em; }
+.assignment-detail-customer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  margin-top: -5px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.assignment-detail-customer-label { flex: 0 0 auto; color: var(--app-text-muted); }
+.assignment-detail-customer-button {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-accent);
+  font: inherit;
+  font-weight: 800;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentcolor 42%, transparent);
+  text-underline-offset: 2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.assignment-detail-customer-button::after { position: absolute; inset: -7px -5px; content: ""; }
+.assignment-detail-customer-name {
+  overflow: hidden;
+  color: var(--app-text);
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .assignment-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .assignment-detail-status,
 .assignment-detail-deadline {
@@ -883,6 +919,91 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .moderation-card-topline { display: flex; gap: 5px; align-items: center; }
 .moderation-card-topline .chip { padding: 2px 6px; font-size: 9px; }
 .moderation-card-chevron { color: var(--app-accent); font-size: 26px; font-weight: 300; line-height: 1; }
+.moderation-resolution-card {
+  gap: 0;
+  padding: 14px;
+  border-radius: 18px;
+  box-shadow: 0 10px 28px var(--app-shadow-card);
+}
+.moderation-dispute-summary { display: grid; gap: 9px; padding: 1px 1px 12px; }
+.moderation-dispute-summary h2 {
+  max-width: 32ch;
+  font-size: 18px;
+  line-height: 1.25;
+  letter-spacing: -.02em;
+  overflow-wrap: anywhere;
+}
+.moderation-dispute-facts { display: flex; flex-wrap: wrap; gap: 6px; }
+.moderation-dispute-fact {
+  display: inline-flex;
+  min-height: 25px;
+  align-items: center;
+  padding: 4px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-text-muted);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
+.moderation-dispute-fact.is-reward {
+  border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border));
+  color: var(--app-accent);
+}
+.moderation-dispute-context {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+.moderation-dispute-copy { display: grid; gap: 4px; padding: 10px 11px; }
+.moderation-dispute-copy + .moderation-dispute-copy { border-top: 1px solid var(--app-border); }
+.moderation-dispute-copy h3 {
+  color: var(--app-text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+.moderation-dispute-copy p {
+  margin: 0;
+  color: var(--app-text);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.moderation-decision-form {
+  display: grid;
+  gap: 11px;
+  margin-top: 13px;
+  padding-top: 13px;
+  border-top: 1px solid var(--app-border);
+}
+.moderation-decision-title { font-size: 14px; line-height: 1.25; }
+.moderation-form-field { display: grid; gap: 6px; color: var(--app-text); font-size: 11px; font-weight: 750; }
+.moderation-form-field select,
+.moderation-form-field textarea {
+  padding: 10px 11px;
+  border-color: var(--app-border);
+  border-radius: 13px;
+  outline: 0;
+  background: var(--app-surface-raised);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.moderation-form-field select:focus,
+.moderation-form-field textarea:focus { border-color: var(--app-accent); }
+.moderation-form-field textarea {
+  min-height: 88px;
+  max-height: 180px;
+  resize: vertical;
+}
+.moderation-decision-actions { display: grid; gap: 8px; }
+.moderation-decision-actions .primary { width: 100%; min-height: 48px; }
+.moderation-decision-actions .status { margin: 0; }
 .compact-empty { margin: 0; padding: 13px 14px; border: 1px solid var(--app-border); border-radius: 14px; color: var(--app-text-muted); }
 .task-card, .assignment-card { gap: 9px; padding: 14px; }
 .card-chips { display: flex; flex-wrap: wrap; gap: 7px; }

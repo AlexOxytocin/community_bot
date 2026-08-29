@@ -2897,7 +2897,7 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
 
 async def test_web_submission_draft_is_bounded_exact_and_template_closed(database_url: str) -> None:
     database = Database(database_url)
-    _author, freeform_task = await _freeform_task(database, update_base=52_750)
+    author, freeform_task = await _freeform_task(database, update_base=52_750)
     _template_author, template_task = await _published_task(database, update_base=52_850)
     performer = await prepare_member(database, telegram_user_id=52_751)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
@@ -2919,6 +2919,8 @@ async def test_web_submission_draft_is_bounded_exact_and_template_closed(databas
         assert accepted.status_code == 201, accepted.text
         assignment_id = accepted.json()["id"]
         detail = await client.get(f"/api/v1/assignments/{assignment_id}")
+        assert detail.json()["task_creator_id"] == str(author.id)
+        assert detail.json()["task_author_display_name"] == author.display_name
         assert detail.json()["submission_contract"] == "freeform_result_v1"
         assert detail.json()["can_submit"] is True
         assert detail.json()["can_cancel"] is True

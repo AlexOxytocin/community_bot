@@ -739,6 +739,8 @@ class ModerationResolutionRequest(_Dto):
 
 
 class AssignmentDetailDto(AssignmentCardDto):
+    task_creator_id: UUID | None
+    task_author_display_name: str
     category_name: str | None
     category_icon: str | None
     task_kind: str | None
@@ -3605,6 +3607,8 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
     task = card.task
     return AssignmentDetailDto(
         **common,
+        task_creator_id=card.task_creator_id,
+        task_author_display_name=card.task_creator_display_name or task.author_display_name,
         category_icon=task.category_icon,
         description=task.description,
         performer_instructions=task.performer_instructions,
