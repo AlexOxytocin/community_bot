@@ -24,7 +24,19 @@ BotAchievementCode = Literal["wealth", "manager"]
 StatsLeaderboardMetric = str
 
 STATS_ACHIEVEMENT_CODES = frozenset(
-    {"speaker", "magnet", "support", "regular", "explorer", "streak"}
+    {
+        "speaker",
+        "magnet",
+        "petrosyan",
+        "sharp",
+        "firefighter",
+        "heartbreaker",
+        "support",
+        "regular",
+        "explorer",
+        "streak",
+        "dialog",
+    }
 )
 BOT_ACHIEVEMENT_THRESHOLDS: dict[BotAchievementCode, tuple[int, ...]] = {
     "wealth": (20, 40, 70, 100, 150, 220, 300, 400, 550, 750),

@@ -80,10 +80,27 @@ def _pulse(period: str) -> dict[str, object]:
         "achievements": [
             {"code": "speaker", "level": 1, "current": 58, "next_level_at": 100, "unlocked": True},
             {"code": "magnet", "level": 1, "current": 26, "next_level_at": 50, "unlocked": True},
+            {"code": "petrosyan", "level": 1, "current": 8, "next_level_at": 15, "unlocked": True},
+            {"code": "sharp", "level": 0, "current": 3, "next_level_at": 5, "unlocked": False},
+            {
+                "code": "firefighter",
+                "level": 0,
+                "current": 4,
+                "next_level_at": 5,
+                "unlocked": False,
+            },
+            {
+                "code": "heartbreaker",
+                "level": 1,
+                "current": 6,
+                "next_level_at": 15,
+                "unlocked": True,
+            },
             {"code": "support", "level": 0, "current": 6, "next_level_at": 10, "unlocked": False},
             {"code": "regular", "level": 0, "current": 2, "next_level_at": 3, "unlocked": False},
             {"code": "explorer", "level": 1, "current": 4, "next_level_at": 10, "unlocked": True},
             {"code": "streak", "level": 0, "current": 2, "next_level_at": 3, "unlocked": False},
+            {"code": "dialog", "level": 0, "current": 9, "next_level_at": 10, "unlocked": False},
         ],
     }
 

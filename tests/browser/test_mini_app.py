@@ -5414,10 +5414,15 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                             for code, level, current, threshold in (
                                 ("speaker", 2, 42, 60),
                                 ("magnet", 3, 26, 30),
+                                ("petrosyan", 1, 8, 15),
+                                ("sharp", 0, 3, 5),
+                                ("firefighter", 0, 4, 5),
+                                ("heartbreaker", 1, 6, 15),
                                 ("support", 3, 64, 120),
                                 ("regular", 0, 2, 3),
                                 ("explorer", 0, 1, 2),
                                 ("streak", 0, 2, 3),
+                                ("dialog", 0, 9, 10),
                                 ("wealth", 3, 70, 100),
                                 ("manager", 0, 0, 1),
                             )
@@ -5608,8 +5613,9 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
             assert page.get_by_role("button", name="Год", exact=True).is_visible()
             assert page.get_by_role("button", name="Всё время", exact=True).is_visible()
-            assert page.locator(".achievement-tile.is-unlocked").count() == 4
-            assert page.locator(".achievement-tile.is-locked").count() == 4
+            assert page.locator(".achievement-tile.is-unlocked").count() == 6
+            assert page.locator(".achievement-tile.is-locked").count() == 7
+            assert page.get_by_role("button", name="Петросян, уровень 1", exact=True).is_visible()
             achievement_geometry = page.locator(".achievements-card").evaluate(
                 """card => {
                   const tiles = [...card.querySelectorAll('.achievement-tile')];
@@ -5628,10 +5634,10 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                   };
                 }"""
             )
-            assert achievement_geometry["cardHeight"] <= 310
+            assert achievement_geometry["cardHeight"] <= 470
             assert achievement_geometry["tileHeights"] == [72]
             assert achievement_geometry["iconSizes"] == [34]
-            assert achievement_geometry["rows"] == 3
+            assert achievement_geometry["rows"] == 5
             assert page.locator(".achievement-detail-sheet").count() == 0
             achievement = page.get_by_role("button", name="Магнит, уровень 3", exact=True)
             page.set_viewport_size({"width": width, "height": 620})
@@ -5684,7 +5690,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             metric_dialog = page.get_by_role("dialog", name="Рейтинг по")
             metric_dialog.wait_for()
             assert leaderboard_filter.get_attribute("aria-expanded") == "true"
-            assert metric_dialog.get_by_role("radio").count() == 13
+            assert metric_dialog.get_by_role("radio").count() == 18
             assert metric_dialog.get_by_text("Основное", exact=True).is_visible()
             assert metric_dialog.get_by_text("Активность", exact=True).is_visible()
             assert metric_dialog.get_by_text("Достижения · уровень", exact=True).is_visible()

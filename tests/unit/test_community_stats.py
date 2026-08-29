@@ -7,6 +7,7 @@ import pytest
 
 from community_bot.application.community_stats import (
     BotAchievementValues,
+    CommunityStatsService,
     CommunityStatsUnavailableError,
     bot_achievement_progress,
 )
@@ -39,6 +40,24 @@ def test_bot_achievement_progress_redacts_another_members_exact_balance() -> Non
     assert progress["wealth"].level == 3
     assert progress["wealth"].current == 70
     assert progress["wealth"].next_level_at == 100
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["petrosyan", "sharp", "firefighter", "heartbreaker", "dialog"],
+)
+def test_new_stats_achievement_metrics_are_allowed_for_all_time(code: str) -> None:
+    CommunityStatsService.validate_metric(
+        f"achievement:{code}",
+        period="all",
+        topic_id=None,
+    )
+    with pytest.raises(ValueError, match="Unsupported Community Stats metric"):
+        CommunityStatsService.validate_metric(
+            f"achievement:{code}",
+            period="week",
+            topic_id=None,
+        )
 
 
 @pytest.mark.asyncio
