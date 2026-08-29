@@ -5,8 +5,26 @@ import datetime
 import httpx
 import pytest
 
-from community_bot.application.community_stats import CommunityStatsUnavailableError
+from community_bot.application.community_stats import (
+    BotAchievementValues,
+    CommunityStatsUnavailableError,
+    bot_achievement_progress,
+)
 from community_bot.infrastructure.community_stats import HttpCommunityStatsGateway
+
+
+def test_bot_achievement_progress_uses_maximum_balance_and_published_tasks() -> None:
+    progress = {
+        item.code: item
+        for item in bot_achievement_progress(
+            BotAchievementValues(maximum_credit_balance=70, created_tasks=5)
+        )
+    }
+
+    assert progress["wealth"].level == 3
+    assert progress["wealth"].next_level_at == 100
+    assert progress["manager"].level == 3
+    assert progress["manager"].next_level_at == 10
 
 
 @pytest.mark.asyncio
@@ -47,7 +65,7 @@ async def test_typed_stats_client_sends_service_auth_and_topic() -> None:
                         "code": "speaker",
                         "level": 1,
                         "current": 10,
-                        "next_level_at": 50,
+                        "next_level_at": 30,
                         "unlocked": True,
                     }
                 ],

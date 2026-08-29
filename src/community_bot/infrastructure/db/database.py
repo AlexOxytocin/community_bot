@@ -61,6 +61,8 @@ if TYPE_CHECKING:
     from community_bot.application.assignments import AssignmentCard
     from community_bot.application.catalog import CatalogPage, CatalogQuery, CatalogTemplate
     from community_bot.application.community_stats import (
+        BotAchievementCode,
+        BotAchievementValues,
         BotLeaderboardItem,
         BotLeaderboardMetric,
         StatsMemberIdentity,
@@ -1368,6 +1370,20 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         """Read a Bot-owned leaderboard metric in one SQL query."""
         return await community_stats_store.bot_leaderboard(
             self._require_session(), metric=metric, limit=limit
+        )
+
+    async def community_bot_achievement_values(self, member_id: UUID) -> BotAchievementValues:
+        """Read Bot-owned achievement counters for one visible member."""
+        return await community_stats_store.bot_achievement_values(
+            self._require_session(), member_id
+        )
+
+    async def community_bot_achievement_leaderboard(
+        self, *, code: BotAchievementCode, limit: int
+    ) -> tuple[BotLeaderboardItem, ...]:
+        """Rank one Bot-owned achievement without exposing its raw counter."""
+        return await community_stats_store.bot_achievement_leaderboard(
+            self._require_session(), code=code, limit=limit
         )
 
     async def administrator_identities(

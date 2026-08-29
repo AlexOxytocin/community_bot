@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, Protocol, Self
 
 from community_bot.domain.members import MemberStatus
@@ -20,9 +20,17 @@ if TYPE_CHECKING:
 StatsPeriod = Literal["week", "month", "year", "all"]
 StatsActivityMetric = Literal["messages", "reactions_given", "reactions_received"]
 BotLeaderboardMetric = Literal["experience", "karma"]
+BotAchievementCode = Literal["wealth", "manager"]
 StatsLeaderboardMetric = str
 
-ACHIEVEMENT_CODES = frozenset({"speaker", "magnet", "support", "regular", "explorer", "streak"})
+STATS_ACHIEVEMENT_CODES = frozenset(
+    {"speaker", "magnet", "support", "regular", "explorer", "streak"}
+)
+BOT_ACHIEVEMENT_THRESHOLDS: dict[BotAchievementCode, tuple[int, ...]] = {
+    "wealth": (20, 40, 70, 100, 150, 220, 300, 400, 550, 750),
+    "manager": (1, 3, 5, 10, 15, 25, 40, 60, 80, 120),
+}
+ACHIEVEMENT_CODES = STATS_ACHIEVEMENT_CODES | BOT_ACHIEVEMENT_THRESHOLDS.keys()
 
 
 class CommunityStatsUnavailableError(RuntimeError):
@@ -55,6 +63,12 @@ class AchievementProgress:
     current: int
     next_level_at: int | None
     unlocked: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BotAchievementValues:
+    maximum_credit_balance: int
+    created_tasks: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +158,37 @@ class CommunityStatsUnitOfWork(Protocol):
     async def community_bot_leaderboard(
         self, *, metric: BotLeaderboardMetric, limit: int
     ) -> tuple[BotLeaderboardItem, ...]: ...
+    async def community_bot_achievement_values(self, member_id: UUID) -> BotAchievementValues: ...
+    async def community_bot_achievement_leaderboard(
+        self, *, code: BotAchievementCode, limit: int
+    ) -> tuple[BotLeaderboardItem, ...]: ...
+
+
+def achievement_level(current: int, thresholds: tuple[int, ...]) -> int:
+    """Return the highest threshold reached by one non-negative metric."""
+    return sum(current >= threshold for threshold in thresholds)
+
+
+def bot_achievement_progress(values: BotAchievementValues) -> tuple[AchievementProgress, ...]:
+    """Build the two Bot-owned achievements without exposing their raw metrics elsewhere."""
+    current_by_code: dict[BotAchievementCode, int] = {
+        "wealth": values.maximum_credit_balance,
+        "manager": values.created_tasks,
+    }
+    progress: list[AchievementProgress] = []
+    for code, thresholds in BOT_ACHIEVEMENT_THRESHOLDS.items():
+        current = current_by_code[code]
+        level = achievement_level(current, thresholds)
+        progress.append(
+            AchievementProgress(
+                code=code,
+                level=level,
+                current=current,
+                next_level_at=thresholds[level] if level < len(thresholds) else None,
+                unlocked=level > 0,
+            )
+        )
+    return tuple(progress)
 
 
 class CommunityStatsService:
@@ -170,11 +215,16 @@ class CommunityStatsService:
                 raise ProfileUnavailableError(message)
             target = require_profile_visible(member, await uow.get_member(target_member_id))
             target_user_id = target.telegram_user_id
-        return await self._gateway.pulse(
+            bot_values = await uow.community_bot_achievement_values(target.id)
+        pulse = await self._gateway.pulse(
             chat_id=self._chat_id,
             user_id=target_user_id,
             period=period,
             topic_id=topic_id,
+        )
+        return replace(
+            pulse,
+            achievements=(*pulse.achievements, *bot_achievement_progress(bot_values)),
         )
 
     async def leaderboard(
@@ -205,6 +255,26 @@ class CommunityStatsService:
                     tracking_started_at=None,
                     calculated_at=datetime.datetime.now(datetime.UTC),
                 )
+            if metric.startswith("achievement:"):
+                code = metric.removeprefix("achievement:")
+                if code in BOT_ACHIEVEMENT_THRESHOLDS:
+                    native = await uow.community_bot_achievement_leaderboard(
+                        code=code,
+                        limit=limit,
+                    )
+                    return EnrichedLeaderboard(
+                        items=tuple(
+                            EnrichedLeaderboardItem(
+                                item.member_id,
+                                item.display_name,
+                                item.value,
+                                item.rank,
+                            )
+                            for item in native
+                        ),
+                        tracking_started_at=None,
+                        calculated_at=datetime.datetime.now(datetime.UTC),
+                    )
 
         raw = await self._gateway.leaderboard(
             chat_id=self._chat_id,

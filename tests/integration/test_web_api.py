@@ -162,7 +162,7 @@ class FakeCommunityStatsGateway:
                     code="speaker",
                     level=1,
                     current=10,
-                    next_level_at=50,
+                    next_level_at=30,
                     unlocked=True,
                 ),
             ),
@@ -276,6 +276,73 @@ async def test_community_stats_connects_history_after_member_registration(
                 permissions_json=[],
             )
             session.add(target)
+            await session.flush()
+            category_id = await session.scalar(select(TaskCategoryModel.id).limit(1))
+            assert category_id is not None
+            published_at = datetime.datetime.now(datetime.UTC)
+            for index in range(5):
+                session.add(
+                    TaskModel(
+                        origin="member",
+                        creator_id=target.id,
+                        author_display_name=target.display_name,
+                        category_id=category_id,
+                        time_size="s",
+                        title=f"Stats achievement task {index + 1}",
+                        description="Published task counted by the Manager achievement.",
+                        completion_criteria="Return a concrete result.",
+                        materials_json={},
+                        input_payload_json={},
+                        credit_reward_per_performer=2,
+                        performer_slots=1,
+                        reserved_credit_total=2,
+                        estimated_minutes=20,
+                        minimum_level=1,
+                        format="online",
+                        deadline_at=published_at + datetime.timedelta(days=1),
+                        status="published",
+                        safety_snapshot_json={},
+                        publish_command_id=uuid4(),
+                        published_at=published_at,
+                    )
+                )
+            transaction_time = published_at - datetime.timedelta(minutes=5)
+            session.add_all(
+                [
+                    AccountTransactionModel(
+                        member_id=target.id,
+                        credit_delta=10,
+                        experience_delta=0,
+                        transaction_type="starting_grant",
+                        idempotency_key=f"stats-achievement:{target.id}:starting",
+                        payload_hash="a" * 64,
+                        created_at=transaction_time,
+                    ),
+                    AccountTransactionModel(
+                        member_id=target.id,
+                        credit_delta=60,
+                        experience_delta=0,
+                        transaction_type="manual_credit_grant",
+                        idempotency_key=f"stats-achievement:{target.id}:grant",
+                        payload_hash="b" * 64,
+                        created_by_member_id=actor.id,
+                        reason="Integration achievement fixture.",
+                        created_at=transaction_time + datetime.timedelta(seconds=1),
+                    ),
+                    AccountTransactionModel(
+                        member_id=target.id,
+                        credit_delta=-30,
+                        experience_delta=0,
+                        transaction_type="admin_adjustment",
+                        idempotency_key=f"stats-achievement:{target.id}:spend",
+                        payload_hash="c" * 64,
+                        created_by_member_id=actor.id,
+                        reason="Integration achievement fixture.",
+                        created_at=transaction_time + datetime.timedelta(seconds=2),
+                    ),
+                ]
+            )
+            target.credit_balance_cached = 40
 
         pulse = await client.get(
             "/api/v1/community-stats/pulse",
@@ -287,6 +354,21 @@ async def test_community_stats_connects_history_after_member_registration(
             "messages": 7,
             "reactions_given": 3,
             "reactions_received": 4,
+        }
+        achievements = {item["code"]: item for item in pulse.json()["achievements"]}
+        assert achievements["wealth"] == {
+            "code": "wealth",
+            "level": 3,
+            "current": 70,
+            "next_level_at": 100,
+            "unlocked": True,
+        }
+        assert achievements["manager"] == {
+            "code": "manager",
+            "level": 3,
+            "current": 5,
+            "next_level_at": 10,
+            "unlocked": True,
         }
         assert gateway.pulse_requests == [
             {
@@ -327,6 +409,20 @@ async def test_community_stats_connects_history_after_member_registration(
             str(actor.id),
             str(target.id),
         }
+        assert len(gateway.leaderboard_requests) == 2
+        wealth_ranking = await client.get(
+            "/api/v1/community-stats/leaderboard",
+            params={"period": "all", "metric": "achievement:wealth"},
+        )
+        assert wealth_ranking.status_code == 200, wealth_ranking.text
+        assert wealth_ranking.json()["items"] == [
+            {
+                "member_id": str(target.id),
+                "display_name": "Stats Target",
+                "value": 3,
+                "rank": 1,
+            }
+        ]
         assert len(gateway.leaderboard_requests) == 2
         assert (
             await client.get(
