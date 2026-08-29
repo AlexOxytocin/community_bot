@@ -320,7 +320,7 @@ async def test_community_stats_connects_history_after_member_registration(
                     ),
                     AccountTransactionModel(
                         member_id=target.id,
-                        credit_delta=60,
+                        credit_delta=75,
                         experience_delta=0,
                         transaction_type="manual_credit_grant",
                         idempotency_key=f"stats-achievement:{target.id}:grant",
@@ -331,7 +331,7 @@ async def test_community_stats_connects_history_after_member_registration(
                     ),
                     AccountTransactionModel(
                         member_id=target.id,
-                        credit_delta=-30,
+                        credit_delta=-45,
                         experience_delta=0,
                         transaction_type="admin_adjustment",
                         idempotency_key=f"stats-achievement:{target.id}:spend",

@@ -169,7 +169,11 @@ def achievement_level(current: int, thresholds: tuple[int, ...]) -> int:
     return sum(current >= threshold for threshold in thresholds)
 
 
-def bot_achievement_progress(values: BotAchievementValues) -> tuple[AchievementProgress, ...]:
+def bot_achievement_progress(
+    values: BotAchievementValues,
+    *,
+    reveal_wealth_current: bool = True,
+) -> tuple[AchievementProgress, ...]:
     """Build the two Bot-owned achievements without exposing their raw metrics elsewhere."""
     current_by_code: dict[BotAchievementCode, int] = {
         "wealth": values.maximum_credit_balance,
@@ -177,8 +181,11 @@ def bot_achievement_progress(values: BotAchievementValues) -> tuple[AchievementP
     }
     progress: list[AchievementProgress] = []
     for code, thresholds in BOT_ACHIEVEMENT_THRESHOLDS.items():
-        current = current_by_code[code]
-        level = achievement_level(current, thresholds)
+        actual_current = current_by_code[code]
+        level = achievement_level(actual_current, thresholds)
+        current = actual_current
+        if code == "wealth" and not reveal_wealth_current:
+            current = thresholds[level - 1] if level > 0 else 0
         progress.append(
             AchievementProgress(
                 code=code,
@@ -224,7 +231,13 @@ class CommunityStatsService:
         )
         return replace(
             pulse,
-            achievements=(*pulse.achievements, *bot_achievement_progress(bot_values)),
+            achievements=(
+                *pulse.achievements,
+                *bot_achievement_progress(
+                    bot_values,
+                    reveal_wealth_current=target.id == actor.member_id,
+                ),
+            ),
         )
 
     async def leaderboard(

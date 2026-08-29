@@ -27,6 +27,20 @@ def test_bot_achievement_progress_uses_maximum_balance_and_published_tasks() -> 
     assert progress["manager"].next_level_at == 10
 
 
+def test_bot_achievement_progress_redacts_another_members_exact_balance() -> None:
+    progress = {
+        item.code: item
+        for item in bot_achievement_progress(
+            BotAchievementValues(maximum_credit_balance=85, created_tasks=5),
+            reveal_wealth_current=False,
+        )
+    }
+
+    assert progress["wealth"].level == 3
+    assert progress["wealth"].current == 70
+    assert progress["wealth"].next_level_at == 100
+
+
 @pytest.mark.asyncio
 async def test_typed_stats_client_sends_service_auth_and_topic() -> None:
     observed: dict[str, object] = {}
