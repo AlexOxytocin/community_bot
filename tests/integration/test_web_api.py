@@ -2459,7 +2459,7 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
             (
                 DbTestRunParticipantModel(run_id=run.id, member_id=moderator.id),
                 DbTestRunParticipantModel(run_id=run.id, member_id=performer.id),
-                DbTestRunParticipantModel(run_id=run.id, member_id=creator.id, is_active=False),
+                DbTestRunParticipantModel(run_id=run.id, member_id=creator.id),
             )
         )
     case = await _open_dispute_fixture(database, creator, performer, test_run_id=run.id)
@@ -2560,17 +2560,37 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
             headers=headers | {"origin": ORIGIN, "idempotency-key": "751002"},
             json=payload,
         )
+        creator_archive = await client.get(
+            "/api/v1/owned-tasks",
+            headers={"cookie": f"__Host-community_session={creator_token}"},
+        )
         assert first.status_code == replay.status_code == 204
         assert conflict.status_code == stale.status_code == 409
+        assert creator_archive.status_code == 200
+        assert creator_archive.json()["items"][0]["status"] == "completed"
+        assert creator_archive.json()["items"][0]["archived_at"] is not None
+
+    async with sessions.begin() as session:
+        creator_participant = await session.scalar(
+            select(DbTestRunParticipantModel).where(
+                DbTestRunParticipantModel.run_id == run.id,
+                DbTestRunParticipantModel.member_id == creator.id,
+            )
+        )
+        assert creator_participant is not None
+        creator_participant.is_active = False
 
     async with sessions() as session:
         stored_case = await session.get(ModerationCaseModel, case.id)
         assignment = await session.get(AssignmentModel, case.assignment_id)
+        task = None if assignment is None else await session.get(TaskModel, assignment.task_id)
         assert stored_case is not None
         assert stored_case.status == "resolved"
         assert stored_case.revision == 1
         assert assignment is not None
         assert assignment.status == "partially_approved"
+        assert task is not None
+        assert task.status == "completed"
         assert (
             await session.scalar(
                 select(func.count())

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.economy import ResolvedLevel
 from community_bot.domain.members import Member, MemberRole, MemberStatus
@@ -15,6 +16,7 @@ from community_bot.domain.tasks import (
     TaskKind,
     TaskStatus,
     TaskTimeSize,
+    derive_task_status,
     task_time_size_label,
     validate_acceptance_actor,
     validate_deadline,
@@ -30,6 +32,46 @@ from community_bot.domain.tasks import (
     validate_task_kind,
     validate_time_size,
 )
+
+
+def test_task_status_is_derived_from_latest_slot_states_after_moderation() -> None:
+    now = datetime.datetime.now(datetime.UTC)
+    deadline = now + datetime.timedelta(days=1)
+
+    assert derive_task_status(
+        current_status=TaskStatus.PUBLISHED,
+        performer_slots=1,
+        deadline_at=deadline,
+        now=now,
+        assignment_states=((1, AssignmentStatus.REJECTED),),
+    ) is TaskStatus.EXPIRED
+    assert derive_task_status(
+        current_status=TaskStatus.SETTLING,
+        performer_slots=2,
+        deadline_at=deadline,
+        now=now,
+        assignment_states=(
+            (1, AssignmentStatus.APPROVED),
+            (2, AssignmentStatus.REJECTED),
+        ),
+    ) is TaskStatus.PARTIALLY_COMPLETED
+    assert derive_task_status(
+        current_status=TaskStatus.SETTLING,
+        performer_slots=2,
+        deadline_at=deadline,
+        now=now,
+        assignment_states=(
+            (1, AssignmentStatus.APPROVED),
+            (2, AssignmentStatus.PARTIALLY_APPROVED),
+        ),
+    ) is TaskStatus.COMPLETED
+    assert derive_task_status(
+        current_status=TaskStatus.PUBLISHED,
+        performer_slots=2,
+        deadline_at=deadline,
+        now=now,
+        assignment_states=((1, AssignmentStatus.REJECTED),),
+    ) is TaskStatus.PUBLISHED
 
 
 def test_deadline_format_slots_and_materials_boundaries() -> None:

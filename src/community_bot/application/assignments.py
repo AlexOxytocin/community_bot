@@ -34,7 +34,11 @@ from community_bot.domain.members import (
     can_review_community_task,
 )
 from community_bot.domain.moderation import RestrictedAction
-from community_bot.domain.tasks import TaskStatus, validate_freeform_result_payload
+from community_bot.domain.tasks import (
+    TaskStatus,
+    derive_task_status,
+    validate_freeform_result_payload,
+)
 
 _MAX_ASSIGNMENT_CARDS = 50
 
@@ -1706,43 +1710,11 @@ async def _update_task_aggregate(
 ) -> None:
     """Derive the task lifecycle only from locked latest slot states."""
     history = await uow.list_task_assignments(context.task_id, for_update=True)
-    latest_by_slot: dict[int, Assignment] = {}
-    for assignment in history:
-        latest_by_slot[assignment.slot_number] = assignment
-    latest = tuple(latest_by_slot.values())
-    active = {
-        AssignmentStatus.ACCEPTED,
-        AssignmentStatus.SUBMITTED,
-        AssignmentStatus.REJECTED_PENDING_DISPUTE,
-        AssignmentStatus.DISPUTED,
-        AssignmentStatus.REVIEWER_REQUIRED,
-    }
-    has_active = any(item.status in active for item in latest)
-    has_open_slots = (
-        context.current_status is TaskStatus.PUBLISHED
-        and context.now < context.deadline
-        and len(latest_by_slot) < context.performer_slots
+    status = derive_task_status(
+        current_status=context.current_status,
+        performer_slots=context.performer_slots,
+        deadline_at=context.deadline,
+        now=context.now,
+        assignment_states=tuple((item.slot_number, item.status) for item in history),
     )
-    if has_active or has_open_slots:
-        status = (
-            context.current_status
-            if (
-                context.current_status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS
-                and context.now < context.deadline
-            )
-            else TaskStatus.PUBLISHED
-            if context.now < context.deadline
-            else TaskStatus.SETTLING
-        )
-    else:
-        paid = sum(
-            item.status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}
-            for item in latest
-        )
-        if paid == context.performer_slots:
-            status = TaskStatus.COMPLETED
-        elif paid:
-            status = TaskStatus.PARTIALLY_COMPLETED
-        else:
-            status = TaskStatus.EXPIRED
     await uow.save_task_status(task_id=context.task_id, status=status)

@@ -22,6 +22,7 @@ from community_bot.application.moderation import (
     Sanction,
     SanctionCard,
 )
+from community_bot.domain.assignments import AssignmentStatus
 from community_bot.domain.economy import (
     AdministrativeContext,
     EconomyMutationResult,
@@ -51,7 +52,9 @@ from community_bot.domain.moderation import (
     risk_signal_key,
     validate_sanction,
 )
+from community_bot.domain.tasks import TaskStatus, derive_task_status
 from community_bot.infrastructure.db.assignments import _cards as assignment_cards
+from community_bot.infrastructure.db.assignments import acquire_task_gate
 from community_bot.infrastructure.db.economy import SqlAlchemyEconomyMutation
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -399,7 +402,10 @@ class SqlAlchemyModerationMutation:
         )
         if assignment is None:
             raise LookupError("Case assignment does not exist.")
-        task = await self._session.get(TaskModel, assignment.task_id)
+        await acquire_task_gate(self._session, assignment.task_id)
+        task = await self._session.scalar(
+            select(TaskModel).where(TaskModel.id == assignment.task_id).with_for_update()
+        )
         if task is None:
             raise LookupError("Case task does not exist.")
         await self._require_test_scope(actor.id, task)
@@ -457,7 +463,8 @@ class SqlAlchemyModerationMutation:
         assignment.slot_ever_paid = assignment.slot_ever_paid or performer_paid
         assignment.terminal_command_id = command.command_id
         assignment.terminal_outcome = command.code.value
-        assignment.reviewed_at = datetime.datetime.now(datetime.UTC)
+        resolved_at = datetime.datetime.now(datetime.UTC)
+        assignment.reviewed_at = resolved_at
         if version == 1 and case.case_type != "fraud_review":
             self._session.add(
                 ReliabilityEventModel(
@@ -504,8 +511,31 @@ class SqlAlchemyModerationMutation:
         await self._session.flush()
         case.current_resolution_id = resolution.id
         case.status = "resolved"
-        case.resolved_at = datetime.datetime.now(datetime.UTC)
+        case.resolved_at = resolved_at
         case.revision += 1
+        await self._session.flush()
+        assignment_history = (
+            await self._session.scalars(
+                select(AssignmentModel)
+                .where(AssignmentModel.task_id == task.id)
+                .order_by(
+                    AssignmentModel.slot_number,
+                    AssignmentModel.accepted_at,
+                    AssignmentModel.id,
+                )
+                .with_for_update()
+            )
+        ).all()
+        task.status = derive_task_status(
+            current_status=TaskStatus(task.status),
+            performer_slots=task.performer_slots,
+            deadline_at=task.deadline_at,
+            now=resolved_at,
+            assignment_states=tuple(
+                (item.slot_number, AssignmentStatus(item.status)) for item in assignment_history
+            ),
+        ).value
+        task.updated_at = resolved_at
         if effect.risk_target:
             await self._add_resolution_signal(
                 case, assignment, task, command.code, effect.risk_target

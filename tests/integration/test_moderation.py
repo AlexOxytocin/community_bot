@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
+import subprocess
+import sys
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -55,6 +59,7 @@ from community_bot.infrastructure.db.models import (
 from tests.integration.test_reputation import add_member, add_paid_interaction, prepare_config
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 async def test_paid_fraud_reversal_is_admin_only_atomic_and_replayable(
@@ -111,6 +116,7 @@ async def test_paid_fraud_reversal_is_admin_only_atomic_and_replayable(
     assert resolved.current_code is ResolutionCode.FRAUD
     async with sessions() as session:
         assignment = await session.get(AssignmentModel, assignment_id)
+        task = None if assignment is None else await session.get(TaskModel, assignment.task_id)
         performer_row = await session.get(MemberModel, performer.id)
         reversals = (
             await session.scalars(
@@ -121,6 +127,7 @@ async def test_paid_fraud_reversal_is_admin_only_atomic_and_replayable(
             )
         ).all()
         assert assignment is not None and assignment.status == "rejected"
+        assert task is not None and task.status == "expired"
         assert assignment.slot_ever_paid is True
         assert performer_row is not None and performer_row.credit_balance_cached == 0
         assert performer_row.experience_total_cached == 0
@@ -140,12 +147,15 @@ async def test_dispute_resolution_matrix_writes_ledger_reliability_and_audit(
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     service = ModerationService(database.unit_of_work)
     expectations = (
-        (ResolutionCode.FULL_PAYMENT, "approved", 2),
-        (ResolutionCode.PARTIAL_PAYMENT, "partially_approved", 1),
-        (ResolutionCode.FULL_REFUND, "rejected", 0),
-        (ResolutionCode.CANCEL_WITHOUT_FAULT, "cancelled", 0),
+        (ResolutionCode.FULL_PAYMENT, "approved", 2, "completed"),
+        (ResolutionCode.PARTIAL_PAYMENT, "partially_approved", 1, "completed"),
+        (ResolutionCode.FULL_REFUND, "rejected", 0, "expired"),
+        (ResolutionCode.CANCEL_WITHOUT_FAULT, "cancelled", 0, "expired"),
     )
-    for index, (code, expected_status, expected_credit) in enumerate(expectations, start=1):
+    for index, (code, expected_status, expected_credit, expected_task_status) in enumerate(
+        expectations,
+        start=1,
+    ):
         performer = await add_member(database, 13_110 + index)
         case = await _open_dispute_fixture(database, creator, performer)
         result = await service.resolve(
@@ -162,6 +172,7 @@ async def test_dispute_resolution_matrix_writes_ledger_reliability_and_audit(
         assert result.current_code is code
         async with sessions() as session:
             assignment = await session.get(AssignmentModel, case.assignment_id)
+            task = None if assignment is None else await session.get(TaskModel, assignment.task_id)
             performer_row = await session.get(MemberModel, performer.id)
             roots = int(
                 await session.scalar(
@@ -173,6 +184,7 @@ async def test_dispute_resolution_matrix_writes_ledger_reliability_and_audit(
                 or 0
             )
             assert assignment is not None and assignment.status == expected_status
+            assert task is not None and task.status == expected_task_status
             assert (
                 performer_row is not None and performer_row.credit_balance_cached == expected_credit
             )
@@ -200,6 +212,49 @@ async def test_dispute_resolution_matrix_writes_ledger_reliability_and_audit(
             == 4
         )
     await database.dispose()
+
+
+async def test_migration_repairs_stale_moderated_task_aggregate(database_url: str) -> None:
+    """Migration 0030 repairs already resolved cases without runtime replay."""
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = database_url
+    await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-m", "alembic", "downgrade", "0029"],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+    )
+    database = Database(database_url)
+    creator = await add_member(database, 13_181)
+    performer = await add_member(database, 13_182)
+    case = await _open_dispute_fixture(database, creator, performer)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        assignment = await session.get(AssignmentModel, case.assignment_id)
+        stored_case = await session.get(ModerationCaseModel, case.id)
+        assert assignment is not None and stored_case is not None
+        task_id = assignment.task_id
+        assignment.status = "rejected"
+        assignment.terminal_outcome = "fraud"
+        assignment.reviewed_at = datetime.datetime.now(datetime.UTC)
+        stored_case.status = "resolved"
+        stored_case.resolved_at = datetime.datetime.now(datetime.UTC)
+    await database.dispose()
+
+    await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+    )
+    repaired = Database(database_url)
+    repaired_sessions = async_sessionmaker(repaired.engine, expire_on_commit=False)
+    async with repaired_sessions() as session:
+        task = await session.get(TaskModel, task_id)
+        assert task is not None and task.status == "expired"
+    await repaired.dispose()
 
 
 async def test_suspension_expires_on_read_without_worker_and_preserves_history(

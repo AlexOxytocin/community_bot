@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from pydantic import HttpUrl, TypeAdapter, ValidationError
 
+from community_bot.domain.assignments import ACTIVE_ASSIGNMENT_STATUSES, AssignmentStatus
 from community_bot.domain.catalog import TaskFormat
 from community_bot.domain.members import Member, MemberStatus
 
@@ -68,6 +69,38 @@ class TaskStatus(StrEnum):
     PARTIALLY_COMPLETED = "partially_completed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+
+def derive_task_status(
+    *,
+    current_status: TaskStatus,
+    performer_slots: int,
+    deadline_at: datetime.datetime,
+    now: datetime.datetime,
+    assignment_states: tuple[tuple[int, AssignmentStatus], ...],
+) -> TaskStatus:
+    """Derive one task status from canonical oldest-to-newest slot history."""
+    latest_by_slot = dict(assignment_states)
+    latest = tuple(latest_by_slot.values())
+    has_active = any(status in ACTIVE_ASSIGNMENT_STATUSES for status in latest)
+    has_open_slots = (
+        current_status is TaskStatus.PUBLISHED
+        and now < deadline_at
+        and len(latest_by_slot) < performer_slots
+    )
+    if has_active or has_open_slots:
+        if current_status is TaskStatus.CLOSED_FOR_NEW_PERFORMERS and now < deadline_at:
+            return current_status
+        return TaskStatus.PUBLISHED if now < deadline_at else TaskStatus.SETTLING
+    paid = sum(
+        status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}
+        for status in latest
+    )
+    if paid == performer_slots:
+        return TaskStatus.COMPLETED
+    if paid:
+        return TaskStatus.PARTIALLY_COMPLETED
+    return TaskStatus.EXPIRED
 
 
 @dataclass(frozen=True, slots=True)
