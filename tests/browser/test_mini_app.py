@@ -5409,7 +5409,9 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                                 "level": level,
                                 "current": current,
                                 "next_level_at": threshold,
-                                "unlocked": level > 0,
+                                "unlocked": level > 0 or (
+                                    code in {"star", "consilium"} and current > 0
+                                ),
                             }
                             for code, level, current, threshold in (
                                 ("speaker", 2, 42, 60),
@@ -5426,6 +5428,8 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                                 ("wake_up", 0, 0, 1),
                                 ("bread_and_salt", 0, 0, 1),
                                 ("onboarder", 0, 0, 1),
+                                ("star", 0, 37, None),
+                                ("consilium", 0, 8, None),
                                 ("wealth", 3, 70, 100),
                                 ("manager", 0, 0, 1),
                             )
@@ -5616,12 +5620,23 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
             assert page.get_by_role("button", name="Год", exact=True).is_visible()
             assert page.get_by_role("button", name="Всё время", exact=True).is_visible()
-            assert page.locator(".achievement-tile.is-unlocked").count() == 6
+            assert page.locator(".achievement-tile.is-unlocked").count() == 8
             assert page.locator(".achievement-tile.is-locked").count() == 10
+            assert page.locator(".achievement-tile.is-record").count() == 2
             assert page.get_by_role("button", name="Петросян, уровень 1", exact=True).is_visible()
             assert page.get_by_role("button", name="Будильник, не открыто", exact=True).is_visible()
             assert page.get_by_role("button", name="Хлеб-соль, не открыто", exact=True).is_visible()
             assert page.get_by_role("button", name="Онбордист, не открыто", exact=True).is_visible()
+            assert page.get_by_role(
+                "button",
+                name="Звезда, личный рекорд 37 реакций",
+                exact=True,
+            ).is_visible()
+            assert page.get_by_role(
+                "button",
+                name="Консилиум, личный рекорд 8 участников",
+                exact=True,
+            ).is_visible()
             achievement_geometry = page.locator(".achievements-card").evaluate(
                 """card => {
                   const tiles = [...card.querySelectorAll('.achievement-tile')];
@@ -5665,6 +5680,22 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.locator(".achievement-detail-sheet").count() == 0
             assert page.locator(".screen").evaluate("node => node.scrollTop") == scroll_before
             assert page.evaluate("document.activeElement?.dataset.achievementCode") == "magnet"
+            star = page.get_by_role(
+                "button",
+                name="Звезда, личный рекорд 37 реакций",
+                exact=True,
+            )
+            star.click()
+            detail = page.locator(".achievement-detail-sheet")
+            detail.wait_for()
+            assert detail.get_by_text("Личный рекорд", exact=True).is_visible()
+            assert detail.get_by_text("37", exact=True).is_visible()
+            assert detail.get_by_text(
+                "реакций на одном сообщении",
+                exact=True,
+            ).is_visible()
+            assert detail.locator(".achievement-progress-track").count() == 0
+            page.get_by_role("button", name="Закрыть достижение", exact=True).click()
             page.set_viewport_size({"width": width, "height": height})
             page.get_by_role("button", name="Месяц", exact=True).click()
             page.locator(".pulse-chart-month .pulse-chart-bar").first.wait_for()

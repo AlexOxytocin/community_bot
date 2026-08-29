@@ -579,6 +579,9 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .achievement-tile { display: grid; min-width: 0; height: 72px; min-height: 72px; place-items: center; align-content: center; gap: 2px; padding: 4px 3px; border: 1px solid var(--app-border); border-radius: 12px; background: var(--app-surface-raised); color: var(--app-text); cursor: pointer; text-align: center; }
 .achievement-tile.is-unlocked { border-color: color-mix(in srgb, var(--app-accent) 34%, var(--app-border)); }
 .achievement-tile.is-locked { opacity: .43; filter: grayscale(1); }
+.achievement-tile.is-record { border-color: color-mix(in srgb, #f5c842 48%, var(--app-border)); }
+.achievement-tile.is-record .achievement-icon { background: color-mix(in srgb, #f5c842 15%, var(--app-surface)); }
+.achievement-tile.is-record .achievement-level { color: color-mix(in srgb, #f5c842 78%, var(--app-text)); }
 .achievement-tile.is-selected { border-color: var(--app-accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent) 55%, transparent); }
 .achievement-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 11px; background: color-mix(in srgb, var(--app-accent) 11%, var(--app-surface)); font-size: 20px; }
 .achievement-tile strong { overflow: hidden; max-width: 100%; font-size: 11px; line-height: 1.15; text-overflow: ellipsis; white-space: nowrap; }
@@ -595,6 +598,9 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .achievement-progress-track { display: block; overflow: hidden; height: 7px; border-radius: 999px; background: color-mix(in srgb, var(--app-text-muted) 18%, transparent); }
 .achievement-progress-fill { display: block; width: var(--achievement-progress); height: 100%; border-radius: inherit; background: var(--app-accent); }
 .achievement-progress-copy { color: var(--app-text-muted); font-size: 9px; text-align: right; }
+.achievement-record { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; padding: 11px 13px; border: 1px solid color-mix(in srgb, #f5c842 38%, var(--app-border)); border-radius: 14px; background: color-mix(in srgb, #f5c842 9%, var(--app-surface)); }
+.achievement-record strong { color: color-mix(in srgb, #f5c842 80%, var(--app-text)); font-size: 28px; line-height: 1; }
+.achievement-record span { color: var(--app-text-muted); font-size: 11px; line-height: 1.3; }
 .leaderboard-filter-trigger { display: grid; width: 100%; min-height: 52px; grid-template-columns: 34px minmax(0, 1fr) 22px; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--app-border); border-radius: 14px; background: var(--app-surface); color: var(--app-text); cursor: pointer; text-align: left; }
 .leaderboard-filter-trigger-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; background: color-mix(in srgb, var(--app-accent) 11%, var(--app-surface-raised)); color: var(--app-accent); }
 .leaderboard-filter-trigger-icon svg { width: 17px; height: 17px; fill: none; stroke: currentcolor; stroke-linecap: round; stroke-width: 1.8; }

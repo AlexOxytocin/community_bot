@@ -3788,6 +3788,26 @@ const communityAchievementCatalog = [
     hint: "Отвечайте новым участникам и помогайте им освоиться в комьюнити.",
   },
   {
+    code: "star",
+    icon: "⭐",
+    title: "Звезда",
+    hint: "Собирайте как можно больше реакций на одном сообщении.",
+    record: true,
+    recordUnit: "реакц.",
+    recordAriaUnit: "реакций",
+    recordCaption: "реакций на одном сообщении",
+  },
+  {
+    code: "consilium",
+    icon: "👥",
+    title: "Консилиум",
+    hint: "Вовлекайте разных участников в обсуждение одного сообщения.",
+    record: true,
+    recordUnit: "участ.",
+    recordAriaUnit: "участников",
+    recordCaption: "участников ответили на одно сообщение",
+  },
+  {
     code: "wealth",
     icon: "💰",
     title: "Я богач",
@@ -3818,11 +3838,13 @@ const communityLeaderboardMetricGroups = [
   },
   {
     label: "Достижения · уровень",
-    options: communityAchievementCatalog.map((achievement) => ({
-      value: `achievement:${achievement.code}`,
-      label: achievement.title,
-      icon: achievement.icon,
-    })),
+    options: communityAchievementCatalog
+      .filter((achievement) => !achievement.record)
+      .map((achievement) => ({
+        value: `achievement:${achievement.code}`,
+        label: achievement.title,
+        icon: achievement.icon,
+      })),
   },
 ];
 const communityLeaderboardMetrics = communityLeaderboardMetricGroups.flatMap((group) => group.options);
@@ -3972,6 +3994,7 @@ function achievementDetailSheet(state, achievement, originButton) {
     originButton.setAttribute("aria-pressed", "false");
     originButton.focus({ preventScroll: true });
   };
+  const isRecord = achievement.record === true;
   const progress = achievement.next_level_at === null
     ? 100
     : Math.min(100, Math.round(achievement.current / achievement.next_level_at * 100));
@@ -3990,7 +4013,14 @@ function achievementDetailSheet(state, achievement, originButton) {
   detailTitle.id = "achievement-detail-title";
   detailHeading.append(
     detailTitle,
-    element("span", achievement.unlocked ? `Уровень ${achievement.level}` : "Пока закрыто"),
+    element(
+      "span",
+      isRecord
+        ? "Личный рекорд"
+        : achievement.unlocked
+          ? `Уровень ${achievement.level}`
+          : "Пока закрыто",
+    ),
   );
   const track = element("span", undefined, "achievement-progress-track");
   const fill = element("span", undefined, "achievement-progress-fill");
@@ -4002,15 +4032,26 @@ function achievementDetailSheet(state, achievement, originButton) {
     detailHeading,
     element("strong", "Как получить", "achievement-detail-label"),
     element("p", achievement.hint, "muted"),
-    track,
-    element(
-      "span",
-      achievement.next_level_at === null
-        ? "Максимальный уровень"
-        : `${achievement.current} из ${achievement.next_level_at}`,
-      "achievement-progress-copy",
-    ),
   );
+  if (isRecord) {
+    const record = element("div", undefined, "achievement-record");
+    record.append(
+      element("strong", String(achievement.current)),
+      element("span", achievement.recordCaption),
+    );
+    dialog.append(record);
+  } else {
+    dialog.append(
+      track,
+      element(
+        "span",
+        achievement.next_level_at === null
+          ? "Максимальный уровень"
+          : `${achievement.current} из ${achievement.next_level_at}`,
+        "achievement-progress-copy",
+      ),
+    );
+  }
   backdrop.append(dialog);
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop) closeSheet();
@@ -4146,19 +4187,38 @@ function pulseDetails(state, revision) {
   achievementsHeading.append(headingCopy);
   const grid = element("div", undefined, "achievement-grid");
   for (const achievement of pulseAchievements) {
+    const isRecord = achievement.record === true;
+    const stateClasses = isRecord
+      ? ` is-record${achievement.unlocked ? " is-unlocked" : ""}`
+      : achievement.unlocked
+        ? " is-unlocked"
+        : " is-locked";
     const button = element(
       "button",
       undefined,
-      `achievement-tile${achievement.unlocked ? " is-unlocked" : " is-locked"}`,
+      `achievement-tile${stateClasses}`,
     );
     button.type = "button";
     button.dataset.achievementCode = achievement.code;
     button.setAttribute("aria-pressed", "false");
-    button.setAttribute("aria-label", `${achievement.title}, ${achievement.unlocked ? `уровень ${achievement.level}` : "не открыто"}`);
+    button.setAttribute(
+      "aria-label",
+      isRecord
+        ? `${achievement.title}, личный рекорд ${achievement.current} ${achievement.recordAriaUnit}`
+        : `${achievement.title}, ${achievement.unlocked ? `уровень ${achievement.level}` : "не открыто"}`,
+    );
     button.append(
-      element("span", achievement.unlocked ? achievement.icon : "◈", "achievement-icon"),
+      element("span", isRecord || achievement.unlocked ? achievement.icon : "◈", "achievement-icon"),
       element("strong", achievement.title),
-      element("span", achievement.unlocked ? `Ур. ${achievement.level}` : "Закрыто", "achievement-level"),
+      element(
+        "span",
+        isRecord
+          ? `${achievement.current} ${achievement.recordUnit}`
+          : achievement.unlocked
+            ? `Ур. ${achievement.level}`
+            : "Закрыто",
+        "achievement-level",
+      ),
     );
     button.addEventListener("click", () => {
       state.selectedAchievement = achievement.code;
