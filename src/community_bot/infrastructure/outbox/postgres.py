@@ -137,6 +137,13 @@ class PostgresNotificationQueue:
                 task_id = event.payload_json.get("task_id")
                 if isinstance(title, str) and isinstance(task_id, str):
                     safe_payload = {"title": title, "task_id": task_id}
+            elif event.event_type == "assignment_rejection_pending_dispute":
+                rejection_reason = event.payload_json.get("rejection_reason")
+                rejection_comment = event.payload_json.get("rejection_comment")
+                if isinstance(rejection_reason, str):
+                    safe_payload = {"rejection_reason": rejection_reason}
+                    if isinstance(rejection_comment, str):
+                        safe_payload["rejection_comment"] = rejection_comment
             for recipient in recipients:
                 if event.event_type == "registration.approved":
                     scheduled_at = now

@@ -736,6 +736,12 @@ class AssignmentModel(Base):
             "'reviewer_required')",
             name="ck_assignments_status",
         ),
+        CheckConstraint(
+            "rejection_reason IS NULL OR rejection_reason IN ("
+            "'not_completed', 'requirements_not_met', 'insufficient_evidence', 'other'"
+            ")",
+            name="ck_assignments_rejection_reason",
+        ),
         Index(
             "uq_assignments_occupied_slot",
             "task_id",
@@ -771,6 +777,8 @@ class AssignmentModel(Base):
     reject_dispute_deadline_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    rejection_comment: Mapped[str | None] = mapped_column(Text)
     reviewed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     terminal_command_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), unique=True

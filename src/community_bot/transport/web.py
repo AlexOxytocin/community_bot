@@ -116,6 +116,7 @@ from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import (
     AssignmentDecision,
     AssignmentError,
+    AssignmentRejectionReason,
     AssignmentStatus,
     SubmissionDraft,
 )
@@ -645,6 +646,8 @@ class AssignmentCardDto(_Dto):
     task_deadline_at: datetime.datetime
     result_summary: str | None
     case_status: str | None
+    rejection_reason: AssignmentRejectionReason | None
+    rejection_comment: str | None
 
 
 class AssignmentsDto(_Dto):
@@ -669,7 +672,25 @@ class AssignmentReviewsDto(_Dto):
 
 
 class AssignmentDecisionRequest(_Dto):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     decision: AssignmentDecision
+    rejection_reason: AssignmentRejectionReason | None = None
+    rejection_comment: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> AssignmentDecisionRequest:
+        """Keep accepted outcomes clean and rejected outcomes explainable."""
+        if self.decision is AssignmentDecision.REJECT:
+            if self.rejection_reason is None:
+                raise ValueError("Assignment rejection requires a reason.")
+            if (
+                self.rejection_reason is AssignmentRejectionReason.OTHER
+                and not (self.rejection_comment or "").strip()
+            ):
+                raise ValueError("Other assignment rejection requires a comment.")
+        elif self.rejection_reason is not None or self.rejection_comment is not None:
+            raise ValueError("Accepted assignment decisions do not accept rejection details.")
+        return self
 
 
 class AssignmentDisputeRequest(_Dto):
@@ -2721,15 +2742,28 @@ def create_web_app(
             operation_key,
             namespace=b"assignment-review-v1",
         )
+        fingerprint = _submission_fingerprint(
+            "assignment_decision",
+            payload={
+                "decision": payload.decision.value,
+                "rejection_reason": (
+                    None if payload.rejection_reason is None else payload.rejection_reason.value
+                ),
+                "rejection_comment": payload.rejection_comment,
+            },
+        )
         try:
             await assignments.decide(
                 DecideAssignmentCommand(
-                    update_id,
-                    None,
-                    assignment_id,
-                    UUID(int=update_id),
-                    payload.decision,
-                    actor.member_id,
+                    update_id=update_id,
+                    actor_telegram_user_id=None,
+                    assignment_id=assignment_id,
+                    decision_command_id=UUID(int=update_id),
+                    decision=payload.decision,
+                    actor_member_id=actor.member_id,
+                    rejection_reason=payload.rejection_reason,
+                    rejection_comment=payload.rejection_comment,
+                    replay_fingerprint=fingerprint,
                 )
             )
         except (AssignmentError, LookupError, PermissionError):
@@ -3689,6 +3723,8 @@ def _assignment_card_dto(card: AssignmentCard) -> AssignmentCardDto:
         task_deadline_at=card.task.deadline_at,
         result_summary=card.result_summary,
         case_status=card.case_status,
+        rejection_reason=assignment.rejection_reason,
+        rejection_comment=assignment.rejection_comment,
     )
 
 

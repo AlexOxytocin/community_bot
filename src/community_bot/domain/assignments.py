@@ -40,6 +40,15 @@ class AssignmentDecision(StrEnum):
     REJECT = "reject"
 
 
+class AssignmentRejectionReason(StrEnum):
+    """Stable author-facing reasons for rejecting a submitted result."""
+
+    NOT_COMPLETED = "not_completed"
+    REQUIREMENTS_NOT_MET = "requirements_not_met"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    OTHER = "other"
+
+
 ACTIVE_ASSIGNMENT_STATUSES = frozenset(
     {
         AssignmentStatus.ACCEPTED,
@@ -72,6 +81,8 @@ class Assignment:
     reviewed_at: datetime.datetime | None = None
     terminal_outcome: str | None = None
     terminal_command_id: UUID | None = None
+    rejection_reason: AssignmentRejectionReason | None = None
+    rejection_comment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

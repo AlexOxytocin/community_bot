@@ -380,6 +380,71 @@ async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notificat
     await database.dispose()
 
 
+async def test_rejection_notification_preserves_only_explainable_reason(
+    database_url: str,
+) -> None:
+    """The selected reason reaches authorized assignment recipients without extra payload."""
+    database = Database(database_url)
+    task, performer = await _seed_published_task(database, now=_IN_WINDOW_UTC)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        assignment = AssignmentModel(
+            id=uuid4(),
+            task_id=task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="rejected_pending_dispute",
+            rejection_reason="requirements_not_met",
+            rejection_comment="Исправьте итоговый файл.",
+        )
+        session.add(assignment)
+        session.add(
+            OutboxEventModel(
+                id=uuid4(),
+                event_type="assignment_rejection_pending_dispute",
+                aggregate_type="assignment",
+                aggregate_id=assignment.id,
+                payload_json={
+                    "assignment_id": str(assignment.id),
+                    "task_id": str(task.id),
+                    "status": assignment.status,
+                    "rejection_reason": assignment.rejection_reason,
+                    "rejection_comment": assignment.rejection_comment,
+                    "private": "must-not-be-copied",
+                },
+                business_key="notification-test:assignment-rejected",
+                created_at=_IN_WINDOW_UTC,
+                next_attempt_at=_IN_WINDOW_UTC,
+            )
+        )
+    queue = PostgresNotificationQueue(database.session_factory)
+    claim = (
+        await queue.claim_outbox(
+            now=_IN_WINDOW_UTC,
+            limit=1,
+            lease_duration=datetime.timedelta(minutes=2),
+        )
+    )[0]
+    await queue.materialize(claim, now=_IN_WINDOW_UTC, window=DeliveryWindow())
+    async with sessions() as session:
+        notifications = (
+            await session.scalars(
+                select(NotificationModel).where(
+                    NotificationModel.notification_type
+                    == "assignment_rejection_pending_dispute"
+                )
+            )
+        ).all()
+    assert {item.member_id for item in notifications} == {task.creator_id, performer.id}
+    assert all(
+        item.payload_json["rejection_reason"] == "requirements_not_met"
+        and item.payload_json["rejection_comment"] == "Исправьте итоговый файл."
+        and "private" not in item.payload_json
+        for item in notifications
+    )
+    await database.dispose()
+
+
 async def test_cancellation_request_materializes_actions_and_becomes_obsolete(  # noqa: PLR0915
     database_url: str,
 ) -> None:

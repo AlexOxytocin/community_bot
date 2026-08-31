@@ -3725,6 +3725,8 @@ async def test_active_assignment_api_paginates_privately_without_effects(
             "task_deadline_at",
             "result_summary",
             "case_status",
+            "rejection_reason",
+            "rejection_comment",
         }
         assert all(set(item) == list_keys for item in first.json()["items"])
         detail = await client.get(f"/api/v1/assignments/{first_assignment.id}")
@@ -4044,20 +4046,63 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
                 await foreign.get(f"/api/v1/assignment-reviews/{assignment.id}")
             ).status_code == 404
         headers = {"origin": ORIGIN, "idempotency-key": "5473"}
+        missing_reason = await client.post(
+            f"/api/v1/assignment-reviews/{assignment.id}/decision",
+            headers={"origin": ORIGIN, "idempotency-key": "5472"},
+            json={"decision": "reject"},
+        )
+        assert missing_reason.status_code == 422
+        assert (
+            await client.post(
+                f"/api/v1/assignment-reviews/{assignment.id}/decision",
+                headers={"origin": ORIGIN, "idempotency-key": "5471"},
+                json={"decision": "reject", "rejection_reason": "other"},
+            )
+        ).status_code == 422
+        rejection_payload = {
+            "decision": "reject",
+            "rejection_reason": "insufficient_evidence",
+            "rejection_comment": "Нужна ссылка на готовый результат.",
+        }
         reject = await client.post(
             f"/api/v1/assignment-reviews/{assignment.id}/decision",
             headers=headers,
-            json={"decision": "reject"},
+            json=rejection_payload,
         )
         assert reject.status_code == 204
 
         async def replay_reject() -> int:
             response = await client.post(
-                reject.request.url.path, headers=headers, json={"decision": "reject"}
+                reject.request.url.path, headers=headers, json=rejection_payload
             )
             return response.status_code
 
         assert await replay_reject() == 204
+        assert (
+            await client.post(
+                reject.request.url.path,
+                headers=headers,
+                json={**rejection_payload, "rejection_comment": "Другая причина."},
+            )
+        ).status_code == 409
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as rejected_user:
+            rejected_auth = await rejected_user.post(
+                "/api/v1/auth/telegram",
+                content=proof(
+                    performer.telegram_user_id,
+                    now=datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=1),
+                ),
+                headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
+            )
+            assert rejected_auth.status_code == 204
+            rejected_detail = await rejected_user.get(
+                f"/api/v1/assignments/{assignment.id}"
+            )
+            assert rejected_detail.status_code == 200
+            assert rejected_detail.json()["rejection_reason"] == "insufficient_evidence"
+            assert rejected_detail.json()["rejection_comment"] == (
+                "Нужна ссылка на готовый результат."
+            )
         assert (
             await client.post(
                 reject.request.url.path, headers=headers, json={"decision": "partial"}
@@ -4069,6 +4114,8 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
             assert stored.status == "rejected_pending_dispute"
             assert stored.reject_dispute_deadline_at is not None
             assert stored.rejected_at is not None
+            assert stored.rejection_reason == "insufficient_evidence"
+            assert stored.rejection_comment == "Нужна ссылка на готовый результат."
             assert stored.reject_dispute_deadline_at - stored.rejected_at == datetime.timedelta(
                 hours=24
             )
@@ -4088,6 +4135,17 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
                 .where(OutboxEventModel.aggregate_id == assignment.id)
             )
             assert (ledger_count, reliability_count, outbox_count) == (0, 1, 3)
+            review_outbox = await session.scalar(
+                select(OutboxEventModel).where(
+                    OutboxEventModel.aggregate_id == assignment.id,
+                    OutboxEventModel.event_type == "assignment_rejection_pending_dispute",
+                )
+            )
+            assert review_outbox is not None
+            assert review_outbox.payload_json["rejection_reason"] == "insufficient_evidence"
+            assert review_outbox.payload_json["rejection_comment"] == (
+                "Нужна ссылка на готовый результат."
+            )
         await service.finalize_rejection(
             assignment_id=assignment.id,
             command_id=uuid4(),

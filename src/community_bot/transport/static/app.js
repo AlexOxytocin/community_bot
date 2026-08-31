@@ -5597,6 +5597,13 @@ const decisionLabels = {
   reject: "Отклонить",
 };
 
+const rejectionReasonLabels = {
+  not_completed: "Задание не выполнено",
+  requirements_not_met: "Не соответствует условиям",
+  insufficient_evidence: "Недостаточно подтверждений",
+  other: "Другая причина",
+};
+
 const createdTaskStatus = (value) => ({
   published: "Опубликовано",
   closed_for_new_performers: "Набор закрыт",
@@ -6264,9 +6271,18 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
       button.type = "button";
       markTransition(button, "PE-040", "authoritative_review_success");
       let operationKey = null;
-      const saveDecision = async ({ confirm = button, edit = null, status: actionStatus = status } = {}) => {
+      const saveDecision = async ({
+        confirm = button,
+        edit = null,
+        status: actionStatus = status,
+        rejectionReason = null,
+        rejectionComment = null,
+      } = {}) => {
         confirm.disabled = true;
-        if (edit) edit.disabled = true;
+        const editableControls = edit
+          ? [...edit.querySelectorAll("input, textarea, select, button")]
+          : [];
+        for (const control of editableControls) control.disabled = true;
         actionStatus.className = "status";
         actionStatus.textContent = "Сохраняем решение…";
         operationKey ||= newOperationKey();
@@ -6275,7 +6291,13 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
             "/api/v1/assignment-reviews/" + encodeURIComponent(assignmentId) + "/decision",
             "POST",
             operationKey,
-            { decision },
+            decision === "reject"
+              ? {
+                  decision,
+                  rejection_reason: rejectionReason,
+                  rejection_comment: rejectionComment || null,
+                }
+              : { decision },
           );
           if (returnTarget === "task-home") {
             await loadTaskHome();
@@ -6307,7 +6329,7 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
           actionStatus.textContent = "Не удалось сохранить решение. Повторите запрос — ключ останется тем же.";
           if (!retryableSubmissionError(error)) operationKey = null;
           confirm.disabled = false;
-          if (edit) edit.disabled = false;
+          for (const control of editableControls) control.disabled = false;
         }
       };
       button.addEventListener("click", () => {
@@ -6326,14 +6348,78 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
           ? "assignment-action-confirm-danger"
           : "primary";
         const confirm = element("button", decisionLabels[decision], confirmClass);
-        confirm.type = "button";
         markTransition(confirm, "PE-040", "authoritative_review_success");
-        confirm.addEventListener("click", () => saveDecision({
-          confirm,
-          status: sheet.status,
-        }));
+        if (decision !== "reject") {
+          confirm.type = "button";
+          confirm.addEventListener("click", () => saveDecision({
+            confirm,
+            status: sheet.status,
+          }));
+          sheet.actions.append(confirm);
+          queueMicrotask(() => confirm.focus({ preventScroll: true }));
+          return;
+        }
+        const form = element("form", undefined, "assignment-action-form assignment-rejection-form");
+        form.id = "assignment-rejection-form";
+        const reasons = element("fieldset", undefined, "assignment-rejection-reasons");
+        reasons.append(element("legend", "Причина отклонения"));
+        for (const [value, labelText] of Object.entries(rejectionReasonLabels)) {
+          const label = element("label", undefined, "assignment-rejection-reason");
+          const input = element("input");
+          input.type = "radio";
+          input.name = "rejection_reason";
+          input.value = value;
+          input.setAttribute("aria-label", labelText);
+          label.append(input, element("span", labelText));
+          reasons.append(label);
+        }
+        const commentLabel = element("label", "Комментарий (необязательно)");
+        const comment = element("textarea");
+        comment.name = "rejection_comment";
+        comment.maxLength = 500;
+        comment.rows = 3;
+        comment.placeholder = "Коротко поясните, что нужно исправить";
+        comment.setAttribute("aria-label", "Комментарий к отклонению");
+        const counter = element("span", "0 / 500", "assignment-action-counter");
+        commentLabel.append(comment, counter);
+        form.append(reasons, commentLabel);
+        sheet.body.append(form);
+        confirm.type = "submit";
+        confirm.setAttribute("form", form.id);
+        confirm.disabled = true;
         sheet.actions.append(confirm);
-        queueMicrotask(() => confirm.focus({ preventScroll: true }));
+        const updateRejectionForm = () => {
+          const reason = form.elements.rejection_reason.value;
+          const commentRequired = reason === "other";
+          const hasRequiredComment = !commentRequired || Boolean(comment.value.trim());
+          commentLabel.firstChild.textContent = commentRequired
+            ? "Комментарий"
+            : "Комментарий (необязательно)";
+          comment.required = commentRequired;
+          counter.textContent = commentRequired && !comment.value.trim()
+            ? `Укажите причину · ${comment.value.length} / 500`
+            : `${comment.value.length} / 500`;
+          counter.classList.toggle("is-requirement", commentRequired && !comment.value.trim());
+          counter.classList.toggle("is-limit", comment.value.length >= comment.maxLength);
+          confirm.disabled = !reason || !hasRequiredComment;
+          operationKey = null;
+        };
+        reasons.addEventListener("change", updateRejectionForm);
+        comment.addEventListener("input", updateRejectionForm);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const rejectionReason = form.elements.rejection_reason.value;
+          const rejectionComment = comment.value.trim();
+          if (!rejectionReason || (rejectionReason === "other" && !rejectionComment)) return;
+          void saveDecision({
+            confirm,
+            edit: form,
+            status: sheet.status,
+            rejectionReason,
+            rejectionComment,
+          });
+        });
+        queueMicrotask(() => reasons.querySelector("input")?.focus({ preventScroll: true }));
       });
       decisionActions.append(button);
     }
@@ -6870,6 +6956,14 @@ async function showAssignmentDetail(assignmentId, push = true, returnTo = null) 
     );
     if (assignment.result_summary) {
       detailContent.append(compactSection("Последний результат", assignment.result_summary));
+    }
+    if (assignment.rejection_reason) {
+      const reasonLabel = rejectionReasonLabels[assignment.rejection_reason]
+        || "Причина указана автором";
+      const reasonCopy = assignment.rejection_comment
+        ? `${reasonLabel}. ${assignment.rejection_comment}`
+        : reasonLabel;
+      detailContent.append(compactSection("Причина отклонения", reasonCopy));
     }
     if (assignment.review_deadline_at) {
       detailContent.append(compactDateSection("Срок проверки", assignment.review_deadline_at));

@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     )
     from community_bot.domain.assignments import (
         Assignment,
+        AssignmentRejectionReason,
         AssignmentStatus,
         ResultVersion,
         SubmissionDraft,
@@ -586,7 +587,7 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), draft_id=draft_id, result_id=result_id
         )
 
-    async def set_assignment_decision(
+    async def set_assignment_decision(  # noqa: PLR0913
         self,
         *,
         assignment_id: UUID,
@@ -594,6 +595,8 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         command_id: UUID,
         outcome: str,
         now: datetime.datetime,
+        rejection_reason: AssignmentRejectionReason | None = None,
+        rejection_comment: str | None = None,
     ) -> Assignment:
         """Persist one assignment review transition."""
         return await assignment_store.set_decision(
@@ -603,6 +606,8 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             command_id=command_id,
             outcome=outcome,
             now=now,
+            rejection_reason=rejection_reason,
+            rejection_comment=rejection_comment,
         )
 
     async def open_assignment_dispute(

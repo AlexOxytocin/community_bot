@@ -1,5 +1,7 @@
 """Targeted tests for notification scheduling and worker orchestration."""
 
+# ruff: noqa: RUF001 - localized user-facing copy intentionally uses Cyrillic.
+
 from __future__ import annotations
 
 import datetime
@@ -224,6 +226,39 @@ async def test_telegram_sender_uses_allowlisted_message() -> None:
     await sender.send(claim)
 
     assert bot.sent == [(42, "Опубликовано новое задание в сообществе.")]
+
+
+@pytest.mark.asyncio
+async def test_telegram_sender_explains_pending_rejection() -> None:
+    """A performer receives the selected reason and the dispute window."""
+    bot = _TelegramBotStub()
+    sender = TelegramNotificationSender(cast("Bot", bot))
+    claim = DeliveryClaim(
+        id=uuid4(),
+        member_id=uuid4(),
+        telegram_user_id=42,
+        notification_type="assignment_rejection_pending_dispute",
+        payload={
+            "rejection_reason": "requirements_not_met",
+            "rejection_comment": "Исправьте итоговый файл.\nПроверьте ссылку.",
+        },
+        attempt_count=1,
+        lease_token=uuid4(),
+    )
+
+    await sender.send(claim)
+
+    assert bot.sent == [
+        (
+            42,
+            (
+                "Результат задания отклонён.\n\n"
+                "Причина: Результат не соответствует условиям.\n\n"
+                "Комментарий: Исправьте итоговый файл. Проверьте ссылку.\n\n"
+                "Резерв заморожен на 24 часа. Вы можете открыть спор в приложении."
+            ),
+        )
+    ]
 
 
 @pytest.mark.asyncio

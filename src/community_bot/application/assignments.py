@@ -13,6 +13,7 @@ from community_bot.domain.assignments import (
     Assignment,
     AssignmentDecision,
     AssignmentError,
+    AssignmentRejectionReason,
     AssignmentStatus,
     ResultVersion,
     SubmissionDraft,
@@ -85,6 +86,9 @@ class DecideAssignmentCommand:
     decision_command_id: UUID
     decision: AssignmentDecision
     actor_member_id: UUID | None = None
+    rejection_reason: AssignmentRejectionReason | None = None
+    rejection_comment: str | None = None
+    replay_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +291,7 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
     async def complete_submission_draft(
         self, *, draft_id: UUID, result_id: UUID
     ) -> SubmissionDraft: ...
-    async def set_assignment_decision(
+    async def set_assignment_decision(  # noqa: PLR0913
         self,
         *,
         assignment_id: UUID,
@@ -295,6 +299,8 @@ class AssignmentUnitOfWork(Protocol):  # pragma: no cover - structural typing co
         command_id: UUID,
         outcome: str,
         now: datetime.datetime,
+        rejection_reason: AssignmentRejectionReason | None = None,
+        rejection_comment: str | None = None,
     ) -> Assignment: ...
     async def mark_reviewer_required(self, assignment_id: UUID) -> Assignment: ...
     async def open_assignment_dispute(
@@ -980,13 +986,29 @@ class AssignmentService:
 
     async def decide(self, command: DecideAssignmentCommand) -> Assignment:
         """Apply full, partial, or reject author review exactly once."""
+        rejection_comment = (
+            None if command.rejection_comment is None else command.rejection_comment.strip() or None
+        )
+        if command.decision is AssignmentDecision.REJECT:
+            if command.rejection_reason is None:
+                raise AssignmentError("Assignment rejection reason is required.")
+            if (
+                command.rejection_reason is AssignmentRejectionReason.OTHER
+                and not rejection_comment
+            ):
+                raise AssignmentError("Other assignment rejection requires a comment.")
+        elif command.rejection_reason is not None or rejection_comment:
+            raise AssignmentError("Only a rejected assignment accepts a rejection reason.")
         async with self._unit_of_work_factory() as uow:
             replay = await _begin(uow, command.update_id)
             if replay is not None:
                 if command.actor_member_id is None:
                     return await _assignment_replay(uow, replay)
                 actor = await _command_actor(uow, command)
-                expected = f"web_assignment:{actor.id}:{command.assignment_id}:{command.decision}"
+                expected = (
+                    f"web_assignment:{actor.id}:{command.assignment_id}:"
+                    f"{command.replay_fingerprint or command.decision}"
+                )
                 if replay != expected:
                     raise AssignmentError("Stored assignment decision does not match command.")
                 assignment = await uow.get_assignment(command.assignment_id)
@@ -1099,6 +1121,8 @@ class AssignmentService:
                 command_id=command.decision_command_id,
                 outcome=command.decision.value,
                 now=now,
+                rejection_reason=command.rejection_reason,
+                rejection_comment=rejection_comment,
             )
             if prepared is not None:
                 await prepared.apply()
@@ -1107,7 +1131,11 @@ class AssignmentService:
                 await uow.recompute_interaction_alert(assignment.id)
             await uow.add_assignment_outbox(
                 assignment=updated,
-                event_type="assignment_reviewed",
+                event_type=(
+                    "assignment_rejection_pending_dispute"
+                    if status is AssignmentStatus.REJECTED_PENDING_DISPUTE
+                    else "assignment_reviewed"
+                ),
                 business_key=f"assignment:{assignment.id}:{status.value}",
             )
             if status in {AssignmentStatus.APPROVED, AssignmentStatus.PARTIALLY_APPROVED}:
@@ -1478,7 +1506,10 @@ async def _finish(  # noqa: PLR0913, PLR0917
 ) -> None:
     outcome = outcome_code or f"assignment:{assignment.id}"
     if command is not None and command.actor_member_id is not None:
-        outcome = f"web_assignment:{actor_id}:{assignment.id}:{command.decision}"
+        outcome = (
+            f"web_assignment:{actor_id}:{assignment.id}:"
+            f"{command.replay_fingerprint or command.decision}"
+        )
     await uow.add_receipt(
         update_id=update_id,
         update_type="assignment_workflow",

@@ -339,6 +339,13 @@ button.card:hover { background: var(--app-surface-raised); }
 .assignment-action-body, .assignment-action-form { display: grid; gap: 9px; min-width: 0; }
 .assignment-action-description { margin: 0; color: var(--app-text-muted); font-size: 11px; line-height: 1.4; }
 .assignment-action-form label { gap: 6px; font-size: 12px; }
+.assignment-rejection-reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 0; padding: 0; border: 0; }
+.assignment-rejection-reasons legend { grid-column: 1 / -1; margin-bottom: 1px; font-size: 12px; font-weight: 800; }
+.assignment-rejection-reason { position: relative; display: grid; min-height: 48px; place-items: center; padding: 8px; border: 1px solid var(--app-border); border-radius: 12px; background: var(--app-surface); color: var(--app-text); text-align: center; cursor: pointer; }
+.assignment-rejection-reason input { position: absolute; width: 1px; min-height: 1px; margin: 0; opacity: 0; }
+.assignment-rejection-reason:has(input:checked) { border-color: var(--app-danger); background: color-mix(in srgb, var(--app-danger) 9%, var(--app-surface)); }
+.assignment-rejection-reason:has(input:focus-visible) { outline: 3px solid var(--app-focus); outline-offset: 2px; }
+.assignment-rejection-reason span { font-size: 11px; font-weight: 750; line-height: 1.2; }
 .assignment-action-form textarea {
   box-sizing: border-box;
   min-height: 92px;

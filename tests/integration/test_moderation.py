@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -228,16 +228,35 @@ async def test_migration_repairs_stale_moderated_task_aggregate(database_url: st
     database = Database(database_url)
     creator = await add_member(database, 13_181)
     performer = await add_member(database, 13_182)
-    case = await _open_dispute_fixture(database, creator, performer)
+    case = await _open_dispute_fixture(
+        database,
+        creator,
+        performer,
+        legacy_assignment_schema=True,
+    )
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
-        assignment = await session.get(AssignmentModel, case.assignment_id)
         stored_case = await session.get(ModerationCaseModel, case.id)
-        assert assignment is not None and stored_case is not None
-        task_id = assignment.task_id
-        assignment.status = "rejected"
-        assignment.terminal_outcome = "fraud"
-        assignment.reviewed_at = datetime.datetime.now(datetime.UTC)
+        task_id = await session.scalar(
+            text("SELECT task_id FROM assignments WHERE id = :assignment_id"),
+            {"assignment_id": case.assignment_id},
+        )
+        assert task_id is not None and stored_case is not None
+        await session.execute(
+            text(
+                """
+                UPDATE assignments
+                SET status = 'rejected',
+                    terminal_outcome = 'fraud',
+                    reviewed_at = :reviewed_at
+                WHERE id = :assignment_id
+                """
+            ),
+            {
+                "assignment_id": case.assignment_id,
+                "reviewed_at": datetime.datetime.now(datetime.UTC),
+            },
+        )
         stored_case.status = "resolved"
         stored_case.resolved_at = datetime.datetime.now(datetime.UTC)
     await database.dispose()
@@ -821,6 +840,7 @@ async def _open_dispute_fixture(
     performer: MemberModel,
     *,
     test_run_id: UUID | None = None,
+    legacy_assignment_schema: bool = False,
 ) -> ModerationCaseModel:
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
@@ -854,19 +874,24 @@ async def _open_dispute_fixture(
             publish_command_id=uuid4(),
             published_at=now,
         )
+        assignment_id = uuid4()
         assignment = AssignmentModel(
-            id=uuid4(), task_id=task.id, performer_id=performer.id, slot_number=1, status="disputed"
+            id=assignment_id,
+            task_id=task.id,
+            performer_id=performer.id,
+            slot_number=1,
+            status="disputed",
         )
         dispute = AssignmentDisputeModel(
             id=uuid4(),
-            assignment_id=assignment.id,
+            assignment_id=assignment_id,
             performer_id=performer.id,
             comment="The rejection is disputed.",
             open_command_id=uuid4(),
         )
         case = ModerationCaseModel(
             id=uuid4(),
-            assignment_id=assignment.id,
+            assignment_id=assignment_id,
             dispute_id=dispute.id,
             case_type="dispute",
             status="open",
@@ -877,14 +902,34 @@ async def _open_dispute_fixture(
         )
         session.add(task)
         await session.flush()
-        session.add(assignment)
-        await session.flush()
+        if legacy_assignment_schema:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO assignments (
+                        id, task_id, performer_id, slot_number, status, slot_ever_paid
+                    ) VALUES (
+                        :id, :task_id, :performer_id, :slot_number, :status, false
+                    )
+                    """
+                ),
+                {
+                    "id": assignment_id,
+                    "task_id": task.id,
+                    "performer_id": performer.id,
+                    "slot_number": 1,
+                    "status": "disputed",
+                },
+            )
+        else:
+            session.add(assignment)
+            await session.flush()
         session.add_all(
             (
                 dispute,
                 case,
                 ReliabilityEventModel(
-                    assignment_id=assignment.id,
+                    assignment_id=assignment_id,
                     event_type="accepted",
                     actor_member_id=performer.id,
                 ),

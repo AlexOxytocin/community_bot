@@ -33,9 +33,10 @@ _MESSAGES = {
     "assignment_submitted": "Результат задания отправлен на проверку.",
     "assignment_cancelled": "Исполнение задания отменено.",
     "assignment_reviewed": "Результат задания проверен.",
+    "assignment_rejection_pending_dispute": None,
     "assignment_disputed": "По заданию открыт спор.",
     "assignment_autoconfirmed": "Результат задания подтверждён автоматически.",
-    "assignment_rejected": "Результат задания отклонён.",
+    "assignment_rejected": "Срок подачи спора истёк. Отклонение результата вступило в силу.",
     "assignment_no_show": "Срок выполнения задания истёк.",
     "moderation_case_resolved": "Решение по спору сохранено.",
     "interaction_alert_opened": "В административной очереди появился новый сигнал.",
@@ -43,10 +44,35 @@ _MESSAGES = {
     "review_reminder_24h": "Напоминание: результат задания ожидает проверки.",
     "review_reminder_48h": "Повторное напоминание: результат задания ожидает проверки.",
 }
+_REJECTION_REASON_LABELS = {
+    "not_completed": "Задание не выполнено",
+    "requirements_not_met": "Результат не соответствует условиям",
+    "insufficient_evidence": "Недостаточно подтверждений",
+    "other": "Другая причина",
+}
 _UNSUPPORTED_NOTIFICATION_TYPE = "unsupported_notification_type"
 _RECIPIENT_UNAVAILABLE = "telegram_recipient_unavailable"
 _RATE_LIMITED = "telegram_rate_limited"
 _TEMPORARILY_UNAVAILABLE = "telegram_temporarily_unavailable"
+_INVALID_NOTIFICATION_PAYLOAD = "invalid_notification_payload"
+
+
+def _notification_text(claim: DeliveryClaim) -> str:
+    if claim.notification_type != "assignment_rejection_pending_dispute":
+        text = _MESSAGES.get(claim.notification_type)
+        if not isinstance(text, str):
+            raise NotificationProcessingError(_UNSUPPORTED_NOTIFICATION_TYPE, permanent=True)
+        return text
+    reason = claim.payload.get("rejection_reason")
+    label = _REJECTION_REASON_LABELS.get(reason) if isinstance(reason, str) else None
+    if label is None:
+        raise NotificationProcessingError(_INVALID_NOTIFICATION_PAYLOAD, permanent=True)
+    parts = ["Результат задания отклонён.", f"Причина: {label}."]
+    comment = claim.payload.get("rejection_comment")
+    if isinstance(comment, str) and (normalized := " ".join(comment.split())):
+        parts.append(f"Комментарий: {normalized[:500]}")
+    parts.append("Резерв заморожен на 24 часа. Вы можете открыть спор в приложении.")
+    return "\n\n".join(parts)
 
 
 class TelegramNotificationSender:
@@ -58,9 +84,7 @@ class TelegramNotificationSender:
 
     async def send(self, claim: DeliveryClaim) -> None:
         """Map Telegram failures to safe retry categories."""
-        text = _MESSAGES.get(claim.notification_type)
-        if text is None:
-            raise NotificationProcessingError(_UNSUPPORTED_NOTIFICATION_TYPE, permanent=True)
+        text = _notification_text(claim)
         try:
             await self._bot.send_message(
                 chat_id=claim.telegram_user_id,

@@ -2268,10 +2268,20 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         assert page.locator('[data-screen-id="M12"]').count() == 0
         assert decision_sheet.get_by_role("button", name="Вернуться", exact=True).count() == 0
         assert decision_sheet.locator(".assignment-action-buttons > :only-child").is_visible()
-        decision_sheet.get_by_role("button", name="Отклонить", exact=True).click()
+        reject_confirm = decision_sheet.get_by_role("button", name="Отклонить", exact=True)
+        assert reject_confirm.is_disabled()
+        decision_sheet.get_by_label("Недостаточно подтверждений", exact=True).check()
+        comment = decision_sheet.get_by_label("Комментарий к отклонению", exact=True)
+        comment.fill("Нужна ссылка на готовый результат.")
+        assert reject_confirm.is_enabled()
+        reject_confirm.click()
         page.locator('[data-screen-id="UX02"]').wait_for()
         assert page.url.endswith("#/tasks")
-        assert decisions == [{"decision": "reject"}]
+        assert decisions == [{
+            "decision": "reject",
+            "rejection_reason": "insufficient_evidence",
+            "rejection_comment": "Нужна ссылка на готовый результат.",
+        }]
         browser.close()
 
 
@@ -6356,7 +6366,11 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
     def decide(route: Route) -> None:
         assert route.request.method == "POST"
         review_keys.append(route.request.headers["idempotency-key"])
-        assert route.request.post_data_json == {"decision": "reject"}
+        assert route.request.post_data_json == {
+            "decision": "reject",
+            "rejection_reason": "requirements_not_met",
+            "rejection_comment": "Результат не соответствует критериям.",
+        }
         if len(review_keys) == 1:
             route.abort()
         else:
@@ -6508,6 +6522,10 @@ def test_freeform_submission_uses_preview_confirm_and_detail_refresh(  # noqa: C
         page.locator('[data-screen-id="M11"]').wait_for()
         assert page.url.endswith(f"#/work/{assignment_id}?view_state=m11")
         _connected_control(page, "PE-040", "authoritative_review_success").last.click()
+        page.get_by_label("Не соответствует условиям", exact=True).check()  # noqa: RUF001
+        page.get_by_label("Комментарий к отклонению", exact=True).fill(
+            "Результат не соответствует критериям."
+        )
         for _attempt in range(2):
             reviews_before = len(review_keys)
             _connected_control(page, "PE-040", "authoritative_review_success").click()

@@ -25,6 +25,7 @@ from community_bot.application.tasks import PublishTaskCommand, TaskService
 from community_bot.domain.assignments import (
     AssignmentDecision,
     AssignmentError,
+    AssignmentRejectionReason,
     AssignmentStatus,
     SubmissionDraft,
 )
@@ -671,6 +672,16 @@ async def test_reject_then_dispute_persists_private_handoff(database_url: str) -
     await service.submit(
         SubmitResultCommand(37_101, performer.telegram_user_id, assignment.id, uuid4(), payload)
     )
+    with pytest.raises(AssignmentError, match="rejection reason is required"):
+        await service.decide(
+            DecideAssignmentCommand(
+                37_099,
+                author.telegram_user_id,
+                assignment.id,
+                uuid4(),
+                AssignmentDecision.REJECT,
+            )
+        )
     rejected = await service.decide(
         DecideAssignmentCommand(
             37_102,
@@ -678,6 +689,8 @@ async def test_reject_then_dispute_persists_private_handoff(database_url: str) -
             assignment.id,
             uuid4(),
             AssignmentDecision.REJECT,
+            rejection_reason=AssignmentRejectionReason.INSUFFICIENT_EVIDENCE,
+            rejection_comment="Нужны дополнительные подтверждения результата.",
         )
     )
     assert rejected.status is AssignmentStatus.REJECTED_PENDING_DISPUTE
@@ -974,6 +987,11 @@ async def test_community_settlement_and_new_update_business_replay(database_url:
                 other_assignment.id,
                 uuid4(),
                 decision_kind,
+                rejection_reason=(
+                    AssignmentRejectionReason.NOT_COMPLETED
+                    if decision_kind is AssignmentDecision.REJECT
+                    else None
+                ),
             )
         )
         if decision_kind is AssignmentDecision.REJECT:

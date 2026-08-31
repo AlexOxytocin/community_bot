@@ -17,6 +17,7 @@ from community_bot.domain.assignments import (
     OCCUPIED_SLOT_STATUSES,
     Assignment,
     AssignmentError,
+    AssignmentRejectionReason,
     AssignmentStatus,
     ResultVersion,
     SubmissionDraft,
@@ -490,6 +491,8 @@ async def set_decision(
     command_id: uuid.UUID,
     outcome: str,
     now: datetime.datetime,
+    rejection_reason: AssignmentRejectionReason | None = None,
+    rejection_comment: str | None = None,
 ) -> Assignment:
     """Persist one review transition under the assignment lock."""
     model = await session.get(AssignmentModel, assignment_id)
@@ -500,6 +503,8 @@ async def set_decision(
         model.slot_ever_paid = True
     model.terminal_command_id = command_id
     model.terminal_outcome = outcome
+    model.rejection_reason = None if rejection_reason is None else rejection_reason.value
+    model.rejection_comment = rejection_comment
     if status is AssignmentStatus.REJECTED_PENDING_DISPUTE:
         model.rejected_at = now
         model.reject_dispute_deadline_at = now + datetime.timedelta(hours=24)
@@ -586,6 +591,16 @@ async def add_outbox(
                 "assignment_id": str(assignment.id),
                 "task_id": str(assignment.task_id),
                 "status": assignment.status.value,
+                **(
+                    {"rejection_reason": assignment.rejection_reason.value}
+                    if assignment.rejection_reason is not None
+                    else {}
+                ),
+                **(
+                    {"rejection_comment": assignment.rejection_comment}
+                    if assignment.rejection_comment is not None
+                    else {}
+                ),
             },
             business_key=business_key,
         )
@@ -607,6 +622,12 @@ def _assignment(model: AssignmentModel) -> Assignment:
         reviewed_at=model.reviewed_at,
         terminal_outcome=model.terminal_outcome,
         terminal_command_id=model.terminal_command_id,
+        rejection_reason=(
+            None
+            if model.rejection_reason is None
+            else AssignmentRejectionReason(model.rejection_reason)
+        ),
+        rejection_comment=model.rejection_comment,
     )
 
 
