@@ -868,6 +868,7 @@ class CommunityAchievementDto(_Dto):
     current: int
     next_level_at: int | None
     unlocked: bool
+    message_url: str | None = None
 
 
 class CommunityPulseDto(_Dto):
@@ -2508,6 +2509,7 @@ def create_web_app(
                         current=item.current,
                         next_level_at=item.next_level_at,
                         unlocked=item.unlocked,
+                        message_url=item.message_url,
                     )
                     for item in pulse.achievements
                 ),

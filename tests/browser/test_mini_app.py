@@ -5419,6 +5419,10 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                                 "level": level,
                                 "current": current,
                                 "next_level_at": threshold,
+                                "message_url": (
+                                    "https://t.me/c/1234567890/42"
+                                    if code in {"star", "consilium"} else None
+                                ),
                                 "unlocked": level > 0 or (
                                     code in {"star", "consilium"} and current > 0
                                 ),
@@ -5705,6 +5709,21 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                 exact=True,
             ).is_visible()
             assert detail.locator(".achievement-progress-track").count() == 0
+            record_link = detail.get_by_role("link", name="Открыть сообщение в Telegram")
+            assert record_link.get_attribute("href") == "https://t.me/c/1234567890/42"
+            assert record_link.get_attribute("rel") == "noopener noreferrer"
+            page.evaluate(
+                "window.recordLinks=[]; "
+                "window.Telegram={WebApp:{openTelegramLink:u=>recordLinks.push(u)}}"
+            )
+            record_link.click()
+            assert page.evaluate("recordLinks") == ["https://t.me/c/1234567890/42"]
+            page.get_by_role("button", name="Закрыть достижение", exact=True).click()
+            page.get_by_role(
+                "button", name="Консилиум, личный рекорд 8 участников", exact=True
+            ).click()
+            detail = page.locator(".achievement-detail-sheet")
+            assert detail.get_by_role("link", name="Открыть сообщение в Telegram").is_visible()
             page.get_by_role("button", name="Закрыть достижение", exact=True).click()
             page.set_viewport_size({"width": width, "height": height})
             page.get_by_role("button", name="Месяц", exact=True).click()

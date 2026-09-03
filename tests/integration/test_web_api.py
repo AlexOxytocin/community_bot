@@ -364,6 +364,7 @@ async def test_community_stats_connects_history_after_member_registration(
             "current": 70,
             "next_level_at": 100,
             "unlocked": True,
+            "message_url": None,
         }
         assert achievements["manager"] == {
             "code": "manager",
@@ -371,6 +372,7 @@ async def test_community_stats_connects_history_after_member_registration(
             "current": 5,
             "next_level_at": 10,
             "unlocked": True,
+            "message_url": None,
         }
         assert gateway.pulse_requests == [
             {

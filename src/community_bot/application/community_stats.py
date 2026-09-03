@@ -75,6 +75,7 @@ class AchievementProgress:
     current: int
     next_level_at: int | None
     unlocked: bool
+    message_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

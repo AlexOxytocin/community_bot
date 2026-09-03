@@ -8,7 +8,7 @@ import datetime  # noqa: TC003 - Pydantic resolves the runtime annotation.
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from community_bot.application.community_stats import (
     AchievementProgress,
@@ -50,6 +50,9 @@ class _Achievement(_Model):
     current: int
     next_level_at: int | None
     unlocked: bool
+    message_url: str | None = Field(
+        default=None, pattern=r"^https://t\.me/c/[1-9]\d*/[1-9]\d*$"
+    )
 
 
 class _Pulse(_Model):

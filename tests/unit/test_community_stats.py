@@ -61,7 +61,8 @@ def test_new_stats_achievement_metrics_are_allowed_for_all_time(code: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_typed_stats_client_sends_service_auth_and_topic() -> None:
+@pytest.mark.parametrize("message_url", [None, "https://t.me/c/1234567890/42"])
+async def test_typed_stats_client_sends_service_auth_and_topic(message_url: str | None) -> None:
     observed: dict[str, object] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -100,6 +101,7 @@ async def test_typed_stats_client_sends_service_auth_and_topic() -> None:
                         "current": 10,
                         "next_level_at": 30,
                         "unlocked": True,
+                        **({"message_url": message_url} if message_url else {}),
                     }
                 ],
             },
@@ -128,6 +130,7 @@ async def test_typed_stats_client_sends_service_auth_and_topic() -> None:
     }
     assert pulse.series[0].bucket_start == datetime.date(2026, 8, 28)
     assert pulse.reaction_breakdown[0].reaction["emoji"] == "👍"
+    assert pulse.achievements[0].message_url == message_url
 
 
 @pytest.mark.asyncio

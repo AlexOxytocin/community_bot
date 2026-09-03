@@ -3779,7 +3779,7 @@ const communityAchievementCatalog = [
     code: "bread_and_salt",
     icon: "🍞",
     title: "Хлеб-соль",
-    hint: "Приветствуйте новичков и помогайте им включиться в общение.",
+    hint: "Первым отметьте новичка через @ник после вступления в чат. Ответ новичка не нужен, срока нет. За каждого новичка — одно очко первому приветствующему.",
   },
   {
     code: "onboarder",
@@ -4040,6 +4040,19 @@ function achievementDetailSheet(state, achievement, originButton) {
       element("span", achievement.recordCaption),
     );
     dialog.append(record);
+    if (achievement.current > 0 && /^https:\/\/t\.me\/c\/[1-9]\d*\/[1-9]\d*$/.test(achievement.message_url || "")) {
+      const recordLink = element("a", "Открыть сообщение в Telegram", "secondary achievement-message-link");
+      recordLink.href = achievement.message_url;
+      recordLink.target = "_blank";
+      recordLink.rel = "noopener noreferrer";
+      recordLink.addEventListener("click", (event) => {
+        if (globalThis.Telegram?.WebApp?.openTelegramLink) {
+          event.preventDefault();
+          globalThis.Telegram.WebApp.openTelegramLink(achievement.message_url);
+        }
+      });
+      dialog.append(recordLink);
+    }
   } else {
     dialog.append(
       track,
