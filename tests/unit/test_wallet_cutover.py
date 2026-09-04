@@ -179,3 +179,29 @@ def test_activity_rehearsal_keeps_pristine_rollback_database(
         ("drill", "0034"),
         ("pristine", "0034"),
     ]
+
+
+def test_onboarding_cutover_uses_compatible_fingerprint_and_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = object.__new__(cutover.Host)
+    host.receipt = {"from_head": "0036", "to_head": "0038"}
+    statements: list[tuple[str, str | None]] = []
+
+    def sql(statement: str, database: str | None = None) -> str:
+        statements.append((statement, database))
+        if statement == cutover.ONBOARDING_FINGERPRINT_SQL:
+            return '{"members": 2}'
+        return "true"
+
+    monkeypatch.setattr(host, "sql", sql)
+    monkeypatch.setattr(host, "head", lambda _database=None: "0038")
+
+    assert host.fingerprint("copy") == {"members": 2}
+    host.receipt["fingerprint"] = {"members": 2}
+    host.check_snapshot("copy", "0038")
+    assert statements == [
+        (cutover.ONBOARDING_FINGERPRINT_SQL, "copy"),
+        (cutover.ONBOARDING_FINGERPRINT_SQL, "copy"),
+        (cutover.ONBOARDING_INVARIANT_SQL, "copy"),
+    ]

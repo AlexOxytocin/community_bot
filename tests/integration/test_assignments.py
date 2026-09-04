@@ -30,6 +30,9 @@ from community_bot.domain.assignments import (
     SubmissionDraft,
 )
 from community_bot.domain.members import MemberRole
+from community_bot.infrastructure.db.assignment_deadlines import (
+    PostgresAssignmentDeadlineSource,
+)
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
@@ -785,6 +788,57 @@ async def test_review_and_deadline_finalizers_are_idempotent(database_url: str) 
     )
     assert [item.id for item in no_show] == [pending.id]
     assert replay_no_show == ()
+    await database.dispose()
+
+
+async def test_deadline_worker_expires_unclaimed_task_and_refunds_reserve(
+    database_url: str,
+) -> None:
+    """A task with no performer is still due and releases its complete reserve once."""
+    database = Database(database_url)
+    author, task = await _published_task(database, update_base=4150)
+    source = PostgresAssignmentDeadlineSource(database.session_factory)
+
+    assert task.id in await source.due_task_ids(now=task.deadline_at, limit=25)
+
+    service = AssignmentService(database.unit_of_work)
+    assert (
+        await service.finalize_deadline(
+            task_id=task.id,
+            command_id=uuid4(),
+            now=task.deadline_at,
+        )
+        == ()
+    )
+    assert (
+        await service.finalize_deadline(
+            task_id=task.id,
+            command_id=uuid4(),
+            now=task.deadline_at,
+        )
+        == ()
+    )
+
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions() as session:
+        stored_task = await session.get(TaskModel, task.id)
+        stored_author = await session.get(MemberModel, author.id)
+        refunds = (
+            await session.scalars(
+                select(AccountTransactionModel).where(
+                    AccountTransactionModel.idempotency_key == f"task:{task.id}:unfilled:refund"
+                )
+            )
+        ).all()
+
+    assert stored_task is not None
+    assert stored_task.status == "expired"
+    assert stored_author is not None
+    assert stored_author.credit_balance_cached == 20
+    assert len(refunds) == 1
+    assert refunds[0].credit_delta == task.reserved_credit_total
+    assert refunds[0].task_id == task.id
+    assert await source.due_task_ids(now=task.deadline_at, limit=25) == ()
     await database.dispose()
 
 

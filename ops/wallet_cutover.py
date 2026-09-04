@@ -29,7 +29,11 @@ SERVICES = {"postgres", "migrate", "worker", "web"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 FROM_HEAD, TO_HEAD = "0033", "0034"
-TRANSITIONS = {"0033-0034": ("0033", "0034"), "0034-0036": ("0034", "0036")}
+TRANSITIONS = {
+    "0033-0034": ("0033", "0034"),
+    "0034-0036": ("0034", "0036"),
+    "0036-0038": ("0036", "0038"),
+}
 
 # Only economic data: maintenance heartbeats must not invalidate this invariant.
 FINGERPRINT_SQL = """SELECT json_build_object(
@@ -64,6 +68,22 @@ ACTIVITY_INVARIANT_SQL = """SELECT (
    AND status IN ('pending','processing'))
  AND NOT EXISTS (SELECT 1 FROM outbox_events WHERE event_type='nomad.published'
    AND status IN ('pending','processing'))
+)::text"""
+
+# Schema 0037 appends crypto consent and 0038 creates an empty onboarding journal.
+# Compare every pre-0037 preference field explicitly so the new columns do not
+# alter the preserved-consent fingerprint.
+ONBOARDING_FINGERPRINT_SQL = FINGERPRINT_SQL.replace(
+    "FROM member_notification_preferences p",
+    "FROM (SELECT member_id,tasks,nomad,revision,tasks_since,nomad_since,"
+    "online,offline,important,important_since,task_updates,task_reminders,disputes,"
+    "online_since,offline_since,task_updates_since,task_reminders_since,disputes_since "
+    "FROM member_notification_preferences) p",
+)
+ONBOARDING_INVARIANT_SQL = """SELECT (
+ NOT EXISTS (SELECT 1 FROM member_notification_preferences
+   WHERE crypto OR crypto_since IS NOT NULL)
+ AND NOT EXISTS (SELECT 1 FROM bot_onboardings)
 )::text"""
 
 
@@ -195,7 +215,12 @@ class Host:
 
     def fingerprint(self, database: str | None = None) -> dict[str, Any]:
         """Read hashes and aggregate counts, never private ledger rows."""
-        sql = ACTIVITY_FINGERPRINT_SQL if self.to_head == "0036" else FINGERPRINT_SQL
+        if self.to_head == "0036":
+            sql = ACTIVITY_FINGERPRINT_SQL
+        elif self.to_head == "0038":
+            sql = ONBOARDING_FINGERPRINT_SQL
+        else:
+            sql = FINGERPRINT_SQL
         return json.loads(self.sql(sql, database))
 
     def stopped(self) -> None:
@@ -315,6 +340,8 @@ class Host:
             raise CutoverError("Snapshot/schema invariant failed.")
         if head == "0036" and self.sql(ACTIVITY_INVARIANT_SQL, database) != "true":
             raise CutoverError("Activity subscriptions or retired queue invariant failed.")
+        if head == "0038" and self.sql(ONBOARDING_INVARIANT_SQL, database) != "true":
+            raise CutoverError("Crypto defaults or onboarding journal invariant failed.")
 
     def start(self, *, old: bool = False, maintenance: bool = False) -> None:
         """Recreate exact services; maintenance writes only liveness heartbeats."""

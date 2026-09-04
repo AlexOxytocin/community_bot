@@ -355,13 +355,13 @@ class AssignmentUnitOfWorkFactory(Protocol):  # pragma: no cover - structural ty
 
 
 class AssignmentDeadlineSource(Protocol):  # pragma: no cover - structural typing contract.
-    """List bounded tasks whose acceptance deadline has arrived."""
+    """List bounded tasks whose deadline has arrived."""
 
     async def due_task_ids(self, *, now: datetime.datetime, limit: int) -> Sequence[UUID]: ...
 
 
 class AssignmentDeadlineWorker:
-    """Finalize due assignments through the canonical transactional service."""
+    """Finalize due tasks and assignments through the canonical transaction."""
 
     def __init__(
         self,
@@ -1373,7 +1373,7 @@ class AssignmentService:
     async def finalize_deadline(
         self, *, task_id: UUID, command_id: UUID, now: datetime.datetime
     ) -> tuple[Assignment, ...]:
-        """Mark accepted slots no-show and refund each unearned member reserve."""
+        """Expire a due task, mark no-shows, and refund every unearned slot."""
         async with self._unit_of_work_factory() as uow:
             await uow.acquire_assignment_task_gate(task_id)
             task = await uow.lock_task(task_id)

@@ -22,7 +22,7 @@ async def test_activity_sends_source_link_and_does_not_retry_uncertain_delivery(
         telegram_user_id=42,
         notification_type="activity.published",
         payload={
-            "categories": ["online", "offline", "important"],
+            "categories": ["online", "offline", "important", "crypto"],
             "message_url": "https://t.me/c/2237685639/24962/24968",
         },
         attempt_count=1,
@@ -31,8 +31,9 @@ async def test_activity_sends_source_link_and_does_not_retry_uncertain_delivery(
     await sender.send(claim)
     sent = bot.send_message.call_args.kwargs
     assert sent["reply_markup"].inline_keyboard[0][0].url == claim.payload["message_url"]
-    assert "Онлайн-встречи" in sent["text"]
+    assert "Онлайн ивенты" in sent["text"]
     assert "Важные обновления чата" in sent["text"]
+    assert "Крипта" in sent["text"]
     bot.send_message.side_effect = TelegramNetworkError(
         method=SendMessage(chat_id=42, text="test"),
         message="connection lost",
@@ -48,11 +49,12 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
     _, overview = activity_panel(preferences)
     callbacks = [button.callback_data for row in overview for button in row]
     assert callbacks == [
-        "activities:online",
-        "activities:offline",
-        "activities:nomad",
-        "activities:important",
-        "activities:tasks_group",
+        "subscription:important:1:3",
+        "subscription:nomad:1:3",
+        "subscription:tasks:1:3",
+        "subscription:online:1:3",
+        "subscription:offline:1:3",
+        "subscription:crypto:1:3",
         "activities:help",
     ]
     _, detail = activity_panel(preferences, "nomad")
@@ -63,14 +65,14 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
     assert detail[0][0].callback_data == "subscription:important:1:3"
 
 
-def test_disputes_are_inside_tasks_and_default_to_off() -> None:
+def test_mutual_help_is_one_direct_toggle_including_legacy_pages() -> None:
     preferences: dict[str, object] = {"revision": 0}
     _, overview = activity_panel(preferences)
-    assert overview[-2][0].text == "Задания · 0 из 4"
-    text, buttons = activity_panel(preferences, "tasks_group")
-    assert "Споры: выключено" in text
-    assert buttons[3][0].text == "Включить: Споры"
-    assert buttons[3][0].callback_data == "subscription:disputes:1:0"
+    assert overview[2][0].text == "☐ Взаимопомощь"
+    assert overview[2][0].callback_data == "subscription:tasks:1:0"
+    for page in ("tasks_group", "tasks", "disputes", "task_updates", "task_reminders"):
+        assert activity_panel(preferences, page)[1] == overview
     preferences["disputes"] = True
     _, overview = activity_panel(preferences)
-    assert overview[-2][0].text == "Задания · 1 из 4"
+    assert overview[2][0].text == "☑ Взаимопомощь"
+    assert overview[2][0].callback_data == "subscription:tasks:0:0"

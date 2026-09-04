@@ -53,13 +53,15 @@ async def configure(*, apply: bool) -> dict[str, object]:
                 secret_token=settings.telegram_webhook_secret.get_secret_value(),
                 allowed_updates=sorted(
                     set(webhook.allowed_updates or ["message", "callback_query"])
-                    | {"message", "edited_message", "callback_query"}
+                    | {"message", "edited_message", "callback_query", "chat_member"}
                 ),
                 drop_pending_updates=False,
             )
             await bot.set_my_commands(list(commands.values()))
             verified = await bot.get_webhook_info()
-            if verified.url != url or "edited_message" not in (verified.allowed_updates or []):
+            if verified.url != url or not {"edited_message", "chat_member"} <= set(
+                verified.allowed_updates or []
+            ):
                 message = "Webhook verification failed"
                 raise RuntimeError(message)
         return {

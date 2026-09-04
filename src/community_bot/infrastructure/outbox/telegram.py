@@ -66,10 +66,11 @@ _NOTIFICATION_DISABLED = "notification_disabled"
 def _notification_text(claim: DeliveryClaim) -> str:
     if claim.notification_type == "activity.published":
         names = {
-            "online": "💻 Онлайн-встречи",
-            "offline": "📍 Офлайн-встречи",
+            "online": "💻 Онлайн ивенты",
+            "offline": "📍 Офлайн ивенты",
             "nomad": "🌍 Цифровой кочевник",
             "important": "📌 Важные обновления чата",
+            "crypto": "🪙 Крипта",
         }
         categories = claim.payload.get("categories")
         if (

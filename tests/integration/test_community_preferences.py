@@ -22,6 +22,7 @@ from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.community_preferences import (
     NOTIFICATION_CATEGORIES,
+    TASK_CATEGORIES,
     PreferencesConflictError,
 )
 from community_bot.domain.notifications import DeliveryWindow
@@ -205,6 +206,8 @@ async def _concurrent_bot_and_web_entry(db: Database) -> None:
         preferences = await client.get("/api/v1/notification-preferences")
         assert preferences.json() == {
             **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
+            "important": True,
+            "nomad": True,
             "revision": 0,
         }
 
@@ -230,6 +233,22 @@ async def test_preferences_serialize_devices_and_preserve_defaults(
     assert (await store.policy(owner.id))["mode"] == "standard"
 
 
+async def test_bot_onboarding_marker_is_durable_and_does_not_reopen_after_completion(
+    community: CommunityFixture,
+) -> None:
+    _, store, _, _ = community
+    telegram_user_id = 987654321
+    assert not await store.onboarding_started(telegram_user_id)
+    await store.begin_onboarding(telegram_user_id, "first", "First name")
+    assert await store.onboarding_started(telegram_user_id)
+    await store.begin_onboarding(telegram_user_id, "changed", "Changed name")
+    assert await store.onboarding_started(telegram_user_id)
+    await store.complete_onboarding(telegram_user_id)
+    assert not await store.onboarding_started(telegram_user_id)
+    await store.begin_onboarding(telegram_user_id, "latest", "Latest name")
+    assert not await store.onboarding_started(telegram_user_id)
+
+
 async def test_task_notifications_require_opt_in_and_saved_choices_survive(
     community: CommunityFixture,
 ) -> None:
@@ -253,7 +272,44 @@ async def test_task_notifications_require_opt_in_and_saved_choices_survive(
         assert not await subscription_allows(session, reader.id, "task.published", now)
 
 
-@pytest.mark.parametrize("category", ["nomad", "important"])
+async def test_mutual_help_updates_all_categories_once_and_preserves_legacy_consent(
+    community: CommunityFixture,
+) -> None:
+    db, store, _, reader = community
+    before = datetime.datetime.now(datetime.UTC)
+    async with db.session_factory.begin() as session:
+        session.add(
+            MemberNotificationPreferencesModel(
+                member_id=reader.id,
+                disputes=True,
+                disputes_since=before,
+            )
+        )
+    # Reading an old partial subscription must not opt the member into more events.
+    assert (await store.preferences(reader.id))["tasks"] is True
+    async with db.session_factory() as session:
+        assert not await subscription_allows(session, reader.id, "task.published", before)
+        assert await subscription_allows(session, reader.id, "assignment_disputed", before)
+    enabled = await store.set_preference(reader.id, "tasks", enabled=True, expected_revision=0)
+    assert enabled["revision"] == 1
+    assert all(enabled[key] for key in TASK_CATEGORIES)
+    assert not enabled["crypto"]
+    async with db.session_factory() as session:
+        row = await session.get(MemberNotificationPreferencesModel, reader.id)
+        assert row is not None
+        assert row.disputes_since == before
+        assert row.tasks_since == row.task_updates_since == row.task_reminders_since
+        assert not await subscription_allows(session, reader.id, "task.published", before)
+    # Repeated absolute values neither change revision nor restart subscription time.
+    repeated = await store.set_preference(reader.id, "tasks", enabled=True, expected_revision=1)
+    assert repeated == enabled
+    disabled = await store.set_preference(reader.id, "tasks", enabled=False, expected_revision=1)
+    assert disabled["revision"] == 2
+    assert not any(disabled[key] for key in TASK_CATEGORIES)
+    assert await CommunityPreferencesStore(db.session_factory).preferences(reader.id) == disabled
+
+
+@pytest.mark.parametrize("category", ["nomad", "important", "crypto"])
 async def test_activity_outbox_dedup_and_unsubscribe_before_send(
     community: CommunityFixture,
     category: NotificationCategory,

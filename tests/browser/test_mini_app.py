@@ -172,7 +172,7 @@ def test_wallet_root_and_recovery_keep_one_transfer_identity(mini_app_url: str) 
 
 
 @pytest.mark.parametrize("width", [320, 390])
-def test_notification_preferences_tiles_save_restore_and_fail_safely(
+def test_notification_preferences_tiles_save_restore_and_fail_safely(  # noqa: PLR0915
     mini_app_url: str, width: int
 ) -> None:
     state = {
@@ -181,6 +181,7 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(
         "online": False,
         "offline": False,
         "important": False,
+        "crypto": False,
         "task_updates": False,
         "task_reminders": False,
         "disputes": False,
@@ -209,9 +210,28 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(
         page.route("**/api/v1/notification-preferences", preferences)
         page.goto(mini_app_url + "#/settings")
         page.get_by_role(
-            "button", name="Активности и подписки Встречи, кочевник, задания и споры"
+            "button", name="Активности и подписки Встречи, кочевник, крипта и взаимопомощь"
         ).click()
-        expect(page.get_by_role("checkbox", name="Новые задания", exact=True)).not_to_be_checked()
+        assert page.locator(".preference-copy strong").all_text_contents() == [
+            "Важные обновления чата",
+            "Цифровой кочевник",
+            "Взаимопомощь",
+            "Онлайн ивенты",
+            "Офлайн ивенты",
+            "Крипта",
+        ]
+        mutual_help = page.get_by_role("checkbox", name="Взаимопомощь", exact=True)
+        expect(mutual_help).not_to_be_checked()
+        expect(page.get_by_role("checkbox")).to_have_count(6)
+        mutual_help.check()
+        expect(page.get_by_role("status")).to_have_text("Сохранено")
+        mutual_help.uncheck()
+        expect(page.get_by_role("status")).to_have_text("Сохранено")
+        assert state["tasks"] is False
+        crypto = page.get_by_role("checkbox", name="Крипта", exact=True)
+        expect(crypto).not_to_be_checked()
+        crypto.check()
+        expect(page.get_by_role("status")).to_have_text("Сохранено")
         expect(
             page.get_by_role("checkbox", name="Важные обновления чата", exact=True)
         ).not_to_be_checked()
@@ -232,7 +252,7 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(
         page.get_by_role("button", name="Назад", exact=True).click()
         expect(
             page.get_by_role(
-                "button", name="Активности и подписки Встречи, кочевник, задания и споры"
+                "button", name="Активности и подписки Встречи, кочевник, крипта и взаимопомощь"
             )
         ).to_be_visible()
         page.goto(mini_app_url + "#/settings/notifications")

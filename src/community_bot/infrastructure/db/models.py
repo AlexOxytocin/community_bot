@@ -691,6 +691,8 @@ class MemberNotificationPreferencesModel(Base):
     offline: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     important: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     important_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    crypto: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    crypto_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     task_updates: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -703,6 +705,22 @@ class MemberNotificationPreferencesModel(Base):
     task_updates_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     task_reminders_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     disputes_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BotOnboardingModel(Base):
+    """Durable pre-registration marker; organic chat joins never create profiles."""
+
+    __tablename__ = "bot_onboardings"
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="waiting_for_chat")
+    telegram_username: Mapped[str | None] = mapped_column(Text)
+    telegram_display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class ActivityPublicationModel(Base):

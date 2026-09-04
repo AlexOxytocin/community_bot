@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, or_, select
 
 from community_bot.infrastructure.db.models import AssignmentModel, TaskModel
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class PostgresAssignmentDeadlineSource:
-    """List due tasks; the application service owns locking and settlement."""
+    """List every due task; the application service owns locking and settlement."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         """Use the process-owned async session factory."""
@@ -29,12 +29,17 @@ class PostgresAssignmentDeadlineSource:
                 select(TaskModel.id)
                 .where(
                     TaskModel.deadline_at <= now,
-                    TaskModel.status.in_(("published", "settling")),
-                    exists(
-                        select(1).where(
-                            AssignmentModel.task_id == TaskModel.id,
-                            AssignmentModel.status == "accepted",
-                        )
+                    or_(
+                        TaskModel.status.in_(("published", "closed_for_new_performers")),
+                        and_(
+                            TaskModel.status == "settling",
+                            exists(
+                                select(1).where(
+                                    AssignmentModel.task_id == TaskModel.id,
+                                    AssignmentModel.status == "accepted",
+                                )
+                            ),
+                        ),
                     ),
                 )
                 .order_by(TaskModel.deadline_at, TaskModel.id)

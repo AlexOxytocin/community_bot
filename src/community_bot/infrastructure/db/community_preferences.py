@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from community_bot.domain.community_preferences import (
     NOTIFICATION_CATEGORIES,
+    TASK_CATEGORIES,
     NotificationCategory,
     PreferencesConflictError,
     RegistrationMode,
@@ -17,6 +18,7 @@ from community_bot.domain.community_preferences import (
 from community_bot.infrastructure.db.activity_publications import activity_is_current
 from community_bot.infrastructure.db.models import (
     AuditEventModel,
+    BotOnboardingModel,
     CommunityRegistrationPolicyModel,
     MemberModel,
     MemberNotificationPreferencesModel,
@@ -70,6 +72,37 @@ class CommunityPreferencesStore:
                 select(MemberModel).where(MemberModel.telegram_user_id == telegram_user_id)
             )
 
+    async def begin_onboarding(
+        self, telegram_user_id: int, telegram_username: str | None, display_name: str
+    ) -> None:
+        """Persist explicit bot start before the user leaves to join the chat."""
+        async with self.sessions() as session, session.begin():
+            row = await session.get(BotOnboardingModel, telegram_user_id, with_for_update=True)
+            if row is None:
+                session.add(
+                    BotOnboardingModel(
+                        telegram_user_id=telegram_user_id,
+                        telegram_username=telegram_username,
+                        telegram_display_name=display_name,
+                    )
+                )
+            else:
+                row.telegram_username = telegram_username
+                row.telegram_display_name = display_name
+
+    async def onboarding_started(self, telegram_user_id: int) -> bool:
+        """Exclude organic chat joins and already completed onboarding."""
+        async with self.sessions() as session:
+            row = await session.get(BotOnboardingModel, telegram_user_id)
+            return bool(row and row.state != "completed")
+
+    async def complete_onboarding(self, telegram_user_id: int) -> None:
+        """Mark the linear flow complete without deleting audit-friendly state."""
+        async with self.sessions() as session, session.begin():
+            row = await session.get(BotOnboardingModel, telegram_user_id, with_for_update=True)
+            if row is not None:
+                row.state = "completed"
+
     async def preferences(self, member_id: uuid.UUID) -> dict[str, object]:
         """Read active member settings without opt-in side effects."""
         async with self.sessions() as session:
@@ -101,9 +134,15 @@ class CommunityPreferencesStore:
             if row.revision != expected_revision:
                 message = "Settings changed; reload them"
                 raise PreferencesConflictError(message)
-            if getattr(row, category) != enabled:
-                setattr(row, category, enabled)
-                setattr(row, f"{category}_since", datetime.datetime.now(datetime.UTC))
+            categories = TASK_CATEGORIES if category in TASK_CATEGORIES else (category,)
+            changed = False
+            now = datetime.datetime.now(datetime.UTC)
+            for key in categories:
+                if getattr(row, key) != enabled:
+                    setattr(row, key, enabled)
+                    setattr(row, f"{key}_since", now)
+                    changed = True
+            if changed:
                 row.revision += 1
             await session.flush()
             return self._preferences(row)
@@ -182,6 +221,7 @@ class CommunityPreferencesStore:
                 category: bool(getattr(row, category)) if row else False
                 for category in NOTIFICATION_CATEGORIES
             },
+            "tasks": any(bool(getattr(row, key)) for key in TASK_CATEGORIES) if row else False,
             "revision": row.revision if row else 0,
         }
 

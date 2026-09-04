@@ -40,6 +40,7 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
         "postgres": candidates[0],
         "backup": str(tmp_path / "frozen.dump"),
         "restore_db": f"wallet_restore_{suffix}",
+        "drill_db": f"schema_drill_{suffix}",
         "failed_db": f"wallet_failed_{suffix}",
     }
     events: list[str] = []
@@ -98,7 +99,11 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
         host.rollback()
         assert host.head() == cutover.FROM_HEAD
     finally:
-        for name in (host.receipt["restore_db"], host.receipt["failed_db"]):
+        for name in (
+            host.receipt["restore_db"],
+            host.receipt["drill_db"],
+            host.receipt["failed_db"],
+        ):
             cutover.run(
                 "docker",
                 "exec",

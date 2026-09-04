@@ -42,12 +42,46 @@ if TYPE_CHECKING:
     from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
 
 START_BUTTON = "Начать"
-APP_BUTTON = "Что за приложение?"
+APP_BUTTON = "Зачем мне приложение?"
 NOTIFICATIONS_BUTTON = "🔔 Уведомления"
 NOMAD_SUBSCRIBE_BUTTON = "🔔 Подписаться: Цифровой кочевник"
 NOMAD_SUBSCRIBED_BUTTON = "✓ Вы подписаны: Цифровой кочевник"
 ACTIVITIES_BUTTON = "Активности и подписки"
 HELP_BUTTON = "Справка"
+ONBOARDING_INTRO = (
+    "👋 Добро пожаловать!\n\n"
+    "Это бот сообщества «Алло, Нейросеточная» — пространства, где участники "
+    "знакомятся, помогают друг другу "
+    "и развивают свои проекты.\n\n"
+    "Здесь ты сможешь:\n"
+    "• находить полезных людей и взаимопомощь;\n"
+    "• участвовать в онлайн- и офлайн-ивентах;\n"
+    "• наблюдать за экспериментами с ИИ, участвовать в них и влиять на их развитие;\n"
+    "• выполнять задания, зарабатывать кредиты и создавать свои.\n\n"
+    "Присоединяйся к чату — после вступления бот сам создаст твой профиль."
+)
+WHY_APP_HELP = (
+    "📱 Зачем нужно приложение?\n\n"
+    "Бот помогает не пропускать интересные активности, а приложение открывает "
+    "остальные возможности сообщества.\n\n"
+    "В приложении можно:\n"
+    "• находить участников и узнавать, чем они занимаются;\n"
+    "• смотреть статистику сообщества, свою активность, уровни и ачивки;\n"
+    "• выполнять задания других участников и получать кредиты;\n"
+    "• создавать задания, когда нужна помощь с проектом, соцсетями, GitHub, "
+    "консультацией или знакомствами;\n"
+    "• управлять кошельком и смотреть историю операций.\n\n"
+    "Пользоваться приложением необязательно. Можно просто выбрать интересные "
+    "подписки и получать уведомления в этом боте. Если понадобятся дополнительные "
+    "возможности — приложение всегда рядом."
+)
+ONBOARDING_DONE = (
+    "✅ Всё готово!\n\n"
+    "Теперь бот будет присылать новости только по выбранным тобой направлениям.\n\n"
+    "Приложение открывать необязательно — подписками можно пользоваться прямо здесь. "
+    "Если захочешь узнать больше об участниках, заданиях и своей активности, "
+    "приложение всегда будет доступно в меню бота."
+)
 APP_HELP = (
     "🤝 Задания и взаимопомощь\n\n"
     "Развиваешь проект в одиночку, продвигаешь свои соцсети или просто нуждаешься "
@@ -118,9 +152,23 @@ class TelegramUpdates:
         self.registration, self.membership = registration, membership
         self.publications = ActivityPublicationStore(store.sessions)
 
-    async def handle(self, body: bytes) -> None:
+    async def handle(self, body: bytes) -> None:  # noqa: C901, PLR0911
         """Process allowlisted update kinds without retaining private message bodies."""
         update = Update.model_validate_json(body)
+        if update.chat_member is not None:
+            event = update.chat_member
+            joined = event.new_chat_member
+            user = joined.user
+            if (
+                event.chat.id == self.settings.community_telegram_chat_id
+                and joined.status in {"member", "administrator", "creator"}
+                and not user.is_bot
+                and await self.store.onboarding_started(user.id)
+            ):
+                await self._private_command(
+                    update.update_id, user, "/onboarding", "/start", membership_verified=True
+                )
+            return
         if update.callback_query is not None:
             await self._callback(update.update_id, update.callback_query)
             return
@@ -225,23 +273,92 @@ class TelegramUpdates:
                     ]
                 )
             buttons.append(
-                [InlineKeyboardButton(text="Проверить участие", callback_data="community:check")]
+                [
+                    InlineKeyboardButton(
+                        text="Я вступил — проверить", callback_data="community:check"
+                    )
+                ]
             )
-            await self._send(user_id, "Бот и приложение доступны только участникам чата.", buttons)
+            await self._send(
+                user_id,
+                (
+                    "Присоединяйся к нашему чату!\n\n"
+                    "Бот и приложение доступны участникам сообщества. "
+                    "Вступи в чат по кнопке ниже, затем вернись сюда "
+                    "и нажми «Я вступил — проверить»."
+                    if self.settings.community_telegram_join_url
+                    else "Бот и приложение доступны только участникам чата. "
+                    "Попроси ссылку на чат у администратора, вступи "
+                    "и нажми «Я вступил — проверить»."
+                ),
+                buttons,
+            )
         return joined
 
-    async def _private_command(  # noqa: PLR0911 - explicit membership, status and menu gates.
+    async def _private_command(  # noqa: C901, PLR0911, PLR0912 - explicit state gates.
         self,
         update_id: int,
         user: User,
         command: str,
         text: str,
+        *,
+        membership_verified: bool = False,
     ) -> None:
-        if not await self._member_gate(user.id):
-            return
         existing = await self.store.member_for_telegram(user.id)
         if existing is not None and existing.status not in {"active", "pending"}:
             await self._send(user.id, "Доступ к приложению ограничен. Обратитесь к администратору.")
+            return
+        if command == "/start" and existing is None:
+            await self.store.begin_onboarding(user.id, user.username, user.full_name)
+            chat_id = self.settings.community_telegram_chat_id
+            if chat_id is None:
+                await self._send(user.id, "Онбординг временно недоступен. Попробуй позже.")
+                return
+            try:
+                joined = await self.membership.is_member(chat_id=chat_id, telegram_user_id=user.id)
+            except MembershipCheckUnavailableError:
+                await self._send(user.id, "Не удалось проверить участие. Попробуй позже.")
+                return
+            buttons = (
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="Продолжить настройку", callback_data="onboarding:continue"
+                        )
+                    ]
+                ]
+                if joined
+                else [
+                    *(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    text="Вступить в сообщество →",
+                                    url=self.settings.community_telegram_join_url,
+                                )
+                            ]
+                        ]
+                        if self.settings.community_telegram_join_url
+                        else []
+                    ),
+                    [
+                        InlineKeyboardButton(
+                            text="Я уже вступил — проверить", callback_data="community:check"
+                        )
+                    ],
+                ]
+            )
+            await self._send(user.id, ONBOARDING_INTRO, buttons)
+            return
+        if command == "/start" and existing is not None and existing.status == "active":
+            await self._send(
+                user.id,
+                "С возвращением! Всё готово — выбирай действие ниже.",
+                reply_keyboard=home_keyboard(),
+            )
+            await self._send(user.id, "Открыть Human Quest", self._launch_buttons())
+            return
+        if not membership_verified and not await self._member_gate(user.id):
             return
         if command in {"/notifications", "/nomad", "/nomad_subscribe", "/help"}:
             if existing is None or existing.status != "active":
@@ -290,13 +407,14 @@ class TelegramUpdates:
         if active:
             await self._send(
                 user.id,
-                "Добро пожаловать!\n\n"
-                "Статистика, ачивки и задания — в приложении.\n\n"
-                "Выбери интересные активности ниже. Подписки добровольные, "
-                "их можно изменить в любой момент.",
+                "🎉 Ты в сообществе!\n\n"
+                "Профиль уже создан, доступ к приложению открыт, "
+                "а на баланс начислено 20 стартовых кредитов.\n\n"
+                "Остался последний шаг — выбери, какие уведомления получать.",
                 reply_keyboard=home_keyboard(),
             )
             await self._show_preferences(user.id, view.context.member_id)
+            await self.store.complete_onboarding(user.id)
         else:
             await self._send(
                 user.id,
@@ -318,7 +436,7 @@ class TelegramUpdates:
             ]
         ]
 
-    async def _callback(  # noqa: C901, PLR0911 - gated navigation, confirmation and revisioned writes.
+    async def _callback(  # noqa: C901, PLR0911 - explicit linear navigation gates.
         self, update_id: int, callback: CallbackQuery
     ) -> None:
         # Ignore inline/forwarded keyboards and callbacks from outside the bot's private dialog.
@@ -331,11 +449,18 @@ class TelegramUpdates:
             return
         with suppress(TelegramBadRequest):
             await self.bot.answer_callback_query(callback.id)
-        if callback.data == "community:check":
-            await self._private_command(update_id, callback.from_user, "/start", "/start")
+        if callback.data in {"community:check", "onboarding:continue"}:
+            if await self._member_gate(callback.from_user.id):
+                await self._private_command(
+                    update_id,
+                    callback.from_user,
+                    "/onboarding",
+                    "/start",
+                    membership_verified=True,
+                )
             return
         if not (callback.data or "").startswith(
-            ("activities:", "subscription:", "confirm:", "notifications:", "nomad:", "help:")
+            ("activities:", "subscription:", "notifications:", "nomad:", "help:", "onboarding:")
         ):
             return
         if not await self._member_gate(callback.from_user.id):
@@ -343,15 +468,26 @@ class TelegramUpdates:
         member = await self.store.member_for_telegram(callback.from_user.id)
         if member is None or member.status != "active":
             return
+        if callback.data == "onboarding:done":
+            await self._edit_or_send(
+                callback.from_user.id,
+                ONBOARDING_DONE,
+                [
+                    [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")],
+                    [navigation("Изменить подписки", "all")],
+                ],
+                callback.message.message_id,
+            )
+            return
         parts = (callback.data or "").split(":")
         if parts[0] == "help":
-            if callback.data == "help:app":
+            if callback.data in {"help:app", "help:why_app"}:
                 await self._edit_or_send(
                     callback.from_user.id,
-                    APP_HELP,
+                    WHY_APP_HELP,
                     [
                         *self._launch_buttons(),
-                        [InlineKeyboardButton(text="Назад к справке", callback_data="help:all")],
+                        [navigation("Назад к подпискам", "all")],
                     ],
                     callback.message.message_id,
                 )
@@ -367,29 +503,8 @@ class TelegramUpdates:
             and parts[2] in {"0", "1"}
             and parts[3].isdigit()
         ):
-            category = parts[1]
-            page = "tasks_group" if category in TASK_CATEGORIES else category
-            if (
-                parts[0] != "confirm"
-                and parts[2] == "0"
-                and category in {"task_updates", "task_reminders", "disputes"}
-            ):
-                await self._edit_or_send(
-                    callback.from_user.id,
-                    "Отключить уведомления?\n\nМожно пропустить изменения или сроки "
-                    "по своим заданиям и спорам. "
-                    "Сами события останутся доступны в приложении.",
-                    [
-                        [
-                            InlineKeyboardButton(
-                                text="Отключить", callback_data=f"confirm:{category}:0:{parts[3]}"
-                            )
-                        ],
-                        [navigation("Оставить включёнными", page)],
-                    ],
-                    callback.message.message_id,
-                )
-                return
+            category = "tasks" if parts[1] in TASK_CATEGORIES else parts[1]
+            page = "all"
             try:
                 await self.store.set_preference(member.id, category, parts[2] == "1", int(parts[3]))
             except PreferencesConflictError:
@@ -422,6 +537,13 @@ class TelegramUpdates:
     ) -> None:
         preferences = await self.store.preferences(member_id)
         text, buttons = activity_panel(preferences, page)
+        if page == "all":
+            buttons.extend(
+                [
+                    [InlineKeyboardButton(text="Готово", callback_data="onboarding:done")],
+                    [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")],
+                ]
+            )
         await self._edit_or_send(user_id, note + text, buttons, message_id)
 
     async def _edit_or_send(

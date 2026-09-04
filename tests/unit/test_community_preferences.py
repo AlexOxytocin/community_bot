@@ -25,9 +25,7 @@ from community_bot.infrastructure.db.community_preferences import active_superad
 from community_bot.infrastructure.db.models import MemberModel
 from community_bot.transport.community_settings import install_community_settings_routes
 from community_bot.transport.telegram_updates import (
-    ACTIVITIES_BUTTON,
     APP_BUTTON,
-    HELP_BUTTON,
     NOMAD_SUBSCRIBE_BUTTON,
     NOMAD_SUBSCRIBED_BUTTON,
     NOTIFICATIONS_BUTTON,
@@ -107,17 +105,23 @@ async def test_caption_hashtags_use_utf16_offsets_and_ignore_plain_text() -> Non
         **_post(),
         "text": None,
         "entities": [],
-        "caption": "🌍 #OFFLINE #online #IMPORTANT #nomad #other",
+        "caption": "🌍 #OFFLINE #online #IMPORTANT #CRYPTO #nomad #other",
         "caption_entities": [
             {"type": "hashtag", "offset": 3, "length": 8},
             {"type": "hashtag", "offset": 12, "length": 7},
             {"type": "hashtag", "offset": 20, "length": 10},
+            {"type": "hashtag", "offset": 31, "length": 7},
         ],
         "photo": [{"file_id": "x", "file_unique_id": "x", "width": 10, "height": 10}],
     }
     await handler.handle(json.dumps({"update_id": 9, "message": message}).encode())
     publications = cast("AsyncMock", handler.publications)
-    assert publications.observe.call_args.kwargs["categories"] == {"offline", "online", "important"}
+    assert publications.observe.call_args.kwargs["categories"] == {
+        "offline",
+        "online",
+        "important",
+        "crypto",
+    }
     publications.observe.reset_mock()
     message["forward_origin"] = {
         "type": "hidden_user",
@@ -215,6 +219,32 @@ async def test_start_is_fail_closed_without_confirmed_chat_membership(
     await handler.handle(json.dumps({"update_id": 3, "message": message}).encode())
     registration.start.assert_not_awaited()
     cast("AsyncMock", handler.bot).send_message.assert_awaited_once()
+    if joined is False:
+        reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
+        assert "Алло, Нейросеточная" in reply["text"]
+        assert "экспериментами с ИИ" in reply["text"]  # noqa: RUF001
+        buttons = reply["reply_markup"].inline_keyboard
+        assert buttons[0][0].text == "Вступить в сообщество →"
+        assert buttons[0][0].url == "https://t.me/+example"
+        assert buttons[1][0].callback_data == "community:check"
+
+
+@pytest.mark.asyncio
+async def test_join_check_continues_registration_after_membership_verified() -> None:
+    handler, _, registration = _handler()
+    registration.start.return_value = SimpleNamespace(
+        context=SimpleNamespace(member_status=MemberStatus.ACTIVE, member_id=uuid4())
+    )
+    callback = {
+        "id": "joined",
+        "chat_instance": "test",
+        "from": _post()["from"],
+        "data": "community:check",
+        "message": {**_post(), "chat": {"id": 456, "type": "private"}},
+    }
+    await handler.handle(json.dumps({"update_id": 19, "callback_query": callback}).encode())
+    registration.start.assert_awaited_once()
+    assert registration.start.call_args.args[0].community_membership_verified
 
 
 @pytest.mark.asyncio
@@ -236,30 +266,113 @@ async def test_bot_preferences_use_explicit_shared_value_and_revision() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("label", ["/start", START_BUTTON])
-async def test_start_shows_compact_persistent_bottom_menu(label: str) -> None:
-    handler, _, registration = _handler()
+async def test_start_shows_intro_before_registration(label: str) -> None:
+    handler, store, registration = _handler()
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": label}
+    await handler.handle(json.dumps({"update_id": 11, "message": message}).encode())
+    registration.start.assert_not_awaited()
+    store.begin_onboarding.assert_awaited_once_with(456, None, "Alex")
+    reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
+    assert "онлайн- и офлайн-ивентах" in reply["text"]
+    assert reply["reply_markup"].inline_keyboard[0][0].callback_data == "onboarding:continue"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("started", [False, True])
+async def test_chat_join_resumes_only_explicit_bot_onboarding(*, started: bool) -> None:
+    handler, store, registration = _handler()
+    store.onboarding_started.return_value = started
     registration.start.return_value = SimpleNamespace(
         context=SimpleNamespace(member_status=MemberStatus.ACTIVE, member_id=uuid4())
     )
-    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": label}
-    await handler.handle(json.dumps({"update_id": 11, "message": message}).encode())
+    user = {"id": 456, "is_bot": False, "first_name": "Alex"}
+    event = {
+        "chat": {"id": CHAT_ID, "type": "supergroup", "title": "Community"},
+        "from": {"id": 999, "is_bot": False, "first_name": "Admin"},
+        "date": _post()["date"],
+        "old_chat_member": {"status": "left", "user": user},
+        "new_chat_member": {"status": "member", "user": user},
+    }
+    await handler.handle(json.dumps({"update_id": 20, "chat_member": event}).encode())
+    if not started:
+        registration.start.assert_not_awaited()
+        cast("AsyncMock", handler.bot).send_message.assert_not_awaited()
+        return
     registration.start.assert_awaited_once()
-    command = registration.start.call_args.args[0]
-    assert command.telegram_user_id == 456
-    assert command.telegram_display_name == "Alex"
-    assert command.community_membership_verified
-    assert command.invitation_token is None
+    assert registration.start.call_args.args[0].community_membership_verified
+    store.complete_onboarding.assert_awaited_once_with(456)
     replies = cast("AsyncMock", handler.bot).send_message.call_args_list
-    markup = replies[0].kwargs["reply_markup"]
-    assert markup.is_persistent
-    assert markup.resize_keyboard
-    assert not markup.one_time_keyboard
-    assert [[key.text for key in row] for row in markup.keyboard] == [
-        [ACTIVITIES_BUTTON],
-        [HELP_BUTTON],
-    ]
-    assert all(key.web_app is None for row in markup.keyboard for key in row)
-    assert replies[1].kwargs["reply_markup"].inline_keyboard[0][0].text == "☐ Онлайн-встречи"
+    assert "Профиль уже создан" in replies[0].kwargs["text"]
+    buttons = replies[1].kwargs["reply_markup"].inline_keyboard
+    assert buttons[-2][0].text == "Готово"
+    assert buttons[-2][0].callback_data == "onboarding:done"
+    assert buttons[-1][0].text == "Зачем мне приложение?"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_finishes_without_forcing_the_app() -> None:
+    handler, store, _ = _handler()
+    store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
+    callback = {
+        "id": "done",
+        "chat_instance": "test",
+        "from": _post()["from"],
+        "data": "onboarding:done",
+        "message": {**_post(), "chat": {"id": 456, "type": "private"}},
+    }
+    await handler.handle(json.dumps({"update_id": 21, "callback_query": callback}).encode())
+    reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
+    assert "Приложение открывать необязательно" in reply["text"]
+    assert all(
+        button.url is None for row in reply["reply_markup"].inline_keyboard for button in row
+    )
+    assert reply["reply_markup"].inline_keyboard[0][0].callback_data == "help:why_app"
+
+
+@pytest.mark.asyncio
+async def test_optional_app_explanation_keeps_return_to_subscriptions() -> None:
+    handler, store, _ = _handler()
+    store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
+    callback = {
+        "id": "why",
+        "chat_instance": "test",
+        "from": _post()["from"],
+        "data": "help:why_app",
+        "message": {**_post(), "chat": {"id": 456, "type": "private"}},
+    }
+    await handler.handle(json.dumps({"update_id": 22, "callback_query": callback}).encode())
+    reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
+    assert "Пользоваться приложением необязательно" in reply["text"]
+    assert "GitHub" in reply["text"]
+    buttons = reply["reply_markup"].inline_keyboard
+    assert buttons[0][0].text == "Открыть приложение"
+    assert buttons[1][0].callback_data == "activities:all"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category", ["tasks", "disputes", "task_updates", "task_reminders", "crypto"]
+)
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_subscription_toggle_is_immediate_without_confirmation(
+    category: str, *, enabled: bool
+) -> None:
+    handler, store, _ = _handler()
+    member_id = uuid4()
+    store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="active")
+    callback = {
+        "id": "direct",
+        "chat_instance": "test",
+        "from": _post()["from"],
+        "data": f"subscription:{category}:{int(enabled)}:0",
+        "message": {**_post(), "chat": {"id": 456, "type": "private"}},
+    }
+    await handler.handle(json.dumps({"update_id": 18, "callback_query": callback}).encode())
+    store.set_preference.assert_awaited_once_with(
+        member_id, "crypto" if category == "crypto" else "tasks", enabled, 0
+    )
+    reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
+    assert reply["text"].startswith("Активности и подписки")
 
 
 @pytest.mark.asyncio
@@ -315,7 +428,7 @@ async def test_nomad_subscribe_conflict_displays_actual_state() -> None:
     await handler.handle(json.dumps({"update_id": 16, "callback_query": callback}).encode())
     reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
     assert "актуальное состояние" in reply["text"]
-    assert reply["reply_markup"].inline_keyboard[0][0].text == "Подписаться"
+    assert reply["reply_markup"].inline_keyboard[1][0].text == "☐ Цифровой кочевник"
 
 
 @pytest.mark.asyncio
@@ -342,7 +455,7 @@ async def test_nomad_unsubscribe_edits_panel_without_extra_messages(prefix: str)
     store.set_preference.assert_awaited_once_with(member_id, "nomad", False, 1)  # noqa: FBT003
     cast("AsyncMock", handler.bot).send_message.assert_not_awaited()
     reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
-    assert reply["reply_markup"].inline_keyboard[0][0].text == "Подписаться"
+    assert reply["reply_markup"].inline_keyboard[1][0].text == "☐ Цифровой кочевник"
     cast("AsyncMock", handler.bot).edit_message_text.assert_awaited_once()
 
 
@@ -393,7 +506,7 @@ async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
         )
     else:
         assert "Активности и подписки" in reply["text"]
-        assert reply["reply_markup"].inline_keyboard[0][0].text == "☐ Онлайн-встречи"
+        assert reply["reply_markup"].inline_keyboard[0][0].text == "☐ Важные обновления чата"
     store.set_preference.assert_not_awaited()
 
 

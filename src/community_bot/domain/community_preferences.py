@@ -5,19 +5,34 @@ from __future__ import annotations
 from typing import Literal
 
 NotificationCategory = Literal[
-    "online", "offline", "nomad", "important", "tasks", "task_updates", "task_reminders", "disputes"
+    "online",
+    "offline",
+    "nomad",
+    "important",
+    "crypto",
+    "tasks",
+    "task_updates",
+    "task_reminders",
+    "disputes",
 ]
 NOTIFICATION_CATEGORIES: tuple[NotificationCategory, ...] = (
     "online",
     "offline",
     "nomad",
     "important",
+    "crypto",
     "tasks",
     "task_updates",
     "task_reminders",
     "disputes",
 )
-PUBLICATION_CATEGORIES = frozenset({"online", "offline", "nomad", "important"})
+PUBLICATION_CATEGORIES = frozenset({"online", "offline", "nomad", "important", "crypto"})
+TASK_CATEGORIES: tuple[NotificationCategory, ...] = (
+    "tasks",
+    "task_updates",
+    "task_reminders",
+    "disputes",
+)
 RegistrationMode = Literal["standard", "simplified"]
 
 

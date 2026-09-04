@@ -37,6 +37,7 @@ from community_bot.infrastructure.db.models import (
     InvitationRedemptionModel,
     MemberAvatarModel,
     MemberModel,
+    MemberNotificationPreferencesModel,
     MembershipResourceModel,
     OutboxEventModel,
     RegistrationApplicationModel,
@@ -336,6 +337,17 @@ async def registration_mode(session: AsyncSession) -> str:
     return policy.mode
 
 
+def _new_member_preferences(member_id: UUID, now: datetime) -> MemberNotificationPreferencesModel:
+    """Initialize new profiles only; never overwrite a returning member's choices."""
+    return MemberNotificationPreferencesModel(
+        member_id=member_id,
+        nomad=True,
+        nomad_since=now,
+        important=True,
+        important_since=now,
+    )
+
+
 async def create_simplified_registration(
     session: AsyncSession,
     *,
@@ -359,6 +371,7 @@ async def create_simplified_registration(
     )
     session.add(member)
     await session.flush()
+    session.add(_new_member_preferences(member.id, now))
     session.add(
         RegistrationApplicationModel(
             member_id=member.id,
@@ -400,6 +413,7 @@ async def create_pending_registration(
     await session.flush()
     session.add_all(
         [
+            _new_member_preferences(member.id, datetime.now(UTC)),
             InvitationRedemptionModel(
                 id=uuid.uuid4(),
                 invitation_id=invitation.id,

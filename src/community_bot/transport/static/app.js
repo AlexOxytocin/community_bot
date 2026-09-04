@@ -5258,7 +5258,7 @@ function showSettings(push = true) {
   const notifications = element("button", undefined, "settings-row settings-link-row");
   notifications.type = "button";
   const notificationsCopy = element("span", undefined, "settings-row-copy");
-  notificationsCopy.append(element("strong", "Активности и подписки"), element("span", "Встречи, кочевник, задания и споры"));
+  notificationsCopy.append(element("strong", "Активности и подписки"), element("span", "Встречи, кочевник, крипта и взаимопомощь"));
   const notificationsIcon = settingsRowIcon("notifications");
   notificationsIcon.classList.add("settings-row-icon");
   notifications.append(notificationsIcon, notificationsCopy, element("span", "›", "settings-chevron"));
@@ -7624,17 +7624,14 @@ async function loadCommunityPreferences(kind, push = true) {
       ["standard", "Стандартная", "Действующий вход по приглашению с заполнением анкеты."],
       ["simplified", "Упрощённая", "Без анкеты: имя из Telegram, город пустой, UTC+0 и 20 стартовых кредитов."],
     ] : [
-      ["online", "Онлайн-встречи", "Анонсы администраторов с тегом #online."],
-      ["offline", "Офлайн-встречи", "Встречи вживую: публикации с тегом #offline."],
-      ["nomad", "Цифровой кочевник", "Публикации администраторов с тегом #nomad."],
       ["important", "Важные обновления чата", "Объявления и изменения от администраторов с тегом #important."],
-      ["tasks", "Новые задания", "Предложения участников и комьюнити."],
-      ["task_updates", "Мои задания", "Исполнители, результаты и изменения по моим заданиям."],
-      ["task_reminders", "Напоминания", "Сроки выполнения и проверки моих заданий."],
-      ["disputes", "Споры", "Открытие и решения по спорам, к которым у меня есть доступ."],
+      ["nomad", "Цифровой кочевник", "Публикации администраторов с тегом #nomad."],
+      ["tasks", "Взаимопомощь", "Новые задания, изменения по твоим заданиям, напоминания и споры."],
+      ["online", "Онлайн ивенты", "Анонсы администраторов с тегом #online."],
+      ["offline", "Офлайн ивенты", "Ивенты вживую: публикации с тегом #offline."],
+      ["crypto", "Крипта", "Публикации администраторов с тегом #crypto."],
     ];
     let selectedMode = state.mode;
-    let pendingPreference = null;
     const confirmation = element("section", undefined, "preference-confirmation preference-tile");
     confirmation.hidden = true;
     const confirmationText = element("p");
@@ -7671,9 +7668,6 @@ async function loadCommunityPreferences(kind, push = true) {
       }
     };
     for (const [key, label, detail] of choices) {
-      if (!policy && (key === "online" || key === "tasks")) {
-        view.append(element("h2", key === "online" ? "Встречи и публикации" : "Задания", "preference-group-title"));
-      }
       const tile = element("label", undefined, "preference-tile");
       const copy = element("span", undefined, "preference-copy");
       copy.append(element("strong", label), element("span", detail));
@@ -7685,17 +7679,7 @@ async function loadCommunityPreferences(kind, push = true) {
       input.checked = policy ? state.mode === key : state[key];
       input.addEventListener("change", () => {
         if (!policy) {
-          if (!input.checked && ["task_updates", "task_reminders", "disputes"].includes(key)) {
-            pendingPreference = key;
-            input.checked = Boolean(state[key]);
-            confirmationText.textContent = `Отключить «${label}»? Можно пропустить изменения или сроки. События останутся в приложении.`;
-            confirmation.hidden = false;
-            tile.after(confirmation);
-            confirmation.querySelector("button")?.focus();
-          } else {
-            pendingPreference = null;
-            void save({ category: key, enabled: input.checked });
-          }
+          void save({ category: key, enabled: input.checked });
           return;
         }
         selectedMode = key;
@@ -7713,13 +7697,6 @@ async function loadCommunityPreferences(kind, push = true) {
           selectedMode = state.mode; controls.forEach(node => { node.checked = node.value === state.mode; });
           confirmation.hidden = true;
         }));
-      view.append(confirmation);
-    } else {
-      confirmation.append(confirmationText,
-        button("Отключить уведомления", () => {
-          if (pendingPreference) void save({ category: pendingPreference, enabled: false });
-        }),
-        button("Оставить включёнными", () => { pendingPreference = null; confirmation.hidden = true; }));
       view.append(confirmation);
     }
     view.append(status, refresh);
