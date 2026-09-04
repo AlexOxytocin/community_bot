@@ -46,8 +46,7 @@ class AiogramTelegramMembershipChecker:
         if member.status in _MEMBER_STATUSES:
             return True
         return bool(
-            member.status is ChatMemberStatus.RESTRICTED
-            and getattr(member, "is_member", False)
+            member.status is ChatMemberStatus.RESTRICTED and getattr(member, "is_member", False)
         )
 
     async def resolve_chat(self, reference: str) -> ResolvedTelegramResource:

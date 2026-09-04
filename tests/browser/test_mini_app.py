@@ -2131,7 +2131,8 @@ def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(  # 
         assert boundary.get_by_text("СОЗДАННЫЕ МНОЙ", exact=True).is_visible()
         assert boundary.get_by_text("Проверить сценарий первого запуска", exact=False).count() == 0
         assert boundary.get_by_text("18", exact=True).is_visible()
-        assert page.locator("#primary-navigation button:visible").count() == 3
+        expect(page.locator("#primary-navigation button:visible")).to_have_count(4)
+        expect(page.get_by_role("button", name="Кошелёк", exact=True)).to_be_visible()
         assert page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )

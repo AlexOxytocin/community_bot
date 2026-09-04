@@ -33,11 +33,7 @@ def _activity_series(period: str) -> list[dict[str, bool | int | str]]:
         return []
     series: list[dict[str, int | str]] = []
     for bucket, message_count in zip(dates, messages, strict=True):
-        value = (
-            0
-            if period == "all" and bucket < tracking_started.replace(day=1)
-            else message_count
-        )
+        value = 0 if period == "all" and bucket < tracking_started.replace(day=1) else message_count
         series.append(
             {
                 "bucket_start": bucket.isoformat(),

@@ -97,9 +97,7 @@ def active_config(web: dict[str, Any]) -> Path:
 
 def release_of(container: dict[str, Any]) -> str:
     """Read one immutable OCI release identity."""
-    value = container.get("Config", {}).get("Labels", {}).get(
-        "org.opencontainers.image.revision"
-    )
+    value = container.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision")
     if not isinstance(value, str) or SHA.fullmatch(value) is None:
         raise DeployError("Running container has no exact release identity.")
     return value
@@ -289,12 +287,16 @@ def deploy(target: str, *, apply: bool) -> None:
                 image,
                 str(source),
             )
-            if run("docker", "run", "--rm", image, "community-migration-head") != evidence[
-                "migration_head"
-            ]:
+            if (
+                run("docker", "run", "--rm", image, "community-migration-head")
+                != evidence["migration_head"]
+            ):
                 raise DeployError("Target image and live migration heads differ.")
-            image_release = inspect(image).get("Config", {}).get("Labels", {}).get(
-                "org.opencontainers.image.revision"
+            image_release = (
+                inspect(image)
+                .get("Config", {})
+                .get("Labels", {})
+                .get("org.opencontainers.image.revision")
             )
             if image_release != target:
                 raise DeployError("Built image has the wrong release identity.")

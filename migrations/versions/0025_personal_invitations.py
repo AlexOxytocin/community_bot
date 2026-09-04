@@ -29,10 +29,7 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_invitations_intended_username",
         "invitations",
-        (
-            "intended_telegram_username IS NULL OR "
-            "intended_telegram_username ~ '^[a-z0-9_]{5,32}$'"
-        ),
+        ("intended_telegram_username IS NULL OR intended_telegram_username ~ '^[a-z0-9_]{5,32}$'"),
     )
 
 

@@ -4101,9 +4101,7 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
             assert rejected_auth.status_code == 204
-            rejected_detail = await rejected_user.get(
-                f"/api/v1/assignments/{assignment.id}"
-            )
+            rejected_detail = await rejected_user.get(f"/api/v1/assignments/{assignment.id}")
             assert rejected_detail.status_code == 200
             assert rejected_detail.json()["rejection_reason"] == "insufficient_evidence"
             assert rejected_detail.json()["rejection_comment"] == (
