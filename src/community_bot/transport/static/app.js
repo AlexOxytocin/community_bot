@@ -5258,7 +5258,7 @@ function showSettings(push = true) {
   const notifications = element("button", undefined, "settings-row settings-link-row");
   notifications.type = "button";
   const notificationsCopy = element("span", undefined, "settings-row-copy");
-  notificationsCopy.append(element("strong", "Уведомления"), element("span", "Задания и Цифровой кочевник"));
+  notificationsCopy.append(element("strong", "Активности и подписки"), element("span", "Встречи, кочевник, задания и споры"));
   const notificationsIcon = settingsRowIcon("notifications");
   notificationsIcon.classList.add("settings-row-icon");
   notifications.append(notificationsIcon, notificationsCopy, element("span", "›", "settings-chevron"));
@@ -7592,7 +7592,7 @@ async function loadCommunityPreferences(kind, push = true) {
   else history.replaceState({ screen: "community-preferences", kind }, "", route);
   setNavigation(policy ? "moderation" : "settings", false);
   shell.classList.add("community-preferences-screen");
-  title.textContent = policy ? "Регистрация участников" : "Уведомления";
+  title.textContent = policy ? "Регистрация участников" : "Активности и подписки";
   setHeaderControl("back", { screenLabel: title.textContent, onBack: () => {
     if (policy) void loadAdministrationAccess(false); else showSettings(false);
   }});
@@ -7617,17 +7617,24 @@ async function loadCommunityPreferences(kind, push = true) {
     status.textContent = "";
     const hint = element("p", policy
       ? "В обоих режимах вход доступен только участникам чата. Начатые анкеты и существующие профили не меняются."
-      : "Уведомления приходят в личные сообщения бота. Эти же настройки доступны в его меню.", "preference-hint");
+      : "Выбери, что получать в боте. Настройки общие с меню бота; после подписки приходят только новые события.", "preference-hint");
     view.replaceChildren(hint);
     const controls = [];
     const choices = policy ? [
       ["standard", "Стандартная", "Действующий вход по приглашению с заполнением анкеты."],
       ["simplified", "Упрощённая", "Без анкеты: имя из Telegram, город пустой, UTC+0 и 20 стартовых кредитов."],
     ] : [
-      ["tasks", "Задания", "По желанию: новые задания, изменения моих заданий и напоминания. По умолчанию выключены."],
-      ["nomad", "Цифровой кочевник", "Подписаться на события Цифрового кочевника: новые публикации суперадминистратора со ссылкой на сообщение."],
+      ["online", "Онлайн-встречи", "Анонсы администраторов с тегом #online."],
+      ["offline", "Офлайн-встречи", "Встречи вживую: публикации с тегом #offline."],
+      ["nomad", "Цифровой кочевник", "Публикации администраторов с тегом #nomad."],
+      ["important", "Важные обновления чата", "Объявления и изменения от администраторов с тегом #important."],
+      ["tasks", "Новые задания", "Предложения участников и комьюнити."],
+      ["task_updates", "Мои задания", "Исполнители, результаты и изменения по моим заданиям."],
+      ["task_reminders", "Напоминания", "Сроки выполнения и проверки моих заданий."],
+      ["disputes", "Споры", "Открытие и решения по спорам, к которым у меня есть доступ."],
     ];
     let selectedMode = state.mode;
+    let pendingPreference = null;
     const confirmation = element("section", undefined, "preference-confirmation preference-tile");
     confirmation.hidden = true;
     const confirmationText = element("p");
@@ -7664,6 +7671,9 @@ async function loadCommunityPreferences(kind, push = true) {
       }
     };
     for (const [key, label, detail] of choices) {
+      if (!policy && (key === "online" || key === "tasks")) {
+        view.append(element("h2", key === "online" ? "Встречи и публикации" : "Задания и споры", "preference-group-title"));
+      }
       const tile = element("label", undefined, "preference-tile");
       const copy = element("span", undefined, "preference-copy");
       copy.append(element("strong", label), element("span", detail));
@@ -7674,7 +7684,20 @@ async function loadCommunityPreferences(kind, push = true) {
       input.setAttribute("aria-label", label);
       input.checked = policy ? state.mode === key : state[key];
       input.addEventListener("change", () => {
-        if (!policy) { void save({ category: key, enabled: input.checked }); return; }
+        if (!policy) {
+          if (!input.checked && ["task_updates", "task_reminders", "disputes"].includes(key)) {
+            pendingPreference = key;
+            input.checked = Boolean(state[key]);
+            confirmationText.textContent = `Отключить «${label}»? Можно пропустить изменения или сроки. События останутся в приложении.`;
+            confirmation.hidden = false;
+            tile.after(confirmation);
+            confirmation.querySelector("button")?.focus();
+          } else {
+            pendingPreference = null;
+            void save({ category: key, enabled: input.checked });
+          }
+          return;
+        }
         selectedMode = key;
         confirmationText.textContent = `Включить режим «${label}» для новых участников?`;
         confirmation.hidden = key === state.mode;
@@ -7690,6 +7713,13 @@ async function loadCommunityPreferences(kind, push = true) {
           selectedMode = state.mode; controls.forEach(node => { node.checked = node.value === state.mode; });
           confirmation.hidden = true;
         }));
+      view.append(confirmation);
+    } else {
+      confirmation.append(confirmationText,
+        button("Отключить уведомления", () => {
+          if (pendingPreference) void save({ category: pendingPreference, enabled: false });
+        }),
+        button("Оставить включёнными", () => { pendingPreference = null; confirmation.hidden = true; }));
       view.append(confirmation);
     }
     view.append(status, refresh);

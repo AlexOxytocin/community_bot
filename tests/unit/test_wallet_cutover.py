@@ -148,3 +148,34 @@ def test_postgres_old_package_requires_same_identity_and_service(
             cutover.validate_postgres(host)
     else:
         cutover.validate_postgres(host)
+
+
+def test_activity_rehearsal_keeps_pristine_rollback_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = FakeHost()
+    host.receipt = {"from_head": "0034", "to_head": "0036", "drill_db": "drill", "postgres": "pg"}
+    host.user = "owner"
+    migrations: list[tuple[str | None, bool]] = []
+    snapshots: list[tuple[str | None, str]] = []
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(cutover, "run", lambda *args: commands.append(args))
+    monkeypatch.setattr(
+        host,
+        "migrate",
+        lambda *, database=None, downgrade=False: migrations.append((database, downgrade)),
+    )
+    monkeypatch.setattr(
+        host, "check_snapshot", lambda database, head: snapshots.append((database, head))
+    )
+    host.rehearse("pristine")
+    assert commands == [
+        ("docker", "exec", "pg", "createdb", "-U", "owner", "--template", "pristine", "drill")
+    ]
+    assert migrations == [("drill", False), ("drill", True)]
+    assert snapshots == [
+        ("pristine", "0034"),
+        ("drill", "0036"),
+        ("drill", "0034"),
+        ("pristine", "0034"),
+    ]

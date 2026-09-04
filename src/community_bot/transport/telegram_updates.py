@@ -1,11 +1,12 @@
-"""Minimal Telegram ingress: admission, shared subscriptions, and one topic."""
+"""Telegram admission, shared subscriptions and tagged community publications."""
 
 # ruff: noqa: RUF001 - Russian interface copy.
 
 from __future__ import annotations
 
+import datetime
 from contextlib import suppress
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
@@ -19,9 +20,15 @@ from aiogram.types import (
 
 from community_bot.application.membership import MembershipCheckUnavailableError
 from community_bot.application.registration import RegistrationStartCommand
-from community_bot.domain.community_preferences import PreferencesConflictError
+from community_bot.domain.community_preferences import (
+    NOTIFICATION_CATEGORIES,
+    PUBLICATION_CATEGORIES,
+    PreferencesConflictError,
+)
 from community_bot.domain.members import MemberStatus
 from community_bot.domain.registration import RegistrationError
+from community_bot.infrastructure.db.activity_publications import ActivityPublicationStore
+from community_bot.transport.activity_menu import TASK_CATEGORIES, activity_panel, navigation
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -39,6 +46,8 @@ APP_BUTTON = "Что за приложение?"
 NOTIFICATIONS_BUTTON = "🔔 Уведомления"
 NOMAD_SUBSCRIBE_BUTTON = "🔔 Подписаться: Цифровой кочевник"
 NOMAD_SUBSCRIBED_BUTTON = "✓ Вы подписаны: Цифровой кочевник"
+ACTIVITIES_BUTTON = "Активности и подписки"
+HELP_BUTTON = "Справка"
 APP_HELP = (
     "📊 Статистика сообщества\n\n"
     "Узнай, чем живёт наш чат: смотри активность за разные периоды, "
@@ -61,13 +70,12 @@ APP_HELP = (
 )
 
 
-def home_keyboard(*, nomad: bool = False) -> ReplyKeyboardMarkup:
+def home_keyboard() -> ReplyKeyboardMarkup:
     """Keep a compact native menu visible without changing secure Mini App launch."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=START_BUTTON)],
-            [KeyboardButton(text=NOMAD_SUBSCRIBED_BUTTON if nomad else NOMAD_SUBSCRIBE_BUTTON)],
-            [KeyboardButton(text=APP_BUTTON), KeyboardButton(text=NOTIFICATIONS_BUTTON)],
+            [KeyboardButton(text=ACTIVITIES_BUTTON)],
+            [KeyboardButton(text=HELP_BUTTON)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -88,9 +96,10 @@ class TelegramUpdates:
         registration: RegistrationService,
         membership: TelegramMembershipChecker,
     ) -> None:
-        """Compose one private menu and the configured forum-topic listener."""
+        """Compose the private menu and configured community publication listener."""
         self.bot, self.settings, self.store = bot, settings, store
         self.registration, self.membership = registration, membership
+        self.publications = ActivityPublicationStore(store.sessions)
 
     async def handle(self, body: bytes) -> None:
         """Process allowlisted update kinds without retaining private message bodies."""
@@ -98,10 +107,12 @@ class TelegramUpdates:
         if update.callback_query is not None:
             await self._callback(update.update_id, update.callback_query)
             return
-        message = update.message
+        message = update.message or update.edited_message
         if message is None:
-            return  # Edits, channel posts and service updates never create a campaign.
+            return  # Channel posts and unrelated update types never create a campaign.
         if message.chat.type == "private":
+            if update.edited_message is not None:
+                return
             if message.from_user is None or message.from_user.is_bot:
                 return
             text = message.text or ""
@@ -113,29 +124,54 @@ class TelegramUpdates:
                 NOTIFICATIONS_BUTTON: "/notifications",
                 NOMAD_SUBSCRIBE_BUTTON: "/nomad_subscribe",
                 NOMAD_SUBSCRIBED_BUTTON: "/nomad",
+                ACTIVITIES_BUTTON: "/notifications",
+                HELP_BUTTON: "/help",
             }
             if text in aliases:
                 command = text = aliases[text]
-            if command in {"/start", "/notifications", "/app", "/nomad", "/nomad_subscribe"}:
+            if command in {
+                "/start",
+                "/notifications",
+                "/app",
+                "/help",
+                "/nomad",
+                "/nomad_subscribe",
+            }:
                 await self._private_command(update.update_id, message.from_user, command, text)
             return
         if (
-            message.chat.id != self.settings.nomad_telegram_chat_id
-            or message.message_thread_id is None
-            or message.message_thread_id != self.settings.nomad_telegram_topic_id
-            or not message.is_topic_message
+            message.chat.id != self.settings.community_telegram_chat_id
             or message.sender_chat is not None
             or message.from_user is None
             or message.from_user.is_bot
+            or message.forward_origin is not None
             or not self._is_publication(message)
         ):
             return
-        await self.store.publish_nomad(
+        text = message.text or message.caption or ""
+        encoded = text.encode("utf-16-le")
+        tags = {
+            encoded[entity.offset * 2 : (entity.offset + entity.length) * 2]
+            .decode("utf-16-le", errors="ignore")
+            .casefold()
+            .removeprefix("#")
+            for entity in (message.entities or message.caption_entities or [])
+            if entity.type == "hashtag"
+        }
+        edited = message.edit_date
+        occurred_at = (
+            datetime.datetime.fromtimestamp(edited, datetime.UTC)
+            if isinstance(edited, int)
+            else edited or message.date
+        )
+        await self.publications.observe(
+            update_id=update.update_id,
             author_id=message.from_user.id,
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             message_id=message.message_id,
-            published_at=message.date,
+            occurred_at=occurred_at,
+            categories=tags & PUBLICATION_CATEGORIES,
             album_id=message.media_group_id,
         )
 
@@ -190,7 +226,7 @@ class TelegramUpdates:
         if existing is not None and existing.status not in {"active", "pending"}:
             await self._send(user.id, "Доступ к приложению ограничен. Обратитесь к администратору.")
             return
-        if command in {"/notifications", "/nomad", "/nomad_subscribe"}:
+        if command in {"/notifications", "/nomad", "/nomad_subscribe", "/help"}:
             if existing is None or existing.status != "active":
                 await self._send(
                     user.id,
@@ -198,10 +234,12 @@ class TelegramUpdates:
                     [[InlineKeyboardButton(text="Продолжить", callback_data="community:check")]],
                 )
                 return
-            if command == "/nomad_subscribe":
-                await self._subscribe_nomad(user.id, existing.id)
+            if command == "/help":
+                await self._show_help(user.id)
             else:
-                await self._show_preferences(user.id, existing.id, nomad_only=command == "/nomad")
+                await self._show_preferences(
+                    user.id, existing.id, page="nomad" if command.startswith("/nomad") else "all"
+                )
             return
         if command == "/app" and existing is not None and existing.status == "active":
             await self._send(
@@ -233,15 +271,15 @@ class TelegramUpdates:
             return
         active = view.context.member_status is MemberStatus.ACTIVE
         if active:
-            preferences = await self.store.preferences(view.context.member_id)
             await self._send(
                 user.id,
                 "Добро пожаловать!\n\n"
                 "Статистика, ачивки и задания — в приложении.\n\n"
-                "Хочешь следить за активностью «Цифрового кочевника»? "
-                "Подпишись кнопкой внизу.",
-                reply_keyboard=home_keyboard(nomad=bool(preferences["nomad"])),
+                "Выбери интересные активности ниже. Подписки добровольные, "
+                "их можно изменить в любой момент.",
+                reply_keyboard=home_keyboard(),
             )
+            await self._show_preferences(user.id, view.context.member_id)
         else:
             await self._send(
                 user.id,
@@ -263,7 +301,9 @@ class TelegramUpdates:
             ]
         ]
 
-    async def _callback(self, update_id: int, callback: CallbackQuery) -> None:
+    async def _callback(  # noqa: C901, PLR0911 - gated navigation, confirmation and revisioned writes.
+        self, update_id: int, callback: CallbackQuery
+    ) -> None:
         # Ignore inline/forwarded keyboards and callbacks from outside the bot's private dialog.
         if (
             callback.message is None
@@ -277,7 +317,9 @@ class TelegramUpdates:
         if callback.data == "community:check":
             await self._private_command(update_id, callback.from_user, "/start", "/start")
             return
-        if not (callback.data or "").startswith(("notifications:", "nomad:")):
+        if not (callback.data or "").startswith(
+            ("activities:", "subscription:", "confirm:", "notifications:", "nomad:", "help:")
+        ):
             return
         if not await self._member_gate(callback.from_user.id):
             return
@@ -285,44 +327,72 @@ class TelegramUpdates:
         if member is None or member.status != "active":
             return
         parts = (callback.data or "").split(":")
-        nomad_only = parts[0] == "nomad"
+        if parts[0] == "help":
+            if callback.data == "help:app":
+                await self._edit_or_send(
+                    callback.from_user.id,
+                    APP_HELP,
+                    [
+                        *self._launch_buttons(),
+                        [InlineKeyboardButton(text="Назад к справке", callback_data="help:all")],
+                    ],
+                    callback.message.message_id,
+                )
+            else:
+                await self._show_help(callback.from_user.id, callback.message.message_id)
+            return
+        page = parts[1] if parts[0] == "activities" and len(parts) == 2 else "all"  # noqa: PLR2004
+        note = ""
         if (
             len(parts) == 4  # noqa: PLR2004 - versioned callback's four explicit fields.
-            and parts[1] in {"tasks", "nomad"}
-            and (not nomad_only or parts[1] == "nomad")
+            and parts[0] in {"subscription", "confirm", "notifications", "nomad"}
+            and parts[1] in NOTIFICATION_CATEGORIES
             and parts[2] in {"0", "1"}
             and parts[3].isdigit()
         ):
-            before = await self.store.preferences(member.id)
-            with suppress(PreferencesConflictError):
-                await self.store.set_preference(member.id, parts[1], parts[2] == "1", int(parts[3]))
-            after = await self.store.preferences(member.id)
-            if before["nomad"] != after["nomad"]:
-                await self._refresh_subscription_menu(callback.from_user.id, member.id)
-        await self._show_preferences(
-            callback.from_user.id, member.id, callback.message.message_id, nomad_only=nomad_only
-        )
-
-    async def _subscribe_nomad(self, user_id: int, member_id: UUID) -> None:
-        preferences = await self.store.preferences(member_id)
-        if not preferences["nomad"]:
-            revision = cast("int", preferences["revision"])
-            with suppress(PreferencesConflictError):
-                await self.store.set_preference(
-                    member_id, "nomad", enabled=True, expected_revision=revision
+            category = parts[1]
+            page = "tasks_group" if category in TASK_CATEGORIES else category
+            if (
+                parts[0] != "confirm"
+                and parts[2] == "0"
+                and category in {"task_updates", "task_reminders", "disputes"}
+            ):
+                await self._edit_or_send(
+                    callback.from_user.id,
+                    "Отключить уведомления?\n\nМожно пропустить изменения или сроки "
+                    "по своим заданиям и спорам. "
+                    "Сами события останутся доступны в приложении.",
+                    [
+                        [
+                            InlineKeyboardButton(
+                                text="Отключить", callback_data=f"confirm:{category}:0:{parts[3]}"
+                            )
+                        ],
+                        [navigation("Оставить включёнными", page)],
+                    ],
+                    callback.message.message_id,
                 )
-        await self._refresh_subscription_menu(user_id, member_id)
-
-    async def _refresh_subscription_menu(self, user_id: int, member_id: UUID) -> None:
-        preferences = await self.store.preferences(member_id)
-        subscribed = bool(preferences["nomad"])
-        text = (
-            "✓ Вы подписаны на активность «Цифровой кочевник».\n\n"
-            "Новые публикации суперадминистратора будут приходить сюда со ссылкой на сообщение."
-            if subscribed
-            else "Подписка на активность «Цифровой кочевник» выключена."
+                return
+            try:
+                await self.store.set_preference(member.id, category, parts[2] == "1", int(parts[3]))
+            except PreferencesConflictError:
+                note = (
+                    "Настройки уже изменились. Показываю актуальное состояние — повтори выбор.\n\n"
+                )
+        await self._show_preferences(
+            callback.from_user.id, member.id, callback.message.message_id, page=page, note=note
         )
-        await self._send(user_id, text, reply_keyboard=home_keyboard(nomad=subscribed))
+
+    async def _show_help(self, user_id: int, message_id: int | None = None) -> None:
+        await self._edit_or_send(
+            user_id,
+            "Справка\n\nЧто хочешь узнать?",
+            [
+                [navigation("Об активностях и подписках", "help")],
+                [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:app")],
+            ],
+            message_id,
+        )
 
     async def _show_preferences(
         self,
@@ -330,44 +400,16 @@ class TelegramUpdates:
         member_id: UUID,
         message_id: int | None = None,
         *,
-        nomad_only: bool = False,
+        page: str = "all",
+        note: str = "",
     ) -> None:
         preferences = await self.store.preferences(member_id)
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    text=f"{'☑' if preferences[key] else '☐'} {label}",
-                    callback_data=(
-                        f"notifications:{key}:{int(not preferences[key])}:{preferences['revision']}"
-                    ),
-                )
-            ]
-            for key, label in (("tasks", "Задания"), ("nomad", "Цифровой кочевник"))
-        ]
-        text = (
-            "Уведомления\n\n"
-            "Подписаться на события Цифрового кочевника\n"
-            "Новые публикации суперадминистратора со ссылкой на сообщение.\n\n"
-            "Задания\nНовые задания, изменения и напоминания. По умолчанию выключены.\n\n"
-            "Выберите нужные подписки кнопками ниже. Настройки общие с приложением."
-        )
-        if nomad_only:
-            subscribed = bool(preferences["nomad"])
-            text = (
-                "Активность «Цифровой кочевник»\n\n"
-                + ("✓ Вы подписаны." if subscribed else "Уведомления выключены.")
-                + "\n\nНовые публикации суперадминистратора — сюда в бот, со ссылкой на сообщение."
-            )
-            buttons = [
-                [
-                    InlineKeyboardButton(
-                        text="Отписаться" if subscribed else "Подписаться",
-                        callback_data=(
-                            f"nomad:nomad:{int(not subscribed)}:{preferences['revision']}"
-                        ),
-                    )
-                ]
-            ]
+        text, buttons = activity_panel(preferences, page)
+        await self._edit_or_send(user_id, note + text, buttons, message_id)
+
+    async def _edit_or_send(
+        self, user_id: int, text: str, buttons: list, message_id: int | None
+    ) -> None:
         if message_id is not None:
             try:
                 await self.bot.edit_message_text(
@@ -376,8 +418,9 @@ class TelegramUpdates:
                     message_id=message_id,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
                 )
-            except TelegramBadRequest:
-                pass
+            except TelegramBadRequest as error:
+                if "message is not modified" in error.message.casefold():
+                    return
             else:
                 return
         await self._send(user_id, text, buttons)

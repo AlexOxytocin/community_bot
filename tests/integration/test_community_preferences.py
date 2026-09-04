@@ -20,8 +20,15 @@ from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.registration import RegistrationService, RegistrationStartCommand
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
-from community_bot.domain.community_preferences import PreferencesConflictError
+from community_bot.domain.community_preferences import (
+    NOTIFICATION_CATEGORIES,
+    PreferencesConflictError,
+)
 from community_bot.domain.notifications import DeliveryWindow
+from community_bot.infrastructure.db.activity_publications import (
+    ActivityPublicationStore,
+    activity_is_current,
+)
 from community_bot.infrastructure.db.community_preferences import (
     CommunityPreferencesStore,
     subscription_allows,
@@ -29,6 +36,7 @@ from community_bot.infrastructure.db.community_preferences import (
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
+    ActivityPublicationModel,
     AuditEventModel,
     MemberModel,
     MemberNotificationPreferencesModel,
@@ -43,6 +51,8 @@ CommunityFixture = tuple[Database, CommunityPreferencesStore, MemberModel, Membe
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from community_bot.domain.community_preferences import NotificationCategory
 
 
 @pytest_asyncio.fixture
@@ -193,14 +203,20 @@ async def _concurrent_bot_and_web_entry(db: Database) -> None:
         assert bot_response.status_code == 200
         assert web_response.status_code == 204
         preferences = await client.get("/api/v1/notification-preferences")
-        assert preferences.json() == {"tasks": False, "nomad": False, "revision": 0}
+        assert preferences.json() == {
+            **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
+            "revision": 0,
+        }
 
 
 async def test_preferences_serialize_devices_and_preserve_defaults(
     community: CommunityFixture,
 ) -> None:
     db, store, owner, reader = community
-    assert await store.preferences(reader.id) == {"tasks": False, "nomad": False, "revision": 0}
+    assert await store.preferences(reader.id) == {
+        **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
+        "revision": 0,
+    }
     changes = await asyncio.gather(
         store.set_preference(reader.id, "nomad", enabled=True, expected_revision=0),
         store.set_preference(reader.id, "tasks", enabled=True, expected_revision=0),
@@ -237,23 +253,30 @@ async def test_task_notifications_require_opt_in_and_saved_choices_survive(
         assert not await subscription_allows(session, reader.id, "task.published", now)
 
 
-async def test_nomad_outbox_dedup_and_unsubscribe_before_send(community: CommunityFixture) -> None:
+@pytest.mark.parametrize("category", ["nomad", "important"])
+async def test_activity_outbox_dedup_and_unsubscribe_before_send(
+    community: CommunityFixture,
+    category: NotificationCategory,
+) -> None:
     db, store, owner, reader = community
-    await store.set_preference(reader.id, "nomad", enabled=True, expected_revision=0)
+    await store.set_preference(reader.id, category, enabled=True, expected_revision=0)
     now = datetime.datetime.now(datetime.UTC)
+    publications = ActivityPublicationStore(db.session_factory)
     post: dict[str, Any] = dict(  # noqa: C408 - named Telegram event fields.
         author_id=owner.telegram_user_id,
         chat_id=-1002237685639,
         topic_id=24962,
         message_id=24968,
-        published_at=now,
+        occurred_at=now,
+        update_id=1,
+        categories={category},
         album_id="album-one",
     )
-    assert await store.publish_nomad(**post)
+    assert await publications.observe(**post)
     post["message_id"] = 24969
-    assert not await store.publish_nomad(**post)
+    assert not await publications.observe(**post)
     post.update(author_id=reader.telegram_user_id, album_id=None)
-    assert not await store.publish_nomad(**post)
+    assert not await publications.observe(**post)
     queue = PostgresNotificationQueue(db.session_factory)
     claims = await queue.claim_outbox(
         now=now + datetime.timedelta(seconds=1),
@@ -274,11 +297,80 @@ async def test_nomad_outbox_dedup_and_unsubscribe_before_send(community: Communi
     )
     assert len(deliveries) == 1
     assert await store.allows_delivery(deliveries[0].id)
-    await store.set_preference(reader.id, "nomad", enabled=False, expected_revision=1)
+    await store.set_preference(reader.id, category, enabled=False, expected_revision=1)
     assert not await store.allows_delivery(deliveries[0].id)
-    await store.set_preference(reader.id, "nomad", enabled=True, expected_revision=2)
+    await store.set_preference(reader.id, category, enabled=True, expected_revision=2)
     assert not await store.allows_delivery(deliveries[0].id)
     reclaimed = await queue.claim_notifications(
         now=now + datetime.timedelta(days=2), limit=10, lease_duration=datetime.timedelta(minutes=2)
     )
     assert not reclaimed
+
+
+async def test_activity_multitag_edits_remove_pending_and_never_resend_sent(
+    community: CommunityFixture,
+) -> None:
+    db, store, owner, reader = community
+    await store.set_preference(reader.id, "online", enabled=True, expected_revision=0)
+    await store.set_preference(reader.id, "offline", enabled=True, expected_revision=1)
+    # Regular app administrators have the same publication right as superadministrators.
+    async with db.session_factory.begin() as session:
+        author = await session.get(MemberModel, owner.id)
+        assert author is not None
+        author.permissions_json = []
+    now = datetime.datetime.now(datetime.UTC)
+    publications = ActivityPublicationStore(db.session_factory)
+    post: dict[str, Any] = dict(  # noqa: C408
+        author_id=owner.telegram_user_id,
+        chat_id=-1002237685639,
+        topic_id=None,
+        message_id=100,
+        occurred_at=now,
+        update_id=100,
+        categories={"online", "offline"},
+    )
+    assert await publications.observe(**post)
+    queue = PostgresNotificationQueue(db.session_factory)
+
+    async def materialize() -> None:
+        claims = await queue.claim_outbox(
+            now=now + datetime.timedelta(days=1),
+            limit=10,
+            lease_duration=datetime.timedelta(minutes=2),
+        )
+        for claim in claims:
+            await queue.materialize(claim, now=now, window=DeliveryWindow())
+
+    await materialize()
+    async with db.session_factory() as session:
+        notification = (await session.scalars(select(NotificationModel))).one()
+        assert notification.payload_json["categories"] == ["offline", "online"]
+        assert notification.payload_json["message_url"] == "https://t.me/c/2237685639/100"
+    async with db.session_factory() as session:
+        assert await activity_is_current(session, notification)
+    post.update(update_id=101, categories=set())
+    assert await publications.observe(**post)
+    async with db.session_factory() as session:
+        assert not await activity_is_current(session, notification)
+    post.update(update_id=100, categories={"online"})
+    assert not await publications.observe(**post)  # A stale update cannot restore a removed tag.
+    # After Telegram's week-long idle reset, a lower update ID is still a newer edit.
+    post.update(update_id=1, occurred_at=now + datetime.timedelta(days=8))
+    assert await publications.observe(**post)
+    await materialize()
+    async with db.session_factory.begin() as session:
+        rows = (await session.scalars(select(NotificationModel))).all()
+        assert len(rows) == 1
+        assert rows[0].payload_json["categories"] == ["online"]
+        rows[0].status = "sent"
+        rows[0].sent_at = now
+        rows[0].attempt_count = 1
+    post.update(update_id=2, categories={"online", "offline"})
+    assert await publications.observe(**post)
+    await materialize()
+    async with db.session_factory() as session:
+        rows = (await session.scalars(select(NotificationModel))).all()
+        assert len(rows) == 1
+        assert rows[0].status == "sent"
+        assert rows[0].payload_json["categories"] == ["online"]
+        assert await session.scalar(select(func.count()).select_from(ActivityPublicationModel)) == 1

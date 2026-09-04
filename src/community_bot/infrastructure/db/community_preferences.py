@@ -1,31 +1,31 @@
-"""Persist shared preferences, audited admission changes, and topic events."""
+"""Persist shared preferences and audited admission changes."""
 
 from __future__ import annotations
 
 import datetime
-import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
 
 from community_bot.domain.community_preferences import (
+    NOTIFICATION_CATEGORIES,
     NotificationCategory,
     PreferencesConflictError,
     RegistrationMode,
     notification_category,
-    topic_message_url,
 )
+from community_bot.infrastructure.db.activity_publications import activity_is_current
 from community_bot.infrastructure.db.models import (
     AuditEventModel,
     CommunityRegistrationPolicyModel,
     MemberModel,
     MemberNotificationPreferencesModel,
     NotificationModel,
-    OutboxEventModel,
 )
 
 if TYPE_CHECKING:
+    import uuid
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -85,7 +85,7 @@ class CommunityPreferencesStore:
         expected_revision: int,
     ) -> dict[str, object]:
         """Serialize device/bot changes and record the start of each subscription."""
-        if category not in {"tasks", "nomad"} or type(enabled) is not bool:
+        if category not in NOTIFICATION_CATEGORIES or type(enabled) is not bool:
             message = "Invalid notification preference"
             raise ValueError(message)
         async with self.sessions() as session, session.begin():
@@ -93,7 +93,9 @@ class CommunityPreferencesStore:
             row = await session.get(MemberNotificationPreferencesModel, member_id)
             if row is None:
                 row = MemberNotificationPreferencesModel(
-                    member_id=member_id, tasks=False, nomad=False, revision=0
+                    member_id=member_id,
+                    revision=0,
+                    **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
                 )
                 session.add(row)
             if row.revision != expected_revision:
@@ -152,49 +154,6 @@ class CommunityPreferencesStore:
                 )
             return {"mode": row.mode, "revision": row.revision}
 
-    async def publish_nomad(  # noqa: PLR0913 - explicit Telegram publication identity.
-        self,
-        *,
-        author_id: int,
-        chat_id: int,
-        topic_id: int,
-        message_id: int,
-        published_at: datetime.datetime,
-        album_id: str | None = None,
-    ) -> bool:
-        """Stage a single event per post or album after checking the current author role."""
-        async with self.sessions() as session, session.begin():
-            author = await session.scalar(
-                select(MemberModel)
-                .where(MemberModel.telegram_user_id == author_id)
-                .with_for_update()
-            )
-            if not active_superadministrator(author):
-                return False
-            key = f"nomad:{chat_id}:{topic_id}:" + (
-                f"album:{album_id}" if album_id else f"message:{message_id}"
-            )
-            event_id = uuid.uuid4()
-            statement = (
-                insert(OutboxEventModel)
-                .values(
-                    id=event_id,
-                    event_type="nomad.published",
-                    aggregate_type="nomad_post",
-                    aggregate_id=event_id,
-                    business_key=key,
-                    status="pending",
-                    attempt_count=0,
-                    payload_json={
-                        "message_url": topic_message_url(chat_id, topic_id, message_id),
-                        "occurred_at": published_at.isoformat(),
-                    },
-                )
-                .on_conflict_do_nothing(index_elements=[OutboxEventModel.business_key])
-            )
-            result = await session.execute(statement.returning(OutboxEventModel.id))
-            return result.scalar_one_or_none() is not None
-
     async def allows_delivery(self, notification_id: uuid.UUID) -> bool:
         """Recheck eligibility immediately before an external send."""
         async with self.sessions() as session:
@@ -202,6 +161,12 @@ class CommunityPreferencesStore:
             if row is None or row.status != "processing":
                 return False
             member = await session.get(MemberModel, row.member_id)
+            if row.notification_type == "nomad.published":
+                return False
+            if row.notification_type == "activity.published":
+                return bool(
+                    member and member.status == "active" and await activity_is_current(session, row)
+                )
             return bool(
                 member
                 and member.status == "active"
@@ -213,8 +178,10 @@ class CommunityPreferencesStore:
     @staticmethod
     def _preferences(row: MemberNotificationPreferencesModel | None) -> dict[str, object]:
         return {
-            "tasks": row.tasks if row else False,
-            "nomad": row.nomad if row else False,
+            **{
+                category: bool(getattr(row, category)) if row else False
+                for category in NOTIFICATION_CATEGORIES
+            },
             "revision": row.revision if row else 0,
         }
 

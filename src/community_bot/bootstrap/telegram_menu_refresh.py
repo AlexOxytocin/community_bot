@@ -1,5 +1,7 @@
 """Explicit one-time menu delivery; never run on startup or retry ambiguous sends."""
 
+# ruff: noqa: RUF001 - Russian UI copy.
+
 from __future__ import annotations
 
 import argparse
@@ -27,11 +29,11 @@ if TYPE_CHECKING:
 
     from community_bot.application.membership import TelegramMembershipChecker
 
-CAMPAIGN = "bottom-menu-nomad-v1"
+CAMPAIGN = "activity-center-v2"
 MENU_UPDATED = (
     "Меню обновлено.\n\n"
-    "Теперь можно подписаться на активность «Цифрового кочевника» кнопкой внизу. "
-    "«Начать» запускает меню без ввода команды.\n\n"
+    "В «Активностях и подписках» теперь можно отдельно выбрать встречи, "
+    "Цифрового кочевника, задания и споры. В «Справке» — как всё работает.\n\n"
     "Твои настройки уведомлений сохранены."
 )
 
@@ -71,7 +73,6 @@ async def deliver_menu(  # noqa: PLR0911, PLR0913 - explicit eligibility gates a
             return "not_in_chat"
     except MembershipCheckUnavailableError:
         return "membership_unavailable"
-    preferences = await store.preferences(member_id)
     if not apply:
         return "eligible"
     if not claim_receipt(receipt):
@@ -80,7 +81,7 @@ async def deliver_menu(  # noqa: PLR0911, PLR0913 - explicit eligibility gates a
         await bot.send_message(
             chat_id=telegram_user_id,
             text=MENU_UPDATED,
-            reply_markup=home_keyboard(nomad=bool(preferences["nomad"])),
+            reply_markup=home_keyboard(),
             disable_notification=True,
         )
     except (TelegramBadRequest, TelegramForbiddenError):

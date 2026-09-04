@@ -1,4 +1,4 @@
-"""Bounded 0033 -> 0034 release with a frozen-runtime gate and database recovery.
+"""Allowlisted schema releases with a frozen-runtime gate and database recovery.
 
 Run from an exact clean Git checkout. Prepare builds but never stops production.
 Apply uses the measured receipt, rechecks drift, and keeps writers in maintenance
@@ -29,6 +29,7 @@ SERVICES = {"postgres", "migrate", "worker", "web"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 FROM_HEAD, TO_HEAD = "0033", "0034"
+TRANSITIONS = {"0033-0034": ("0033", "0034"), "0034-0036": ("0034", "0036")}
 
 # Only economic data: maintenance heartbeats must not invalidate this invariant.
 FINGERPRINT_SQL = """SELECT json_build_object(
@@ -42,6 +43,28 @@ FINGERPRINT_SQL = """SELECT json_build_object(
  'ledger_hash', (SELECT md5(COALESCE(string_agg(
    id::text||':'||member_id||':'||credit_delta||':'||experience_delta||':'||payload_hash,
    ',' ORDER BY id),'')) FROM account_transactions))::text"""
+
+# Schema 0035 intentionally expands preferences and increments their revision.
+# Compare the original consent fields, then separately assert the new defaults/splits.
+ACTIVITY_FINGERPRINT_SQL = FINGERPRINT_SQL.replace(
+    "FROM member_notification_preferences p",
+    "FROM (SELECT member_id,tasks,tasks_since,nomad,nomad_since "
+    "FROM member_notification_preferences) p",
+)
+ACTIVITY_INVARIANT_SQL = """SELECT (
+ NOT EXISTS (SELECT 1 FROM member_notification_preferences WHERE
+   online OR offline OR important OR online_since IS NOT NULL OR offline_since IS NOT NULL
+   OR important_since IS NOT NULL OR task_updates IS DISTINCT FROM tasks
+   OR task_reminders IS DISTINCT FROM tasks OR disputes IS DISTINCT FROM tasks
+   OR task_updates_since IS DISTINCT FROM tasks_since
+   OR task_reminders_since IS DISTINCT FROM tasks_since
+   OR disputes_since IS DISTINCT FROM tasks_since)
+ AND NOT EXISTS (SELECT 1 FROM activity_publications)
+ AND NOT EXISTS (SELECT 1 FROM notifications WHERE notification_type='nomad.published'
+   AND status IN ('pending','processing'))
+ AND NOT EXISTS (SELECT 1 FROM outbox_events WHERE event_type='nomad.published'
+   AND status IN ('pending','processing'))
+)::text"""
 
 
 class CutoverError(RuntimeError):
@@ -89,6 +112,8 @@ class Host:
     def __init__(self, receipt: dict[str, Any]) -> None:
         """Bind validated database names to one measured release receipt."""
         self.receipt = receipt
+        if (self.from_head, self.to_head) not in TRANSITIONS.values():
+            raise CutoverError("Unsupported schema transition.")
         self.config = Path(receipt["config"])
         self.env_file = ROOT / "shared" / ".env"
         validate_environment_file(self.env_file)
@@ -100,10 +125,25 @@ class Host:
                 raise CutoverError("Invalid database identifier.")
         if len({self.database, receipt["restore_db"], receipt["failed_db"]}) != 3:
             raise CutoverError("Recovery databases must be distinct.")
+        if "drill_db" in receipt and (
+            not IDENTIFIER.fullmatch(receipt["drill_db"])
+            or receipt["drill_db"] in {self.database, receipt["restore_db"], receipt["failed_db"]}
+        ):
+            raise CutoverError("Migration drill database must be distinct.")
         if urlsplit(self.values["DATABASE_URL"]).path != f"/{self.database}":
             raise CutoverError("Runtime and PostgreSQL database identities differ.")
         if self.values.get("RELEASE_MAINTENANCE", "false").lower() not in {"false", "0"}:
             raise CutoverError("Base environment must not enable maintenance.")
+
+    @property
+    def from_head(self) -> str:
+        """Keep older prepared receipts readable for recovery."""
+        return self.receipt.get("from_head", FROM_HEAD)
+
+    @property
+    def to_head(self) -> str:
+        """Read the exact allowlisted target schema."""
+        return self.receipt.get("to_head", TO_HEAD)
 
     def compose(
         self,
@@ -155,7 +195,8 @@ class Host:
 
     def fingerprint(self, database: str | None = None) -> dict[str, Any]:
         """Read hashes and aggregate counts, never private ledger rows."""
-        return json.loads(self.sql(FINGERPRINT_SQL, database))
+        sql = ACTIVITY_FINGERPRINT_SQL if self.to_head == "0036" else FINGERPRINT_SQL
+        return json.loads(self.sql(sql, database))
 
     def stopped(self) -> None:
         """Reject any running app process or remaining database client."""
@@ -184,7 +225,7 @@ class Host:
             args += ["--env", f"DATABASE_URL={urlunsplit(parsed._replace(path=f'/{database}'))}"]
         args += ["migrate"]
         if downgrade:
-            args += ["python", "-m", "alembic", "downgrade", FROM_HEAD]
+            args += ["python", "-m", "alembic", "downgrade", self.from_head]
         self.compose(*args)
 
     def backup_restore(self) -> None:
@@ -242,17 +283,38 @@ class Host:
             )
         if result.returncode:
             raise CutoverError("Isolated restore failed.")
-        self.check_snapshot(restore, FROM_HEAD)
-        self.migrate(database=restore)
-        self.check_snapshot(restore, TO_HEAD)
-        self.migrate(database=restore, downgrade=True)
-        self.check_snapshot(restore, FROM_HEAD)
+        self.rehearse(restore)
         receipt["restore_verified"] = True
+
+    def rehearse(self, restore: str) -> None:
+        """Exercise migrations on a clone, never on the rollback database."""
+        self.check_snapshot(restore, self.from_head)
+        # Keep the restored backup pristine: migrations retire legacy queued events,
+        # and a downgrade cannot recreate those events for a faithful rollback.
+        drill = self.receipt["drill_db"]
+        run(
+            "docker",
+            "exec",
+            self.receipt["postgres"],
+            "createdb",
+            "-U",
+            self.user,
+            "--template",
+            restore,
+            drill,
+        )
+        self.migrate(database=drill)
+        self.check_snapshot(drill, self.to_head)
+        self.migrate(database=drill, downgrade=True)
+        self.check_snapshot(drill, self.from_head)
+        self.check_snapshot(restore, self.from_head)
 
     def check_snapshot(self, database: str | None, head: str) -> None:
         """Check exact schema and conserved economic data."""
         if self.head(database) != head or self.fingerprint(database) != self.receipt["fingerprint"]:
             raise CutoverError("Snapshot/schema invariant failed.")
+        if head == "0036" and self.sql(ACTIVITY_INVARIANT_SQL, database) != "true":
+            raise CutoverError("Activity subscriptions or retired queue invariant failed.")
 
     def start(self, *, old: bool = False, maintenance: bool = False) -> None:
         """Recreate exact services; maintenance writes only liveness heartbeats."""
@@ -315,12 +377,12 @@ class Host:
         """Retain the failed database; promote the verified pre-cutover restore."""
         receipt = self.receipt
         self.stop()
-        if self.head() != FROM_HEAD:
+        if self.head() != self.from_head:
             if not receipt.get("restore_verified"):
                 raise CutoverError("No verified recovery database; manual recovery required.")
             if digest(Path(receipt["backup"])) != receipt["backup_sha256"]:
                 raise CutoverError("Backup digest changed; refusing recovery.")
-            self.check_snapshot(receipt["restore_db"], FROM_HEAD)
+            self.check_snapshot(receipt["restore_db"], self.from_head)
             self.sql(
                 f'BEGIN; ALTER DATABASE "{self.database}" RENAME TO "{receipt["failed_db"]}"; '
                 f'ALTER DATABASE "{receipt["restore_db"]}" RENAME TO "{self.database}"; COMMIT;',
@@ -343,10 +405,10 @@ def execute(host: Host, path: Path) -> None:
         receipt["phase"] = "migrating"
         save(path, receipt)
         host.migrate()
-        host.check_snapshot(None, TO_HEAD)
+        host.check_snapshot(None, host.to_head)
         host.start(maintenance=True)
         host.verify(maintenance=True)
-        host.check_snapshot(None, TO_HEAD)
+        host.check_snapshot(None, host.to_head)
     except Exception:
         receipt["phase"] = "rolling_back"
         save(path, receipt)
@@ -373,7 +435,7 @@ def activate(host: Host) -> None:
         host.verify()
 
 
-def prepare(source: Path, target: str) -> tuple[Host, Path]:
+def prepare(source: Path, target: str, transition: str = "0033-0034") -> tuple[Host, Path]:
     """Measure the current package and build the exact clean main checkout."""
     if not SHA.fullmatch(target) or run("git", "-C", str(source), "rev-parse", "HEAD") != target:
         raise CutoverError("Source must be an exact full-SHA checkout.")
@@ -414,7 +476,10 @@ def prepare(source: Path, target: str) -> tuple[Host, Path]:
     directory.mkdir(mode=0o700)
     backup_dir = Path("/var/backups/community-bot")
     backup_dir.mkdir(mode=0o700, exist_ok=True)
+    from_head, to_head = TRANSITIONS[transition]
     receipt = {
+        "from_head": from_head,
+        "to_head": to_head,
         "target": target,
         "before": before,
         "config": str(config),
@@ -427,6 +492,7 @@ def prepare(source: Path, target: str) -> tuple[Host, Path]:
         "old_image": web["Image"],
         "image": f"community-bot:{target}",
         "restore_db": f"wallet_restore_{operation}",
+        "drill_db": f"schema_drill_{operation}",
         "failed_db": f"wallet_failed_{operation}",
         "backup": str(backup_dir / f"wallet-{operation}.dump"),
         "override": str(directory / "maintenance.json"),
@@ -443,7 +509,8 @@ def prepare(source: Path, target: str) -> tuple[Host, Path]:
     if (
         inspect(receipt["image"])["Config"]["Labels"].get("org.opencontainers.image.revision")
         != target
-        or run("docker", "run", "--rm", receipt["image"], "community-migration-head") != TO_HEAD
+        or run("docker", "run", "--rm", receipt["image"], "community-migration-head")
+        != host.to_head
     ):
         raise CutoverError("Target image identity/head mismatch.")
     save(
@@ -465,7 +532,7 @@ def prepare(source: Path, target: str) -> tuple[Host, Path]:
 def validate_source(host: Host) -> None:
     """Fail before stopping anything if measured source or package has drifted."""
     receipt = host.receipt
-    if digest(host.config) != receipt["config_sha256"] or host.head() != FROM_HEAD:
+    if digest(host.config) != receipt["config_sha256"] or host.head() != host.from_head:
         raise CutoverError("Source schema/package drifted.")
     if set(host.compose("config", "--services", old=True).splitlines()) != SERVICES:
         raise CutoverError("Unexpected production services.")
@@ -508,6 +575,7 @@ def main() -> int:
     parser.add_argument("--source", type=Path)
     parser.add_argument("--target")
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--transition", choices=tuple(TRANSITIONS), default="0033-0034")
     args = parser.parse_args()
     if os.name != "posix" or os.geteuid() != 0:
         raise CutoverError("Production cutover requires Linux root.")
@@ -518,7 +586,7 @@ def main() -> int:
         if args.mode == "prepare":
             if args.source is None or args.target is None:
                 raise CutoverError("Prepare requires source and target.")
-            _host, path = prepare(args.source, args.target)
+            _host, path = prepare(args.source, args.target, args.transition)
             print(json.dumps({"prepared_receipt": str(path)}))
         else:
             if args.receipt is None:

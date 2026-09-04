@@ -9,7 +9,10 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from community_bot.domain.community_preferences import PreferencesConflictError
+from community_bot.domain.community_preferences import (
+    NotificationCategory,
+    PreferencesConflictError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -25,7 +28,7 @@ class PreferenceRequest(BaseModel):
     """One absolute selection with optimistic concurrency, never a blind toggle."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    category: Literal["tasks", "nomad"]
+    category: NotificationCategory
     enabled: bool
     expected_revision: int = Field(ge=0)
 

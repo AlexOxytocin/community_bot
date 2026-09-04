@@ -20,11 +20,14 @@ from community_bot.domain.community_preferences import (
     topic_message_url,
 )
 from community_bot.domain.members import MemberStatus
+from community_bot.infrastructure.db.activity_publications import activity_publisher
 from community_bot.infrastructure.db.community_preferences import active_superadministrator
 from community_bot.infrastructure.db.models import MemberModel
 from community_bot.transport.community_settings import install_community_settings_routes
 from community_bot.transport.telegram_updates import (
+    ACTIVITIES_BUTTON,
     APP_BUTTON,
+    HELP_BUTTON,
     NOMAD_SUBSCRIBE_BUTTON,
     NOMAD_SUBSCRIBED_BUTTON,
     NOTIFICATIONS_BUTTON,
@@ -40,9 +43,11 @@ TOPIC_ID = 24962
     ("kind", "expected"),
     [
         ("task.published", "tasks"),
-        ("assignment_submitted", "tasks"),
-        ("review_reminder_24h", "tasks"),
-        ("task_deadline_reminder", "tasks"),
+        ("assignment_submitted", "task_updates"),
+        ("review_reminder_24h", "task_reminders"),
+        ("task_deadline_reminder", "task_reminders"),
+        ("assignment_disputed", "disputes"),
+        ("moderation_case_resolved", "disputes"),
         ("nomad.published", "nomad"),
         ("wallet.transfer_received", None),
         ("registration.approved", None),
@@ -62,7 +67,7 @@ def test_notification_categories(kind: str, expected: str | None) -> None:
         ("administrator", "banned", ["superadministrator"], False),
     ],
 )
-def test_only_active_superadministrator_is_a_publisher(
+def test_only_active_superadministrator_can_change_registration_policy(
     role: str,
     status: str,
     permissions: list[str],
@@ -74,6 +79,53 @@ def test_only_active_superadministrator_is_a_publisher(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(
+    ("role", "status", "expected"),
+    [
+        ("administrator", "active", True),
+        ("moderator", "active", False),
+        ("member", "active", False),
+        ("administrator", "banned", False),
+    ],
+)
+def test_regular_administrator_can_publish_activity(
+    role: str,
+    status: str,
+    expected: bool,  # noqa: FBT001
+) -> None:
+    assert (
+        activity_publisher(MemberModel(role=role, status=status, permissions_json=[])) is expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_caption_hashtags_use_utf16_offsets_and_ignore_plain_text() -> None:
+    handler, _, _ = _handler()
+    message = {
+        **_post(),
+        "text": None,
+        "entities": [],
+        "caption": "🌍 #OFFLINE #online #IMPORTANT #nomad #other",
+        "caption_entities": [
+            {"type": "hashtag", "offset": 3, "length": 8},
+            {"type": "hashtag", "offset": 12, "length": 7},
+            {"type": "hashtag", "offset": 20, "length": 10},
+        ],
+        "photo": [{"file_id": "x", "file_unique_id": "x", "width": 10, "height": 10}],
+    }
+    await handler.handle(json.dumps({"update_id": 9, "message": message}).encode())
+    publications = cast("AsyncMock", handler.publications)
+    assert publications.observe.call_args.kwargs["categories"] == {"offline", "online", "important"}
+    publications.observe.reset_mock()
+    message["forward_origin"] = {
+        "type": "hidden_user",
+        "date": message["date"],
+        "sender_user_name": "Hidden",
+    }
+    await handler.handle(json.dumps({"update_id": 10, "message": message}).encode())
+    publications.observe.assert_not_awaited()
 
 
 def test_exact_topic_message_link() -> None:
@@ -107,6 +159,7 @@ def _handler() -> tuple[TelegramUpdates, AsyncMock, AsyncMock]:
         registration=registration,
         membership=AsyncMock(is_member=AsyncMock(return_value=True)),
     )
+    handler.publications = AsyncMock()
     return handler, store, registration
 
 
@@ -118,26 +171,33 @@ def _post() -> dict:
         "from": {"id": 456, "is_bot": False, "first_name": "Alex"},
         "message_thread_id": TOPIC_ID,
         "is_topic_message": True,
-        "text": "New information",
+        "text": "#nomad",
+        "entities": [{"type": "hashtag", "offset": 0, "length": 6}],
     }
 
 
 @pytest.mark.asyncio
-async def test_topic_ingress_ignores_edits_wrong_topic_anonymous_and_service_messages() -> None:
-    handler, store, _ = _handler()
+async def test_tag_ingress_accepts_edits_all_topics_but_ignores_anonymous_and_other_chats() -> None:
+    handler, _, _ = _handler()
+    publications = cast("AsyncMock", handler.publications)
     await handler.handle(json.dumps({"update_id": 1, "message": _post()}).encode())
-    store.publish_nomad.assert_awaited_once()
-    store.publish_nomad.reset_mock()
-    variants = [
+    publications.observe.assert_awaited_once()
+    assert publications.observe.call_args.kwargs["categories"] == {"nomad"}
+    for variant in [
         {"edited_message": _post()},
         {"message": {**_post(), "message_thread_id": TOPIC_ID + 1}},
+    ]:
+        await handler.handle(json.dumps({"update_id": 2, **variant}).encode())
+    assert publications.observe.await_count == 3
+    publications.observe.reset_mock()
+    variants = [
         {"message": {**_post(), "sender_chat": {"id": CHAT_ID, "type": "supergroup"}}},
         {"message": {**_post(), "text": None, "forum_topic_closed": {}}},
         {"message": {**_post(), "chat": {"id": CHAT_ID - 1, "type": "supergroup"}}},
     ]
     for variant in variants:
         await handler.handle(json.dumps({"update_id": 2, **variant}).encode())
-    store.publish_nomad.assert_not_awaited()
+    publications.observe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -189,42 +249,40 @@ async def test_start_shows_compact_persistent_bottom_menu(label: str) -> None:
     assert command.telegram_display_name == "Alex"
     assert command.community_membership_verified
     assert command.invitation_token is None
-    markup = cast("AsyncMock", handler.bot).send_message.call_args.kwargs["reply_markup"]
+    replies = cast("AsyncMock", handler.bot).send_message.call_args_list
+    markup = replies[0].kwargs["reply_markup"]
     assert markup.is_persistent
     assert markup.resize_keyboard
     assert not markup.one_time_keyboard
     assert [[key.text for key in row] for row in markup.keyboard] == [
-        [START_BUTTON],
-        [NOMAD_SUBSCRIBE_BUTTON],
-        [APP_BUTTON, NOTIFICATIONS_BUTTON],
+        [ACTIVITIES_BUTTON],
+        [HELP_BUTTON],
     ]
     assert all(key.web_app is None for row in markup.keyboard for key in row)
-    assert markup.keyboard[0][0].text == "Начать"
-    assert markup.keyboard[2][0].text == "Что за приложение?"
+    assert replies[1].kwargs["reply_markup"].inline_keyboard[0][0].text == "☐ Онлайн-встречи"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subscribed", [False, True])
-async def test_nomad_subscribe_is_absolute_and_preserves_tasks(*, subscribed: bool) -> None:
+async def test_old_nomad_button_opens_new_panel_without_changing_consent(
+    *, subscribed: bool
+) -> None:
     handler, store, registration = _handler()
     member_id = uuid4()
     store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="active")
     preferences = {"tasks": True, "nomad": subscribed, "revision": 4}
     store.preferences.side_effect = lambda _: dict(preferences)
 
-    async def save(*args: object, **kwargs: object) -> None:
-        assert args == (member_id, "nomad")
-        assert kwargs == {"enabled": True, "expected_revision": 4}
-        preferences["nomad"] = True
-
-    store.set_preference.side_effect = save
     message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": NOMAD_SUBSCRIBE_BUTTON}
     await handler.handle(json.dumps({"update_id": 14, "message": message}).encode())
-    assert store.set_preference.await_count == int(not subscribed)
+    store.set_preference.assert_not_awaited()
     assert preferences["tasks"] is True
     registration.start.assert_not_awaited()
     reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
-    assert reply["reply_markup"].keyboard[1][0].text == NOMAD_SUBSCRIBED_BUTTON
+    assert (
+        reply["reply_markup"].inline_keyboard[0][0].callback_data
+        == f"subscription:nomad:{int(not subscribed)}:4"
+    )
 
 
 @pytest.mark.asyncio
@@ -239,7 +297,7 @@ async def test_nomad_status_button_only_opens_current_subscription(*, subscribed
     reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
     button = reply["reply_markup"].inline_keyboard[0][0]
     assert button.text == ("Отписаться" if subscribed else "Подписаться")
-    assert button.callback_data == f"nomad:nomad:{int(not subscribed)}:3"
+    assert button.callback_data == f"subscription:nomad:{int(not subscribed)}:3"
 
 
 @pytest.mark.asyncio
@@ -247,16 +305,22 @@ async def test_nomad_subscribe_conflict_displays_actual_state() -> None:
     handler, store, _ = _handler()
     store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
     store.set_preference.side_effect = PreferencesConflictError()
-    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": NOMAD_SUBSCRIBE_BUTTON}
-    await handler.handle(json.dumps({"update_id": 16, "message": message}).encode())
-    reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
-    assert "выключена" in reply["text"]
-    assert reply["reply_markup"].keyboard[1][0].text == NOMAD_SUBSCRIBE_BUTTON
+    callback = {
+        "id": "conflict",
+        "chat_instance": "test",
+        "from": _post()["from"],
+        "data": "subscription:nomad:1:0",
+        "message": {**_post(), "chat": {"id": 456, "type": "private"}},
+    }
+    await handler.handle(json.dumps({"update_id": 16, "callback_query": callback}).encode())
+    reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
+    assert "актуальное состояние" in reply["text"]
+    assert reply["reply_markup"].inline_keyboard[0][0].text == "Подписаться"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prefix", ["nomad", "notifications"])
-async def test_nomad_unsubscribe_refreshes_bottom_menu(prefix: str) -> None:
+async def test_nomad_unsubscribe_edits_panel_without_extra_messages(prefix: str) -> None:
     handler, store, _ = _handler()
     member_id = uuid4()
     store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="active")
@@ -276,8 +340,9 @@ async def test_nomad_unsubscribe_refreshes_bottom_menu(prefix: str) -> None:
     }
     await handler.handle(json.dumps({"update_id": 17, "callback_query": callback}).encode())
     store.set_preference.assert_awaited_once_with(member_id, "nomad", False, 1)  # noqa: FBT003
-    reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
-    assert reply["reply_markup"].keyboard[1][0].text == NOMAD_SUBSCRIBE_BUTTON
+    cast("AsyncMock", handler.bot).send_message.assert_not_awaited()
+    reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
+    assert reply["reply_markup"].inline_keyboard[0][0].text == "Подписаться"
     cast("AsyncMock", handler.bot).edit_message_text.assert_awaited_once()
 
 
@@ -324,9 +389,8 @@ async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
             == "https://t.me/humanquest_bot?startapp"
         )
     else:
-        assert "Подписаться на события Цифрового кочевника" in reply["text"]
-        assert "По умолчанию выключены" in reply["text"]
-        assert reply["reply_markup"].inline_keyboard[0][0].text == "☐ Задания"
+        assert "Активности и подписки" in reply["text"]
+        assert reply["reply_markup"].inline_keyboard[0][0].text == "☐ Онлайн-встречи"
     store.set_preference.assert_not_awaited()
 
 

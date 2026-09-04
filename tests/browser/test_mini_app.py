@@ -175,7 +175,17 @@ def test_wallet_root_and_recovery_keep_one_transfer_identity(mini_app_url: str) 
 def test_notification_preferences_tiles_save_restore_and_fail_safely(
     mini_app_url: str, width: int
 ) -> None:
-    state = {"tasks": False, "nomad": False, "revision": 0}
+    state = {
+        "tasks": False,
+        "nomad": False,
+        "online": False,
+        "offline": False,
+        "important": False,
+        "task_updates": False,
+        "task_reminders": False,
+        "disputes": False,
+        "revision": 0,
+    }
     fail = False
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -198,8 +208,13 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(
 
         page.route("**/api/v1/notification-preferences", preferences)
         page.goto(mini_app_url + "#/settings")
-        page.get_by_role("button", name="Уведомления Задания и Цифровой кочевник").click()
-        expect(page.get_by_role("checkbox", name="Задания", exact=True)).not_to_be_checked()
+        page.get_by_role(
+            "button", name="Активности и подписки Встречи, кочевник, задания и споры"
+        ).click()
+        expect(page.get_by_role("checkbox", name="Новые задания", exact=True)).not_to_be_checked()
+        expect(
+            page.get_by_role("checkbox", name="Важные обновления чата", exact=True)
+        ).not_to_be_checked()
         nomad = page.get_by_role("checkbox", name="Цифровой кочевник", exact=True)
         expect(nomad).not_to_be_checked()
         nomad.check()
@@ -216,7 +231,9 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(
         expect(nomad).to_be_checked()
         page.get_by_role("button", name="Назад", exact=True).click()
         expect(
-            page.get_by_role("button", name="Уведомления Задания и Цифровой кочевник")
+            page.get_by_role(
+                "button", name="Активности и подписки Встречи, кочевник, задания и споры"
+            )
         ).to_be_visible()
         page.goto(mini_app_url + "#/settings/notifications")
         expect(nomad).to_be_checked()

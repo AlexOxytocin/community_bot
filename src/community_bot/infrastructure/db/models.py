@@ -687,6 +687,37 @@ class MemberNotificationPreferencesModel(Base):
     revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     tasks_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     nomad_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    online: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    offline: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    important: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    important_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    task_updates: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    task_reminders: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    disputes: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    online_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    offline_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    task_updates_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    task_reminders_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    disputes_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActivityPublicationModel(Base):
+    """One message or album; only tag metadata, never chat text or media."""
+
+    __tablename__ = "activity_publications"
+    __table_args__ = (UniqueConstraint("chat_id", "source_key"),)
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("members.id"))
+    message_url: Mapped[str] = mapped_column(Text, nullable=False)
+    parts_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    categories_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class NotificationModel(Base):

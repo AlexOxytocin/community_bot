@@ -64,6 +64,24 @@ _NOTIFICATION_DISABLED = "notification_disabled"
 
 
 def _notification_text(claim: DeliveryClaim) -> str:
+    if claim.notification_type == "activity.published":
+        names = {
+            "online": "💻 Онлайн-встречи",
+            "offline": "📍 Офлайн-встречи",
+            "nomad": "🌍 Цифровой кочевник",
+            "important": "📌 Важные обновления чата",
+        }
+        categories = claim.payload.get("categories")
+        if (
+            not isinstance(categories, list)
+            or not categories
+            or any(not isinstance(key, str) or key not in names for key in categories)
+        ):
+            raise NotificationProcessingError(_INVALID_NOTIFICATION_PAYLOAD, permanent=True)
+        return (
+            " · ".join(names[key] for key in categories)
+            + "\n\nНовая публикация администратора в сообществе."
+        )
     if claim.notification_type == "wallet.transfer_received":
         amount = claim.payload.get("amount")
         if type(amount) is not int or amount <= 0:
@@ -107,10 +125,10 @@ class TelegramNotificationSender:
         if self._allow_delivery is not None and not await self._allow_delivery(claim):
             raise NotificationProcessingError(_NOTIFICATION_DISABLED, permanent=True)
         markup = None
-        if claim.notification_type == "nomad.published":
+        if claim.notification_type in {"nomad.published", "activity.published"}:
             url = claim.payload.get("message_url")
             if not isinstance(url, str) or not re.fullmatch(
-                r"https://t\.me/c/[0-9]+/[0-9]+/[0-9]+", url
+                r"https://t\.me/c/[0-9]+/(?:[0-9]+/)?[0-9]+", url
             ):
                 raise NotificationProcessingError(_INVALID_NOTIFICATION_PAYLOAD, permanent=True)
             markup = InlineKeyboardMarkup(
@@ -127,4 +145,9 @@ class TelegramNotificationSender:
         except TelegramRetryAfter as error:
             raise NotificationProcessingError(_RATE_LIMITED) from error
         except (TelegramNetworkError, TelegramServerError) as error:
-            raise NotificationProcessingError(_TEMPORARILY_UNAVAILABLE) from error
+            raise NotificationProcessingError(
+                "delivery_uncertain"
+                if claim.notification_type == "activity.published"
+                else _TEMPORARILY_UNAVAILABLE,
+                permanent=claim.notification_type == "activity.published",
+            ) from error

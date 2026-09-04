@@ -726,6 +726,7 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .community-preferences-screen #screen-title { font-size: 18px; line-height: 1.3; letter-spacing: -.02em; }
 .shell.community-preferences-screen .screen-heading { display: flex; gap: 10px; }
 .community-preferences-view { display: grid; gap: 12px; }
+.preference-group-title { font-size: 15px; line-height: 1.4; font-weight: 600; margin: 6px 2px 0; }
 .preference-tile { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px; border: 1px solid var(--app-border); border-radius: 18px; background: var(--app-surface); color: var(--app-text); text-align: left; }
 .preference-copy { display: grid; gap: 6px; min-width: 0; }
 .preference-copy strong { font-size: 15px; line-height: 1.4; }

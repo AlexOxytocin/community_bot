@@ -127,7 +127,13 @@ async def _seed_published_task(
         session.add_all((owner, recipient, inactive, category))
         await session.flush()
         session.add_all(
-            MemberNotificationPreferencesModel(member_id=member.id, tasks=True)
+            MemberNotificationPreferencesModel(
+                member_id=member.id,
+                tasks=True,
+                task_updates=True,
+                task_reminders=True,
+                disputes=True,
+            )
             for member in (owner, recipient, inactive)
         )
         session.add(template)
@@ -256,7 +262,13 @@ async def test_registration_and_dispute_events_notify_active_moderation_staff(
         session.add_all((moderator, administrator, paused_moderator, assignment))
         await session.flush()
         session.add_all(
-            MemberNotificationPreferencesModel(member_id=member.id, tasks=True)
+            MemberNotificationPreferencesModel(
+                member_id=member.id,
+                tasks=True,
+                task_updates=True,
+                task_reminders=True,
+                disputes=True,
+            )
             for member in (moderator, administrator, paused_moderator)
         )
     await _add_outbox(

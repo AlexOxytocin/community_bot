@@ -2461,7 +2461,7 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
     async with sessions.begin() as session:
         # Notification delivery is opt-in; scope filtering is tested below.
         session.add_all(
-            MemberNotificationPreferencesModel(member_id=member.id, tasks=True)
+            MemberNotificationPreferencesModel(member_id=member.id, disputes=True)
             for member in (creator, performer)
         )
         run = DbTestRunModel(marker="TEST-MODERATION-RESOLUTION", started_by_member_id=moderator.id)

@@ -16,6 +16,10 @@ from community_bot.application.notifications import (
     OutboxClaim,
 )
 from community_bot.domain.notifications import DeliveryWindow, NotificationError, RetryPolicy
+from community_bot.infrastructure.db.activity_publications import (
+    activity_is_current,
+    materialize_activity,
+)
 from community_bot.infrastructure.db.community_preferences import subscription_allows
 from community_bot.infrastructure.db.models import (
     AssignmentModel,
@@ -115,7 +119,7 @@ class PostgresNotificationQueue:
                 )
             return tuple(claims)
 
-    async def materialize(  # noqa: C901 - explicit allowlisted event projections.
+    async def materialize(  # noqa: C901, PLR0912 - explicit allowlisted event projections.
         self, claim: OutboxClaim, *, now: datetime.datetime, window: DeliveryWindow
     ) -> None:
         """Create all addressable notifications and finish the exact event lease."""
@@ -132,6 +136,14 @@ class PostgresNotificationQueue:
             )
             if event is None:
                 raise NotificationProcessingError(_STALE_OUTBOX_LEASE, permanent=True)
+            if event.event_type == "activity.published":
+                await materialize_activity(session, event, now=now, window=window)
+                event.status = "materialized"
+                event.published_at = now
+                event.lease_token = None
+                event.lease_expires_at = None
+                event.last_error_code = None
+                return
             recipients = await self._event_recipients(session, event)
             safe_payload: dict[str, object] = (
                 {"amount": event.payload_json["amount"]}
@@ -319,6 +331,13 @@ class PostgresNotificationQueue:
             ).all()
             claims: list[DeliveryClaim] = []
             for row in rows:
+                if row.notification_type == "activity.published" and row.status == "processing":
+                    # An expired lease may follow a successful send with a lost response.
+                    row.status = "failed"
+                    row.last_error_code = "delivery_uncertain"
+                    row.lease_token = None
+                    row.lease_expires_at = None
+                    continue
                 member = await session.get(MemberModel, row.member_id)
                 if member is None:
                     row.status = "failed"
@@ -594,6 +613,10 @@ class PostgresNotificationQueue:
         now: datetime.datetime,
     ) -> bool:
         """Suppress a scheduled reminder after its domain state becomes terminal."""
+        if notification.notification_type == "nomad.published":
+            return False
+        if notification.notification_type == "activity.published":
+            return member.status == "active" and await activity_is_current(session, notification)
         if member.status != "active" or not await subscription_allows(
             session, member.id, notification.notification_type, notification.created_at
         ):

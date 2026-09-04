@@ -87,7 +87,7 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
         if not await preferences.allows_delivery(claim.id):
             return False
         if settings.community_telegram_chat_id is None:
-            return claim.notification_type != "nomad.published"
+            return claim.notification_type not in {"nomad.published", "activity.published"}
         try:
             return await membership.is_member(
                 chat_id=settings.community_telegram_chat_id,

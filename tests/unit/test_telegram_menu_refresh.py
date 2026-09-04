@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import SendMessage
 
 from community_bot.bootstrap.telegram_menu_refresh import claim_receipt, deliver_menu
-from community_bot.transport.telegram_updates import NOMAD_SUBSCRIBED_BUTTON
+from community_bot.transport.telegram_updates import ACTIVITIES_BUTTON
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,7 +53,7 @@ async def test_refresh_preserves_preferences_and_never_resends(
     if apply:
         reply = bot.send_message.call_args.kwargs
         assert reply["disable_notification"] is True
-        assert reply["reply_markup"].keyboard[1][0].text == NOMAD_SUBSCRIBED_BUTTON
+        assert reply["reply_markup"].keyboard[0][0].text == ACTIVITIES_BUTTON
     else:
         assert not list(tmp_path.iterdir())  # noqa: ASYNC240 - tiny local test fixture.
 

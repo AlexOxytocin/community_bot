@@ -22,10 +22,8 @@ async def configure(*, apply: bool) -> dict[str, object]:
         or settings.mini_app_origin is None
         or not settings.mini_app_origin.startswith("https://")
         or settings.community_telegram_chat_id is None
-        or settings.nomad_telegram_chat_id is None
-        or settings.nomad_telegram_topic_id is None
     ):
-        message = "Configure HTTPS origin, bot, webhook secret, community and Nomad topic first"
+        message = "Configure HTTPS origin, bot, webhook secret and community first"
         raise ValueError(message)
     url = settings.mini_app_origin.rstrip("/") + "/api/telegram/webhook"
     async with Bot(token=settings.bot_token.get_secret_value()) as bot:
@@ -40,16 +38,11 @@ async def configure(*, apply: bool) -> dict[str, object]:
         if core.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
             message = "Community bot must be an administrator for reliable membership checks"
             raise ValueError(message)
-        source = await bot.get_chat_member(settings.nomad_telegram_chat_id, identity.id)
-        if source.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR} and not (
-            source.status == ChatMemberStatus.MEMBER and identity.can_read_all_group_messages
-        ):
-            message = "Bot cannot receive all Nomad source messages"
-            raise ValueError(message)
         commands = {command.command: command for command in await bot.get_my_commands()}
         commands.update(
             start=BotCommand(command="start", description="Запустить приложение"),
             notifications=BotCommand(command="notifications", description="Настройки уведомлений"),
+            help=BotCommand(command="help", description="Справка"),
         )
         if len(commands) > 100:  # noqa: PLR2004 - Telegram Bot API command limit.
             message = "Bot command list is full"
@@ -60,19 +53,19 @@ async def configure(*, apply: bool) -> dict[str, object]:
                 secret_token=settings.telegram_webhook_secret.get_secret_value(),
                 allowed_updates=sorted(
                     set(webhook.allowed_updates or ["message", "callback_query"])
-                    | {"message", "callback_query"}
+                    | {"message", "edited_message", "callback_query"}
                 ),
                 drop_pending_updates=False,
             )
             await bot.set_my_commands(list(commands.values()))
             verified = await bot.get_webhook_info()
-            if verified.url != url:
+            if verified.url != url or "edited_message" not in (verified.allowed_updates or []):
                 message = "Webhook verification failed"
                 raise RuntimeError(message)
         return {
             "preflight": "passed",
             "applied": apply,
-            "source_topic": settings.nomad_telegram_topic_id,
+            "source_chat": settings.community_telegram_chat_id,
         }
 
 
