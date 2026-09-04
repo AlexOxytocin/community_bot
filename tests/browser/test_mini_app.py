@@ -1727,7 +1727,7 @@ def test_ui_next_settings_opens_profile_and_selects_theme(  # noqa: PLR0915
         theme_trigger.click()
         theme_dialog = page.get_by_role("dialog", name="Оформление", exact=True)
         theme_dialog.wait_for()
-        acid = theme_dialog.get_by_role("radio", name="Кислота", exact=True)
+        acid = theme_dialog.get_by_role("radio", name="Яблоко", exact=True)
         neon = theme_dialog.get_by_role("radio", name="Неон", exact=True)
         system_mode = theme_dialog.get_by_role("radio", name="Как в Telegram", exact=True)
         light_mode = theme_dialog.get_by_role("radio", name="Светлый", exact=True)
@@ -2131,7 +2131,8 @@ def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(  # 
         assert boundary.get_by_text("СОЗДАННЫЕ МНОЙ", exact=True).is_visible()
         assert boundary.get_by_text("Проверить сценарий первого запуска", exact=False).count() == 0
         assert boundary.get_by_text("18", exact=True).is_visible()
-        assert page.locator("#primary-navigation button:visible").count() == 3
+        expect(page.locator("#primary-navigation button:visible")).to_have_count(4)
+        expect(page.get_by_role("button", name="Кошелёк", exact=True)).to_be_visible()
         assert page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
@@ -4754,6 +4755,61 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
         assert page.evaluate("globalThis.readyCalls") == 1
         assert page.evaluate("globalThis.expandCalls") == 1
         assert page.evaluate("globalThis.fullscreenCalls") == 1
+        browser.close()
+
+
+@pytest.mark.parametrize(
+    ("preset", "theme", "gradient"),
+    [
+        (
+            "acid",
+            "light",
+            "linear-gradient(145deg, rgb(227, 255, 92), rgb(154, 214, 0) 60%, rgb(118, 169, 0))",
+        ),
+        (
+            "acid",
+            "dark",
+            "linear-gradient(145deg, rgb(242, 255, 138), rgb(201, 255, 50) 60%, rgb(174, 230, 0))",
+        ),
+        (
+            "neon",
+            "light",
+            "linear-gradient(122deg, rgb(96, 64, 255) 0%, rgb(25, 205, 242) 68%)",
+        ),
+        (
+            "neon",
+            "dark",
+            (
+                "linear-gradient(122deg, rgb(154, 134, 255) 0%, "
+                "rgb(154, 134, 255) 30%, rgb(63, 224, 255) 100%)"
+            ),
+        ),
+    ],
+)
+def test_task_home_find_uses_theme_specific_deep_gradient(
+    mini_app_url: str,
+    preset: str,
+    theme: str,
+    gradient: str,
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route("**/api/v1/me", lambda route: route.fulfill(json={"member_id": "member"}))
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+        )
+        page.route(
+            "**/api/v1/moderation/cases?*",
+            lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
+        )
+
+        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/tasks")
+        find_action = page.locator('[data-home-action="find"]')
+        find_action.wait_for()
+
+        assert find_action.evaluate("node => getComputedStyle(node).backgroundImage") == gradient
         browser.close()
 
 

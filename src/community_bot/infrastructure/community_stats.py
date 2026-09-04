@@ -50,9 +50,7 @@ class _Achievement(_Model):
     current: int
     next_level_at: int | None
     unlocked: bool
-    message_url: str | None = Field(
-        default=None, pattern=r"^https://t\.me/c/[1-9]\d*/[1-9]\d*$"
-    )
+    message_url: str | None = Field(default=None, pattern=r"^https://t\.me/c/[1-9]\d*/[1-9]\d*$")
 
 
 class _Pulse(_Model):

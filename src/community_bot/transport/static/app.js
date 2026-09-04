@@ -5063,7 +5063,7 @@ function loadProfile(push = true) {
   void loadOwnProfile(state, revision);
 }
 
-const themePresetLabels = Object.freeze({ acid: "Кислота", neon: "Неон" });
+const themePresetLabels = Object.freeze({ acid: "Яблоко", neon: "Неон" });
 const themeModeLabels = Object.freeze({
   system: "Как в Telegram",
   light: "Светлый",

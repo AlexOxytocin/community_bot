@@ -69,6 +69,7 @@ from community_bot.infrastructure.db.models import (
     KarmaVoteModel,
     MemberAvatarModel,
     MemberModel,
+    MemberNotificationPreferencesModel,
     MemberSanctionModel,
     MembershipResourceModel,
     ModerationCaseModel,
@@ -2458,6 +2459,11 @@ async def test_web_moderation_resolves_scoped_dispute_once_with_safe_detail(
     performer = await add_member(database, 52_123)
     sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions.begin() as session:
+        # Notification delivery is opt-in; scope filtering is tested below.
+        session.add_all(
+            MemberNotificationPreferencesModel(member_id=member.id, tasks=True)
+            for member in (creator, performer)
+        )
         run = DbTestRunModel(marker="TEST-MODERATION-RESOLUTION", started_by_member_id=moderator.id)
         session.add(run)
         await session.flush()
@@ -4101,9 +4107,7 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
                 headers={"content-type": "text/plain; charset=utf-8", "origin": ORIGIN},
             )
             assert rejected_auth.status_code == 204
-            rejected_detail = await rejected_user.get(
-                f"/api/v1/assignments/{assignment.id}"
-            )
+            rejected_detail = await rejected_user.get(f"/api/v1/assignments/{assignment.id}")
             assert rejected_detail.status_code == 200
             assert rejected_detail.json()["rejection_reason"] == "insufficient_evidence"
             assert rejected_detail.json()["rejection_comment"] == (
