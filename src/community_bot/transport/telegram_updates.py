@@ -34,8 +34,28 @@ if TYPE_CHECKING:
     from community_bot.bootstrap.settings import Settings
     from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
 
-APP_BUTTON = "📱 Приложение"
+APP_BUTTON = "Что за приложение?"
 NOTIFICATIONS_BUTTON = "🔔 Уведомления"
+APP_HELP = (
+    "📊 Статистика сообщества\n\n"
+    "Узнай, чем живёт наш чат: смотри активность за разные периоды, "
+    "находи участников и сравнивай результаты в лидерборде.\n\n"
+    "🏆 Ачивки и рекорды\n\n"
+    "Общайся, приветствуй новичков и вовлекай других в обсуждения — "
+    "за участие в жизни сообщества можно получать ачивки. "
+    "В своей карточке смотри достижения и личные рекорды, "
+    "а в карточках участников — их результаты.\n\n"
+    "🤝 Задания и взаимопомощь\n\n"
+    "Выполняй задания участников и комьюнити, чтобы зарабатывать кредиты. "
+    "Нужна помощь самому? Создай своё задание, опиши ожидаемый результат "
+    "и назначь награду. Ход работы и проверка результата — в приложении.\n\n"
+    "💳 Кредиты и кошелёк\n\n"
+    "На старте ты получаешь 20 кредитов. Их можно тратить на задания "
+    "для других участников. В кошельке доступны баланс и история операций, "
+    "а после 50 кредитов, заработанных за задания, открываются переводы "
+    "между участниками.\n\n"
+    "👇 Начни со своей статистики и ачивок — или найди первое задание."
+)
 
 
 def home_keyboard() -> ReplyKeyboardMarkup:
@@ -79,7 +99,7 @@ class TelegramUpdates:
                 return
             text = message.text or ""
             command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
-            if text == APP_BUTTON:
+            if text in {APP_BUTTON, "📱 Приложение"}:
                 command, text = "/app", "/app"
             elif text == NOTIFICATIONS_BUTTON:
                 command, text = "/notifications", "/notifications"
@@ -170,7 +190,7 @@ class TelegramUpdates:
         if command == "/app" and existing is not None and existing.status == "active":
             await self._send(
                 user.id,
-                "Задания, сообщество и кошелёк — всё в приложении.",
+                APP_HELP,
                 self._launch_buttons(),
             )
             return

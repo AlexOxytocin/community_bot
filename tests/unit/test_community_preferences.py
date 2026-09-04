@@ -180,10 +180,11 @@ async def test_start_shows_compact_persistent_bottom_menu() -> None:
         [APP_BUTTON, NOTIFICATIONS_BUTTON]
     ]
     assert all(key.web_app is None for row in markup.keyboard for key in row)
+    assert markup.keyboard[0][0].text == "Что за приложение?"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("label", [APP_BUTTON, NOTIFICATIONS_BUTTON])
+@pytest.mark.parametrize("label", [APP_BUTTON, "📱 Приложение", NOTIFICATIONS_BUTTON])
 async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
     handler, store, registration = _handler()
     store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
@@ -191,7 +192,20 @@ async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
     await handler.handle(json.dumps({"update_id": 12, "message": message}).encode())
     reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
     registration.start.assert_not_awaited()
-    if label == APP_BUTTON:
+    if label in {APP_BUTTON, "📱 Приложение"}:
+        headings = [
+            "Статистика сообщества",
+            "Ачивки и рекорды",
+            "Задания и взаимопомощь",
+            "Кредиты и кошелёк",
+        ]
+        positions = [reply["text"].index(heading) for heading in headings]
+        assert positions == sorted(positions)
+        assert "уведомлен" not in reply["text"].lower()
+        assert "20 кредитов" in reply["text"]
+        assert "50 кредитов" in reply["text"]
+        assert len(reply["text"]) < 4096
+        assert reply["reply_markup"].inline_keyboard[0][0].text == "Открыть приложение"
         assert (
             reply["reply_markup"].inline_keyboard[0][0].url
             == "https://t.me/humanquest_bot?startapp"
