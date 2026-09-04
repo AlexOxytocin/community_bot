@@ -19,6 +19,7 @@
   --app-accent-strong: #12bfb3;
   --app-accent-text: #05060a;
   --app-brand-secondary: #a78bfa;
+  --app-task-find-background: linear-gradient(145deg, var(--app-accent), color-mix(in srgb, var(--app-brand-secondary) 72%, var(--app-accent)));
   --app-focus: #c4b5fd;
   --app-danger: #fb7185;
   --app-danger-pressed: #fda4af;
@@ -44,6 +45,7 @@
   --app-accent-strong: #aee600;
   --app-accent-text: #090b07;
   --app-brand-secondary: #e0ff78;
+  --app-task-find-background: linear-gradient(145deg, #f2ff8a, #c9ff32 60%, #aee600);
   --app-focus: #e6ffa0;
   --app-danger: #ff6f83;
   --app-danger-pressed: #ff9cab;
@@ -66,6 +68,7 @@
   --app-accent-strong: #b7e72c;
   --app-accent-text: #101900;
   --app-brand-secondary: #7553e8;
+  --app-task-find-background: linear-gradient(145deg, #e3ff5c, #9ad600 60%, #76a900);
   --app-focus: #557f00;
   --app-danger: #c83f5a;
   --app-danger-pressed: #a92d47;
@@ -88,6 +91,7 @@
   --app-accent-strong: #19cdf2;
   --app-accent-text: #ffffff;
   --app-brand-secondary: #22b8f4;
+  --app-task-find-background: linear-gradient(122deg, #6040ff 0%, #19cdf2 68%);
   --app-focus: #6d5bff;
   --app-danger: #f0265c;
   --app-danger-pressed: #c9134a;
@@ -110,6 +114,7 @@
   --app-accent-strong: #3fe0ff;
   --app-accent-text: #101233;
   --app-brand-secondary: #3fe0ff;
+  --app-task-find-background: linear-gradient(122deg, #9a86ff 0%, #9a86ff 30%, #3fe0ff 100%);
   --app-focus: #c1b3ff;
   --app-danger: #ff4d75;
   --app-danger-pressed: #ff87a3;
@@ -871,7 +876,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-home-primary > span:last-child { color: var(--app-text-muted); font-size: 12px; }
 .task-home-find {
   border-color: color-mix(in srgb, var(--app-accent) 72%, var(--app-border));
-  background: linear-gradient(145deg, var(--app-accent), color-mix(in srgb, var(--app-brand-secondary) 72%, var(--app-accent)));
+  background: var(--app-task-find-background);
   color: var(--app-accent-text);
 }
 .task-home-find > span:last-child { color: color-mix(in srgb, var(--app-accent-text) 78%, transparent); }
