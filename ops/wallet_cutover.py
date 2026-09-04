@@ -103,9 +103,22 @@ class Host:
         if self.values.get("RELEASE_MAINTENANCE", "false").lower() not in {"false", "0"}:
             raise CutoverError("Base environment must not enable maintenance.")
 
-    def compose(self, *args: str, old: bool = False, maintenance: bool = False) -> str:
+    def compose(
+        self,
+        *args: str,
+        old: bool = False,
+        maintenance: bool = False,
+        config: Path | None = None,
+    ) -> str:
         """Run only the exact measured Compose package and explicit override."""
-        prefix = ["docker", "compose", "--env-file", str(self.env_file), "-f", str(self.config)]
+        prefix = [
+            "docker",
+            "compose",
+            "--env-file",
+            str(self.env_file),
+            "-f",
+            str(config or self.config),
+        ]
         if maintenance:
             prefix += ["-f", self.receipt["override"]]
         release = self.receipt["before"] if old else self.receipt["target"]
@@ -384,6 +397,13 @@ def prepare(source: Path, target: str) -> tuple[Host, Path]:
     if config.read_bytes() != (source / "compose.production.yaml").read_bytes():
         raise CutoverError("Compose changes require a separate cutover.")
     validate_environment_file(config)
+    postgres = inspect(f"{PROJECT}-postgres-1")
+    postgres_config = Path(
+        postgres["Config"]["Labels"]["com.docker.compose.project.config_files"]
+    ).resolve(strict=True)
+    if not postgres_config.is_relative_to((ROOT / "shared").resolve(strict=True)):
+        raise CutoverError("Unrecognized PostgreSQL Compose package.")
+    validate_environment_file(postgres_config)
     before = labels["org.opencontainers.image.revision"]
     if not SHA.fullmatch(before):
         raise CutoverError("Missing source release identity.")
@@ -398,6 +418,10 @@ def prepare(source: Path, target: str) -> tuple[Host, Path]:
         "config": str(config),
         "config_sha256": digest(config),
         "postgres": f"{PROJECT}-postgres-1",
+        "postgres_id": postgres["Id"],
+        "postgres_image": postgres["Image"],
+        "postgres_config": str(postgres_config),
+        "postgres_config_sha256": digest(postgres_config),
         "old_image": web["Image"],
         "image": f"community-bot:{target}",
         "restore_db": f"wallet_restore_{operation}",
@@ -443,15 +467,36 @@ def validate_source(host: Host) -> None:
         raise CutoverError("Source schema/package drifted.")
     if set(host.compose("config", "--services", old=True).splitlines()) != SERVICES:
         raise CutoverError("Unexpected production services.")
-    for service in ("web", "worker", "postgres"):
+    for service in ("web", "worker"):
         item = inspect(f"{PROJECT}-{service}-1")
         if (
             item["Config"]["Labels"].get("com.docker.compose.project.config_files")
             != receipt["config"]
         ):
             raise CutoverError("Services do not share the measured Compose package.")
-        if service != "postgres" and item["Image"] != receipt["old_image"]:
+        if item["Image"] != receipt["old_image"]:
             raise CutoverError("Source runtime drifted.")
+    validate_postgres(host)
+
+
+def validate_postgres(host: Host) -> None:
+    """Allow an unrecreated DB container only when its exact service is unchanged."""
+    receipt = host.receipt
+    postgres = inspect(receipt["postgres"])
+    config = Path(receipt["postgres_config"])
+    if (
+        postgres["Id"] != receipt["postgres_id"]
+        or postgres["Image"] != receipt["postgres_image"]
+        or postgres["Config"]["Labels"].get("com.docker.compose.project.config_files")
+        != receipt["postgres_config"]
+        or postgres["Config"]["Labels"].get("com.docker.compose.project") != PROJECT
+        or digest(config) != receipt["postgres_config_sha256"]
+    ):
+        raise CutoverError("PostgreSQL identity/package drifted.")
+    current = json.loads(host.compose("config", "--format", "json", old=True))
+    previous = json.loads(host.compose("config", "--format", "json", old=True, config=config))
+    if current["services"]["postgres"] != previous["services"]["postgres"]:
+        raise CutoverError("PostgreSQL service differs between measured packages.")
 
 
 def main() -> int:

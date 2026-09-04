@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 # ruff: noqa: D102, D107, EM101, TRY003 - deliberately minimal fault-injection adapter.
 from typing import TYPE_CHECKING, Any
 
@@ -100,3 +102,49 @@ def test_after_activation_failure_recovers_forward_without_discarding_data(
     assert "rollback" not in host.events
     assert host.receipt["phase"] == "ready"
     assert host.events.count("start_open") == 2
+
+
+@pytest.mark.parametrize("changed", [None, "identity", "service"])
+def test_postgres_old_package_requires_same_identity_and_service(
+    changed: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = FakeHost()
+    host.receipt = {
+        "postgres": "postgres",
+        "postgres_id": "container-id",
+        "postgres_image": "image-id",
+        "postgres_config": "/measured/old.yaml",
+        "postgres_config_sha256": "digest",
+    }
+    item = {
+        "Id": "changed" if changed == "identity" else "container-id",
+        "Image": "image-id",
+        "Config": {
+            "Labels": {
+                "com.docker.compose.project.config_files": "/measured/old.yaml",
+                "com.docker.compose.project": cutover.PROJECT,
+            }
+        },
+    }
+    monkeypatch.setattr(cutover, "inspect", lambda _: item)
+    monkeypatch.setattr(cutover, "digest", lambda _: "digest")
+    monkeypatch.setattr(
+        host,
+        "compose",
+        lambda *_, **kwargs: json.dumps(
+            {
+                "services": {
+                    "postgres": {
+                        "image": (
+                            "changed" if changed == "service" and kwargs.get("config") else "same"
+                        )
+                    }
+                }
+            }
+        ),
+    )
+    if changed:
+        with pytest.raises(cutover.CutoverError, match="PostgreSQL"):
+            cutover.validate_postgres(host)
+    else:
+        cutover.validate_postgres(host)
