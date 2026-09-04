@@ -14,7 +14,7 @@
 - PostgreSQL-дедупликация, transactional outbox и worker;
 - Alembic-миграции, backup и restore drill.
 
-Старый Telegram chat UI, long-polling runtime и pilot/release-контур удалены. Telegram остаётся внешней платформой для запуска Mini App, проверки auth proof и коротких исходящих уведомлений без callback-навигации. HTTP API и frontend Mini App входят в текущий runtime и покрыты integration- и browser-тестами.
+Старый Telegram chat UI, long-polling runtime и pilot/release-контур удалены. Telegram используется для запуска Mini App, проверки auth proof и исходящих уведомлений. Минимальный opt-in webhook добавляет `/start`, общее меню подписок и публикации настроенной темы; управление заданиями остаётся в Mini App. Настройка ingress и правила выпуска описаны в [ADR 0022](docs/adr/0022-minimal-telegram-ingress.md).
 
 ## Окружение
 

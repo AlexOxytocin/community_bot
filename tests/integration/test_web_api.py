@@ -239,6 +239,8 @@ async def test_community_stats_connects_history_after_member_registration(
     database = Database(database_url)
     actor = await active_member(database, 52_080)
     gateway = FakeCommunityStatsGateway()
+    membership = FakeMembershipChecker()
+    membership.members.add((-100_200, actor.telegram_user_id))
     app = create_web_app(
         settings=Settings(
             bot_token=BOT_TOKEN,
@@ -249,6 +251,7 @@ async def test_community_stats_connects_history_after_member_registration(
         ),
         database=database,
         community_stats_gateway=gateway,
+        membership_checker=membership,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
         authenticated = await client.post(

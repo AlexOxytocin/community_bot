@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from aiogram.exceptions import (
@@ -13,16 +14,20 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from community_bot.application.notifications import NotificationProcessingError
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from aiogram import Bot
 
     from community_bot.application.notifications import DeliveryClaim
 
 
 _MESSAGES = {
+    "nomad.published": "🌍 Цифровой кочевник\n\nВ теме появилась новая информация.",
     "registration.approved": "Регистрация подтверждена.",
     "registration.submitted": "В очереди модерации появилась новая регистрация.",
     "task.published": "Опубликовано новое задание в сообществе.",
@@ -55,6 +60,7 @@ _RECIPIENT_UNAVAILABLE = "telegram_recipient_unavailable"
 _RATE_LIMITED = "telegram_rate_limited"
 _TEMPORARILY_UNAVAILABLE = "telegram_temporarily_unavailable"
 _INVALID_NOTIFICATION_PAYLOAD = "invalid_notification_payload"
+_NOTIFICATION_DISABLED = "notification_disabled"
 
 
 def _notification_text(claim: DeliveryClaim) -> str:
@@ -85,17 +91,36 @@ def _notification_text(claim: DeliveryClaim) -> str:
 class TelegramNotificationSender:
     """Send allowlisted messages without exposing persisted payload details."""
 
-    def __init__(self, bot: Bot) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        *,
+        allow_delivery: Callable[[DeliveryClaim], Awaitable[bool]] | None = None,
+    ) -> None:
         """Use one process-owned aiogram bot client."""
         self._bot = bot
+        self._allow_delivery = allow_delivery
 
     async def send(self, claim: DeliveryClaim) -> None:
         """Map Telegram failures to safe retry categories."""
         text = _notification_text(claim)
+        if self._allow_delivery is not None and not await self._allow_delivery(claim):
+            raise NotificationProcessingError(_NOTIFICATION_DISABLED, permanent=True)
+        markup = None
+        if claim.notification_type == "nomad.published":
+            url = claim.payload.get("message_url")
+            if not isinstance(url, str) or not re.fullmatch(
+                r"https://t\.me/c/[0-9]+/[0-9]+/[0-9]+", url
+            ):
+                raise NotificationProcessingError(_INVALID_NOTIFICATION_PAYLOAD, permanent=True)
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть сообщение", url=url)]]
+            )
         try:
             await self._bot.send_message(
                 chat_id=claim.telegram_user_id,
                 text=text,
+                **({"reply_markup": markup} if markup is not None else {}),
             )
         except (TelegramForbiddenError, TelegramBadRequest) as error:
             raise NotificationProcessingError(_RECIPIENT_UNAVAILABLE, permanent=True) from error

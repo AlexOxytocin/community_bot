@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     )
     bot_token: SecretStr | None = None
     telegram_bot_username: str | None = None
+    telegram_webhook_secret: SecretStr | None = None
+    nomad_telegram_chat_id: int | None = None
+    nomad_telegram_topic_id: int | None = Field(default=None, gt=0)
     community_telegram_chat_id: int | None = None
     community_telegram_chat_title: str = "Алло, Нейросеточная?"
     community_telegram_join_url: str | None = None
@@ -113,6 +116,7 @@ class Settings(BaseSettings):
         if self.community_telegram_join_url is not None and self.community_telegram_chat_id is None:
             msg = "COMMUNITY_TELEGRAM_JOIN_URL requires COMMUNITY_TELEGRAM_CHAT_ID"
             raise ValueError(msg)
+        self._validate_telegram_ingress()
         stats_values = (self.community_stats_base_url, self.community_stats_token)
         if any(value is not None for value in stats_values) and not all(
             value is not None for value in stats_values
@@ -126,6 +130,32 @@ class Settings(BaseSettings):
             msg = "COMMUNITY_STATS_TOKEN must contain at least 16 characters"
             raise ValueError(msg)
         return self
+
+    def _validate_telegram_ingress(self) -> None:
+        if (self.nomad_telegram_chat_id is None) != (self.nomad_telegram_topic_id is None):
+            msg = "NOMAD_TELEGRAM_CHAT_ID and NOMAD_TELEGRAM_TOPIC_ID must be set together"
+            raise ValueError(msg)
+        if self.nomad_telegram_chat_id is not None and not str(
+            self.nomad_telegram_chat_id
+        ).startswith("-100"):
+            msg = "Nomad source must be a Telegram supergroup"
+            raise ValueError(msg)
+        if self.telegram_webhook_secret is not None:
+            if (
+                re.fullmatch(
+                    r"[A-Za-z0-9_-]{32,256}", self.telegram_webhook_secret.get_secret_value()
+                )
+                is None
+            ):
+                msg = "Telegram webhook secret requires 32-256 URL-safe characters"
+                raise ValueError(msg)
+            if not (
+                self.community_telegram_chat_id
+                and self.community_telegram_join_url
+                and self.telegram_bot_username
+            ):
+                msg = "Telegram webhook requires the community chat, join URL and bot username"
+                raise ValueError(msg)
 
 
 @lru_cache(maxsize=1)

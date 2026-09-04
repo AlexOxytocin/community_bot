@@ -16,10 +16,12 @@ from community_bot.application.notifications import (
     OutboxClaim,
 )
 from community_bot.domain.notifications import DeliveryWindow, NotificationError, RetryPolicy
+from community_bot.infrastructure.db.community_preferences import subscription_allows
 from community_bot.infrastructure.db.models import (
     AssignmentModel,
     InteractionAlertModel,
     MemberModel,
+    MemberNotificationPreferencesModel,
     ModerationCaseModel,
     NotificationModel,
     OutboxEventModel,
@@ -113,7 +115,7 @@ class PostgresNotificationQueue:
                 )
             return tuple(claims)
 
-    async def materialize(
+    async def materialize(  # noqa: C901 - explicit allowlisted event projections.
         self, claim: OutboxClaim, *, now: datetime.datetime, window: DeliveryWindow
     ) -> None:
         """Create all addressable notifications and finish the exact event lease."""
@@ -141,6 +143,11 @@ class PostgresNotificationQueue:
                 task_id = event.payload_json.get("task_id")
                 if isinstance(title, str) and isinstance(task_id, str):
                     safe_payload = {"title": title, "task_id": task_id}
+            elif event.event_type == "nomad.published":
+                safe_payload = {
+                    "message_url": event.payload_json["message_url"],
+                    "occurred_at": event.payload_json["occurred_at"],
+                }
             elif event.event_type == "assignment_rejection_pending_dispute":
                 rejection_reason = event.payload_json.get("rejection_reason")
                 rejection_comment = event.payload_json.get("rejection_comment")
@@ -149,6 +156,15 @@ class PostgresNotificationQueue:
                     if isinstance(rejection_comment, str):
                         safe_payload["rejection_comment"] = rejection_comment
             for recipient in recipients:
+                occurred_at = (
+                    datetime.datetime.fromisoformat(str(safe_payload["occurred_at"]))
+                    if event.event_type == "nomad.published"
+                    else event.created_at
+                )
+                if not await subscription_allows(
+                    session, recipient.member_id, event.event_type, occurred_at
+                ):
+                    continue
                 if event.event_type == "registration.approved":
                     scheduled_at = now
                 else:
@@ -311,6 +327,8 @@ class PostgresNotificationQueue:
                 if not await self._notification_is_current(session, row, member=member, now=now):
                     row.status = "failed"
                     row.last_error_code = "notification_obsolete"
+                    row.lease_token = None
+                    row.lease_expires_at = None
                     continue
                 token = uuid.uuid4()
                 row.status = "processing"
@@ -402,6 +420,19 @@ class PostgresNotificationQueue:
         self, session: AsyncSession, event: OutboxEventModel
     ) -> tuple[_Recipient, ...]:
         member_ids: set[UUID] = set()
+        if event.event_type == "nomad.published" and event.aggregate_type == "nomad_post":
+            members = await session.scalars(
+                select(MemberModel)
+                .join(
+                    MemberNotificationPreferencesModel,
+                    MemberNotificationPreferencesModel.member_id == MemberModel.id,
+                )
+                .where(
+                    MemberModel.status == "active",
+                    MemberNotificationPreferencesModel.nomad.is_(True),
+                )
+            )
+            return tuple(_Recipient(member.id, member.timezone) for member in members)
         if event.aggregate_type == "task":
             task = await session.get(TaskModel, event.aggregate_id)
             if task is None:
@@ -554,7 +585,7 @@ class PostgresNotificationQueue:
             administrators = [item for item in administrators if item.id in participant_set]
         return tuple(administrators)
 
-    async def _notification_is_current(  # noqa: PLR0911 - explicit lifecycle checks.
+    async def _notification_is_current(  # noqa: C901, PLR0911 - explicit lifecycle checks.
         self,
         session: AsyncSession,
         notification: NotificationModel,
@@ -563,6 +594,10 @@ class PostgresNotificationQueue:
         now: datetime.datetime,
     ) -> bool:
         """Suppress a scheduled reminder after its domain state becomes terminal."""
+        if member.status != "active" or not await subscription_allows(
+            session, member.id, notification.notification_type, notification.created_at
+        ):
+            return False
         if notification.notification_type == "task.cancellation_requested":
             aggregate_id = notification.payload_json.get("aggregate_id")
             if not isinstance(aggregate_id, str):

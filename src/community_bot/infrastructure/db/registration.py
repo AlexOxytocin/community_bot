@@ -30,6 +30,7 @@ from community_bot.domain.registration import (
     RegistrationStep,
 )
 from community_bot.infrastructure.db.models import (
+    CommunityRegistrationPolicyModel,
     ConversationStateModel,
     InvitationMembershipResourceModel,
     InvitationModel,
@@ -320,6 +321,54 @@ async def get_registration_context(
     if member is None:
         return None
     return await _context_by_member(session, member, for_update=for_update)
+
+
+async def registration_mode(session: AsyncSession) -> str:
+    """Fail closed if the singleton is absent; share-lock against concurrent changes."""
+    policy = await session.scalar(
+        select(CommunityRegistrationPolicyModel)
+        .where(CommunityRegistrationPolicyModel.id == 1)
+        .with_for_update(read=True)
+    )
+    if policy is None:
+        message = "Registration policy missing"
+        raise RuntimeError(message)
+    return policy.mode
+
+
+async def create_simplified_registration(
+    session: AsyncSession,
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    telegram_display_name: str,
+) -> RegistrationContext:
+    """Caller holds the identity lock and applies the ledger grant before commit."""
+    now = datetime.now(UTC)
+    member = MemberModel(
+        id=uuid.uuid4(),
+        telegram_user_id=telegram_user_id,
+        telegram_username=_optional_text(telegram_username, maximum=128),
+        display_name=_fallback_display_name(telegram_display_name),
+        city=None,
+        timezone="UTC",
+        role="member",
+        status="active",
+        level_number=1,
+        approved_at=now,
+    )
+    session.add(member)
+    await session.flush()
+    session.add(
+        RegistrationApplicationModel(
+            member_id=member.id,
+            status="approved",
+            reviewed_at=now,
+            review_comment="Simplified registration; verified community membership",
+        )
+    )
+    await session.flush()
+    return await _context_by_member(session, member, for_update=False)
 
 
 async def create_pending_registration(

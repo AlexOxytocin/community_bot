@@ -59,6 +59,7 @@ class AdministratorOverview:
     can_appoint: bool
     can_delegate_administrator_management: bool
     can_grant_credits: bool
+    can_manage_registration: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +291,7 @@ class AdministrationService:
         return AdministratorOverview(
             items=cards,
             actor_permissions=effective_administrator_permissions(actor),
+            can_manage_registration=is_superadministrator(actor),
             can_appoint=can_manage_administrators(actor),
             can_delegate_administrator_management=is_superadministrator(actor),
             can_grant_credits=is_superadministrator(actor),

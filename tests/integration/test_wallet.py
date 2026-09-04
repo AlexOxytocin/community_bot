@@ -28,6 +28,8 @@ from community_bot.domain.economy import (
     InsufficientBalanceError,
     ReversalCommand,
     earn_community_reward,
+    refund_reward,
+    reserve_reward,
     starting_grant,
 )
 from community_bot.domain.notifications import DeliveryWindow
@@ -35,6 +37,8 @@ from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     MemberModel,
     NotificationModel,
+    TaskCategoryModel,
+    TaskModel,
 )
 from community_bot.infrastructure.outbox.postgres import PostgresNotificationQueue
 from community_bot.transport.web import create_web_app
@@ -143,6 +147,7 @@ async def test_wallet_concurrency_replay_history_and_atomic_pair(  # noqa: PLR09
         await service.transfer(sender, TransferCommand(other.member_id, 80, "12345"))
     page = await service.read(sender, kind="history", limit=1, cursor=None)
     assert page["items"][0]["balance_after"] == 35
+    assert page["items"][0]["counterparty_id"] == recipient.member_id
     assert page["next_cursor"]
     older = await service.read(sender, kind="history", limit=5, cursor=page["next_cursor"])
     assert len(older["items"]) == 2
@@ -211,6 +216,83 @@ async def test_unpaired_transfer_is_rejected_by_database(wallet_accounts: Wallet
             )
             == 115
         )
+
+
+async def test_wallet_resolves_published_reserve_and_its_reversal(
+    wallet_accounts: WalletAccounts,
+) -> None:
+    db, service, actors = wallet_accounts
+    owner, other, admin = actors
+    now = datetime.datetime.now(datetime.UTC)
+    sessions = async_sessionmaker(db.engine, expire_on_commit=False)
+    publication = uuid4()
+    async with sessions.begin() as session:
+        category = await session.scalar(select(TaskCategoryModel).limit(1))
+        assert category is not None
+        task = TaskModel(
+            origin="member",
+            creator_id=owner.member_id,
+            author_display_name="Owner",
+            category_id=category.id,
+            title="Связанное задание",
+            description="Task",
+            completion_criteria="Done",
+            materials_json={},
+            input_payload_json={},
+            credit_reward_per_performer=2,
+            performer_slots=1,
+            reserved_credit_total=2,
+            estimated_minutes=10,
+            minimum_level=1,
+            format="online",
+            deadline_at=now + datetime.timedelta(days=1),
+            safety_snapshot_json={},
+            publish_command_id=publication,
+            published_at=now,
+        )
+        session.add(task)
+    economy = EconomyService(db.unit_of_work)
+    reserve = await economy.apply_one(
+        reserve_reward(
+            member_id=owner.member_id,
+            amount=2,
+            idempotency_key=f"task_publish:{publication}:reserve",
+        )
+    )
+    operation = await service.read(owner, kind="operation", transaction_id=reserve.transaction_id)
+    assert operation["task_id"] == task.id
+    assert operation["task_title"] == task.title
+    assert operation["task_owned"] is True
+    with pytest.raises(LookupError):
+        await service.read(other, kind="operation", transaction_id=reserve.transaction_id)
+    async with sessions.begin() as session:
+        await session.execute(
+            text("UPDATE members SET role='administrator' WHERE id=:id"), {"id": admin.member_id}
+        )
+    reversal = await economy.apply_one(
+        ReversalCommand(
+            reversed_transaction_id=reserve.transaction_id,
+            idempotency_key="reserve-reversal",
+            actor_member_id=admin.member_id,
+            reason="Пересмотр",
+        )
+    )
+    operation = await service.read(owner, kind="operation", transaction_id=reversal.transaction_id)
+    assert operation["task_id"] == task.id
+    assert operation["reversed_transaction_id"] == reserve.transaction_id
+    assert operation["actor_name"] == "Wallet 2"
+    for prefix, suffix in (("task_cancel", "refund"), ("task_close", "free_slots:refund")):
+        refund = await economy.apply_one(
+            refund_reward(
+                member_id=owner.member_id,
+                amount=2,
+                idempotency_key=f"{prefix}:{task.id}:{suffix}",
+            )
+        )
+        operation = await service.read(
+            owner, kind="operation", transaction_id=refund.transaction_id
+        )
+        assert operation["task_id"] == task.id
 
 
 async def test_wallet_immutable_pair_and_revoked_earnings(wallet_accounts: WalletAccounts) -> None:

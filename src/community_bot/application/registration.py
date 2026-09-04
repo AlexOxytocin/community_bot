@@ -152,6 +152,7 @@ class RegistrationStartCommand:
     telegram_username: str | None
     telegram_display_name: str
     invitation_token: str | None = None
+    community_membership_verified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +213,20 @@ class ProfileAvatar:
 
 class RegistrationUnitOfWork(EconomyUnitOfWork, Protocol):
     """Transactional persistence required by registration workflows."""
+
+    async def registration_mode(self) -> str:
+        """Read the runtime mode in the same transaction as account creation."""
+        ...
+
+    async def create_simplified_registration(
+        self,
+        *,
+        telegram_user_id: int,
+        telegram_username: str | None,
+        telegram_display_name: str,
+    ) -> RegistrationContext:
+        """Create a normal active member without inventing consent or profile answers."""
+        ...
 
     async def acquire_update_gate(self, update_id: int) -> None:
         """Serialize one exact Telegram update."""
@@ -736,6 +751,34 @@ class RegistrationService:
                 for_update=True,
             )
             if context is None:
+                if (
+                    command.community_membership_verified
+                    and await unit_of_work.registration_mode() == "simplified"
+                ):
+                    context = await unit_of_work.create_simplified_registration(
+                        telegram_user_id=command.telegram_user_id,
+                        telegram_username=command.telegram_username,
+                        telegram_display_name=command.telegram_display_name,
+                    )
+                    prepared = await unit_of_work.economy.prepare_batch(
+                        (starting_grant(context.member_id),)
+                    )
+                    await prepared.apply()
+                    await unit_of_work.append_audit_event(
+                        actor_member_id=context.member_id,
+                        action="registration_simplified",
+                        entity_type="member",
+                        entity_id=str(context.member_id),
+                        reason="Verified community membership; simplified admission",
+                    )
+                    await unit_of_work.add_registration_receipt(
+                        update_id=command.update_id,
+                        update_type="registration_start",
+                        actor_id=context.member_id,
+                        outcome_code="registration_approved",
+                    )
+                    await unit_of_work.commit()
+                    return RegistrationView("registration_approved", context)
                 if not command.invitation_token:
                     outcome = "invitation_required"
                     await unit_of_work.add_registration_receipt(

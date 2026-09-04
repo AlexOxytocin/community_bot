@@ -57,7 +57,7 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
                 "-m",
                 "alembic",
                 "downgrade" if downgrade else "upgrade",
-                "0031" if downgrade else "head",
+                cutover.FROM_HEAD if downgrade else cutover.TO_HEAD,
             ],
             env=env,
             capture_output=True,
@@ -81,18 +81,18 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
     try:
         host.backup_restore()
         assert host.receipt["restore_verified"]
-        assert host.head() == "0031"
-        assert host.head(host.receipt["restore_db"]) == "0031"
+        assert host.head() == cutover.FROM_HEAD
+        assert host.head(host.receipt["restore_db"]) == cutover.FROM_HEAD
         migrate()
-        assert host.head() == "0032"
+        assert host.head() == cutover.TO_HEAD
         host.rollback()
-        assert host.head() == "0031"
-        assert host.head(host.receipt["failed_db"]) == "0032"
+        assert host.head() == cutover.FROM_HEAD
+        assert host.head(host.receipt["failed_db"]) == cutover.TO_HEAD
         assert host.fingerprint() == host.receipt["fingerprint"]
         assert events == ["stopped", "old_started", "old_verified"]
         # Crash/retry after the atomic rename is safe: restored DB remains live.
         host.rollback()
-        assert host.head() == "0031"
+        assert host.head() == cutover.FROM_HEAD
     finally:
         for name in (host.receipt["restore_db"], host.receipt["failed_db"]):
             cutover.run(

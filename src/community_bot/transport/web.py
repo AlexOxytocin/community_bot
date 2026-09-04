@@ -20,6 +20,7 @@ from typing import Annotated, Literal, cast
 from urllib.parse import parse_qsl, quote, urlsplit
 from uuid import UUID
 
+from aiogram import Bot
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -153,9 +154,12 @@ from community_bot.infrastructure.avatar_images import (
     normalize_profile_avatar,
 )
 from community_bot.infrastructure.community_stats import HttpCommunityStatsGateway
+from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.health import readiness_report
 from community_bot.infrastructure.telegram_membership import AiogramTelegramMembershipChecker
+from community_bot.transport.community_settings import install_community_settings_routes
+from community_bot.transport.telegram_updates import TelegramUpdates
 
 _COOKIE_NAME = "__Host-community_session"
 _LOCAL_COOKIE_NAME = "community_session_local"
@@ -383,6 +387,7 @@ class AdministrationDto(_Dto):
     can_appoint: bool
     can_delegate_administrator_management: bool
     can_grant_credits: bool
+    can_manage_registration: bool = False
 
 
 class CreditGrantRecipientDto(_Dto):
@@ -911,13 +916,14 @@ class CommunityLeaderboardDto(_Dto):
     calculated_at: datetime.datetime
 
 
-def create_web_app(
+def create_web_app(  # noqa: PLR0913 - injectable external Telegram boundaries for acceptance tests.
     *,
     settings: Settings,
     database: Database,
     heartbeat_not_before: datetime.datetime | None = None,
     membership_checker: TelegramMembershipChecker | None = None,
     community_stats_gateway: CommunityStatsGateway | None = None,
+    telegram_bot: Bot | None = None,
 ) -> FastAPI:
     """Build the web-only application after strict config validation."""
     bot_token, origin = _web_config(settings)
@@ -962,6 +968,21 @@ def create_web_app(
     )
     owned_membership_checker = membership_checker is None
     membership_checker = membership_checker or AiogramTelegramMembershipChecker(bot_token)
+    preferences_store = CommunityPreferencesStore(database.session_factory)
+    owned_telegram_bot = telegram_bot is None and settings.telegram_webhook_secret is not None
+    if owned_telegram_bot:
+        telegram_bot = Bot(token=bot_token)
+    telegram_updates = (
+        TelegramUpdates(
+            bot=telegram_bot,
+            settings=settings,
+            store=preferences_store,
+            registration=registration,
+            membership=membership_checker,
+        )
+        if telegram_bot is not None
+        else None
+    )
     index_html = (
         (_STATIC_DIR / "index.html")
         .read_text(encoding="utf-8")
@@ -973,6 +994,8 @@ def create_web_app(
         try:
             yield
         finally:
+            if owned_telegram_bot and telegram_bot is not None:
+                await telegram_bot.session.close()
             if owned_membership_checker:
                 await membership_checker.close()
             if owned_community_stats_gateway and community_stats_gateway is not None:
@@ -1099,6 +1122,17 @@ def create_web_app(
         )
         return response
 
+    install_community_settings_routes(
+        app,
+        store=preferences_store,
+        current_actor=current_actor,
+        require_origin=lambda request: _require_origin(request, origin),
+        telegram=telegram_updates,
+        webhook_secret=settings.telegram_webhook_secret.get_secret_value()
+        if settings.telegram_webhook_secret is not None
+        else None,
+    )
+
     def core_membership_resource() -> MembershipResourceDto | None:
         if (
             settings.community_telegram_chat_id is None
@@ -1116,6 +1150,8 @@ def create_web_app(
         telegram_user_id: int,
         optional_resources: tuple[MembershipResource, ...] = (),
     ) -> JSONResponse | None:
+        if settings.community_telegram_chat_id is not None and core_membership_resource() is None:
+            return _error_response(503, "membership_check_unavailable")
         resources = tuple(
             item
             for item in (
@@ -1206,11 +1242,29 @@ def create_web_app(
                         telegram_username=identity.username,
                         telegram_display_name=identity.display_name,
                         invitation_token=invitation_token,
+                        community_membership_verified=settings.community_telegram_chat_id
+                        is not None,
                     )
                 )
             except RegistrationError:
                 return _error_response(403, "invalid_invitation")
             except (RuntimeError, SQLAlchemyError):
+                return _error_response(503, "onboarding_unavailable")
+        elif settings.community_telegram_chat_id is not None:
+            gate = await membership_gate(identity.user_id)
+            if gate is not None:
+                return gate
+            try:
+                await registration.start(
+                    RegistrationStartCommand(
+                        update_id=_registration_update_id(raw),
+                        telegram_user_id=identity.user_id,
+                        telegram_username=identity.username,
+                        telegram_display_name=identity.display_name,
+                        community_membership_verified=True,
+                    )
+                )
+            except (RegistrationError, RuntimeError, SQLAlchemyError):
                 return _error_response(503, "onboarding_unavailable")
         return await issue_session(
             identity,
@@ -1585,6 +1639,7 @@ def create_web_app(
                     overview.can_delegate_administrator_management
                 ),
                 can_grant_credits=overview.can_grant_credits,
+                can_manage_registration=overview.can_manage_registration,
             )
         )
 

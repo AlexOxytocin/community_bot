@@ -63,6 +63,9 @@ FROZEN_PROOF = (
 
 
 class FakeDatabase:
+    def session_factory(self) -> None:
+        raise AssertionError("Preference queries are not used by auth tests.")
+
     def __init__(self) -> None:
         self.member_id = uuid4()
         self.created_digest: bytes | None = None
@@ -380,6 +383,11 @@ def test_web_config_and_route_set_are_closed() -> None:
         if hasattr(route, "methods")
     }
     assert routes == {
+        ("/api/v1/notification-preferences", ("GET",)),
+        ("/api/v1/notification-preferences", ("PATCH",)),
+        ("/api/v1/administration/registration-policy", ("GET",)),
+        ("/api/v1/administration/registration-policy", ("PATCH",)),
+        ("/api/telegram/webhook", ("POST",)),
         ("/openapi.json", ("GET", "HEAD")),
         ("/healthz", ("GET",)),
         ("/readyz", ("GET",)),

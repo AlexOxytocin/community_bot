@@ -12,15 +12,22 @@ import structlog
 from aiogram import Bot
 
 from community_bot.application.assignments import AssignmentDeadlineWorker, AssignmentService
-from community_bot.application.notifications import NotificationWorker
+from community_bot.application.membership import MembershipCheckUnavailableError
+from community_bot.application.notifications import (
+    DeliveryClaim,
+    NotificationProcessingError,
+    NotificationWorker,
+)
 from community_bot.bootstrap.migration_head import single_migration_head
 from community_bot.bootstrap.settings import get_settings
 from community_bot.domain.notifications import DeliveryWindow
 from community_bot.infrastructure.db import Database
 from community_bot.infrastructure.db.assignment_deadlines import PostgresAssignmentDeadlineSource
+from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
 from community_bot.infrastructure.observability import configure_logging, configure_sentry
 from community_bot.infrastructure.outbox import PostgresNotificationQueue
 from community_bot.infrastructure.outbox.telegram import TelegramNotificationSender
+from community_bot.infrastructure.telegram_membership import AiogramTelegramMembershipChecker
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -73,9 +80,26 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
     database = Database(settings.database_url)
     queue = PostgresNotificationQueue(database.session_factory)
     bot = Bot(token=settings.bot_token.get_secret_value())
+    preferences = CommunityPreferencesStore(database.session_factory)
+    membership = AiogramTelegramMembershipChecker(settings.bot_token.get_secret_value())
+
+    async def allow_delivery(claim: DeliveryClaim) -> bool:
+        if not await preferences.allows_delivery(claim.id):
+            return False
+        if settings.community_telegram_chat_id is None:
+            return claim.notification_type != "nomad.published"
+        try:
+            return await membership.is_member(
+                chat_id=settings.community_telegram_chat_id,
+                telegram_user_id=claim.telegram_user_id,
+            )
+        except MembershipCheckUnavailableError as error:
+            code = "membership_check_unavailable"
+            raise NotificationProcessingError(code) from error
+
     worker = NotificationWorker(
         queue,
-        TelegramNotificationSender(bot),
+        TelegramNotificationSender(bot, allow_delivery=allow_delivery),
         delivery_window=window,
         batch_size=settings.worker_batch_size,
         lease_duration=datetime.timedelta(seconds=settings.worker_lease_seconds),
@@ -108,5 +132,6 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
                 return
             await asyncio.sleep(settings.worker_poll_interval_seconds)
     finally:
+        await membership.close()
         await bot.session.close()
         await database.dispose()

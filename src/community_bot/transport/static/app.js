@@ -170,7 +170,7 @@ const productRouteFor = (id) => {
   return "#/moderation/:case_id?";
 };
 const resourceRoute = (pattern, resourceId) => {
-  const required = pattern.match(/:\w+(?!\?)/g) || [];
+  const required = (pattern.match(/:\w+\??/g) || []).filter((part) => !part.endsWith("?"));
   if (required.length && !resourceId) return null;
   const values = [resourceId].filter(Boolean).map(encodeURIComponent);
   let index = 0;
@@ -263,11 +263,13 @@ const setNavigation = (screen, context) => {
   shell.classList.toggle("profile-screen", screen === "profile");
   shell.classList.toggle("settings-screen", screen === "settings");
   shell.classList.toggle("wallet-root-screen", screen === "wallet" && !context);
+  shell.classList.toggle("wallet-screen", screen === "wallet");
   shell.classList.toggle("task-home-screen", screen === "task-home");
   shell.classList.toggle("onboarding-screen", screen === "onboarding");
   shell.classList.toggle("moderation-screen", screen === "moderation" && !context);
   primaryNavigation.hidden = screen === "onboarding" || context;
   shell.classList.remove("catalog-filter-screen", "task-creation-screen");
+  shell.classList.remove("community-preferences-screen");
   document.body.classList.toggle("ui-next-tasks-home", screen === "task-home");
   shell.classList.remove("task-detail-screen", "assignment-detail-screen", "assignment-review-screen");
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog" || screen === "task-home"));
@@ -322,6 +324,8 @@ const settingsRowIcon = (name) => {
   svg.setAttribute("aria-hidden", "true");
   svg.innerHTML = name === "profile"
     ? '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM5 20a7 7 0 0 1 14 0"/>'
+    : name === "notifications"
+      ? '<path d="M9 20h6M6 10a6 6 0 0 1 12 0v5l2 2H4l2-2Z"/>'
     : name === "fullscreen"
       ? '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>'
       : '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/>';
@@ -4332,7 +4336,7 @@ function showParticipantsState(state, revision) {
     "click",
     () => switchParticipantsView(state, revision, "leaderboard"),
   );
-  tabs.append(membersTab, pulseTab, leaderboardTab);
+  tabs.append(pulseTab, membersTab, leaderboardTab);
   boundary.append(tabs);
   if (state.view === "members") {
     const search = element("form", undefined, "participant-search");
@@ -4607,7 +4611,7 @@ function switchParticipantsView(state, revision, view) {
   }
 }
 
-function loadParticipants(view = "members", period = "week", metric = "experience") {
+function loadParticipants(view = "pulse", period = "week", metric = "experience") {
   const revision = ++screenRevision;
   const achievementMetric = metric.startsWith("achievement:");
   const state = {
@@ -5251,7 +5255,15 @@ function showSettings(push = true) {
   });
   fullscreen.append(fullscreenCopy, fullscreenToggle);
 
-  list.append(profile, theme, fullscreen);
+  const notifications = element("button", undefined, "settings-row settings-link-row");
+  notifications.type = "button";
+  const notificationsCopy = element("span", undefined, "settings-row-copy");
+  notificationsCopy.append(element("strong", "Уведомления"), element("span", "Задания и Цифровой кочевник"));
+  const notificationsIcon = settingsRowIcon("notifications");
+  notificationsIcon.classList.add("settings-row-icon");
+  notifications.append(notificationsIcon, notificationsCopy, element("span", "›", "settings-chevron"));
+  notifications.addEventListener("click", () => void loadCommunityPreferences("notifications"));
+  list.append(profile, notifications, theme, fullscreen);
   replaceContent(list);
 }
 
@@ -7555,6 +7567,12 @@ async function loadAdministrationAccess(push = true) {
       notice,
       administratorRights(overview.actor_permissions, { disabled: true }),
     );
+    if (overview.can_manage_registration) {
+      const registration = element("button", "Регистрация участников ›", "preference-tile");
+      registration.type = "button";
+      registration.addEventListener("click", () => void loadCommunityPreferences("registration"));
+      content.insertBefore(registration, notice);
+    }
   } catch {
     if (revision === screenRevision) {
       replaceContent(
@@ -7562,6 +7580,124 @@ async function loadAdministrationAccess(push = true) {
         element("p", "Не удалось загрузить права доступа.", "status"),
       );
     }
+  }
+}
+
+async function loadCommunityPreferences(kind, push = true) {
+  const revision = ++screenRevision;
+  const policy = kind === "registration";
+  const path = policy ? "/api/v1/administration/registration-policy" : "/api/v1/notification-preferences";
+  const route = policy ? "#/moderation/registration" : "#/settings/notifications";
+  if (push) history.pushState({ screen: "community-preferences", kind }, "", route);
+  else history.replaceState({ screen: "community-preferences", kind }, "", route);
+  setNavigation(policy ? "moderation" : "settings", false);
+  shell.classList.add("community-preferences-screen");
+  title.textContent = policy ? "Регистрация участников" : "Уведомления";
+  setHeaderControl("back", { screenLabel: title.textContent, onBack: () => {
+    if (policy) void loadAdministrationAccess(false); else showSettings(false);
+  }});
+  content.closest(".screen").removeAttribute("aria-label");
+  content.closest(".screen").setAttribute("aria-labelledby", "screen-title");
+  const view = element("div", undefined, "community-preferences-view");
+  const status = element("p", "Загружаем настройки…", "preference-status");
+  status.setAttribute("role", "status");
+  view.append(status);
+  replaceContent(view);
+  const button = (text, action, style = "secondary") => {
+    const node = element("button", text, style);
+    node.type = "button";
+    node.addEventListener("click", action);
+    return node;
+  };
+  try {
+    const response = await apiFetch(path, { credentials: "same-origin" });
+    if (!response.ok) throw new Error(response.status === 403 ? "forbidden" : "unavailable");
+    let state = await response.json();
+    if (revision !== screenRevision) return;
+    status.textContent = "";
+    const hint = element("p", policy
+      ? "В обоих режимах вход доступен только участникам чата. Начатые анкеты и существующие профили не меняются."
+      : "Уведомления приходят в личные сообщения бота. Эти же настройки доступны в его меню.", "preference-hint");
+    view.replaceChildren(hint);
+    const controls = [];
+    const choices = policy ? [
+      ["standard", "Стандартная", "Действующий вход по приглашению с заполнением анкеты."],
+      ["simplified", "Упрощённая", "Без анкеты: имя из Telegram, город пустой, UTC+0 и 20 стартовых кредитов."],
+    ] : [
+      ["tasks", "Задания", "Новые задания, изменения моих заданий и напоминания."],
+      ["nomad", "Цифровой кочевник", "Новые публикации суперадминистратора в теме — со ссылкой на сообщение."],
+    ];
+    let selectedMode = state.mode;
+    const confirmation = element("section", undefined, "preference-confirmation preference-tile");
+    confirmation.hidden = true;
+    const confirmationText = element("p");
+    const refresh = button("Обновить настройки", () => void loadCommunityPreferences(kind, false));
+    refresh.hidden = true;
+    const save = async (body) => {
+      controls.forEach(node => { node.disabled = true; });
+      confirmation.querySelectorAll("button").forEach(node => { node.disabled = true; });
+      status.textContent = "Сохраняем…";
+      try {
+        const result = await apiFetch(path, {
+          method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, expected_revision: state.revision }),
+        });
+        if (!result.ok) throw new Error(result.status === 409 ? "conflict" : "failed");
+        state = await result.json();
+        if (revision !== screenRevision) return;
+        status.textContent = "Сохранено";
+        confirmation.hidden = true;
+        refresh.hidden = true;
+      } catch (error) {
+        if (revision !== screenRevision) return;
+        status.textContent = error.message === "conflict"
+          ? "Настройки изменились в другом окне или боте. Обновите их и повторите выбор."
+          : "Не удалось сохранить. Проверьте соединение и обновите настройки.";
+        confirmation.hidden = true;
+        refresh.hidden = false;
+      } finally {
+        if (revision === screenRevision) {
+          controls.forEach(node => { node.disabled = false; node.checked = policy ? state.mode === node.value : state[node.value]; });
+          selectedMode = state.mode;
+          confirmation.querySelectorAll("button").forEach(node => { node.disabled = false; });
+        }
+      }
+    };
+    for (const [key, label, detail] of choices) {
+      const tile = element("label", undefined, "preference-tile");
+      const copy = element("span", undefined, "preference-copy");
+      copy.append(element("strong", label), element("span", detail));
+      const input = element("input");
+      input.type = policy ? "radio" : "checkbox";
+      input.name = policy ? "registration-mode" : key;
+      input.value = key;
+      input.setAttribute("aria-label", label);
+      input.checked = policy ? state.mode === key : state[key];
+      input.addEventListener("change", () => {
+        if (!policy) { void save({ category: key, enabled: input.checked }); return; }
+        selectedMode = key;
+        confirmationText.textContent = `Включить режим «${label}» для новых участников?`;
+        confirmation.hidden = key === state.mode;
+      });
+      controls.push(input);
+      tile.append(copy, input);
+      view.append(tile);
+    }
+    if (policy) {
+      confirmation.append(confirmationText,
+        button("Подтвердить изменение", () => void save({ mode: selectedMode, confirmed: true }), "primary"),
+        button("Отмена", () => {
+          selectedMode = state.mode; controls.forEach(node => { node.checked = node.value === state.mode; });
+          confirmation.hidden = true;
+        }));
+      view.append(confirmation);
+    }
+    view.append(status, refresh);
+  } catch (error) {
+    if (revision !== screenRevision) return;
+    status.textContent = error.message === "forbidden"
+      ? "Этот раздел вам недоступен." : "Не удалось загрузить настройки.";
+    view.append(button("Повторить", () => void loadCommunityPreferences(kind, false)));
   }
 }
 
@@ -9626,6 +9762,8 @@ async function bootstrapTaskHome(authAttempted = false) {
     );
     if (initialHash.startsWith("#/wallet")) void loadWallet(initialHash.slice(8) || "", false);
     else if (initialHash === "#/settings") showSettings(false);
+    else if (initialHash === "#/settings/notifications") void loadCommunityPreferences("notifications", false);
+    else if (initialHash === "#/moderation/registration") void loadCommunityPreferences("registration", false);
     else if (/^#\/profile(?:\/.*)?$/.test(initialHash)) loadProfile(false);
     else if (directMember) {
       history.replaceState(
@@ -9691,6 +9829,8 @@ async function bootstrapTaskHome(authAttempted = false) {
         presentationLocationFor(forceEdit ? "T05" : "T06", resourceId),
       );
       openTaskCreation(forceEdit, forceEdit ? null : "stale");
+    } else if (initialHash === "#/members") {
+      loadParticipants();
     } else if (["P01", "P05", "P08"].includes(presentationId)) {
       loadParticipants(presentationId === "P05" ? "leaderboard" : presentationId === "P08" ? "pulse" : "members");
     } else if (presentationId === "M01" || presentationId === "M02") {
@@ -9777,6 +9917,75 @@ const walletButton = (label, action, style = "secondary") => {
 const walletTime = (stamp) => new Date(stamp).toLocaleString("ru-RU", { dateStyle: "medium", timeStyle: "short" });
 const walletDelta = (amount) => amount === 0 ? "0" : `${amount > 0 ? "+" : "−"}${Math.abs(amount)}`;
 
+function walletTile(label, value, extraClass = "") {
+  const tile = element("section", undefined, `wallet-tile ${extraClass}`);
+  tile.append(element("span", label, "wallet-label"), element("p", value, "wallet-tile-value"));
+  return tile;
+}
+
+function walletSourceLink(label, description, href, action) {
+  const link = element("a", undefined, "wallet-tile wallet-source-link");
+  link.href = href;
+  const copy = element("span", undefined, "wallet-source-copy");
+  copy.append(element("span", label, "wallet-label"), element("strong", description));
+  link.append(copy, element("span", "›", "wallet-source-chevron"));
+  link.addEventListener("click", event => {
+    if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); action();
+  });
+  return link;
+}
+
+function walletOperationDetails(operation) {
+  const detail = element("div", undefined, "wallet-operation-detail");
+  const hero = element("section", undefined, "wallet-tile wallet-operation-hero");
+  hero.append(
+    element("span", walletNames[operation.transaction_type] || "Операция", "wallet-label"),
+    element("strong", walletDelta(operation.credit_delta), `wallet-operation-amount${operation.credit_delta > 0 ? " is-positive" : ""}`),
+    element("span", "кредитов", "wallet-label"),
+    element("time", walletTime(operation.created_at), "wallet-operation-time"),
+  );
+  const metrics = element("div", undefined, "wallet-operation-metrics");
+  metrics.append(
+    walletTile(operation.balance_reconstructed ? "Расчётный баланс после" : "Баланс после", `${operation.balance_after} кр.`),
+    walletTile("Изменение опыта", `${walletDelta(operation.experience_delta)} XP`),
+  );
+  detail.append(hero, metrics);
+  if (operation.task_id) {
+    const route = `/operations/${operation.transaction_id}/task`;
+    detail.append(walletSourceLink("Задание", operation.task_title || "Открыть задание", `#/wallet${route}`, () => void loadWallet(route)));
+  }
+  if (operation.counterparty_id) {
+    detail.append(walletSourceLink(
+      operation.transaction_type === "transfer_sent" ? "Получатель" : "Отправитель",
+      `${operation.counterparty_name}${operation.counterparty_username ? ` · @${operation.counterparty_username}` : ""}`,
+      `#/members/${operation.counterparty_id}`,
+      () => showMemberProfile(operation.counterparty_id),
+    ));
+  }
+  if (operation.reversed_transaction_id) {
+    const route = `/operations/${operation.reversed_transaction_id}`;
+    detail.append(walletSourceLink("Связанное действие", "Открыть исходную операцию", `#/wallet${route}`, () => void loadWallet(route)));
+  }
+  const explanation = operation.reason || operation.comment || ({
+    starting_grant: "Начислено при активации участия в сообществе. Это начисление не связано с заданием.",
+    manual_credit_grant: "Кредиты начислены администратором. Отдельного задания у этого действия нет.",
+    admin_adjustment: "Баланс изменён администратором.",
+    task_reward_reserved: "Кредиты зарезервированы для оплаты задания.",
+    task_reward_refunded: "Неиспользованный резерв возвращён в кошелёк.",
+    transfer_sent: "Кредиты переведены участнику без комиссии.",
+    transfer_received: "Кредиты получены от участника без комиссии.",
+  }[operation.transaction_type] || "Основание сохранено в записи этой операции.");
+  const reason = walletTile("Основание", explanation);
+  if (operation.actor_name) reason.append(element("small", `Инициатор: ${operation.actor_name}`, "wallet-label"));
+  if (operation.reason && operation.comment && operation.reason !== operation.comment) reason.append(element("p", operation.comment, "wallet-tile-value"));
+  if (!operation.task_id && /^(task_|partial_task_|community_task_)/.test(operation.transaction_type)) {
+    reason.append(element("small", "Связь с заданием в этой старой записи не сохранилась.", "wallet-label"));
+  }
+  detail.append(reason, walletTile("Номер операции", operation.transaction_id, "wallet-operation-id"));
+  return detail;
+}
+
 async function loadWallet(route = "", push = true) {
   const revision = ++screenRevision;
   const root = !route;
@@ -9796,14 +10005,49 @@ async function loadWallet(route = "", push = true) {
     if (root || route === "/history") {
       if (root) {
         const balance = element("section", undefined, "wallet-balance-card");
-        balance.append(element("span", "Доступно", "wallet-label"), element("strong", String(summary.balance), "wallet-balance"), element("span", "кредитов", "wallet-label"));
-        if (summary.reserved) balance.append(walletButton(`Ещё ${summary.reserved} в резерве заданий →`, () => void loadWallet("/reserve"), "wallet-inline"));
-        balance.append(walletButton(walletDraft?.pending ? "Проверить незавершённый перевод" : summary.transfers_enabled ? "Перевести кредиты" : "Когда откроются переводы?", () => void loadWallet(walletDraft?.pending ? "/confirm" : summary.transfers_enabled ? "/transfer" : "/locked"), "primary"));
-        balance.append(element("p", summary.transfers_enabled ? `Переводы открыты · заработано ${summary.earned} кредитов` : `${summary.earned} / ${summary.transfer_threshold} заработано для переводов`, "wallet-label"));
-        if (!summary.transfers_enabled) {
-          const progress = element("progress"); progress.max = summary.transfer_threshold; progress.value = summary.earned; progress.setAttribute("aria-label", "Доступ к переводам"); balance.append(progress);
+        const overview = element("div", undefined, "wallet-balance-overview");
+        const available = element("div", undefined, "wallet-available");
+        const amount = element("div", undefined, "wallet-balance-line");
+        amount.append(element("strong", String(summary.balance), "wallet-balance"), element("span", "кредитов", "wallet-label"));
+        available.append(element("span", "Доступно", "wallet-label"), amount);
+        overview.append(available);
+        if (summary.reserved) {
+          const reserve = walletButton("", () => void loadWallet("/reserve"), "wallet-reserve-summary");
+          reserve.append(element("span", "В резерве", "wallet-label"), element("strong", `${summary.reserved} кр. ›`));
+          overview.append(reserve);
         }
-        view.append(balance, element("h2", "История операций", "wallet-section-title"));
+        balance.append(overview);
+        const transferAccess = element("div", undefined, "wallet-transfer-access");
+        const transferButton = walletButton(walletDraft?.pending ? "Проверить незавершённый перевод" : "Перевести кредиты", () => void loadWallet(walletDraft?.pending ? "/confirm" : "/transfer"), "primary wallet-transfer-button");
+        transferButton.disabled = !summary.transfers_enabled && !walletDraft?.pending;
+        transferAccess.append(transferButton);
+        if (transferButton.disabled) transferAccess.append(walletButton("Когда откроются переводы?", () => void loadWallet("/locked"), "wallet-unlock-link"));
+        transferAccess.append(element("p", summary.transfers_enabled ? `Заработано ${summary.earned} кредитов` : `${summary.earned} из ${summary.transfer_threshold} кредитов за задания`, "wallet-label"));
+        if (!summary.transfers_enabled) {
+          const progress = element("progress"); progress.max = summary.transfer_threshold; progress.value = summary.earned; progress.setAttribute("aria-label", "Доступ к переводам"); transferAccess.append(progress);
+        }
+        balance.append(transferAccess);
+        const guide = element("section", undefined, "wallet-tile wallet-credit-guide");
+        guide.append(element("h2", "Как использовать кредиты", "wallet-tile-heading"));
+        for (const [label, verb, description, destination] of [
+          ["Заработать", "Выполняй", " задания участников и комьюнити.", "T01"],
+          ["Потратить", "Создавай", " свои задания и оплачивай работу участников.", "T04B"],
+        ]) {
+          const row = element("p", undefined, "wallet-credit-guide-row");
+          const link = element("a", verb, "wallet-guide-link");
+          link.href = presentationLocationFor(destination);
+          link.addEventListener("click", event => {
+            if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            if (destination === "T01") {
+              history.pushState({ screen: "catalog" }, "", link.href);
+              void loadCatalog(false);
+            } else beginTaskCreationFlow();
+          });
+          row.append(element("strong", `${label} — `), link, document.createTextNode(description));
+          guide.append(row);
+        }
+        view.append(balance, guide, element("h2", "История операций", "wallet-section-title"));
       }
       const list = element("div", undefined, "wallet-history");
       view.append(list);
@@ -9839,46 +10083,109 @@ async function loadWallet(route = "", push = true) {
       return;
     }
     if (route === "/locked") {
-      view.append(section("Сначала — вклад в сообщество", `Нужно заработать ${summary.transfer_threshold} кредитов за задания. Уже заработано ${summary.earned}, осталось ${Math.max(0, summary.transfer_threshold - summary.earned)}.`), element("p", "Стартовые кредиты, подарки и переводы не учитываются. Обычные траты не закрывают доступ обратно. Отменённые награды не считаются заработанными.", "muted"));
+      if (summary.transfers_enabled) return void loadWallet("/transfer", false);
+      view.classList.add("wallet-unlock-view");
+      const progressCard = element("section", undefined, "wallet-tile wallet-unlock-progress");
+      progressCard.append(
+        element("h2", "Сначала — вклад в сообщество", "wallet-tile-heading"),
+        element("p", "Переводы откроются, когда заработаешь нужное количество кредитов за задания.", "wallet-tile-value"),
+      );
+      const progress = element("progress");
+      progress.max = summary.transfer_threshold;
+      progress.value = Math.min(summary.earned, summary.transfer_threshold);
+      progress.setAttribute("aria-label", "Доступ к переводам");
+      const count = element("div", undefined, "wallet-unlock-count");
+      count.append(element("strong", `${summary.earned} / ${summary.transfer_threshold}`), element("span", "кредитов заработано", "wallet-label"));
+      progressCard.append(count, progress, element("p", `Осталось ${Math.max(0, summary.transfer_threshold - summary.earned)} кредитов`, "wallet-label"));
+      const earned = element("section", undefined, "wallet-tile");
+      earned.append(
+        element("h2", "Что учитывается", "wallet-tile-heading"),
+        element("p", "Подтверждённые награды за задания за вычетом отменённых начислений. Обычные траты не закрывают доступ к переводам.", "wallet-tile-value"),
+      );
+      const excluded = element("section", undefined, "wallet-tile");
+      excluded.append(
+        element("h2", "Что не учитывается", "wallet-tile-heading"),
+        element("p", "Стартовые кредиты, подарки, ручные начисления и переводы от других участников.", "wallet-tile-value"),
+      );
+      view.append(progressCard, earned, excluded);
     } else if (route === "/reserve") {
       view.append(element("strong", `${summary.reserved} кредитов`, "wallet-balance"), element("p", "Эти кредиты уже исключены из доступного баланса и предназначены для оплаты твоих заданий. После расчёта они поступят исполнителям, а неиспользованная часть вернётся в кошелёк."), walletButton("Мои задания", () => void loadTaskHome()));
     } else if (route.startsWith("/operations/")) {
-      const operation = await fetchJson(`/api/v1/wallet${route}`);
+      const operationRoute = route.replace(/\/task$/, "");
+      const operation = await fetchJson(`/api/v1/wallet${operationRoute}`);
       if (revision !== screenRevision) return;
-      view.append(element("strong", walletDelta(operation.credit_delta), "wallet-balance"), section(walletNames[operation.transaction_type] || "Операция", walletTime(operation.created_at)));
-      for (const [label, value] of [["Участник", operation.counterparty_name], ["Ник", operation.counterparty_username], ["Задание", operation.task_title], ["Основание", operation.reason], ["Комментарий", operation.comment], [operation.balance_reconstructed ? "Расчётный баланс после" : "Баланс после", `${operation.balance_after} кредитов`], ["Изменение опыта", String(operation.experience_delta)], ["Номер операции", operation.transaction_id]]) {
-        if (value) view.append(section(label, value));
+      if (route.endsWith("/task")) {
+        try {
+          if (!operation.task_id) throw new Error("task_unavailable");
+          if (operation.assignment_id && !operation.task_owned) {
+            const targetRevision = screenRevision + 1;
+            await showAssignmentDetail(operation.assignment_id, false);
+            if (screenRevision !== targetRevision) return;
+          } else {
+            const page = await fetchJson(`/api/v1/owned-tasks?scope=${operation.task_owned ? "created" : "performed"}`);
+            if (revision !== screenRevision) return;
+            const task = page.items.find(item => item.id === operation.task_id);
+            if (!task) throw new Error("task_unavailable");
+            showOwnedTask(task, false);
+          }
+          setHeaderControl("back", { onBack: () => void loadWallet(operationRoute), hideTitle: true, screenLabel: "Задание" });
+        } catch {
+          if (revision !== screenRevision) return;
+          replaceContent(walletTile("Задание недоступно", "Не удалось открыть связанное задание. Возможно, доступ изменился."), walletButton("К операции", () => void loadWallet(operationRoute)));
+        }
+        return;
       }
+      view.append(walletOperationDetails(operation));
     } else if (route === "/transfer" && !walletDraft?.pending) {
       if (!summary.transfers_enabled) return void loadWallet("/locked", false);
+      view.classList.add("wallet-tile", "wallet-transfer-form");
       walletDraft ||= { person: null, amount: "", comment: "", operationKey: null, pending: false };
       const searchLabel = element("label", "Кому", "wallet-field");
       const search = element("input"); search.type = "search"; search.placeholder = "Имя или @ник"; search.setAttribute("aria-label", "Найти получателя");
-      searchLabel.append(search);
+      search.id = "wallet-recipient-query"; search.autocomplete = "off"; search.maxLength = 80;
+      searchLabel.htmlFor = search.id;
+      const searchForm = element("form", undefined, "wallet-recipient-search");
+      searchForm.setAttribute("role", "search"); searchForm.setAttribute("aria-label", "Поиск получателя");
+      const searchField = element("div", undefined, "participant-search");
+      searchField.append(searchIcon(), search);
+      searchForm.append(searchField);
       const results = element("div", undefined, "wallet-recipients");
-      const selected = element("p", walletDraft.person ? `Получатель: ${walletDraft.person.display_name}` : "Выбери получателя", "wallet-label");
+      results.id = "wallet-recipient-results"; results.setAttribute("aria-live", "polite");
+      search.setAttribute("aria-controls", results.id);
+      const selected = element("p", walletDraft.person ? `Получатель: ${walletDraft.person.display_name}` : "Найди участника по имени или @нику и выбери из списка.", "wallet-label");
       let requestNumber = 0, timer;
-      search.addEventListener("input", () => {
-        const request = ++requestNumber; clearTimeout(timer); results.replaceChildren();
+      const findRecipients = async () => {
+        const request = ++requestNumber;
         const query = search.value.trim();
-        if (!query) return;
-        timer = setTimeout(async () => {
-          try {
-            const page = await fetchJson(`/api/v1/wallet/recipients?query=${encodeURIComponent(query)}`);
-            if (revision !== screenRevision || request !== requestNumber) return;
-            results.replaceChildren(...page.items.map(person => walletButton(`${person.display_name}${person.telegram_username ? ` · @${person.telegram_username}` : ""}`, () => {
-              walletDraft.person = person; selected.textContent = `Получатель: ${person.display_name}${person.telegram_username ? ` · @${person.telegram_username}` : ""}`; results.replaceChildren(); saveWalletDraft();
-            }, "wallet-recipient")));
-            if (!page.items.length) results.append(element("p", "Активные участники не найдены.", "muted"));
-          } catch { if (revision === screenRevision && request === requestNumber) results.textContent = "Не удалось выполнить поиск. Повтори запрос."; }
-        }, 220);
+        if (!query) { results.replaceChildren(element("p", "Введи имя или @ник участника.", "wallet-label")); return; }
+        results.replaceChildren(element("p", "Ищем участников…", "wallet-label"));
+        results.setAttribute("aria-busy", "true");
+        try {
+          const page = await fetchJson(`/api/v1/wallet/recipients?query=${encodeURIComponent(query)}`);
+          if (revision !== screenRevision || request !== requestNumber) return;
+          results.replaceChildren(...page.items.map(person => walletButton(`${person.display_name}${person.telegram_username ? ` · @${person.telegram_username}` : ""}`, () => {
+            ++requestNumber; clearTimeout(timer);
+            walletDraft.person = person; search.value = person.telegram_username ? `@${person.telegram_username}` : person.display_name;
+            selected.textContent = `Получатель: ${person.display_name}${person.telegram_username ? ` · @${person.telegram_username}` : ""}`;
+            results.replaceChildren(); saveWalletDraft();
+          }, "wallet-recipient")));
+          if (!page.items.length) results.append(element("p", "Активные участники не найдены.", "wallet-label"));
+        } catch { if (revision === screenRevision && request === requestNumber) results.textContent = "Не удалось выполнить поиск. Измени запрос или нажми Enter, чтобы повторить."; }
+        finally { if (revision === screenRevision && request === requestNumber) results.setAttribute("aria-busy", "false"); }
+      };
+      searchForm.addEventListener("submit", event => { event.preventDefault(); clearTimeout(timer); void findRecipients(); });
+      search.addEventListener("input", () => {
+        ++requestNumber; clearTimeout(timer); results.replaceChildren(); results.setAttribute("aria-busy", "false");
+        walletDraft.person = null; saveWalletDraft();
+        selected.textContent = "Выбери получателя из результатов поиска.";
+        if (search.value.trim()) timer = setTimeout(() => void findRecipients(), 220);
       });
       const amountLabel = element("label", "Сумма", "wallet-field"), amount = element("input");
       amount.type = "number"; amount.inputMode = "numeric"; amount.min = "1"; amount.max = String(summary.balance); amount.step = "1"; amount.value = walletDraft.amount; amountLabel.append(amount);
       const commentLabel = element("label", "Комментарий · необязательно", "wallet-field"), comment = element("input");
       comment.maxLength = 140; comment.value = walletDraft.comment; commentLabel.append(comment);
       const status = element("p", "", "status is-error"); status.setAttribute("role", "alert");
-      view.append(element("p", `Доступно ${summary.balance} кредитов · без комиссии`, "wallet-label"), searchLabel, results, selected, amountLabel, commentLabel, status, element("p", "Перевод не начисляет опыт.", "wallet-label"), walletButton("Продолжить", () => {
+      view.append(element("p", `Доступно ${summary.balance} кредитов · без комиссии`, "wallet-label"), searchLabel, searchForm, results, selected, amountLabel, commentLabel, status, element("p", "Перевод не начисляет опыт.", "wallet-label"), walletButton("Продолжить", () => {
         const value = Number(amount.value);
         if (!walletDraft.person || !Number.isSafeInteger(value) || value < 1 || value > summary.balance || value > 1000000000) { status.textContent = "Выбери получателя и укажи целую сумму в пределах баланса."; return; }
         walletDraft = { person: walletDraft.person, amount: value, comment: comment.value.trim(), operationKey: newOperationKey(), pending: false }; saveWalletDraft(); void loadWallet("/confirm");
@@ -9886,9 +10193,12 @@ async function loadWallet(route = "", push = true) {
     } else if (route === "/confirm" || walletDraft?.pending) {
       if (!walletDraft?.person) return void loadWallet("/transfer", false);
       const draft = walletDraft;
-      view.append(section("Получатель", `${draft.person.display_name}${draft.person.telegram_username ? ` · @${draft.person.telegram_username}` : ""}`), element("strong", `${draft.amount} кредитов`, "wallet-transfer-amount"), section("Комиссия", "0 кредитов"));
-      if (!draft.pending) view.append(section("Останется", `${summary.balance - draft.amount} кредитов`));
-      if (draft.comment) view.append(section("Комментарий", draft.comment));
+      view.append(walletTile("Получатель", `${draft.person.display_name}${draft.person.telegram_username ? ` · @${draft.person.telegram_username}` : ""}`), walletTile("Сумма перевода", `${draft.amount} кредитов`));
+      const metrics = element("div", undefined, "wallet-operation-metrics");
+      metrics.append(walletTile("Комиссия", "0 кредитов"));
+      if (!draft.pending) metrics.append(walletTile("Останется", `${summary.balance - draft.amount} кредитов`));
+      view.append(metrics);
+      if (draft.comment) view.append(walletTile("Комментарий", draft.comment));
       const status = element("p", draft.pending ? "Результат предыдущей отправки ещё не подтверждён. Повтори проверку — второй раз кредиты не спишутся." : "После подтверждения перевод нельзя отменить самостоятельно.", "status");
       const confirm = walletButton(draft.pending ? "Проверить и завершить перевод" : `Подтвердить перевод ${draft.amount}`, async () => {
         if (walletSending) return;
@@ -9899,7 +10209,7 @@ async function loadWallet(route = "", push = true) {
           if (revision !== screenRevision) return;
           title.textContent = "Перевод выполнен";
           const success = element("section", undefined, "wallet-view");
-          success.append(section(receipt.recipient.display_name, `Отправлено ${receipt.amount} кредитов`), section("Баланс после перевода", `${receipt.balance_after} кредитов`), walletButton("В кошелёк", () => void loadWallet(), "primary"));
+          success.append(walletTile(receipt.recipient.display_name, `Отправлено ${receipt.amount} кредитов`), walletTile("Баланс после перевода", `${receipt.balance_after} кредитов`), walletButton("В кошелёк", () => void loadWallet(), "primary"));
           replaceContent(success);
         } catch (error) {
           if ([400,403,404,409,422].includes(error?.status)) { draft.pending = false; walletDraft = draft; saveWalletDraft(); }
@@ -9921,8 +10231,14 @@ async function loadWallet(route = "", push = true) {
 }
 
 catalogNav.addEventListener("click", () => void loadTaskHome());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && location.hash === "#/settings/notifications"
+      && !content.querySelector("input:disabled")) {
+    void loadCommunityPreferences("notifications", false);
+  }
+});
 walletNav.addEventListener("click", () => void loadWallet());
-participantsNav.addEventListener("click", () => loadParticipants("members"));
+participantsNav.addEventListener("click", () => loadParticipants());
 profileNav.addEventListener("click", () => showSettings());
 moderationNav.addEventListener("click", () => loadModeration());
 back.addEventListener("click", () => {
@@ -9964,7 +10280,11 @@ back.addEventListener("click", () => {
   }
 });
 globalThis.addEventListener("popstate", (event) => {
-  if (/^#\/wallet(?:\/|$)/.test(location.hash)) {
+  if (location.hash === "#/settings/notifications") {
+    void loadCommunityPreferences("notifications", false);
+  } else if (location.hash === "#/moderation/registration") {
+    void loadCommunityPreferences("registration", false);
+  } else if (/^#\/wallet(?:\/|$)/.test(location.hash)) {
     void loadWallet(location.hash.slice(8), false);
   } else if (event.state?.screen === "wallet") {
     void loadWallet(event.state.walletRoute || "", false);
@@ -9974,7 +10294,7 @@ globalThis.addEventListener("popstate", (event) => {
     void loadCatalog(false);
   } else if (event.state?.screen === "participants") {
     loadParticipants(
-      event.state.view || "members",
+      event.state.view || "pulse",
       event.state.period || "week",
       event.state.metric || "experience",
     );
@@ -9997,6 +10317,8 @@ globalThis.addEventListener("popstate", (event) => {
     showAssignmentDetail(event.state.assignmentId, false);
   } else if (event.state?.screen === "profile") {
     loadProfile(false);
+  } else if (event.state?.screen === "community-preferences") {
+    void loadCommunityPreferences(event.state.kind, false);
   } else if (event.state?.screen === "settings") {
     showSettings(false);
   } else if (event.state?.screen === "member-profile") {

@@ -131,6 +131,12 @@ def test_wallet_root_and_recovery_keep_one_transfer_identity(mini_app_url: str) 
         page.goto(f"{mini_app_url}#/wallet")
         expect(page.locator("#wallet-nav")).to_have_attribute("aria-pressed", "true")
         expect(page.locator("#screen-title")).not_to_be_visible()
+        expect(page.locator(".wallet-credit-guide-row")).to_have_text(
+            [
+                "Заработать — Выполняй задания участников и комьюнити.",
+                "Потратить — Создавай свои задания и оплачивай работу участников.",
+            ]
+        )
         expect(page.get_by_text("Операций пока нет.")).to_be_visible()
         page.get_by_role("button", name="Перевести кредиты", exact=True).click()
         page.get_by_label("Найти получателя").fill("masha")
@@ -163,12 +169,157 @@ def test_wallet_root_and_recovery_keep_one_transfer_identity(mini_app_url: str) 
         browser.close()
 
 
+@pytest.mark.parametrize("width", [320, 390])
+def test_notification_preferences_tiles_save_restore_and_fail_safely(
+    mini_app_url: str, width: int
+) -> None:
+    state = {"tasks": True, "nomad": False, "revision": 0}
+    fail = False
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": width, "height": 844})
+        page.route("**/api/v1/**", lambda route: route.fulfill(status=403, json={}))
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+
+        def preferences(route: Route) -> None:
+            if route.request.method == "PATCH":
+                if fail:
+                    route.fulfill(status=409, json={"detail": "settings_changed"})
+                    return
+                body = route.request.post_data_json
+                assert isinstance(body, dict)
+                assert body["expected_revision"] == state["revision"]
+                state[body["category"]] = body["enabled"]
+                state["revision"] += 1
+            route.fulfill(json=state)
+
+        page.route("**/api/v1/notification-preferences", preferences)
+        page.goto(mini_app_url + "#/settings")
+        page.get_by_role("button", name="Уведомления Задания и Цифровой кочевник").click()
+        expect(page.get_by_role("checkbox", name="Задания", exact=True)).to_be_checked()
+        nomad = page.get_by_role("checkbox", name="Цифровой кочевник", exact=True)
+        expect(nomad).not_to_be_checked()
+        nomad.check()
+        expect(page.get_by_role("status")).to_have_text("Сохранено")
+        page.reload()
+        expect(nomad).to_be_checked()
+        assert (
+            page.locator("#screen-title").evaluate("el => getComputedStyle(el).fontSize") == "18px"
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        fail = True
+        nomad.uncheck()
+        expect(page.get_by_role("status")).to_contain_text("Настройки изменились")
+        expect(nomad).to_be_checked()
+        page.get_by_role("button", name="Назад", exact=True).click()
+        expect(
+            page.get_by_role("button", name="Уведомления Задания и Цифровой кочевник")
+        ).to_be_visible()
+        page.goto(mini_app_url + "#/settings/notifications")
+        expect(nomad).to_be_checked()
+        browser.close()
+
+
+def test_registration_policy_requires_explicit_confirmation(mini_app_url: str) -> None:
+    state = {"mode": "standard", "revision": 0}
+    changes = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 320, "height": 844})
+        page.route("**/api/v1/**", lambda route: route.fulfill(status=403, json={}))
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+
+        def policy(route: Route) -> None:
+            if route.request.method == "PATCH":
+                changes.append(route.request.post_data_json)
+                state.update(mode="simplified", revision=1)
+            route.fulfill(json=state)
+
+        page.route("**/api/v1/administration/registration-policy", policy)
+        page.goto(mini_app_url + "#/settings")
+        expect(page.locator(".settings-list")).to_be_visible()
+        page.goto(mini_app_url + "#/moderation/registration")
+        page.get_by_role("radio", name="Упрощённая", exact=True).check()
+        assert not changes
+        page.get_by_role("button", name="Отмена", exact=True).click()
+        expect(page.get_by_role("radio", name="Стандартная", exact=True)).to_be_checked()
+        page.get_by_role("radio", name="Упрощённая", exact=True).check()
+        page.get_by_role("button", name="Подтвердить изменение", exact=True).click()
+        expect(page.get_by_role("status")).to_have_text("Сохранено")
+        assert changes == [{"mode": "simplified", "confirmed": True, "expected_revision": 0}]
+        page.reload()
+        expect(page.get_by_role("radio", name="Упрощённая", exact=True)).to_be_checked()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        browser.close()
+
+
+def test_wallet_guide_links_open_catalog_and_creation(mini_app_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 320, "height": 740})
+        page.route("**/api/v1/**", lambda route: route.fulfill(status=403, json={}))
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route(
+            "**/api/v1/wallet",
+            lambda route: route.fulfill(
+                json={
+                    "balance": 20,
+                    "reserved": 0,
+                    "earned": 0,
+                    "transfer_threshold": 50,
+                    "transfers_enabled": False,
+                }
+            ),
+        )
+        page.route(
+            "**/api/v1/wallet/history?*",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
+        )
+        page.route(
+            "**/api/v1/task-creation",
+            lambda route: route.fulfill(
+                json={
+                    "categories": [],
+                    "time_sizes": [],
+                    "draft": None,
+                    "preview": None,
+                    "needs_edit": False,
+                }
+            ),
+        )
+        page.goto(f"{mini_app_url}#/wallet")
+        expect(page.get_by_role("link", name="Выполняй", exact=True)).to_have_attribute(
+            "href", "#/catalog?view_state=t01"
+        )
+        expect(page.get_by_role("link", name="Создавай", exact=True)).to_have_attribute(
+            "href", "#/compose/tasks?view_state=t04b"
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.get_by_role("link", name="Выполняй", exact=True).click()
+        page.locator('[data-screen-id="T01"]').wait_for()
+        page.go_back()
+        page.get_by_role("link", name="Создавай", exact=True).click()
+        page.locator('[data-screen-id="T05"]').wait_for()
+        expect(page.locator("#screen-title")).to_have_text("Новое задание")
+        page.go_back()
+        expect(page.get_by_role("link", name="Создавай", exact=True)).to_be_visible()
+        browser.close()
+
+
 @pytest.mark.browser_smoke
 def test_wallet_locked_deeplink_and_history_retry(mini_app_url: str) -> None:
     history_calls = 0
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
+        page.set_viewport_size({"width": 390, "height": 844})
         page.route(
             "**/api/v1/**", lambda route: route.fulfill(status=403, json={"code": "forbidden"})
         )
@@ -178,7 +329,7 @@ def test_wallet_locked_deeplink_and_history_retry(mini_app_url: str) -> None:
             lambda route: route.fulfill(
                 json={
                     "balance": 20,
-                    "reserved": 0,
+                    "reserved": 2,
                     "earned": 0,
                     "transfer_threshold": 50,
                     "transfers_enabled": False,
@@ -197,13 +348,161 @@ def test_wallet_locked_deeplink_and_history_retry(mini_app_url: str) -> None:
         page.route("**/api/v1/wallet/history?*", history)
         page.goto(f"{mini_app_url}#/wallet/transfer")
         expect(page.get_by_text("Сначала — вклад в сообщество", exact=True)).to_be_visible()
+        for width in (320, 390):
+            page.set_viewport_size({"width": width, "height": 844})
+            expect(page.locator(".wallet-unlock-view > .wallet-tile")).to_have_count(3)
+            assert (
+                page.locator("#screen-title").evaluate("el => getComputedStyle(el).fontSize")
+                == "18px"
+            )
+            assert (
+                page.locator(".wallet-tile-heading").first.evaluate(
+                    "el => getComputedStyle(el).fontSize"
+                )
+                == "15px"
+            )
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        expect(page.get_by_text("Осталось 50 кредитов", exact=True)).to_be_visible()
         expect(page.get_by_label("Найти получателя")).to_have_count(0)
         page.get_by_role("button", name="Назад", exact=True).click()
         page.get_by_role("button", name="Повторить загрузку истории", exact=True).click()
         expect(page.get_by_text("Операций пока нет.")).to_be_visible()
+        expect(page.get_by_role("button", name="Перевести кредиты", exact=True)).to_be_disabled()
         expect(
             page.get_by_role("button", name="Когда откроются переводы?", exact=True)
         ).to_be_visible()
+        assert (
+            page.locator(".wallet-balance-card").evaluate("el => el.getBoundingClientRect().height")
+            < 265
+        )
+        expect(page.get_by_role("button", name=re.compile("В резерве"))).to_be_visible()  # noqa: RUF001
+        browser.close()
+
+
+def test_wallet_recipient_search_submit_empty_and_selection_reset(mini_app_url: str) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 320, "height": 844})
+        page.route(
+            "**/api/v1/**", lambda route: route.fulfill(status=403, json={"code": "forbidden"})
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route(
+            "**/api/v1/wallet",
+            lambda route: route.fulfill(json={"balance": 54, "transfers_enabled": True}),
+        )
+        recipient = {
+            "member_id": "00000000-0000-0000-0000-000000000222",
+            "display_name": "Маша",
+            "telegram_username": "masha",
+        }
+        page.route(
+            "**/api/v1/wallet/recipients?*",
+            lambda route: route.fulfill(
+                json={
+                    "items": [recipient]
+                    if parse_qs(urlsplit(route.request.url).query).get("query") == ["masha"]
+                    else []
+                }
+            ),
+        )
+        page.goto(f"{mini_app_url}#/wallet/transfer")
+        search_form = page.get_by_role("search", name="Поиск получателя")
+        expect(search_form.get_by_role("button", name="Найти", exact=True)).to_have_count(0)
+        search_form.get_by_label("Найти получателя").press("Enter")
+        expect(page.get_by_text("Введи имя или @ник участника.", exact=True)).to_be_visible()
+        search = page.get_by_label("Найти получателя")
+        search.fill("nobody")
+        search.press("Enter")
+        expect(page.get_by_text("Активные участники не найдены.", exact=True)).to_be_visible()
+        search.fill("masha")
+        page.get_by_role("button", name="Маша · @masha", exact=True).click()
+        expect(page.get_by_text("Получатель: Маша · @masha", exact=True)).to_be_visible()
+        search.fill("")
+        page.get_by_label("Сумма", exact=True).fill("1")
+        page.get_by_role("button", name="Продолжить", exact=True).click()
+        expect(page.get_by_role("alert")).to_have_text(
+            "Выбери получателя и укажи целую сумму в пределах баланса."
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        browser.close()
+
+
+def test_wallet_operation_tiles_sources_and_unavailable_task(mini_app_url: str) -> None:
+    identifier = "00000000-0000-0000-0000-000000000333"
+    task_id = "00000000-0000-0000-0000-000000000444"
+    operation = {
+        "transaction_id": identifier,
+        "transaction_type": "task_reward_reserved",
+        "credit_delta": -2,
+        "experience_delta": 0,
+        "balance_after": 18,
+        "balance_reconstructed": True,
+        "created_at": "2026-08-28T16:23:00Z",
+        "task_id": task_id,
+        "task_title": "Длинное название задания " * 8,
+        "task_owned": True,
+        "comment": "<img src=x onerror=alert(1)>",
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route(
+            "**/api/v1/**", lambda route: route.fulfill(status=403, json={"code": "forbidden"})
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route("**/api/v1/wallet", lambda route: route.fulfill(json={"balance": 18}))
+        page.route("**/api/v1/wallet/operations/*", lambda route: route.fulfill(json=operation))
+        page.route(
+            "**/api/v1/wallet/history?*",
+            lambda route: route.fulfill(json={"items": [operation], "next_cursor": None}),
+        )
+        for width in (320, 390):
+            page.set_viewport_size({"width": width, "height": 844})
+            page.goto(f"{mini_app_url}#/wallet/operations/{identifier}")
+            expect(page.locator(".wallet-operation-hero")).to_be_visible()
+            assert (
+                page.locator("#screen-title").evaluate("el => getComputedStyle(el).fontSize")
+                == "18px"
+            )
+            expect(page.locator(".wallet-operation-metrics .wallet-tile")).to_have_count(2)
+            expect(page.get_by_text(operation["comment"], exact=True)).to_be_visible()
+            assert page.locator(".wallet-operation-detail img").count() == 0
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            link = page.get_by_role("link", name=re.compile("Задание"))
+            expect(link).to_have_attribute("href", f"#/wallet/operations/{identifier}/task")
+            link.click()
+            expect(page.get_by_text("Задание недоступно", exact=True)).to_be_visible()
+            page.get_by_role("button", name="К операции", exact=True).click()  # noqa: RUF001
+            expect(page.locator(".wallet-operation-hero")).to_be_visible()
+        operation.update(transaction_type="manual_credit_grant", task_id=None, comment=None)
+        page.reload()
+        expect(page.get_by_text("Кредиты начислены администратором.", exact=False)).to_be_visible()
+        expect(page.locator(".wallet-source-link")).to_have_count(0)
+        operation.update(
+            transaction_type="transfer_received", counterparty_id=task_id, counterparty_name="Маша"
+        )
+        page.reload()
+        expect(page.get_by_role("link", name=re.compile("Отправитель Маша"))).to_have_attribute(
+            "href", f"#/members/{task_id}"
+        )
+        operation.update(reversed_transaction_id=task_id)
+        page.reload()
+        expect(
+            page.get_by_role("link", name=re.compile("Открыть исходную операцию"))
+        ).to_have_attribute("href", f"#/wallet/operations/{task_id}")
+        page.goto(f"{mini_app_url}#/wallet/history")
+        expect(page.locator(".wallet-operation")).to_be_visible()
+        assert (
+            page.locator(".wallet-operation").evaluate("el => getComputedStyle(el).borderRadius")
+            == "18px"
+        )
+        page.locator(".wallet-operation").click()
+        expect(page.locator(".wallet-operation-hero")).to_be_visible()
+        assert errors == []
         browser.close()
 
 
@@ -1658,6 +1957,7 @@ def test_ui_next_member_profile_returns_to_participants(  # noqa: PLR0915
 
         page.goto(mini_app_url + "?theme=light#/tasks")
         page.get_by_role("button", name="Комьюнити", exact=True).click()
+        page.get_by_role("button", name="Люди", exact=True).click()
         page.locator(".member-row").click()
         page.locator(".foreign-profile").wait_for()
         member_back = page.get_by_role("button", name="Назад к участникам", exact=True)
@@ -3178,6 +3478,7 @@ def test_telegram_profile_photo_is_shared_persistent_and_keeps_initials_fallback
         assert avatar_requests == [avatar_path]
 
         page.get_by_role("button", name="Комьюнити", exact=True).click()
+        page.get_by_role("button", name="Люди", exact=True).click()
         page.locator(".member-row .person-avatar-photo").wait_for()
         assert avatar_requests == [avatar_path]
         page.locator(".member-row").click()
@@ -5343,6 +5644,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
 
         modes["leaderboard"] = "error"
         page.get_by_role("button", name="Комьюнити", exact=True).click()
+        page.get_by_role("button", name="Люди", exact=True).click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
         page.get_by_role("button", name="Лидерборд").click()
         page.get_by_text("Статистика временно недоступна.", exact=False).wait_for()
@@ -5358,11 +5660,13 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         modes["leaderboard"] = "empty"
         assert page.locator("#primary-navigation").is_visible()
         page.locator("#participants-nav").click()
+        page.get_by_role("button", name="Люди", exact=True).click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
         page.get_by_role("button", name="Лидерборд").click()
         page.get_by_text("В лидерборде пока никого нет.").wait_for()  # noqa: RUF001
 
         page.locator("#participants-nav").click()
+        page.get_by_role("button", name="Люди", exact=True).click()
         page.locator('[data-screen-id="P01"][data-state="content"]').wait_for()
         page.get_by_role("button", name="Задания", exact=True).click()
         page.get_by_role("heading", name="Задания").wait_for()
@@ -5637,6 +5941,11 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             page.route("**/api/v1/community-stats/leaderboard?*", leaderboard_route)
             page.goto(mini_app_url)
             page.get_by_role("button", name="Комьюнити", exact=True).click()
+            page.locator('[data-screen-id="P08"][data-state="content"]').wait_for()
+            expect(page.get_by_role("button", name="Пульс", exact=True)).to_have_attribute(
+                "aria-pressed", "true"
+            )
+            page.get_by_role("button", name="Люди", exact=True).click()
             page.locator(".member-row").nth(5).wait_for()
             assert page.get_by_text("LEGACY_AVAILABILITY_VALUE", exact=True).count() == 0
 
@@ -5690,6 +5999,11 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
 
             page.get_by_role("button", name="Пульс", exact=True).click()
             page.locator('[data-screen-id="P08"][data-state="content"]').wait_for()
+            assert page.locator(".participants-tabs button").all_text_contents() == [
+                "Пульс",
+                "Люди",
+                "Лидерборд",
+            ]
             assert page.locator(".pulse-card h2, .pulse-helper").count() == 0
             assert page.get_by_text("получено реакций", exact=True).count() == 1
             assert page.get_by_text("поставлено реакций", exact=True).count() == 1

@@ -1167,6 +1167,25 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             telegram_display_name=telegram_display_name,
         )
 
+    async def registration_mode(self) -> str:
+        """Read admission policy inside the registration transaction."""
+        return await registration_store.registration_mode(self._require_session())
+
+    async def create_simplified_registration(
+        self,
+        *,
+        telegram_user_id: int,
+        telegram_username: str | None,
+        telegram_display_name: str,
+    ) -> RegistrationContext:
+        """Create an active profile under the registration identity lock."""
+        return await registration_store.create_simplified_registration(
+            self._require_session(),
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+            telegram_display_name=telegram_display_name,
+        )
+
     async def update_registration_username(
         self,
         *,

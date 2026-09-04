@@ -657,6 +657,38 @@ class OutboxEventModel(Base):
     )
 
 
+class CommunityRegistrationPolicyModel(Base):
+    """One runtime admission mode, changed only by a superadministrator."""
+
+    __tablename__ = "community_registration_policy"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_registration_policy_singleton"),
+        CheckConstraint("mode IN ('standard','simplified')", name="ck_registration_policy_mode"),
+        CheckConstraint("revision >= 0", name="ck_registration_policy_revision"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="standard")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class MemberNotificationPreferencesModel(Base):
+    """Shared Telegram and Mini App settings; dates prevent historical catch-up."""
+
+    __tablename__ = "member_notification_preferences"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_notification_preferences_revision"),
+        CheckConstraint("NOT nomad OR nomad_since IS NOT NULL", name="ck_nomad_subscription_since"),
+    )
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), primary_key=True
+    )
+    tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    nomad: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    tasks_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    nomad_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class NotificationModel(Base):
     """One addressable, retryable notification derived from a durable event."""
 

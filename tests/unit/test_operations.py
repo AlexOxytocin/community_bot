@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from contextlib import contextmanager
@@ -11,9 +12,25 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 from ops import _runtime as runtime
+from ops.seed_wallet_local import seed as seed_wallet
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://localhost:5432/community_bot_local",
+        "postgresql+asyncpg://production.example:55432/community_bot_local",
+        "postgresql+asyncpg://127.0.0.1:55432/production",
+    ],
+)
+def test_wallet_seed_rejects_other_databases(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    """Refuse an unintended database before opening a connection."""
+    monkeypatch.setenv("DATABASE_URL", url)
+    with pytest.raises(RuntimeError, match="Refusing to seed"):
+        asyncio.run(seed_wallet())
 
 
 def test_production_compose_contains_internal_web_without_public_ports() -> None:
@@ -161,6 +178,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "release_contract.py",
         "restore_drill.py",
         "seed_task_home_local.py",
+        "seed_wallet_local.py",
         "serve_community_stats_stub.py",
         "wallet_cutover.py",
     }

@@ -41,9 +41,7 @@ class AiogramTelegramMembershipChecker:
         """Return Telegram's current membership decision."""
         try:
             member = await self._bot.get_chat_member(chat_id=chat_id, user_id=telegram_user_id)
-        except (TelegramNetworkError, TelegramServerError) as error:
-            raise MembershipCheckUnavailableError from error
-        except (TelegramBadRequest, TelegramForbiddenError) as error:
+        except TelegramAPIError as error:
             raise MembershipCheckUnavailableError from error
         if member.status in _MEMBER_STATUSES:
             return True

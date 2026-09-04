@@ -122,16 +122,36 @@ class SqlAlchemyWalletStore:
           )
           SELECT h.id AS transaction_id,h.transaction_type,h.credit_delta,h.experience_delta,
             h.comment,h.reason,h.created_at,task.id AS task_id,task.title AS task_title,
-            h.reversed_transaction_id,
+            original.id AS reversed_transaction_id,
+            COALESCE(h.assignment_id,original.assignment_id) AS assignment_id,
+            task.creator_id=:member AS task_owned,
             COALESCE(h.balance_after,h.historical_balance) AS balance_after,
             h.balance_after IS NULL AS balance_reconstructed,
-            wt.id AS transfer_id, peer.display_name AS counterparty_name,
-            peer.telegram_username AS counterparty_username
-          FROM h LEFT JOIN assignments assignment ON assignment.id=h.assignment_id
-          LEFT JOIN tasks task ON task.id=COALESCE(h.task_id,assignment.task_id)
+            wt.id AS transfer_id, peer.id AS counterparty_id,
+            peer.display_name AS counterparty_name,
+            peer.telegram_username AS counterparty_username,
+            author.display_name AS actor_name
+          FROM h
+          LEFT JOIN account_transactions original
+            ON original.id=h.reversed_transaction_id AND original.member_id=:member
+          LEFT JOIN assignments assignment
+            ON assignment.id=COALESCE(h.assignment_id,original.assignment_id)
+          LEFT JOIN tasks published ON published.creator_id=:member
+            AND COALESCE(original.transaction_type,h.transaction_type)='task_reward_reserved'
+            AND COALESCE(original.idempotency_key,h.idempotency_key)
+              ='task_publish:'||published.publish_command_id::text||':'||'reserve'
+          LEFT JOIN tasks refunded ON refunded.creator_id=:member
+            AND COALESCE(original.transaction_type,h.transaction_type)='task_reward_refunded'
+            AND COALESCE(original.idempotency_key,h.idempotency_key) IN (
+              concat('task_cancel',':',refunded.id::text,':','refund'),
+              concat('task_close',':',refunded.id::text,':','free_slots',':','refund'))
+          LEFT JOIN tasks task
+            ON task.id=COALESCE(
+              h.task_id,original.task_id,assignment.task_id,published.id,refunded.id)
           LEFT JOIN wallet_transfers wt ON wt.outgoing_id=h.id OR wt.incoming_id=h.id
           LEFT JOIN members peer ON peer.id=CASE WHEN wt.sender_id=:member
             THEN wt.recipient_id ELSE wt.sender_id END
+          LEFT JOIN members author ON author.id=h.created_by_member_id
           WHERE {where} ORDER BY h.created_at DESC,h.id DESC LIMIT :limit
         """),
                     params,
