@@ -14,7 +14,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 
 from community_bot.application.economy import ProductConfigBootstrapCoordinator
 from community_bot.application.registration import RegistrationService, RegistrationStartCommand
@@ -22,12 +22,16 @@ from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.community_preferences import PreferencesConflictError
 from community_bot.domain.notifications import DeliveryWindow
-from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
+from community_bot.infrastructure.db.community_preferences import (
+    CommunityPreferencesStore,
+    subscription_allows,
+)
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import (
     AccountTransactionModel,
     AuditEventModel,
     MemberModel,
+    MemberNotificationPreferencesModel,
     NotificationModel,
     RegistrationApplicationModel,
 )
@@ -189,17 +193,17 @@ async def _concurrent_bot_and_web_entry(db: Database) -> None:
         assert bot_response.status_code == 200
         assert web_response.status_code == 204
         preferences = await client.get("/api/v1/notification-preferences")
-        assert preferences.json() == {"tasks": True, "nomad": False, "revision": 0}
+        assert preferences.json() == {"tasks": False, "nomad": False, "revision": 0}
 
 
 async def test_preferences_serialize_devices_and_preserve_defaults(
     community: CommunityFixture,
 ) -> None:
     db, store, owner, reader = community
-    assert await store.preferences(reader.id) == {"tasks": True, "nomad": False, "revision": 0}
+    assert await store.preferences(reader.id) == {"tasks": False, "nomad": False, "revision": 0}
     changes = await asyncio.gather(
         store.set_preference(reader.id, "nomad", enabled=True, expected_revision=0),
-        store.set_preference(reader.id, "tasks", enabled=False, expected_revision=0),
+        store.set_preference(reader.id, "tasks", enabled=True, expected_revision=0),
         return_exceptions=True,
     )
     assert sum(isinstance(result, PreferencesConflictError) for result in changes) == 1
@@ -208,6 +212,29 @@ async def test_preferences_serialize_devices_and_preserve_defaults(
     with pytest.raises(PermissionError):
         await store.set_policy(reader.id, "simplified", 0)
     assert (await store.policy(owner.id))["mode"] == "standard"
+
+
+async def test_task_notifications_require_opt_in_and_saved_choices_survive(
+    community: CommunityFixture,
+) -> None:
+    db, store, _, reader = community
+    now = datetime.datetime.now(datetime.UTC)
+    async with db.session_factory.begin() as session:
+        assert not await subscription_allows(session, reader.id, "task.published", now)
+        await session.execute(
+            insert(MemberNotificationPreferencesModel).values(member_id=reader.id)
+        )
+    assert (await store.preferences(reader.id))["tasks"] is False
+    enabled = await store.set_preference(reader.id, "tasks", enabled=True, expected_revision=0)
+    revision = enabled["revision"]
+    assert isinstance(revision, int)
+    await store.set_preference(reader.id, "nomad", enabled=True, expected_revision=revision)
+    assert (await store.preferences(reader.id))["tasks"] is True
+    async with db.session_factory() as session:
+        assert await subscription_allows(
+            session, reader.id, "task.published", datetime.datetime.now(datetime.UTC)
+        )
+        assert not await subscription_allows(session, reader.id, "task.published", now)
 
 
 async def test_nomad_outbox_dedup_and_unsubscribe_before_send(community: CommunityFixture) -> None:

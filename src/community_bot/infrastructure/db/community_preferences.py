@@ -51,7 +51,7 @@ async def subscription_allows(
         return True
     preferences = await session.get(MemberNotificationPreferencesModel, member_id)
     if preferences is None:
-        return category == "tasks"
+        return False
     since = getattr(preferences, f"{category}_since")
     return bool(getattr(preferences, category) and (since is None or since <= occurred_at))
 
@@ -93,7 +93,7 @@ class CommunityPreferencesStore:
             row = await session.get(MemberNotificationPreferencesModel, member_id)
             if row is None:
                 row = MemberNotificationPreferencesModel(
-                    member_id=member_id, tasks=True, nomad=False, revision=0
+                    member_id=member_id, tasks=False, nomad=False, revision=0
                 )
                 session.add(row)
             if row.revision != expected_revision:
@@ -213,7 +213,7 @@ class CommunityPreferencesStore:
     @staticmethod
     def _preferences(row: MemberNotificationPreferencesModel | None) -> dict[str, object]:
         return {
-            "tasks": row.tasks if row else True,
+            "tasks": row.tasks if row else False,
             "nomad": row.nomad if row else False,
             "revision": row.revision if row else 0,
         }

@@ -8,7 +8,14 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
 
 from community_bot.application.membership import MembershipCheckUnavailableError
 from community_bot.application.registration import RegistrationStartCommand
@@ -26,6 +33,20 @@ if TYPE_CHECKING:
     from community_bot.application.registration import RegistrationService
     from community_bot.bootstrap.settings import Settings
     from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
+
+APP_BUTTON = "📱 Приложение"
+NOTIFICATIONS_BUTTON = "🔔 Уведомления"
+
+
+def home_keyboard() -> ReplyKeyboardMarkup:
+    """Keep a compact native menu visible without changing secure Mini App launch."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=APP_BUTTON), KeyboardButton(text=NOTIFICATIONS_BUTTON)]],
+        resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Выберите действие в меню",
+    )
 
 
 class TelegramUpdates:
@@ -58,7 +79,11 @@ class TelegramUpdates:
                 return
             text = message.text or ""
             command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
-            if command in {"/start", "/notifications"}:
+            if text == APP_BUTTON:
+                command, text = "/app", "/app"
+            elif text == NOTIFICATIONS_BUTTON:
+                command, text = "/notifications", "/notifications"
+            if command in {"/start", "/notifications", "/app"}:
                 await self._private_command(update.update_id, message.from_user, command, text)
             return
         if (
@@ -119,7 +144,13 @@ class TelegramUpdates:
             await self._send(user_id, "Бот и приложение доступны только участникам чата.", buttons)
         return joined
 
-    async def _private_command(self, update_id: int, user: User, command: str, text: str) -> None:
+    async def _private_command(  # noqa: PLR0911 - explicit membership, status and menu gates.
+        self,
+        update_id: int,
+        user: User,
+        command: str,
+        text: str,
+    ) -> None:
         if not await self._member_gate(user.id):
             return
         existing = await self.store.member_for_telegram(user.id)
@@ -128,9 +159,20 @@ class TelegramUpdates:
             return
         if command == "/notifications":
             if existing is None or existing.status != "active":
-                await self._send(user.id, "Сначала завершите регистрацию через /start.")
+                await self._send(
+                    user.id,
+                    "Сначала завершите регистрацию — нажмите кнопку ниже.",
+                    [[InlineKeyboardButton(text="Продолжить", callback_data="community:check")]],
+                )
                 return
             await self._show_preferences(user.id, existing.id)
+            return
+        if command == "/app" and existing is not None and existing.status == "active":
+            await self._send(
+                user.id,
+                "Задания, сообщество и кошелёк — всё в приложении.",
+                self._launch_buttons(),
+            )
             return
         parts = text.split(maxsplit=1)
         invitation = parts[1] if len(parts) == 2 and len(parts[1]) <= 256 else None  # noqa: PLR2004
@@ -154,25 +196,34 @@ class TelegramUpdates:
             )
             return
         active = view.context.member_status is MemberStatus.ACTIVE
-        buttons = []
-        if self.settings.telegram_bot_username:
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text="Открыть приложение" if active else "Продолжить регистрацию",
-                        url=f"https://t.me/{self.settings.telegram_bot_username}?startapp",
-                    )
-                ]
-            )
         if active:
-            buttons.append(
-                [InlineKeyboardButton(text="Уведомления", callback_data="notifications:open")]
+            await self._send(
+                user.id,
+                "Добро пожаловать!\n\n"
+                "Задания, сообщество и кошелёк — в приложении.\n"
+                "Настройки уведомлений — в меню ниже.",
+                reply_keyboard=home_keyboard(),
             )
-        await self._send(
-            user.id,
-            "Добро пожаловать!" if active else "Продолжите регистрацию в приложении.",
-            buttons,
-        )
+        else:
+            await self._send(
+                user.id,
+                "Продолжите регистрацию в приложении.",
+                self._launch_buttons("Продолжить регистрацию"),
+            )
+
+    def _launch_buttons(self, label: str = "Открыть приложение") -> list:
+        # A regular reply-keyboard web_app does not provide the user initData
+        # required by our auth. Keep the main-app Telegram launch instead.
+        if not self.settings.telegram_bot_username:
+            return []
+        return [
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    url=f"https://t.me/{self.settings.telegram_bot_username}?startapp",
+                )
+            ]
+        ]
 
     async def _callback(self, update_id: int, callback: CallbackQuery) -> None:
         # Ignore inline/forwarded keyboards and callbacks from outside the bot's private dialog.
@@ -221,7 +272,13 @@ class TelegramUpdates:
             ]
             for key, label in (("tasks", "Задания"), ("nomad", "Цифровой кочевник"))
         ]
-        text = "Уведомления\n\nНастройки общие с приложением. Нажмите на нужный блок."
+        text = (
+            "Уведомления\n\n"
+            "Подписаться на события Цифрового кочевника\n"
+            "Новые публикации суперадминистратора со ссылкой на сообщение.\n\n"
+            "Задания\nНовые задания, изменения и напоминания. По умолчанию выключены.\n\n"
+            "Выберите нужные подписки кнопками ниже. Настройки общие с приложением."
+        )
         if message_id is not None:
             try:
                 await self.bot.edit_message_text(
@@ -236,12 +293,24 @@ class TelegramUpdates:
                 return
         await self._send(user_id, text, buttons)
 
-    async def _send(self, user_id: int, text: str, buttons: list | None = None) -> None:
+    async def _send(
+        self,
+        user_id: int,
+        text: str,
+        buttons: list | None = None,
+        *,
+        reply_keyboard: ReplyKeyboardMarkup | None = None,
+    ) -> None:
         try:
             await self.bot.send_message(
                 chat_id=user_id,
                 text=text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons or []),
+                reply_markup=reply_keyboard
+                or (
+                    InlineKeyboardMarkup(inline_keyboard=buttons)
+                    if buttons
+                    else ReplyKeyboardRemove()
+                ),
             )
         except (TelegramForbiddenError, TelegramBadRequest):
             return

@@ -15,10 +15,15 @@ from community_bot.application.identity import ActorContext
 from community_bot.application.membership import MembershipCheckUnavailableError
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.community_preferences import notification_category, topic_message_url
+from community_bot.domain.members import MemberStatus
 from community_bot.infrastructure.db.community_preferences import active_superadministrator
 from community_bot.infrastructure.db.models import MemberModel
 from community_bot.transport.community_settings import install_community_settings_routes
-from community_bot.transport.telegram_updates import TelegramUpdates
+from community_bot.transport.telegram_updates import (
+    APP_BUTTON,
+    NOTIFICATIONS_BUTTON,
+    TelegramUpdates,
+)
 
 CHAT_ID = -1002237685639
 TOPIC_ID = 24962
@@ -74,7 +79,7 @@ def _handler() -> tuple[TelegramUpdates, AsyncMock, AsyncMock]:
     store = AsyncMock(
         publish_nomad=AsyncMock(),
         member_for_telegram=AsyncMock(return_value=None),
-        preferences=AsyncMock(return_value={"tasks": True, "nomad": False, "revision": 0}),
+        preferences=AsyncMock(return_value={"tasks": False, "nomad": False, "revision": 0}),
         set_preference=AsyncMock(),
     )
     bot = AsyncMock(
@@ -157,6 +162,54 @@ async def test_bot_preferences_use_explicit_shared_value_and_revision() -> None:
     await handler.handle(json.dumps({"update_id": 4, "callback_query": callback}).encode())
     store.set_preference.assert_awaited_once_with(member_id, "nomad", True, 0)  # noqa: FBT003
     cast("AsyncMock", handler.bot).edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_shows_compact_persistent_bottom_menu() -> None:
+    handler, _, registration = _handler()
+    registration.start.return_value = SimpleNamespace(
+        context=SimpleNamespace(member_status=MemberStatus.ACTIVE)
+    )
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": "/start"}
+    await handler.handle(json.dumps({"update_id": 11, "message": message}).encode())
+    markup = cast("AsyncMock", handler.bot).send_message.call_args.kwargs["reply_markup"]
+    assert markup.is_persistent
+    assert markup.resize_keyboard
+    assert not markup.one_time_keyboard
+    assert [[key.text for key in row] for row in markup.keyboard] == [
+        [APP_BUTTON, NOTIFICATIONS_BUTTON]
+    ]
+    assert all(key.web_app is None for row in markup.keyboard for key in row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", [APP_BUTTON, NOTIFICATIONS_BUTTON])
+async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
+    handler, store, registration = _handler()
+    store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": label}
+    await handler.handle(json.dumps({"update_id": 12, "message": message}).encode())
+    reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
+    registration.start.assert_not_awaited()
+    if label == APP_BUTTON:
+        assert (
+            reply["reply_markup"].inline_keyboard[0][0].url
+            == "https://t.me/humanquest_bot?startapp"
+        )
+    else:
+        assert "Подписаться на события Цифрового кочевника" in reply["text"]
+        assert "По умолчанию выключены" in reply["text"]
+        assert reply["reply_markup"].inline_keyboard[0][0].text == "☐ Задания"
+    store.set_preference.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bottom_menu_rechecks_membership_before_preferences() -> None:
+    handler, store, _ = _handler()
+    cast("AsyncMock", handler.membership).is_member.return_value = False
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": NOTIFICATIONS_BUTTON}
+    await handler.handle(json.dumps({"update_id": 13, "message": message}).encode())
+    store.preferences.assert_not_awaited()
 
 
 @pytest.mark.asyncio

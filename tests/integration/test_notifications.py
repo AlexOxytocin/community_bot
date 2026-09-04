@@ -20,6 +20,7 @@ from community_bot.infrastructure.db import Database, readiness_report
 from community_bot.infrastructure.db.models import (
     AssignmentModel,
     MemberModel,
+    MemberNotificationPreferencesModel,
     NotificationModel,
     OutboxEventModel,
     TaskCancellationRequestModel,
@@ -125,6 +126,10 @@ async def _seed_published_task(
         )
         session.add_all((owner, recipient, inactive, category))
         await session.flush()
+        session.add_all(
+            MemberNotificationPreferencesModel(member_id=member.id, tasks=True)
+            for member in (owner, recipient, inactive)
+        )
         session.add(template)
         await session.flush()
         session.add(task)
@@ -249,6 +254,11 @@ async def test_registration_and_dispute_events_notify_active_moderation_staff(
             status="disputed",
         )
         session.add_all((moderator, administrator, paused_moderator, assignment))
+        await session.flush()
+        session.add_all(
+            MemberNotificationPreferencesModel(member_id=member.id, tasks=True)
+            for member in (moderator, administrator, paused_moderator)
+        )
     await _add_outbox(
         database,
         event_type="registration.submitted",
@@ -430,8 +440,7 @@ async def test_rejection_notification_preserves_only_explainable_reason(
         notifications = (
             await session.scalars(
                 select(NotificationModel).where(
-                    NotificationModel.notification_type
-                    == "assignment_rejection_pending_dispute"
+                    NotificationModel.notification_type == "assignment_rejection_pending_dispute"
                 )
             )
         ).all()

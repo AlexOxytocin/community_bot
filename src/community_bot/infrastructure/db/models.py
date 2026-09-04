@@ -682,7 +682,7 @@ class MemberNotificationPreferencesModel(Base):
     member_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("members.id"), primary_key=True
     )
-    tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     nomad: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     tasks_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))

@@ -1,4 +1,4 @@
-"""Bounded 0032 -> 0033 release with a frozen-runtime gate and database recovery.
+"""Bounded 0033 -> 0034 release with a frozen-runtime gate and database recovery.
 
 Run from an exact clean Git checkout. Prepare builds but never stops production.
 Apply uses the measured receipt, rechecks drift, and keeps writers in maintenance
@@ -28,10 +28,12 @@ PROJECT = "community-mini-app-core"
 SERVICES = {"postgres", "migrate", "worker", "web"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
-FROM_HEAD, TO_HEAD = "0032", "0033"
+FROM_HEAD, TO_HEAD = "0033", "0034"
 
 # Only economic data: maintenance heartbeats must not invalidate this invariant.
 FINGERPRINT_SQL = """SELECT json_build_object(
+ 'preferences_hash', (SELECT md5(COALESCE(string_agg(
+   row_to_json(p)::text, ',' ORDER BY member_id),'')) FROM member_notification_preferences p),
  'members', (SELECT count(*) FROM members),
  'ledger', (SELECT count(*) FROM account_transactions),
  'member_hash', (SELECT md5(COALESCE(string_agg(

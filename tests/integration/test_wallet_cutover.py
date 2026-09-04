@@ -78,6 +78,10 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
         f"transaction_type,idempotency_key,payload_hash) VALUES ('{uuid4()}','{member}',"
         f"10,0,'starting_grant','starting_grant:{member}',repeat('a',64))"
     )
+    host.sql(
+        "INSERT INTO member_notification_preferences (member_id,tasks,revision) "
+        f"VALUES ('{member}',true,1)"
+    )
     try:
         host.backup_restore()
         assert host.receipt["restore_verified"]
