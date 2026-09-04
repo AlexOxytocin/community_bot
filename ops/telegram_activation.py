@@ -41,7 +41,7 @@ WEBHOOK_LOCATION = """    location = /api/telegram/webhook {
 # Executed as a fixed argv program inside the existing image. Only rollback data
 # (not executable source) uses stdin. Bot tokens never leave the runtime.
 RUNTIME = r"""
-import asyncio, json, sys, urllib.request, urllib.error
+import asyncio, json, re, sys, urllib.request, urllib.error
 from aiogram import Bot
 from aiogram.types import BotCommand
 from community_bot.bootstrap.settings import get_settings
@@ -72,15 +72,19 @@ async def main():
                 'url':url, 'menu':(await bot.get_chat_menu_button()).model_dump(mode='json')}))
         elif action == "probe":
             results = {}
-            for name, base in [('public',s.mini_app_origin),('internal','http://127.0.0.1:8000')]:
+            for name, base in [('public',s.mini_app_origin),('public_identified',s.mini_app_origin),('internal','http://127.0.0.1:8000')]:
+                headers = {'Content-Type':'application/json','X-Telegram-Bot-Api-Secret-Token':'invalid-secret'}
+                if name == 'public_identified': headers['User-Agent'] = 'CommunityBot-Webhook-Verification/1.0'
                 req = urllib.request.Request(base.rstrip('/')+'/api/telegram/webhook', data=b'{"update_id":0}',
-                    headers={'Content-Type':'application/json','X-Telegram-Bot-Api-Secret-Token':'invalid-secret'})
+                    headers=headers)
                 try:
                     r = urllib.request.urlopen(req,timeout=10)
                 except urllib.error.HTTPError as e: r = e
                 with r:
                     results[name] = {'status':r.status,'type':r.headers.get('Content-Type'),
                         'server':r.headers.get('Server'),'mitigated':r.headers.get('cf-mitigated')}
+                    codes = re.findall(r'error code: (\d{4})',r.read(1024).decode(errors='replace'))
+                    if codes: results[name]['edge_error_code'] = codes[0]
             print(json.dumps(results))
         elif action == "apply":
             from community_bot.bootstrap.telegram_features import configure
@@ -90,7 +94,8 @@ async def main():
             url = s.mini_app_origin.rstrip('/') + '/api/telegram/webhook'
             def request(secret):
                 req = urllib.request.Request(url, data=b'{"update_id":0}', headers={
-                    'Content-Type':'application/json', 'X-Telegram-Bot-Api-Secret-Token':secret})
+                    'Content-Type':'application/json', 'X-Telegram-Bot-Api-Secret-Token':secret,
+                    'User-Agent':'CommunityBot-Webhook-Verification/1.0'})
                 try:
                     with urllib.request.urlopen(req, timeout=10) as r: return r.status
                 except urllib.error.HTTPError as e: return e.code
