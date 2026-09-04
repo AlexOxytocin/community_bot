@@ -90,18 +90,19 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
     try:
         while True:
             now = datetime.datetime.now(datetime.UTC)
-            deadlines_finalized = await deadlines.tick(now=now)
-            result = await worker.tick(now=now)
+            if not settings.release_maintenance:
+                deadlines_finalized = await deadlines.tick(now=now)
+                result = await worker.tick(now=now)
+                logger.info(
+                    "worker_tick_completed",
+                    deadlines_finalized=deadlines_finalized,
+                    **asdict(result),
+                )
             await queue.heartbeat(
                 process_name="community-worker",
                 release=settings.release,
                 migration_revision=migration_revision,
                 now=now,
-            )
-            logger.info(
-                "worker_tick_completed",
-                deadlines_finalized=deadlines_finalized,
-                **asdict(result),
             )
             if once:
                 return

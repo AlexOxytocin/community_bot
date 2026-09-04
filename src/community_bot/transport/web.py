@@ -11,7 +11,7 @@ import hmac
 import json
 import re
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal
@@ -982,6 +982,21 @@ def create_web_app(
     app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     started_at = heartbeat_not_before or datetime.datetime.now(datetime.UTC)
 
+    if settings.release_maintenance:
+
+        @app.middleware("http")
+        async def maintenance_gate(
+            request: Request,
+            call_next: Callable[[Request], Awaitable[Response]],
+        ) -> Response:
+            if request.url.path not in {"/healthz", "/readyz"}:
+                return JSONResponse(
+                    {"code": "release_maintenance"},
+                    status_code=503,
+                    headers={"Cache-Control": "no-store", "Retry-After": "30"},
+                )
+            return await call_next(request)
+
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "alive"}, headers={"Cache-Control": "no-store"})
@@ -1009,10 +1024,14 @@ def create_web_app(
             **report.as_dict(),
             "invitation_config": invitation_configured,
             "release": settings.release,
+            "maintenance": settings.release_maintenance,
         }
         payload["healthy"] = report.healthy and runtime_config_healthy
         if report.healthy and not runtime_config_healthy:
             payload["code"] = "invitation_config_missing"
+        if settings.release_maintenance:
+            payload["healthy"] = False
+            payload["code"] = "release_maintenance"
         return JSONResponse(
             payload,
             status_code=200 if payload["healthy"] else 503,
@@ -1635,7 +1654,10 @@ def create_web_app(
         _require_origin(request, origin)
         actor = await current_actor(request)
         operation_key = _idempotency_key(request)
-        payload = await _submission_request(request, WalletTransferRequest)
+        payload = cast(
+            "WalletTransferRequest | None",
+            await _submission_request(request, WalletTransferRequest),
+        )
         if payload is None:
             return _error_response(422, "invalid_request")
         try:
@@ -3413,6 +3435,7 @@ async def _submission_request(
         | PersonalInvitationCreateRequest
         | MembershipResourceCreateRequest
         | CreditGrantRequest
+        | WalletTransferRequest
     ],
 ) -> (
     SaveSubmissionDraftRequest
@@ -3427,6 +3450,7 @@ async def _submission_request(
     | PersonalInvitationCreateRequest
     | MembershipResourceCreateRequest
     | CreditGrantRequest
+    | WalletTransferRequest
     | None
 ):
     if request.headers.get("content-type", "").lower() != "application/json":

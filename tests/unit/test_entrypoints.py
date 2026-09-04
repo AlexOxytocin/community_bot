@@ -61,11 +61,15 @@ def test_worker_handles_operator_interrupt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance", [False, True])
 async def test_worker_once_composes_ticks_heartbeats_and_closes(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    maintenance: bool,
 ) -> None:
     events: list[str] = []
     settings = _worker_settings()
+    settings.release_maintenance = maintenance
 
     class Database:
         session_factory = object()
@@ -119,9 +123,7 @@ async def test_worker_once_composes_ticks_heartbeats_and_closes(  # noqa: C901
 
     await entrypoint._run(once=True, window=DeliveryWindow())  # noqa: SLF001
 
-    assert events == [
-        "deadlines",
-        "notifications",
+    assert events == ([] if maintenance else ["deadlines", "notifications"]) + [
         "heartbeat",
         "bot_closed",
         "database_closed",

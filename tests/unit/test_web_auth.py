@@ -111,6 +111,30 @@ def _app(database: FakeDatabase) -> FastAPI:
     )
 
 
+@pytest.mark.asyncio
+async def test_release_maintenance_blocks_sessions_and_all_product_routes() -> None:
+    database = FakeDatabase()
+    app = create_web_app(
+        settings=Settings(
+            bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, release_maintenance=True, _env_file=None
+        ),
+        database=cast("Database", database),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        for method, path in [
+            ("GET", "/api/v1/wallet"),
+            ("POST", "/api/v1/wallet/transfers"),
+            ("POST", "/api/v1/auth/telegram"),
+            ("GET", "/"),
+            ("GET", "/local-review"),
+        ]:
+            response = await client.request(method, path)
+            assert response.status_code == 503
+            assert response.json() == {"code": "release_maintenance"}
+        assert (await client.get("/healthz")).status_code == 200
+    assert not database.created_sessions
+
+
 def _proof(user_id: int, *, now: datetime.datetime) -> bytes:
     return _signed_fields(
         {

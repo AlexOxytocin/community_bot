@@ -353,8 +353,8 @@ def main() -> int:  # noqa: PLR0915 - one serialized release transaction.
         target_head = run("docker", "run", "--rm", image, "community-migration-head")
         probe, probe_environment = compose(active, image, sha)
         live_head = database_head(probe, probe_environment)
-        if target_head != live_head and not migration_changed:
-            raise RuntimeError("Unexpected database head mismatch.")
+        if target_head != live_head or migration_changed:
+            raise RuntimeError("Schema changes require the dedicated tested cutover tool.")
         before_image = require_release_image(before_release)
         run("docker", "tag", before_image, PREVIOUS_IMAGE)
         deploy, environment = compose(active, image, sha)

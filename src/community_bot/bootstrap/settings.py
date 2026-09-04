@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     invite_token_secret: SecretStr | None = None
     sentry_dsn: SecretStr | None = None
     release: str = "local"
+    release_maintenance: bool = False
     notification_window_start_local: datetime.time = datetime.time(hour=9)
     notification_window_end_local: datetime.time = datetime.time(hour=21)
     worker_batch_size: int = 25

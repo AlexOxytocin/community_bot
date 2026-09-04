@@ -63,8 +63,11 @@ class WalletStore(Protocol):
 class WalletUnitOfWork(Protocol):
     """Atomic wallet, ledger, member-cache and outbox boundary."""
 
-    economy: EconomyMutationPort
-    wallet: WalletStore
+    @property
+    def economy(self) -> EconomyMutationPort: ...
+
+    @property
+    def wallet(self) -> WalletStore: ...
 
     async def get_member(self, member_id: UUID) -> Member | None: ...
     async def set_repeatable_read(self) -> None: ...

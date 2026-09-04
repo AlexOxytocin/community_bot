@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -34,7 +35,7 @@ def test_transfer_pair_is_conserved_stable_and_credit_only() -> None:
 @pytest.mark.parametrize("amount", [0, -1, True, 1.5, 1_000_000_001])
 def test_invalid_transfer_amount(amount: float) -> None:
     with pytest.raises(ValueError, match="positive bounded integer"):
-        transfer_commands(uuid4(), TransferCommand(uuid4(), amount, "operation"))
+        transfer_commands(uuid4(), TransferCommand(uuid4(), cast("int", amount), "operation"))
 
 
 def test_self_transfer_and_empty_identity_rejected() -> None:

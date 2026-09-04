@@ -144,6 +144,8 @@ def test_migration_deploy_is_private_backup_first_and_non_interactive() -> None:
     assert "def run_migration(" in deploy
     assert '"--no-deps",\n                    "-T",\n                    "migrate"' in deploy
     assert "Forward migration completed; automatic image rollback is unsafe." in deploy
+    assert "if target_head != live_head or migration_changed:" in deploy
+    assert "Schema changes require the dedicated tested cutover tool." in deploy
 
 
 def test_host_maintenance_surface_is_python_and_data_only() -> None:
@@ -160,6 +162,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "restore_drill.py",
         "seed_task_home_local.py",
         "serve_community_stats_stub.py",
+        "wallet_cutover.py",
     }
     assert list((root / "ops").glob("*.sh")) == []
     assert list((root / "ops" / "systemd").glob("*")) == []

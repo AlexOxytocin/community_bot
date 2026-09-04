@@ -161,6 +161,8 @@ class SqlAlchemyWalletStore:
         if transfer is None or transfer.sender_id != member_id:
             raise LookupError("Transfer receipt not found.")
         recipient = await self.session.get(MemberModel, transfer.recipient_id)
+        if recipient is None:
+            raise LookupError("Transfer recipient not found.")
         operation = await self.operation(member_id, transfer.outgoing_id)
         return {
             "transfer_id": transfer.id,
