@@ -146,7 +146,10 @@ def _handler() -> tuple[TelegramUpdates, AsyncMock, AsyncMock]:
         set_preference=AsyncMock(),
     )
     bot = AsyncMock(
-        send_message=AsyncMock(), answer_callback_query=AsyncMock(), edit_message_text=AsyncMock()
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=777)),
+        answer_callback_query=AsyncMock(),
+        edit_message_text=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
     )
     registration = AsyncMock()
     handler = TelegramUpdates(
@@ -155,6 +158,7 @@ def _handler() -> tuple[TelegramUpdates, AsyncMock, AsyncMock]:
             _env_file=None,
             community_telegram_chat_id=CHAT_ID,
             community_telegram_join_url="https://t.me/+example",
+            community_entry_topic_id=13579,
             telegram_bot_username="humanquest_bot",
             nomad_telegram_chat_id=CHAT_ID,
             nomad_telegram_topic_id=TOPIC_ID,
@@ -278,6 +282,53 @@ async def test_start_shows_intro_before_registration(label: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_returning_start_is_the_saved_subscription_home_and_removes_old_menu() -> None:
+    handler, store, registration = _handler()
+    member_id = uuid4()
+    store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="active")
+    store.preferences.return_value = {
+        "important": True,
+        "nomad": False,
+        "tasks": True,
+        "task_updates": True,
+        "task_reminders": True,
+        "disputes": True,
+        "online": False,
+        "offline": True,
+        "crypto": False,
+        "revision": 7,
+    }
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": "/start"}
+
+    await handler.handle(json.dumps({"update_id": 23, "message": message}).encode())
+
+    registration.start.assert_not_awaited()
+    cast("AsyncMock", handler.membership).is_member.assert_not_awaited()
+    sent = cast("AsyncMock", handler.bot).send_message
+    sent.assert_awaited_once()
+    assert sent.call_args.kwargs["text"].startswith("Активности и подписки")
+    assert sent.call_args.kwargs["reply_markup"].remove_keyboard is True
+    edited = cast("AsyncMock", handler.bot).edit_message_reply_markup
+    edited.assert_awaited_once()
+    buttons = edited.call_args.kwargs["reply_markup"].inline_keyboard
+    assert [row[0].text for row in buttons[:6]] == [
+        "☑ Важные обновления чата",
+        "☐ Цифровой кочевник",
+        "☑ Взаимопомощь",
+        "☐ Онлайн ивенты",
+        "☑ Офлайн ивенты",
+        "☐ Крипта",
+    ]
+    assert [row[0].text for row in buttons[-3:]] == [
+        "Что за активности?",
+        "Зачем мне вообще открывать приложение?",
+        "Готово",
+    ]
+    assert buttons[-4][0].text == "Точка входа в чат"
+    assert buttons[-4][0].url == "https://t.me/c/2237685639/13579"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("started", [False, True])
 async def test_chat_join_resumes_only_explicit_bot_onboarding(*, started: bool) -> None:
     handler, store, registration = _handler()
@@ -304,9 +355,11 @@ async def test_chat_join_resumes_only_explicit_bot_onboarding(*, started: bool) 
     replies = cast("AsyncMock", handler.bot).send_message.call_args_list
     assert "Профиль уже создан" in replies[0].kwargs["text"]
     buttons = replies[1].kwargs["reply_markup"].inline_keyboard
-    assert buttons[-2][0].text == "Готово"
-    assert buttons[-2][0].callback_data == "onboarding:done"
-    assert buttons[-1][0].text == "Зачем мне приложение?"
+    assert buttons[-3][0].text == "Что за активности?"
+    assert buttons[-3][0].callback_data == "activities:help"
+    assert buttons[-2][0].text == "Зачем мне вообще открывать приложение?"
+    assert buttons[-1][0].text == "Готово"
+    assert buttons[-1][0].callback_data == "onboarding:done"
 
 
 @pytest.mark.asyncio
@@ -322,11 +375,19 @@ async def test_onboarding_finishes_without_forcing_the_app() -> None:
     }
     await handler.handle(json.dumps({"update_id": 21, "callback_query": callback}).encode())
     reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
-    assert "Приложение открывать необязательно" in reply["text"]
-    assert all(
-        button.url is None for row in reply["reply_markup"].inline_keyboard for button in row
-    )
-    assert reply["reply_markup"].inline_keyboard[0][0].callback_data == "help:why_app"
+    assert reply["text"].startswith("✅ Настройки сохранены.\n\nАктивности")  # noqa: RUF001
+    linked = [
+        button
+        for row in reply["reply_markup"].inline_keyboard
+        for button in row
+        if button.url is not None
+    ]
+    assert [button.text for button in linked] == ["Точка входа в чат"]
+    assert [row[0].text for row in reply["reply_markup"].inline_keyboard[-3:]] == [
+        "Что за активности?",
+        "Зачем мне вообще открывать приложение?",
+        "Готово",
+    ]
 
 
 @pytest.mark.asyncio

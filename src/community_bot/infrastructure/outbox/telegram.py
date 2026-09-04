@@ -125,21 +125,28 @@ class TelegramNotificationSender:
         text = _notification_text(claim)
         if self._allow_delivery is not None and not await self._allow_delivery(claim):
             raise NotificationProcessingError(_NOTIFICATION_DISABLED, permanent=True)
-        markup = None
+        buttons: list[list[InlineKeyboardButton]] = []
         if claim.notification_type in {"nomad.published", "activity.published"}:
             url = claim.payload.get("message_url")
             if not isinstance(url, str) or not re.fullmatch(
                 r"https://t\.me/c/[0-9]+/(?:[0-9]+/)?[0-9]+", url
             ):
                 raise NotificationProcessingError(_INVALID_NOTIFICATION_PAYLOAD, permanent=True)
-            markup = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="Открыть сообщение", url=url)]]
-            )
+            buttons.append([InlineKeyboardButton(text="Открыть сообщение", url=url)])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="К подпискам",
+                    callback_data="activities:all",
+                )
+            ]
+        )
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
         try:
             await self._bot.send_message(
                 chat_id=claim.telegram_user_id,
                 text=text,
-                **({"reply_markup": markup} if markup is not None else {}),
+                reply_markup=markup,
             )
         except (TelegramForbiddenError, TelegramBadRequest) as error:
             raise NotificationProcessingError(_RECIPIENT_UNAVAILABLE, permanent=True) from error

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
+from aiogram.types import ReplyKeyboardRemove
 from sqlalchemy import select
 
 from community_bot.application.membership import MembershipCheckUnavailableError
@@ -22,7 +23,6 @@ from community_bot.infrastructure.db.community_preferences import CommunityPrefe
 from community_bot.infrastructure.db.database import Database
 from community_bot.infrastructure.db.models import MemberModel
 from community_bot.infrastructure.telegram_membership import AiogramTelegramMembershipChecker
-from community_bot.transport.telegram_updates import home_keyboard
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -81,7 +81,7 @@ async def deliver_menu(  # noqa: PLR0911, PLR0913 - explicit eligibility gates a
         await bot.send_message(
             chat_id=telegram_user_id,
             text=MENU_UPDATED,
-            reply_markup=home_keyboard(),
+            reply_markup=ReplyKeyboardRemove(),
             disable_notification=True,
         )
     except (TelegramBadRequest, TelegramForbiddenError):

@@ -18,6 +18,8 @@ def test_environment_changes_only_scoped_values() -> None:
     assert "NOMAD_TELEGRAM_TOPIC_ID=1\n" not in after
     assert after.count("NOMAD_TELEGRAM_TOPIC_ID=") == 1
     assert "NOMAD_TELEGRAM_TOPIC_ID=24962" in after
+    assert after.count("COMMUNITY_ENTRY_TOPIC_ID=") == 1
+    assert "COMMUNITY_ENTRY_TOPIC_ID=21568" in after
     compile(activation.RUNTIME, "runtime-probe", "exec")
 
 

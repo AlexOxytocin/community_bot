@@ -341,10 +341,18 @@ def _new_member_preferences(member_id: UUID, now: datetime) -> MemberNotificatio
     """Initialize new profiles only; never overwrite a returning member's choices."""
     return MemberNotificationPreferencesModel(
         member_id=member_id,
+        tasks=True,
+        tasks_since=now,
         nomad=True,
         nomad_since=now,
         important=True,
         important_since=now,
+        task_updates=True,
+        task_updates_since=now,
+        task_reminders=True,
+        task_reminders_since=now,
+        disputes=True,
+        disputes_since=now,
     )
 
 

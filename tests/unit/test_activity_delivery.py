@@ -1,3 +1,7 @@
+"""Activity publication and subscription panel behavior."""
+
+# ruff: noqa: RUF001 - Russian UI copy.
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -31,6 +35,8 @@ async def test_activity_sends_source_link_and_does_not_retry_uncertain_delivery(
     await sender.send(claim)
     sent = bot.send_message.call_args.kwargs
     assert sent["reply_markup"].inline_keyboard[0][0].url == claim.payload["message_url"]
+    assert sent["reply_markup"].inline_keyboard[1][0].text == "К подпискам"
+    assert sent["reply_markup"].inline_keyboard[1][0].callback_data == "activities:all"
     assert "Онлайн ивенты" in sent["text"]
     assert "Важные обновления чата" in sent["text"]
     assert "Крипта" in sent["text"]
@@ -46,7 +52,11 @@ async def test_activity_sends_source_link_and_does_not_retry_uncertain_delivery(
 
 def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None:
     preferences: dict[str, object] = {"revision": 3}
-    _, overview = activity_panel(preferences)
+    text, overview = activity_panel(preferences)
+    assert "сэкономить ресурс вашего внимания" in text
+    assert "сразу точку входа" in text
+    assert "☑ — включено" not in text
+    assert "Настройки общие с приложением" not in text
     callbacks = [button.callback_data for row in overview for button in row]
     assert callbacks == [
         "subscription:important:1:3",
@@ -55,7 +65,6 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
         "subscription:online:1:3",
         "subscription:offline:1:3",
         "subscription:crypto:1:3",
-        "activities:help",
     ]
     _, detail = activity_panel(preferences, "nomad")
     assert detail[0][0].text == "Подписаться"

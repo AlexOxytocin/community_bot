@@ -25,7 +25,7 @@ from ops.wallet_cutover import ROOT, SERVICES, CutoverError, digest, inspect, ru
 WEB = "community-mini-app-core-web-1"
 WORKER = "community-mini-app-core-worker-1"
 ENV_FILE = ROOT / "shared" / ".env"
-CHAT, TOPIC = -1002237685639, 24962
+CHAT, TOPIC, ENTRY_TOPIC = -1002237685639, 24962, 21568
 NGINX_FILE = Path("/opt/app/nginx/conf.d/default.conf")
 WEBHOOK_LOCATION = """    location = /api/telegram/webhook {
         proxy_pass http://community-mini-app-core-web-1:8000;
@@ -155,11 +155,12 @@ def runtime(action: str, data: dict | None = None) -> dict:
 
 
 def environment_content(original: str, secret: str) -> bytes:
-    """Change only the three explicitly scoped settings; preserve other content."""
+    """Change only the explicitly scoped Telegram settings; preserve other content."""
     changes = {
         "TELEGRAM_WEBHOOK_SECRET": secret,
         "NOMAD_TELEGRAM_CHAT_ID": str(CHAT),
         "NOMAD_TELEGRAM_TOPIC_ID": str(TOPIC),
+        "COMMUNITY_ENTRY_TOPIC_ID": str(ENTRY_TOPIC),
     }
     lines = [
         line for line in original.splitlines() if line.partition("=")[0].strip() not in changes

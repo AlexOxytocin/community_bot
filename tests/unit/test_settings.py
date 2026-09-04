@@ -68,6 +68,15 @@ def test_community_chat_id_can_enable_stats_without_a_join_url() -> None:
     )
     assert settings.community_telegram_chat_title == "Алло, Нейросеточная?"
 
+    with pytest.raises(ValueError, match="COMMUNITY_ENTRY_TOPIC_ID requires"):
+        Settings(_env_file=None, community_entry_topic_id=123)
+    settings = Settings(
+        _env_file=None,
+        community_telegram_chat_id=-100_100,
+        community_entry_topic_id=123,
+    )
+    assert settings.community_entry_topic_id == 123
+
 
 def test_community_stats_settings_are_paired_and_private_origin_only() -> None:
     with pytest.raises(ValueError, match="must be set together"):

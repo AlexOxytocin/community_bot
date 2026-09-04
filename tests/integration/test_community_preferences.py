@@ -208,6 +208,10 @@ async def _concurrent_bot_and_web_entry(db: Database) -> None:
             **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
             "important": True,
             "nomad": True,
+            "tasks": True,
+            "task_updates": True,
+            "task_reminders": True,
+            "disputes": True,
             "revision": 0,
         }
 

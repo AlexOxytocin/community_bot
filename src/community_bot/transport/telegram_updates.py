@@ -12,8 +12,6 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
 )
@@ -24,6 +22,7 @@ from community_bot.domain.community_preferences import (
     NOTIFICATION_CATEGORIES,
     PUBLICATION_CATEGORIES,
     PreferencesConflictError,
+    topic_message_url,
 )
 from community_bot.domain.members import MemberStatus
 from community_bot.domain.registration import RegistrationError
@@ -42,7 +41,8 @@ if TYPE_CHECKING:
     from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
 
 START_BUTTON = "Начать"
-APP_BUTTON = "Зачем мне приложение?"
+APP_BUTTON = "Зачем мне вообще открывать приложение?"
+LEGACY_APP_BUTTON = "Зачем мне приложение?"
 NOTIFICATIONS_BUTTON = "🔔 Уведомления"
 NOMAD_SUBSCRIBE_BUTTON = "🔔 Подписаться: Цифровой кочевник"
 NOMAD_SUBSCRIBED_BUTTON = "✓ Вы подписаны: Цифровой кочевник"
@@ -74,13 +74,6 @@ WHY_APP_HELP = (
     "Пользоваться приложением необязательно. Можно просто выбрать интересные "
     "подписки и получать уведомления в этом боте. Если понадобятся дополнительные "
     "возможности — приложение всегда рядом."
-)
-ONBOARDING_DONE = (
-    "✅ Всё готово!\n\n"
-    "Теперь бот будет присылать новости только по выбранным тобой направлениям.\n\n"
-    "Приложение открывать необязательно — подписками можно пользоваться прямо здесь. "
-    "Если захочешь узнать больше об участниках, заданиях и своей активности, "
-    "приложение всегда будет доступно в меню бота."
 )
 APP_HELP = (
     "🤝 Задания и взаимопомощь\n\n"
@@ -119,20 +112,6 @@ APP_HELP = (
     "между участниками.\n\n"
     "👇 Найди первое задание или создай своё — начни с того, где тебе нужна помощь."
 )
-
-
-def home_keyboard() -> ReplyKeyboardMarkup:
-    """Keep a compact native menu visible without changing secure Mini App launch."""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=ACTIVITIES_BUTTON)],
-            [KeyboardButton(text=HELP_BUTTON)],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-        one_time_keyboard=False,
-        input_field_placeholder="Выберите действие в меню",
-    )
 
 
 class TelegramUpdates:
@@ -185,6 +164,7 @@ class TelegramUpdates:
             aliases = {
                 START_BUTTON: "/start",
                 APP_BUTTON: "/app",
+                LEGACY_APP_BUTTON: "/app",
                 "📱 Приложение": "/app",
                 NOTIFICATIONS_BUTTON: "/notifications",
                 NOMAD_SUBSCRIBE_BUTTON: "/nomad_subscribe",
@@ -351,12 +331,7 @@ class TelegramUpdates:
             await self._send(user.id, ONBOARDING_INTRO, buttons)
             return
         if command == "/start" and existing is not None and existing.status == "active":
-            await self._send(
-                user.id,
-                "С возвращением! Всё готово — выбирай действие ниже.",
-                reply_keyboard=home_keyboard(),
-            )
-            await self._send(user.id, "Открыть Human Quest", self._launch_buttons())
+            await self._show_preferences(user.id, existing.id, remove_reply_keyboard=True)
             return
         if not membership_verified and not await self._member_gate(user.id):
             return
@@ -411,7 +386,6 @@ class TelegramUpdates:
                 "Профиль уже создан, доступ к приложению открыт, "
                 "а на баланс начислено 20 стартовых кредитов.\n\n"
                 "Остался последний шаг — выбери, какие уведомления получать.",
-                reply_keyboard=home_keyboard(),
             )
             await self._show_preferences(user.id, view.context.member_id)
             await self.store.complete_onboarding(user.id)
@@ -469,14 +443,11 @@ class TelegramUpdates:
         if member is None or member.status != "active":
             return
         if callback.data == "onboarding:done":
-            await self._edit_or_send(
+            await self._show_preferences(
                 callback.from_user.id,
-                ONBOARDING_DONE,
-                [
-                    [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")],
-                    [navigation("Изменить подписки", "all")],
-                ],
+                member.id,
                 callback.message.message_id,
+                note="✅ Настройки сохранены.\n\n",
             )
             return
         parts = (callback.data or "").split(":")
@@ -526,7 +497,7 @@ class TelegramUpdates:
             message_id,
         )
 
-    async def _show_preferences(
+    async def _show_preferences(  # noqa: PLR0913 - home transition removes a legacy keyboard.
         self,
         user_id: int,
         member_id: UUID,
@@ -534,20 +505,50 @@ class TelegramUpdates:
         *,
         page: str = "all",
         note: str = "",
+        remove_reply_keyboard: bool = False,
     ) -> None:
         preferences = await self.store.preferences(member_id)
         text, buttons = activity_panel(preferences, page)
         if page == "all":
+            if (
+                self.settings.community_telegram_chat_id is not None
+                and self.settings.community_entry_topic_id is not None
+            ):
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text="Точка входа в чат",
+                            url=topic_message_url(
+                                self.settings.community_telegram_chat_id,
+                                None,
+                                self.settings.community_entry_topic_id,
+                            ),
+                        )
+                    ]
+                )
             buttons.extend(
                 [
-                    [InlineKeyboardButton(text="Готово", callback_data="onboarding:done")],
+                    [navigation("Что за активности?", "help")],
                     [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")],
+                    [InlineKeyboardButton(text="Готово", callback_data="onboarding:done")],
                 ]
             )
-        await self._edit_or_send(user_id, note + text, buttons, message_id)
+        await self._edit_or_send(
+            user_id,
+            note + text,
+            buttons,
+            message_id,
+            remove_reply_keyboard=remove_reply_keyboard,
+        )
 
     async def _edit_or_send(
-        self, user_id: int, text: str, buttons: list, message_id: int | None
+        self,
+        user_id: int,
+        text: str,
+        buttons: list,
+        message_id: int | None,
+        *,
+        remove_reply_keyboard: bool = False,
     ) -> None:
         if message_id is not None:
             try:
@@ -562,6 +563,21 @@ class TelegramUpdates:
                     return
             else:
                 return
+        if remove_reply_keyboard:
+            try:
+                message = await self.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                await self.bot.edit_message_reply_markup(
+                    chat_id=user_id,
+                    message_id=message.message_id,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                )
+            except (TelegramForbiddenError, TelegramBadRequest):
+                return
+            return
         await self._send(user_id, text, buttons)
 
     async def _send(
@@ -569,15 +585,12 @@ class TelegramUpdates:
         user_id: int,
         text: str,
         buttons: list | None = None,
-        *,
-        reply_keyboard: ReplyKeyboardMarkup | None = None,
     ) -> None:
         try:
             await self.bot.send_message(
                 chat_id=user_id,
                 text=text,
-                reply_markup=reply_keyboard
-                or (
+                reply_markup=(
                     InlineKeyboardMarkup(inline_keyboard=buttons)
                     if buttons
                     else ReplyKeyboardRemove()
