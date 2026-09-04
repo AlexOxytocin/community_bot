@@ -179,6 +179,7 @@ def test_host_maintenance_surface_is_python_and_data_only() -> None:
         "restore_drill.py",
         "seed_task_home_local.py",
         "seed_wallet_local.py",
+        "telegram_activation.py",
         "serve_community_stats_stub.py",
         "wallet_cutover.py",
     }

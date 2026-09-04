@@ -50,3 +50,19 @@ web-only runtime, но не возвращает старый conversational tas
    При откате к 0032 остановить новый ingress/worker до восстановления БД.
    Созданные аккаунты/20 кредитов не отменять автоматически. Начальные настройки
    миграции сами не включают упрощённый режим или рассылку.
+
+## Активация на уже обновлённом runtime
+
+`python3 -m ops.telegram_activation prepare` измеряет running image, release,
+Compose labels, head 0033, права бота и прежний webhook/menu. Чужой webhook
+блокирует активацию. Секрет создаётся на сервере, прежний и новый env сохраняются
+root-private рядом с receipt, без вывода содержимого.
+
+После проверки receipt: `python3 -m ops.telegram_activation apply --receipt PATH`.
+Сценарий меняет только три Telegram-настройки, пересоздаёт worker/web с тем же
+image и release, проверяет exact readiness, подключает webhook/команды и проверяет
+публичный webhook запросами с неверным секретом и пустым Telegram update.
+Меню запуска приложения, режим регистрации и подписки пользователей не меняются.
+При сбое возвращаются env, webhook и команды; БД не восстанавливается.
+После прерывания в фазе activating предусмотрен `recover --receipt PATH`.
+Это транспортная проверка, а не пользовательская Telegram UI acceptance.
