@@ -565,18 +565,20 @@ class TelegramUpdates:
                 return
         if remove_reply_keyboard:
             try:
-                message = await self.bot.send_message(
+                removal = await self.bot.send_message(
                     chat_id=user_id,
-                    text=text,
+                    text="Обновляю меню…",
                     reply_markup=ReplyKeyboardRemove(),
                 )
-                await self.bot.edit_message_reply_markup(
+                await self.bot.send_message(
                     chat_id=user_id,
-                    message_id=message.message_id,
+                    text=text,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
                 )
             except (TelegramForbiddenError, TelegramBadRequest):
                 return
+            with suppress(TelegramForbiddenError, TelegramBadRequest):
+                await self.bot.delete_message(chat_id=user_id, message_id=removal.message_id)
             return
         await self._send(user_id, text, buttons)
 

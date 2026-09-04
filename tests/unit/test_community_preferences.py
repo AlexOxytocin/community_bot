@@ -148,8 +148,8 @@ def _handler() -> tuple[TelegramUpdates, AsyncMock, AsyncMock]:
     bot = AsyncMock(
         send_message=AsyncMock(return_value=SimpleNamespace(message_id=777)),
         answer_callback_query=AsyncMock(),
+        delete_message=AsyncMock(),
         edit_message_text=AsyncMock(),
-        edit_message_reply_markup=AsyncMock(),
     )
     registration = AsyncMock()
     handler = TelegramUpdates(
@@ -305,12 +305,10 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     registration.start.assert_not_awaited()
     cast("AsyncMock", handler.membership).is_member.assert_not_awaited()
     sent = cast("AsyncMock", handler.bot).send_message
-    sent.assert_awaited_once()
-    assert sent.call_args.kwargs["text"].startswith("Активности и подписки")
-    assert sent.call_args.kwargs["reply_markup"].remove_keyboard is True
-    edited = cast("AsyncMock", handler.bot).edit_message_reply_markup
-    edited.assert_awaited_once()
-    buttons = edited.call_args.kwargs["reply_markup"].inline_keyboard
+    assert sent.await_count == 2
+    assert sent.call_args_list[0].kwargs["reply_markup"].remove_keyboard is True
+    assert sent.call_args_list[1].kwargs["text"].startswith("Активности и подписки")
+    buttons = sent.call_args_list[1].kwargs["reply_markup"].inline_keyboard
     assert [row[0].text for row in buttons[:6]] == [
         "☑ Важные обновления чата",
         "☐ Цифровой кочевник",
@@ -326,6 +324,9 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     ]
     assert buttons[-4][0].text == "Точка входа в чат"
     assert buttons[-4][0].url == "https://t.me/c/2237685639/13579"
+    cast("AsyncMock", handler.bot).delete_message.assert_awaited_once_with(
+        chat_id=456, message_id=777
+    )
 
 
 @pytest.mark.asyncio
