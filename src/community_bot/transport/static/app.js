@@ -7672,7 +7672,7 @@ async function loadCommunityPreferences(kind, push = true) {
     };
     for (const [key, label, detail] of choices) {
       if (!policy && (key === "online" || key === "tasks")) {
-        view.append(element("h2", key === "online" ? "Встречи и публикации" : "Задания и споры", "preference-group-title"));
+        view.append(element("h2", key === "online" ? "Встречи и публикации" : "Задания", "preference-group-title"));
       }
       const tile = element("label", undefined, "preference-tile");
       const copy = element("span", undefined, "preference-copy");

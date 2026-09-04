@@ -25,7 +25,7 @@ CATEGORY_COPY = {
         "Открытие и решения по твоим спорам. Для модераторов — события в рамках их доступа.",
     ),
 }
-TASK_CATEGORIES = ("tasks", "task_updates", "task_reminders")
+TASK_CATEGORIES = ("tasks", "task_updates", "task_reminders", "disputes")
 
 
 def navigation(label: str, page: str) -> InlineKeyboardButton:
@@ -39,10 +39,10 @@ def activity_panel(
     """Render either the overview or a compact explanation with explicit subscription controls."""
     if page == "all":
         buttons = []
-        for category in ("online", "offline", "nomad", "important", "tasks_group", "disputes"):
+        for category in ("online", "offline", "nomad", "important", "tasks_group"):
             if category == "tasks_group":
                 count = sum(bool(preferences.get(key)) for key in TASK_CATEGORIES)
-                label = f"Задания · {count} из 3"
+                label = f"Задания · {count} из {len(TASK_CATEGORIES)}"
             else:
                 label = f"{'☑' if preferences.get(category) else '☐'} {CATEGORY_COPY[category][0]}"
             buttons.append([navigation(label, category)])
@@ -60,9 +60,9 @@ def activity_panel(
             "Онлайн- и офлайн-встречи, Цифровой кочевник — ссылки на публикации "
             "администраторов с тегами #online, #offline и #nomad.\n\n"
             "Важные обновления чата — объявления и изменения с тегом #important.\n\n"
-            "Задания — новые предложения, изменения своих заданий и напоминания. "
-            "Каждый тип можно настроить отдельно.\n\n"
-            "Споры — только события, к которым у тебя есть доступ.\n\n"
+            "Задания — новые предложения, изменения своих заданий, напоминания и споры. "
+            "Каждый тип можно настроить отдельно. "
+            "По спорам приходят только события, к которым у тебя есть доступ.\n\n"
             "После подписки приходят только новые события. Отписаться можно в любой момент."
         )
         return text, [[navigation("К подпискам", "all")]]

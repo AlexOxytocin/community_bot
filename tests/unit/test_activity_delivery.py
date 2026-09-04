@@ -53,7 +53,6 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
         "activities:nomad",
         "activities:important",
         "activities:tasks_group",
-        "activities:disputes",
         "activities:help",
     ]
     _, detail = activity_panel(preferences, "nomad")
@@ -62,3 +61,16 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
     text, detail = activity_panel(preferences, "important")
     assert "#important" in text
     assert detail[0][0].callback_data == "subscription:important:1:3"
+
+
+def test_disputes_are_inside_tasks_and_default_to_off() -> None:
+    preferences: dict[str, object] = {"revision": 0}
+    _, overview = activity_panel(preferences)
+    assert overview[-2][0].text == "Задания · 0 из 4"
+    text, buttons = activity_panel(preferences, "tasks_group")
+    assert "Споры: выключено" in text
+    assert buttons[3][0].text == "Включить: Споры"
+    assert buttons[3][0].callback_data == "subscription:disputes:1:0"
+    preferences["disputes"] = True
+    _, overview = activity_panel(preferences)
+    assert overview[-2][0].text == "Задания · 1 из 4"

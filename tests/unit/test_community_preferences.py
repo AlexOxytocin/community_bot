@@ -372,13 +372,16 @@ async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
     registration.start.assert_not_awaited()
     if label in {APP_BUTTON, "📱 Приложение"}:
         headings = [
+            "Задания и взаимопомощь",
             "Статистика сообщества",
             "Ачивки и рекорды",
-            "Задания и взаимопомощь",
             "Кредиты и кошелёк",
         ]
         positions = [reply["text"].index(heading) for heading in headings]
         assert positions == sorted(positions)
+        assert reply["text"].startswith("🤝 Задания и взаимопомощь")
+        for example in ("солопренёров", "соцсетей", "GitHub", "консультаций", "знакомств"):
+            assert example in reply["text"]
         assert "уведомлен" not in reply["text"].lower()
         assert "20 кредитов" in reply["text"]
         assert "50 кредитов" in reply["text"]
