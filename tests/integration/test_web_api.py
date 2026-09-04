@@ -1706,7 +1706,7 @@ async def test_task_creation_resource_recovers_and_publishes_exactly_once(
         ).status_code == 204
         state = (await client.get("/api/v1/task-creation")).json()
         draft_id = state["draft"]["id"]
-        assert state["credit_balance"] == 10
+        assert state["credit_balance"] == 20
         assert state["categories"][0]["code"]
         assert state["categories"][0]["description"]
         assert state["draft"]["values"]["format"] == "online"
@@ -1851,7 +1851,7 @@ async def test_community_task_creation_and_moderation_are_permission_scoped(
     database_url: str,
 ) -> None:
     database = Database(database_url)
-    performer = await prepare_member(database, telegram_user_id=52_072)
+    performer = await add_member(database, 52_072)
     creator = await add_member(
         database,
         52_073,
@@ -1865,6 +1865,7 @@ async def test_community_task_creation_and_moderation_are_permission_scoped(
         permissions=[COMMUNITY_TASK_REVIEW_PERMISSION],
     )
     denied = await add_member(database, 52_075, role=MemberRole.ADMINISTRATOR)
+    await prepare_config(database, creator.id)
     app = create_web_app(
         settings=Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url),
         database=database,
@@ -2059,7 +2060,7 @@ async def test_community_task_creation_and_moderation_are_permission_scoped(
         assert stored_performer is not None
         assert stored_assignment.status == "approved"
         assert stored_assignment.terminal_outcome == "full"
-        assert stored_performer.credit_balance_cached == 20
+        assert stored_performer.credit_balance_cached == 10
         assert [
             (item.transaction_type, item.credit_delta, item.experience_delta)
             for item in transactions

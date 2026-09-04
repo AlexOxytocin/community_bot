@@ -131,7 +131,11 @@ class PostgresNotificationQueue:
             if event is None:
                 raise NotificationProcessingError(_STALE_OUTBOX_LEASE, permanent=True)
             recipients = await self._event_recipients(session, event)
-            safe_payload: dict[str, object] = {}
+            safe_payload: dict[str, object] = (
+                {"amount": event.payload_json["amount"]}
+                if event.event_type == "wallet.transfer_received"
+                else {}
+            )
             if event.event_type == "task.cancellation_requested":
                 title = event.payload_json.get("title")
                 task_id = event.payload_json.get("task_id")
@@ -496,7 +500,10 @@ class PostgresNotificationQueue:
                 )
             )
             member_ids.update(administrators)
-        elif event.aggregate_type == "member" and event.event_type == "registration.approved":
+        elif event.aggregate_type == "member" and event.event_type in {
+            "registration.approved",
+            "wallet.transfer_received",
+        }:
             member_ids.add(event.aggregate_id)
         elif event.aggregate_type == "member" and event.event_type == "registration.submitted":
             member_ids.update(

@@ -666,6 +666,30 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .shell.context-screen { grid-template-rows: minmax(0, 1fr); }
 :root[data-telegram-fullscreen="true"] .screen { padding-top: max(12px, calc(var(--tg-content-safe-area-inset-top, 0px) + 6px)); }
 .bottom-nav button[hidden] { display: none; }
+.wallet-root-screen .screen-heading { display: none; }
+.wallet-root-screen .screen { padding-top: max(14px, calc(var(--tg-content-safe-area-inset-top, 0px) + 8px)); }
+.wallet-view { display: grid; gap: 16px; padding-bottom: 12px; }
+.wallet-balance-card { display: grid; gap: 10px; padding: 20px; border: 1px solid var(--app-border); border-radius: 20px; background: var(--app-surface); }
+.wallet-balance { display: block; font-size: 52px; line-height: 1.1; font-weight: 750; letter-spacing: -2px; font-variant-numeric: tabular-nums; }
+.wallet-label { margin: 0; color: var(--app-text-muted); font-size: 12px; }
+.wallet-balance-card .primary { margin-top: 8px; }
+.wallet-inline { width: fit-content; min-height: 44px; padding: 4px 0; border: 0; background: transparent; color: var(--app-accent); font-size: 12px; text-align: left; }
+.wallet-balance-card progress { width: 100%; height: 6px; accent-color: var(--app-accent); }
+.wallet-section-title { margin: 6px 0 0; font-size: 15px; }
+.wallet-history { display: grid; }
+.wallet-operation { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; min-height: 76px; padding: 14px 2px; background: transparent; color: var(--app-text); border: 0; border-bottom: 1px solid var(--app-border); text-align: left; cursor: pointer; }
+.wallet-operation > span:first-child { display: grid; gap: 4px; min-width: 0; }
+.wallet-operation strong { font-size: 13px; }
+.wallet-operation small { font-size: 11px; color: var(--app-text-muted); overflow-wrap: anywhere; }
+.wallet-delta { font-size: 17px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.wallet-delta.is-positive { color: var(--app-success); }
+.wallet-field { display: grid; gap: 8px; font-size: 13px; }
+.wallet-field input { min-height: 48px; width: 100%; font-size: 16px; }
+.wallet-recipients { display: grid; gap: 6px; }
+.wallet-recipients:empty { display: none; }
+.wallet-recipient { min-height: 48px; padding: 12px; border: 1px solid var(--app-border); border-radius: 12px; background: var(--app-surface); color: var(--app-text); text-align: left; overflow-wrap: anywhere; }
+.wallet-transfer-amount { font-size: 30px; font-variant-numeric: tabular-nums; }
+.wallet-view .section p { overflow-wrap: anywhere; }
 .hidden { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid var(--app-focus); outline-offset: 3px; }
 

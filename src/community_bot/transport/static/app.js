@@ -37,6 +37,7 @@ shell.addEventListener("scroll", anchorShellScroll, { passive: true });
 anchorShellScroll();
 const catalogNav = document.getElementById("catalog-nav");
 const profileNav = document.getElementById("profile-nav");
+const walletNav = document.getElementById("wallet-nav");
 const participantsNav = document.getElementById("participants-nav");
 const moderationNav = document.getElementById("moderation-nav");
 const heading = title.parentElement;
@@ -261,6 +262,7 @@ const setNavigation = (screen, context) => {
   shell.classList.toggle("participants-screen", screen === "participants");
   shell.classList.toggle("profile-screen", screen === "profile");
   shell.classList.toggle("settings-screen", screen === "settings");
+  shell.classList.toggle("wallet-root-screen", screen === "wallet" && !context);
   shell.classList.toggle("task-home-screen", screen === "task-home");
   shell.classList.toggle("onboarding-screen", screen === "onboarding");
   shell.classList.toggle("moderation-screen", screen === "moderation" && !context);
@@ -271,6 +273,7 @@ const setNavigation = (screen, context) => {
   catalogNav.setAttribute("aria-pressed", String(screen === "catalog" || screen === "task-home"));
   profileNav.setAttribute("aria-pressed", String(screen === "profile" || screen === "settings"));
   participantsNav.setAttribute("aria-pressed", String(screen === "participants"));
+  walletNav.setAttribute("aria-pressed", String(screen === "wallet"));
   moderationNav.setAttribute("aria-pressed", String(screen === "moderation"));
   setHeaderControl(context ? "back" : null);
 };
@@ -3292,7 +3295,12 @@ function ownProfileOverview(state, revision) {
   );
   const metrics = element("div", undefined, "metric-grid");
   for (const [value, label] of [[me.credit_balance, "Кредиты"], [me.experience_total, "Опыт"], [member.karma.score, "Карма"]]) {
-    const metric = element("article", undefined, "metric-card");
+    const metric = element(label === "Кредиты" ? "button" : "article", undefined, "metric-card");
+    if (label === "Кредиты") {
+      metric.type = "button";
+      metric.setAttribute("aria-label", "Открыть кошелёк");
+      metric.addEventListener("click", () => void loadWallet());
+    }
     metric.append(element("strong", valueOrDash(value)), element("span", label));
     metrics.append(metric);
   }
@@ -9616,7 +9624,8 @@ async function bootstrapTaskHome(authAttempted = false) {
     const directCreditRecipient = initialHash.match(
       /^#\/moderation\/credits\/recipients\/([0-9a-f-]{36})$/i,
     );
-    if (initialHash === "#/settings") showSettings(false);
+    if (initialHash.startsWith("#/wallet")) void loadWallet(initialHash.slice(8) || "", false);
+    else if (initialHash === "#/settings") showSettings(false);
     else if (/^#\/profile(?:\/.*)?$/.test(initialHash)) loadProfile(false);
     else if (directMember) {
       history.replaceState(
@@ -9742,7 +9751,177 @@ async function bootstrapTaskHome(authAttempted = false) {
   }
 }
 
+const walletNames = {
+  starting_grant: "Стартовые кредиты", task_reward_reserved: "Резерв на задание",
+  task_reward_earned: "Награда за задание", partial_task_reward: "Частичная награда",
+  community_task_reward: "Награда сообщества", task_reward_refunded: "Возврат резерва",
+  penalty: "Штраф", manual_credit_grant: "Начисление кредитов", admin_adjustment: "Корректировка",
+  fraud_reversal: "Отмена операции", resolution_reversal: "Пересмотр решения",
+  transfer_sent: "Исходящий перевод", transfer_received: "Входящий перевод",
+};
+let walletDraft = null;
+let walletSending = false;
+const walletDraftKey = () => `wallet-transfer:${currentMemberId}`;
+const saveWalletDraft = () => {
+  try {
+    if (walletDraft) sessionStorage.setItem(walletDraftKey(), JSON.stringify(walletDraft));
+    else sessionStorage.removeItem(walletDraftKey());
+  } catch { /* In-memory idempotency still protects this session. */ }
+};
+const walletButton = (label, action, style = "secondary") => {
+  const button = element("button", label, style);
+  button.type = "button";
+  button.addEventListener("click", action);
+  return button;
+};
+const walletTime = (stamp) => new Date(stamp).toLocaleString("ru-RU", { dateStyle: "medium", timeStyle: "short" });
+const walletDelta = (amount) => amount === 0 ? "0" : `${amount > 0 ? "+" : "−"}${Math.abs(amount)}`;
+
+async function loadWallet(route = "", push = true) {
+  const revision = ++screenRevision;
+  const root = !route;
+  setNavigation("wallet", !root);
+  title.textContent = root ? "" : ({ "/history": "История операций", "/transfer": "Перевод кредитов", "/confirm": "Проверь перевод", "/reserve": "В резерве", "/locked": "Переводы пока закрыты" }[route] || "Операция");
+  setHeaderControl(root ? null : "back", { onBack: () => void loadWallet(), hideTitle: root, screenLabel: "Кошелёк" });
+  if (push) history.pushState({ screen: "wallet", walletRoute: route }, "", `#/wallet${route}`);
+  else history.replaceState({ screen: "wallet", walletRoute: route }, "", `#/wallet${route}`);
+  replaceContent(element("p", "Загружаем кошелёк…", "status"));
+  try {
+    if (!walletDraft) {
+      try { walletDraft = JSON.parse(sessionStorage.getItem(walletDraftKey()) || "null"); } catch { walletDraft = null; }
+    }
+    const summary = await fetchJson("/api/v1/wallet");
+    if (revision !== screenRevision) return;
+    const view = element("section", undefined, "wallet-view");
+    if (root || route === "/history") {
+      if (root) {
+        const balance = element("section", undefined, "wallet-balance-card");
+        balance.append(element("span", "Доступно", "wallet-label"), element("strong", String(summary.balance), "wallet-balance"), element("span", "кредитов", "wallet-label"));
+        if (summary.reserved) balance.append(walletButton(`Ещё ${summary.reserved} в резерве заданий →`, () => void loadWallet("/reserve"), "wallet-inline"));
+        balance.append(walletButton(walletDraft?.pending ? "Проверить незавершённый перевод" : summary.transfers_enabled ? "Перевести кредиты" : "Когда откроются переводы?", () => void loadWallet(walletDraft?.pending ? "/confirm" : summary.transfers_enabled ? "/transfer" : "/locked"), "primary"));
+        balance.append(element("p", summary.transfers_enabled ? `Переводы открыты · заработано ${summary.earned} кредитов` : `${summary.earned} / ${summary.transfer_threshold} заработано для переводов`, "wallet-label"));
+        if (!summary.transfers_enabled) {
+          const progress = element("progress"); progress.max = summary.transfer_threshold; progress.value = summary.earned; progress.setAttribute("aria-label", "Доступ к переводам"); balance.append(progress);
+        }
+        view.append(balance, element("h2", "История операций", "wallet-section-title"));
+      }
+      const list = element("div", undefined, "wallet-history");
+      view.append(list);
+      let cursor = null;
+      let historyFailed = false;
+      const more = walletButton(root ? "Вся история" : "Показать ещё", () => root && !historyFailed ? void loadWallet("/history") : void appendPage());
+      const appendPage = async () => {
+        more.disabled = true;
+        try {
+          const page = await fetchJson(`/api/v1/wallet/history?limit=${root ? 5 : 30}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          if (revision !== screenRevision) return;
+          historyFailed = false;
+          more.textContent = root ? "Вся история" : "Показать ещё";
+          for (const operation of page.items) {
+            const item = walletButton("", () => void loadWallet(`/operations/${operation.transaction_id}`), "wallet-operation");
+            const copy = element("span");
+            copy.append(element("strong", walletNames[operation.transaction_type] || "Операция"));
+            const description = operation.counterparty_name || operation.task_title || operation.comment;
+            if (description) copy.append(element("small", description));
+            copy.append(element("small", walletTime(operation.created_at)));
+            item.append(copy, element("span", walletDelta(operation.credit_delta), operation.credit_delta > 0 ? "wallet-delta is-positive" : "wallet-delta"));
+            list.append(item);
+          }
+          if (!list.children.length) list.append(element("p", "Операций пока нет.", "muted"));
+          cursor = page.next_cursor;
+          more.hidden = !cursor;
+        } catch { historyFailed = true; more.hidden = false; more.textContent = "Повторить загрузку истории"; }
+        finally { more.disabled = false; }
+      };
+      view.append(more);
+      replaceContent(view);
+      await appendPage();
+      return;
+    }
+    if (route === "/locked") {
+      view.append(section("Сначала — вклад в сообщество", `Нужно заработать ${summary.transfer_threshold} кредитов за задания. Уже заработано ${summary.earned}, осталось ${Math.max(0, summary.transfer_threshold - summary.earned)}.`), element("p", "Стартовые кредиты, подарки и переводы не учитываются. Обычные траты не закрывают доступ обратно. Отменённые награды не считаются заработанными.", "muted"));
+    } else if (route === "/reserve") {
+      view.append(element("strong", `${summary.reserved} кредитов`, "wallet-balance"), element("p", "Эти кредиты уже исключены из доступного баланса и предназначены для оплаты твоих заданий. После расчёта они поступят исполнителям, а неиспользованная часть вернётся в кошелёк."), walletButton("Мои задания", () => void loadTaskHome()));
+    } else if (route.startsWith("/operations/")) {
+      const operation = await fetchJson(`/api/v1/wallet${route}`);
+      if (revision !== screenRevision) return;
+      view.append(element("strong", walletDelta(operation.credit_delta), "wallet-balance"), section(walletNames[operation.transaction_type] || "Операция", walletTime(operation.created_at)));
+      for (const [label, value] of [["Участник", operation.counterparty_name], ["Ник", operation.counterparty_username], ["Задание", operation.task_title], ["Основание", operation.reason], ["Комментарий", operation.comment], [operation.balance_reconstructed ? "Расчётный баланс после" : "Баланс после", `${operation.balance_after} кредитов`], ["Изменение опыта", String(operation.experience_delta)], ["Номер операции", operation.transaction_id]]) {
+        if (value) view.append(section(label, value));
+      }
+    } else if (route === "/transfer" && !walletDraft?.pending) {
+      if (!summary.transfers_enabled) return void loadWallet("/locked", false);
+      walletDraft ||= { person: null, amount: "", comment: "", operationKey: null, pending: false };
+      const searchLabel = element("label", "Кому", "wallet-field");
+      const search = element("input"); search.type = "search"; search.placeholder = "Имя или @ник"; search.setAttribute("aria-label", "Найти получателя");
+      searchLabel.append(search);
+      const results = element("div", undefined, "wallet-recipients");
+      const selected = element("p", walletDraft.person ? `Получатель: ${walletDraft.person.display_name}` : "Выбери получателя", "wallet-label");
+      let requestNumber = 0, timer;
+      search.addEventListener("input", () => {
+        const request = ++requestNumber; clearTimeout(timer); results.replaceChildren();
+        const query = search.value.trim();
+        if (!query) return;
+        timer = setTimeout(async () => {
+          try {
+            const page = await fetchJson(`/api/v1/wallet/recipients?query=${encodeURIComponent(query)}`);
+            if (revision !== screenRevision || request !== requestNumber) return;
+            results.replaceChildren(...page.items.map(person => walletButton(`${person.display_name}${person.telegram_username ? ` · @${person.telegram_username}` : ""}`, () => {
+              walletDraft.person = person; selected.textContent = `Получатель: ${person.display_name}${person.telegram_username ? ` · @${person.telegram_username}` : ""}`; results.replaceChildren(); saveWalletDraft();
+            }, "wallet-recipient")));
+            if (!page.items.length) results.append(element("p", "Активные участники не найдены.", "muted"));
+          } catch { if (revision === screenRevision && request === requestNumber) results.textContent = "Не удалось выполнить поиск. Повтори запрос."; }
+        }, 220);
+      });
+      const amountLabel = element("label", "Сумма", "wallet-field"), amount = element("input");
+      amount.type = "number"; amount.inputMode = "numeric"; amount.min = "1"; amount.max = String(summary.balance); amount.step = "1"; amount.value = walletDraft.amount; amountLabel.append(amount);
+      const commentLabel = element("label", "Комментарий · необязательно", "wallet-field"), comment = element("input");
+      comment.maxLength = 140; comment.value = walletDraft.comment; commentLabel.append(comment);
+      const status = element("p", "", "status is-error"); status.setAttribute("role", "alert");
+      view.append(element("p", `Доступно ${summary.balance} кредитов · без комиссии`, "wallet-label"), searchLabel, results, selected, amountLabel, commentLabel, status, element("p", "Перевод не начисляет опыт.", "wallet-label"), walletButton("Продолжить", () => {
+        const value = Number(amount.value);
+        if (!walletDraft.person || !Number.isSafeInteger(value) || value < 1 || value > summary.balance || value > 1000000000) { status.textContent = "Выбери получателя и укажи целую сумму в пределах баланса."; return; }
+        walletDraft = { person: walletDraft.person, amount: value, comment: comment.value.trim(), operationKey: newOperationKey(), pending: false }; saveWalletDraft(); void loadWallet("/confirm");
+      }, "primary"));
+    } else if (route === "/confirm" || walletDraft?.pending) {
+      if (!walletDraft?.person) return void loadWallet("/transfer", false);
+      const draft = walletDraft;
+      view.append(section("Получатель", `${draft.person.display_name}${draft.person.telegram_username ? ` · @${draft.person.telegram_username}` : ""}`), element("strong", `${draft.amount} кредитов`, "wallet-transfer-amount"), section("Комиссия", "0 кредитов"));
+      if (!draft.pending) view.append(section("Останется", `${summary.balance - draft.amount} кредитов`));
+      if (draft.comment) view.append(section("Комментарий", draft.comment));
+      const status = element("p", draft.pending ? "Результат предыдущей отправки ещё не подтверждён. Повтори проверку — второй раз кредиты не спишутся." : "После подтверждения перевод нельзя отменить самостоятельно.", "status");
+      const confirm = walletButton(draft.pending ? "Проверить и завершить перевод" : `Подтвердить перевод ${draft.amount}`, async () => {
+        if (walletSending) return;
+        walletSending = true; confirm.disabled = true; draft.pending = true; walletDraft = draft; saveWalletDraft(); status.textContent = "Проверяем перевод…";
+        try {
+          const receipt = await submissionRequest("/api/v1/wallet/transfers", "POST", draft.operationKey, { recipient_id: draft.person.member_id, amount: draft.amount, comment: draft.comment || null });
+          walletDraft = null; saveWalletDraft();
+          if (revision !== screenRevision) return;
+          title.textContent = "Перевод выполнен";
+          const success = element("section", undefined, "wallet-view");
+          success.append(section(receipt.recipient.display_name, `Отправлено ${receipt.amount} кредитов`), section("Баланс после перевода", `${receipt.balance_after} кредитов`), walletButton("В кошелёк", () => void loadWallet(), "primary"));
+          replaceContent(success);
+        } catch (error) {
+          if ([400,403,404,409,422].includes(error?.status)) { draft.pending = false; walletDraft = draft; saveWalletDraft(); }
+          if (revision !== screenRevision) return;
+          status.textContent = ({ insufficient_balance: "Недостаточно кредитов. Обнови кошелёк.", transfers_locked: "Для переводов нужно заработать 50 кредитов за задания.", wallet_unavailable: "Участник больше не может участвовать в переводах.", idempotency_conflict: "Этот запрос уже использован. Открой кошелёк и проверь историю." })[error.message] || "Не удалось подтвердить результат. Повторная проверка безопасна.";
+          confirm.textContent = draft.pending ? "Проверить и завершить перевод" : "Повторить";
+          confirm.disabled = false;
+        } finally { walletSending = false; }
+      }, "primary");
+      confirm.disabled = walletSending;
+      view.append(status, confirm);
+      if (!draft.pending) view.append(walletButton("Изменить перевод", () => void loadWallet("/transfer")));
+    } else return void loadWallet("", false);
+    replaceContent(view);
+  } catch {
+    if (revision !== screenRevision) return;
+    replaceContent(element("p", "Не удалось загрузить кошелёк. Проверь соединение или заново открой Mini App.", "status"), walletButton("Повторить", () => void loadWallet(route, false)));
+  }
+}
+
 catalogNav.addEventListener("click", () => void loadTaskHome());
+walletNav.addEventListener("click", () => void loadWallet());
 participantsNav.addEventListener("click", () => loadParticipants("members"));
 profileNav.addEventListener("click", () => showSettings());
 moderationNav.addEventListener("click", () => loadModeration());
@@ -9785,7 +9964,11 @@ back.addEventListener("click", () => {
   }
 });
 globalThis.addEventListener("popstate", (event) => {
-  if (event.state?.screen === "task-home") {
+  if (/^#\/wallet(?:\/|$)/.test(location.hash)) {
+    void loadWallet(location.hash.slice(8), false);
+  } else if (event.state?.screen === "wallet") {
+    void loadWallet(event.state.walletRoute || "", false);
+  } else if (event.state?.screen === "task-home") {
     void loadTaskHome(false);
   } else if (event.state?.screen === "catalog") {
     void loadCatalog(false);

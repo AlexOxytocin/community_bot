@@ -112,6 +112,12 @@ from community_bot.application.tasks import (
     TaskPreview,
     TaskService,
 )
+from community_bot.application.wallet import (
+    MAX_TRANSFER,
+    TransferCommand,
+    TransfersLockedError,
+    WalletService,
+)
 from community_bot.bootstrap.settings import Settings
 from community_bot.domain.assignments import (
     AssignmentDecision,
@@ -121,6 +127,7 @@ from community_bot.domain.assignments import (
     SubmissionDraft,
 )
 from community_bot.domain.catalog import TaskFormat
+from community_bot.domain.economy import IdempotencyConflictError, InsufficientBalanceError
 from community_bot.domain.moderation import ModerationError, ResolutionCode
 from community_bot.domain.registration import (
     ModerationDecision,
@@ -184,6 +191,10 @@ _PUBLIC_ERROR_CODES = frozenset(
         "administration_unavailable",
         "community_stats_unavailable",
         "credit_grant_unavailable",
+        "wallet_unavailable",
+        "transfers_locked",
+        "insufficient_balance",
+        "idempotency_conflict",
         "task_catalog_unavailable",
         "unauthorized",
     }
@@ -390,6 +401,12 @@ class CreditGrantRequest(_Dto):
     target_member_id: UUID
     amount: int = Field(gt=0, strict=True)
     reason: str = Field(min_length=3, max_length=500)
+
+
+class WalletTransferRequest(_Dto):
+    recipient_id: UUID
+    amount: int = Field(gt=0, le=MAX_TRANSFER, strict=True)
+    comment: str | None = Field(default=None, max_length=140)
 
 
 class CreditGrantReceiptDto(_Dto):
@@ -921,6 +938,7 @@ def create_web_app(
     moderation = ModerationService(database.unit_of_work)
     administration = AdministrationService(database.unit_of_work)
     credit_grants = CreditGrantService(database.unit_of_work)
+    wallet = WalletService(database.unit_of_work)
     owned_community_stats_gateway = False
     if (
         community_stats_gateway is None
@@ -1550,6 +1568,99 @@ def create_web_app(
                 can_grant_credits=overview.can_grant_credits,
             )
         )
+
+    async def wallet_read(  # noqa: PLR0913 - mirrors the typed wallet projection inputs.
+        actor: ActorContext,
+        kind: str = "summary",
+        *,
+        limit: int = 30,
+        cursor: str | None = None,
+        transaction_id: UUID | None = None,
+        transfer_id: UUID | None = None,
+        query: str = "",
+    ) -> JSONResponse:
+        try:
+            return _json_response(
+                await wallet.read(
+                    actor,
+                    kind=kind,
+                    limit=limit,
+                    cursor=cursor,
+                    transaction_id=transaction_id,
+                    transfer_id=transfer_id,
+                    query=query,
+                )
+            )
+        except PermissionError:
+            return _error_response(403, "wallet_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        except ValueError:
+            return _error_response(422, "invalid_request")
+
+    @app.get("/api/v1/wallet")
+    async def wallet_summary(actor: ActorContext = Depends(current_actor)) -> JSONResponse:
+        return await wallet_read(actor)
+
+    @app.get("/api/v1/wallet/history")
+    async def wallet_history(
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=100)] = 30,
+        cursor: str | None = None,
+    ) -> JSONResponse:
+        return await wallet_read(actor, "history", limit=limit, cursor=cursor)
+
+    @app.get("/api/v1/wallet/operations/{transaction_id}")
+    async def wallet_operation(
+        transaction_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> JSONResponse:
+        return await wallet_read(actor, "operation", transaction_id=transaction_id)
+
+    @app.get("/api/v1/wallet/recipients")
+    async def wallet_recipients(
+        query: str,
+        actor: ActorContext = Depends(current_actor),
+        limit: Annotated[int, Query(ge=1, le=30)] = 20,
+    ) -> JSONResponse:
+        return await wallet_read(actor, "recipients", query=query, limit=limit)
+
+    @app.get("/api/v1/wallet/transfers/{transfer_id}")
+    async def wallet_receipt(
+        transfer_id: UUID, actor: ActorContext = Depends(current_actor)
+    ) -> JSONResponse:
+        return await wallet_read(actor, "receipt", transfer_id=transfer_id)
+
+    @app.post("/api/v1/wallet/transfers")
+    async def wallet_transfer(request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        payload = await _submission_request(request, WalletTransferRequest)
+        if payload is None:
+            return _error_response(422, "invalid_request")
+        try:
+            receipt = await wallet.transfer(
+                actor,
+                TransferCommand(
+                    recipient_id=payload.recipient_id,
+                    amount=payload.amount,
+                    comment=payload.comment,
+                    operation_key=operation_key,
+                ),
+            )
+        except TransfersLockedError:
+            return _error_response(403, "transfers_locked")
+        except InsufficientBalanceError:
+            return _error_response(409, "insufficient_balance")
+        except IdempotencyConflictError:
+            return _error_response(409, "idempotency_conflict")
+        except PermissionError:
+            return _error_response(403, "wallet_unavailable")
+        except LookupError:
+            return _error_response(404, "not_found")
+        except ValueError:
+            return _error_response(422, "invalid_request")
+        return _json_response(receipt, status_code=200 if receipt["replayed"] else 201)
 
     @app.get(
         "/api/v1/administration/credits/self",

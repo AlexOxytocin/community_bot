@@ -1456,11 +1456,11 @@ class AccountTransactionModel(Base):
             "transaction_type IN ('starting_grant', 'task_reward_reserved', "
             "'task_reward_earned', 'task_reward_refunded', 'partial_task_reward', "
             "'community_task_reward', 'penalty', 'admin_adjustment', 'fraud_reversal', "
-            "'resolution_reversal', 'manual_credit_grant')",
+            "'resolution_reversal', 'manual_credit_grant', 'transfer_sent', 'transfer_received')",
             name="ck_account_transactions_type",
         ),
         CheckConstraint(
-            "(transaction_type = 'starting_grant' AND credit_delta IN (5, 10) "
+            "(transaction_type = 'starting_grant' AND credit_delta IN (5, 10, 20) "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'task_reward_reserved' AND credit_delta < 0 "
             "AND experience_delta = 0) OR "
@@ -1472,6 +1472,9 @@ class AccountTransactionModel(Base):
             "(transaction_type = 'penalty' AND credit_delta < 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'manual_credit_grant' AND credit_delta > 0 "
+            "AND experience_delta = 0) OR "
+            "(transaction_type = 'transfer_sent' AND credit_delta < 0 AND experience_delta = 0) OR "
+            "(transaction_type = 'transfer_received' AND credit_delta > 0 "
             "AND experience_delta = 0) OR "
             "(transaction_type = 'admin_adjustment' "
             "AND (credit_delta <> 0 OR experience_delta <> 0)) OR "
@@ -1500,6 +1503,7 @@ class AccountTransactionModel(Base):
         PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
     )
     credit_delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    balance_after: Mapped[int | None] = mapped_column(BigInteger)
     experience_delta: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     transaction_type: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
@@ -1518,6 +1522,33 @@ class AccountTransactionModel(Base):
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WalletTransferModel(Base):
+    """One immutable identity linking the two ledger legs of a peer transfer."""
+
+    __tablename__ = "wallet_transfers"
+    __table_args__ = (
+        CheckConstraint("amount > 0 AND sender_id <> recipient_id", name="ck_wallet_transfer"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    sender_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    recipient_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("members.id"), nullable=False
+    )
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text)
+    outgoing_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("account_transactions.id"), unique=True, nullable=False
+    )
+    incoming_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("account_transactions.id"), unique=True, nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

@@ -155,10 +155,12 @@ class SqlAlchemyEconomyMutation:
                     message = "Reversal source transaction does not exist."
                     raise LookupError(message)
                 if source.transaction_type in {
+                    TransactionType.TRANSFER_SENT.value,
+                    TransactionType.TRANSFER_RECEIVED.value,
                     TransactionType.FRAUD_REVERSAL.value,
                     TransactionType.RESOLUTION_REVERSAL.value,
                 }:
-                    message = "A reversal cannot reverse another reversal."
+                    message = "Cannot reverse another reversal or an individual transfer."
                     raise IdempotencyConflictError(message)
                 normalized = EconomyCommand(
                     transaction_type=command.transaction_type,
@@ -279,7 +281,9 @@ def _stage_economy_batch(
             experience_changed.add(command.member_id)
 
         transaction_id = uuid.uuid4()
-        session.add(_transaction_model(command, transaction_id))
+        transaction = _transaction_model(command, transaction_id)
+        transaction.balance_after = credit_total
+        session.add(transaction)
         persisted.append((command, transaction_id))
         results.append(
             EconomyMutationResult(
@@ -835,6 +839,14 @@ def _authorize_administrative_commands(
         if command.actor_member_id is None:
             continue
         actor = members[command.actor_member_id]
+        if command.transaction_type in {
+            TransactionType.TRANSFER_SENT,
+            TransactionType.TRANSFER_RECEIVED,
+        }:
+            if actor.status != MemberStatus.ACTIVE.value:
+                message = "An active sender is required."
+                raise AuthorizationError(message)
+            continue
         if (
             actor.status != MemberStatus.ACTIVE.value
             or actor.role != MemberRole.ADMINISTRATOR.value
@@ -875,7 +887,12 @@ def _stored_result(
 def _economy_audit(command: EconomyCommand, transaction_id: UUID) -> AuditEventModel:
     return AuditEventModel(
         actor_member_id=command.actor_member_id,
-        action="economy_administrative_mutation",
+        action=(
+            "wallet_transfer"
+            if command.transaction_type
+            in {TransactionType.TRANSFER_SENT, TransactionType.TRANSFER_RECEIVED}
+            else "economy_administrative_mutation"
+        ),
         entity_type="account_transaction",
         entity_id=str(transaction_id),
         before_json=None,

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from uuid import UUID
 
-_STARTING_GRANT_AMOUNT = 10
+_STARTING_GRANT_AMOUNT = 20
 _MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 
@@ -44,6 +44,8 @@ class TransactionType(StrEnum):
     COMMUNITY_TASK_REWARD = "community_task_reward"
     PENALTY = "penalty"
     MANUAL_CREDIT_GRANT = "manual_credit_grant"
+    TRANSFER_SENT = "transfer_sent"
+    TRANSFER_RECEIVED = "transfer_received"
     ADMIN_ADJUSTMENT = "admin_adjustment"
     FRAUD_REVERSAL = "fraud_reversal"
     RESOLUTION_REVERSAL = "resolution_reversal"
@@ -633,6 +635,24 @@ def _validate_adjustment(command: EconomyCommand) -> None:
     _require_admin_metadata(command)
 
 
+def _validate_transfer(command: EconomyCommand) -> None:
+    outgoing = command.transaction_type is TransactionType.TRANSFER_SENT
+    _require(
+        condition=(
+            command.experience_delta == 0
+            and (command.credit_delta < 0 if outgoing else command.credit_delta > 0)
+            and command.actor_member_id is not None
+            and (
+                command.actor_member_id == command.member_id
+                if outgoing
+                else command.actor_member_id != command.member_id
+            )
+            and command.idempotency_key.startswith("wallet_transfer:")
+        ),
+        message="Invalid wallet transfer.",
+    )
+
+
 def _validate_reversal(command: EconomyCommand) -> None:
     _require(
         condition=command.credit_delta != 0 or command.experience_delta != 0,
@@ -654,6 +674,8 @@ _DELTA_VALIDATORS: dict[TransactionType, Callable[[EconomyCommand], None]] = {
     TransactionType.COMMUNITY_TASK_REWARD: _validate_reward,
     TransactionType.PENALTY: _validate_penalty,
     TransactionType.MANUAL_CREDIT_GRANT: _validate_manual_credit_grant,
+    TransactionType.TRANSFER_SENT: _validate_transfer,
+    TransactionType.TRANSFER_RECEIVED: _validate_transfer,
     TransactionType.ADMIN_ADJUSTMENT: _validate_adjustment,
     TransactionType.FRAUD_REVERSAL: _validate_reversal,
     TransactionType.RESOLUTION_REVERSAL: _validate_reversal,

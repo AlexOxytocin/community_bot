@@ -60,6 +60,153 @@ def _new_page(browser: Any, *, bridge: str = "") -> Any:  # noqa: ANN401
     return page
 
 
+@pytest.mark.browser_smoke
+def test_wallet_root_and_recovery_keep_one_transfer_identity(mini_app_url: str) -> None:
+    sent: list[dict[str, Any]] = []
+    recipient = {
+        "member_id": "00000000-0000-0000-0000-000000000222",
+        "display_name": "Маша",
+        "telegram_username": "masha",
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 390, "height": 844})
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route(
+            "**/api/v1/**", lambda route: route.fulfill(status=403, json={"code": "forbidden"})
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route(
+            "**/api/v1/wallet",
+            lambda route: route.fulfill(
+                json={
+                    "balance": 115,
+                    "reserved": 6,
+                    "earned": 95,
+                    "transfer_threshold": 50,
+                    "transfers_enabled": True,
+                }
+            ),
+        )
+        page.route(
+            "**/api/v1/wallet/history?*",
+            lambda route: route.fulfill(
+                json={
+                    "items": [],
+                    "next_cursor": None,
+                }
+            ),
+        )
+        page.route(
+            "**/api/v1/wallet/recipients?*",
+            lambda route: route.fulfill(
+                json={
+                    "items": [recipient],
+                }
+            ),
+        )
+
+        def transfer(route: Route) -> None:
+            sent.append(
+                {
+                    "key": route.request.headers["idempotency-key"],
+                    "body": route.request.post_data_json,
+                }
+            )
+            if len(sent) == 1:
+                route.abort("failed")
+            else:
+                route.fulfill(
+                    json={
+                        "recipient": recipient,
+                        "amount": 15,
+                        "balance_after": 100,
+                        "replayed": True,
+                    }
+                )
+
+        page.route("**/api/v1/wallet/transfers", transfer)
+        page.goto(f"{mini_app_url}#/wallet")
+        expect(page.locator("#wallet-nav")).to_have_attribute("aria-pressed", "true")
+        expect(page.locator("#screen-title")).not_to_be_visible()
+        expect(page.get_by_text("Операций пока нет.")).to_be_visible()
+        page.get_by_role("button", name="Перевести кредиты", exact=True).click()
+        page.get_by_label("Найти получателя").fill("masha")
+        page.get_by_role("button", name="Маша · @masha").click()
+        page.get_by_label("Сумма", exact=True).fill("1.5")
+        page.get_by_role("button", name="Продолжить", exact=True).click()
+        expect(
+            page.get_by_text("Выбери получателя и укажи целую сумму в пределах баланса.")
+        ).to_be_visible()
+        assert not sent
+        page.get_by_label("Сумма", exact=True).fill("15")
+        page.get_by_role("button", name="Продолжить", exact=True).click()
+        expect(page.get_by_text("0 кредитов", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Подтвердить перевод 15", exact=True).click()
+        expect(
+            page.get_by_text("Не удалось подтвердить результат. Повторная проверка безопасна.")  # noqa: RUF001
+        ).to_be_visible()
+        page.reload()
+        page.get_by_role("button", name="Проверить и завершить перевод", exact=True).click()
+        expect(page.get_by_text("Отправлено 15 кредитов", exact=True)).to_be_visible()
+        assert len(sent) == 2
+        assert sent[0] == sent[1]
+        page.get_by_role("button", name="В кошелёк", exact=True).click()  # noqa: RUF001
+        expect(page.get_by_role("button", name="Перевести кредиты", exact=True)).to_be_visible()
+        page.goto(f"{mini_app_url}#/wallet/history")
+        expect(page.locator("#screen-title")).to_have_text("История операций")
+        page.go_back()
+        expect(page.locator("#screen-title")).not_to_be_visible()
+        assert not errors
+        browser.close()
+
+
+@pytest.mark.browser_smoke
+def test_wallet_locked_deeplink_and_history_retry(mini_app_url: str) -> None:
+    history_calls = 0
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.route(
+            "**/api/v1/**", lambda route: route.fulfill(status=403, json={"code": "forbidden"})
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route(
+            "**/api/v1/wallet",
+            lambda route: route.fulfill(
+                json={
+                    "balance": 20,
+                    "reserved": 0,
+                    "earned": 0,
+                    "transfer_threshold": 50,
+                    "transfers_enabled": False,
+                }
+            ),
+        )
+
+        def history(route: Route) -> None:
+            nonlocal history_calls
+            history_calls += 1
+            if history_calls == 1:
+                route.fulfill(status=503, json={"code": "unavailable"})
+            else:
+                route.fulfill(json={"items": [], "next_cursor": None})
+
+        page.route("**/api/v1/wallet/history?*", history)
+        page.goto(f"{mini_app_url}#/wallet/transfer")
+        expect(page.get_by_text("Сначала — вклад в сообщество", exact=True)).to_be_visible()
+        expect(page.get_by_label("Найти получателя")).to_have_count(0)
+        page.get_by_role("button", name="Назад", exact=True).click()
+        page.get_by_role("button", name="Повторить загрузку истории", exact=True).click()
+        expect(page.get_by_text("Операций пока нет.")).to_be_visible()
+        expect(
+            page.get_by_role("button", name="Когда откроются переводы?", exact=True)
+        ).to_be_visible()
+        browser.close()
+
+
 def _connected_control(page: Any, edge_id: str, trigger: str) -> Any:  # noqa: ANN401
     control = page.locator(f'[data-transition-id="{edge_id}"][data-transition-trigger="{trigger}"]')
     control.first.wait_for()
@@ -2277,11 +2424,13 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         reject_confirm.click()
         page.locator('[data-screen-id="UX02"]').wait_for()
         assert page.url.endswith("#/tasks")
-        assert decisions == [{
-            "decision": "reject",
-            "rejection_reason": "insufficient_evidence",
-            "rejection_comment": "Нужна ссылка на готовый результат.",
-        }]
+        assert decisions == [
+            {
+                "decision": "reject",
+                "rejection_reason": "insufficient_evidence",
+                "rejection_comment": "Нужна ссылка на готовый результат.",
+            }
+        ]
         browser.close()
 
 
@@ -5421,11 +5570,11 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                                 "next_level_at": threshold,
                                 "message_url": (
                                     "https://t.me/c/1234567890/42"
-                                    if code in {"star", "consilium"} else None
+                                    if code in {"star", "consilium"}
+                                    else None
                                 ),
-                                "unlocked": level > 0 or (
-                                    code in {"star", "consilium"} and current > 0
-                                ),
+                                "unlocked": level > 0
+                                or (code in {"star", "consilium"} and current > 0),
                             }
                             for code, level, current, threshold in (
                                 ("speaker", 2, 42, 60),

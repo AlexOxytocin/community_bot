@@ -209,6 +209,25 @@ def _telegram_method() -> SendMessage:
 
 
 @pytest.mark.asyncio
+async def test_wallet_notice_is_credit_only_and_does_not_leak_comment() -> None:
+    bot = _TelegramBotStub()
+    sender = TelegramNotificationSender(cast("Bot", bot))
+    claim = DeliveryClaim(
+        id=uuid4(),
+        member_id=uuid4(),
+        telegram_user_id=42,
+        notification_type="wallet.transfer_received",
+        payload={"amount": 15, "comment": "private wallet comment"},
+        attempt_count=1,
+        lease_token=uuid4(),
+    )
+    await sender.send(claim)
+    assert len(bot.sent) == 1
+    assert "+15 кредитов" in bot.sent[0][1]
+    assert "private" not in bot.sent[0][1]
+
+
+@pytest.mark.asyncio
 async def test_telegram_sender_uses_allowlisted_message() -> None:
     """Delivery ignores persisted payload and sends only allowlisted text."""
     bot = _TelegramBotStub()

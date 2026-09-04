@@ -49,6 +49,7 @@ from community_bot.infrastructure.db.models import (
     WebSessionModel,
 )
 from community_bot.infrastructure.db.moderation import SqlAlchemyModerationMutation
+from community_bot.infrastructure.db.wallet import SqlAlchemyWalletStore
 
 _UPDATE_LOCK_NAMESPACE = "telegram_update"
 
@@ -1434,6 +1435,11 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
         return await credit_grant_store.recipients(
             self._require_session(), query=query, limit=limit
         )
+
+    @property
+    def wallet(self) -> SqlAlchemyWalletStore:
+        """Share the transaction and economy locks with wallet persistence."""
+        return SqlAlchemyWalletStore(self._require_session())
 
     async def credit_grant_recipient(self, member_id: UUID) -> CreditGrantRecipient | None:
         """Return one account with its current credit balance."""

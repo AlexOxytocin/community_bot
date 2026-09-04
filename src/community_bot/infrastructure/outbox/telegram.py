@@ -58,6 +58,13 @@ _INVALID_NOTIFICATION_PAYLOAD = "invalid_notification_payload"
 
 
 def _notification_text(claim: DeliveryClaim) -> str:
+    if claim.notification_type == "wallet.transfer_received":
+        amount = claim.payload.get("amount")
+        if type(amount) is not int or amount <= 0:
+            raise NotificationProcessingError(_INVALID_NOTIFICATION_PAYLOAD, permanent=True)
+        return (
+            f"Получен перевод: +{amount} кредитов. Подробности — во вкладке «Кошелёк» в приложении."
+        )
     if claim.notification_type != "assignment_rejection_pending_dispute":
         text = _MESSAGES.get(claim.notification_type)
         if not isinstance(text, str):

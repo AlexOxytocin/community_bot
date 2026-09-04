@@ -35,6 +35,7 @@ from community_bot.application.tasks import (
     SaveWebTaskDraftCommand,
     TaskService,
 )
+from community_bot.application.wallet import WalletService
 from community_bot.bootstrap.product_config import load_product_config_candidate
 from community_bot.domain.assignments import AssignmentDecision
 from community_bot.domain.catalog import TaskFormat
@@ -422,7 +423,9 @@ async def test_freeform_task_publishes_without_template_and_reserves_full_budget
     async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
         persisted = await session.get(MemberModel, member.id)
     assert persisted is not None
-    assert persisted.credit_balance_cached == 2
+    assert persisted.credit_balance_cached == 12
+    wallet = await WalletService(database.unit_of_work).read(actor_context(member))
+    assert wallet["reserved"] == 8
     await database.dispose()
 
 
@@ -522,7 +525,7 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
         persisted_author = await session.get(MemberModel, author.id)
     assert response_id is not None
     assert persisted_author is not None
-    assert persisted_author.credit_balance_cached == 8
+    assert persisted_author.credit_balance_cached == 18
     pending_responses = await task_service.pending_cancellation_responses(
         actor=actor_context(performer)
     )
@@ -623,7 +626,7 @@ async def test_partially_completed_group_can_release_its_free_slot_reserve(
             )
         )
     assert persisted_author is not None
-    assert persisted_author.credit_balance_cached == 8
+    assert persisted_author.credit_balance_cached == 18
     assert persisted_performer is not None
     assert persisted_performer.credit_balance_cached == 2
     assert persisted_assignment is not None
@@ -693,7 +696,7 @@ async def test_partially_completed_task_without_free_slots_cannot_be_reopened(
     assert persisted_task is not None
     assert persisted_task.status == TaskStatus.PARTIALLY_COMPLETED.value
     assert persisted_author is not None
-    assert persisted_author.credit_balance_cached == 6
+    assert persisted_author.credit_balance_cached == 16
     assert assignment_count == 2
     assert free_slot_refund is None
     await database.dispose()
@@ -759,7 +762,9 @@ async def test_persistent_preview_publish_replay_and_cancel(database_url: str) -
             )
         ).all()
     assert model is not None
-    assert model.credit_balance_cached == 10
+    assert model.credit_balance_cached == 20
+    wallet = await WalletService(database.unit_of_work).read(actor_context(member))
+    assert wallet["reserved"] == 0
     assert transactions[-1].experience_delta == 0
     assert await scalar_count(database, OutboxEventModel) == 2
     await database.dispose()
@@ -792,7 +797,7 @@ async def test_two_public_drafts_compete_for_one_balance(database_url: str) -> N
     await EconomyService(database.unit_of_work).apply_one(
         admin_adjustment(
             member_id=member.id,
-            credit_delta=-5,
+            credit_delta=-15,
             experience_delta=0,
             idempotency_key="task-competing-drafts:balance-fixture",
             context=AdministrativeContext(admin.id, "Competing drafts balance fixture."),
@@ -1027,7 +1032,7 @@ async def test_publish_business_retry_concurrent_cancel_and_private_listing(  # 
     assert len(refunds) == 1
     assert refunds[0].experience_delta == 0
     assert persisted_owner is not None
-    assert persisted_owner.credit_balance_cached == 10
+    assert persisted_owner.credit_balance_cached == 20
     audit_after_cancel = await scalar_count(database, AuditEventModel)
     outbox_after_cancel = await scalar_count(database, OutboxEventModel)
     receipts_after_cancel = await scalar_count(database, ProcessedTelegramUpdateModel)

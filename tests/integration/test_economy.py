@@ -209,7 +209,7 @@ async def test_starting_grant_is_persistent_replay_safe_and_singleton(database_u
     async with sessions() as session:
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
-        assert persisted.credit_balance_cached == 10
+        assert persisted.credit_balance_cached == 20
     await database.dispose()
 
 
@@ -236,7 +236,7 @@ async def test_batch_is_all_new_or_all_stored_and_rolls_back_on_failure(database
                 reserve_reward(member_id=first_member.id, amount=3, idempotency_key="reserve:ok"),
                 reserve_reward(
                     member_id=second_member.id,
-                    amount=11,
+                    amount=21,
                     idempotency_key="reserve:fail",
                 ),
             )
@@ -262,7 +262,7 @@ async def test_rewards_update_experience_and_level_against_active_version(
     async with sessions() as session:
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
-        assert persisted.credit_balance_cached == 20
+        assert persisted.credit_balance_cached == 30
         assert persisted.experience_total_cached == 10
         assert persisted.level_number == 2
         assert persisted.level_config_version_id is not None
@@ -353,7 +353,7 @@ async def test_exact_reversal_is_single_and_restores_both_totals(database_url: s
     async with sessions() as session:
         persisted = await session.get(MemberModel, member.id)
         assert persisted is not None
-        assert persisted.credit_balance_cached == 10
+        assert persisted.credit_balance_cached == 20
         assert persisted.experience_total_cached == 0
     await database.dispose()
 
@@ -427,21 +427,21 @@ async def test_history_authorization_pagination_and_reconciliation(database_url:
     mismatches = await queries.reconcile(actor_member_id=admin.id)
     assert len(mismatches) == 1
     assert mismatches[0].member_id == member.id
-    assert mismatches[0].expected_credit_balance == 11
+    assert mismatches[0].expected_credit_balance == 21
     assert mismatches[0].actual_credit_balance == 999
 
     async with database.engine.begin() as connection:
         await connection.execute(
             text(
-                "UPDATE members SET credit_balance_cached = 11, "
+                "UPDATE members SET credit_balance_cached = 21, "
                 "experience_total_cached = 9 WHERE id = :member_id"
             ),
             {"member_id": member.id},
         )
     experience_mismatch = await queries.reconcile(actor_member_id=admin.id)
     assert len(experience_mismatch) == 1
-    assert experience_mismatch[0].expected_credit_balance == 11
-    assert experience_mismatch[0].actual_credit_balance == 11
+    assert experience_mismatch[0].expected_credit_balance == 21
+    assert experience_mismatch[0].actual_credit_balance == 21
     assert experience_mismatch[0].expected_experience_total == 0
     assert experience_mismatch[0].actual_experience_total == 9
 
