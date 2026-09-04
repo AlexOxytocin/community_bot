@@ -12,6 +12,7 @@ def test_settings_have_safe_development_defaults() -> None:
     assert settings.log_level == "INFO"
     assert settings.bot_token is None
     assert settings.database_url.startswith("postgresql+asyncpg://")
+    assert settings.community_entry_topic_id == 21568
     assert settings.notification_window_start_local.hour == 9
     assert settings.notification_window_end_local.hour == 21
     assert settings.worker_batch_size == 25
@@ -68,8 +69,6 @@ def test_community_chat_id_can_enable_stats_without_a_join_url() -> None:
     )
     assert settings.community_telegram_chat_title == "Алло, Нейросеточная?"
 
-    with pytest.raises(ValueError, match="COMMUNITY_ENTRY_TOPIC_ID requires"):
-        Settings(_env_file=None, community_entry_topic_id=123)
     settings = Settings(
         _env_file=None,
         community_telegram_chat_id=-100_100,

@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     community_telegram_chat_id: int | None = None
     community_telegram_chat_title: str = "Алло, Нейросеточная?"
     community_telegram_join_url: str | None = None
-    community_entry_topic_id: int | None = Field(default=None, gt=0)
+    community_entry_topic_id: int | None = Field(default=21568, gt=0)
     mini_app_origin: str | None = None
     local_review_telegram_user_id: int | None = None
     local_review_invitation_token: SecretStr | None = None
@@ -116,9 +116,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         if self.community_telegram_join_url is not None and self.community_telegram_chat_id is None:
             msg = "COMMUNITY_TELEGRAM_JOIN_URL requires COMMUNITY_TELEGRAM_CHAT_ID"
-            raise ValueError(msg)
-        if self.community_entry_topic_id is not None and self.community_telegram_chat_id is None:
-            msg = "COMMUNITY_ENTRY_TOPIC_ID requires COMMUNITY_TELEGRAM_CHAT_ID"
             raise ValueError(msg)
         self._validate_telegram_ingress()
         stats_values = (self.community_stats_base_url, self.community_stats_token)
