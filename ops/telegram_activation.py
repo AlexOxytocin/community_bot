@@ -26,6 +26,17 @@ WEB = "community-mini-app-core-web-1"
 WORKER = "community-mini-app-core-worker-1"
 ENV_FILE = ROOT / "shared" / ".env"
 CHAT, TOPIC = -1002237685639, 24962
+NGINX_FILE = Path("/opt/app/nginx/conf.d/default.conf")
+WEBHOOK_LOCATION = """    location = /api/telegram/webhook {
+        proxy_pass http://community-mini-app-core-web-1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 256k;
+    }
+
+"""
 
 # Executed as a fixed argv program inside the existing image. Only rollback data
 # (not executable source) uses stdin. Bot tokens never leave the runtime.
@@ -141,6 +152,39 @@ def environment_content(original: str, secret: str) -> bytes:
     ).encode()
 
 
+def nginx_content(original: str) -> bytes:
+    """Insert one exact Telegram endpoint inside the measured host, never edit root routes."""
+    host = "    server_name allo.godmodetools.com;"
+    marker = "    location /api/v1/ {"
+    if original.count(host) != 1:
+        raise CutoverError("Ambiguous nginx host")
+    start = original.index(host)
+    end = original.find("\nserver {", start)
+    end = len(original) if end < 0 else end
+    section = original[start:end]
+    if "/api/telegram/webhook" in section:
+        if WEBHOOK_LOCATION not in section:
+            raise CutoverError("Existing webhook proxy differs")
+        return original.encode()
+    if section.count(marker) != 1:
+        raise CutoverError("Ambiguous API location")
+    position = original.index(marker, start, end)
+    return (original[:position] + WEBHOOK_LOCATION + original[position:]).encode()
+
+
+def edge(state: dict, receipt: Path, *, old: bool = False) -> None:
+    """Validate and reload one staged nginx route, retaining a complete rollback copy."""
+    if digest(NGINX_FILE) not in {state["nginx_sha256"], state["new_nginx_sha256"]}:
+        raise CutoverError("Nginx config drifted")
+    source = receipt.parent / ("old.nginx" if old else "new.nginx")
+    expected = state["nginx_sha256"] if old else state["new_nginx_sha256"]
+    if digest(source) != expected:
+        raise CutoverError("Nginx staging changed")
+    replace_file(source, NGINX_FILE)
+    run("docker", "exec", "nginx", "nginx", "-t")
+    run("docker", "exec", "nginx", "nginx", "-s", "reload")
+
+
 def compose(state: dict, *args: str) -> str:
     """Bind the exact running image, release, environment and package."""
     return run(
@@ -213,7 +257,12 @@ def verify(state: dict) -> None:
 
 def replace_env(source: Path) -> None:
     """Atomically promote a root-private staged environment without logging it."""
-    temporary = ENV_FILE.with_name(".env.telegram-stage")
+    replace_file(source, ENV_FILE)
+
+
+def replace_file(source: Path, destination: Path) -> None:
+    """Replace only a measured destination from its private staged copy."""
+    temporary = destination.with_name(f".{destination.name}.telegram-stage")
     if temporary.exists():
         raise CutoverError("Unresolved environment staging file")
     with temporary.open("xb") as out:
@@ -221,7 +270,7 @@ def replace_env(source: Path) -> None:
         out.write(source.read_bytes())
         out.flush()
         os.fsync(out.fileno())
-    temporary.replace(ENV_FILE)
+    temporary.replace(destination)
 
 
 def apply(state: dict, receipt: Path) -> None:
@@ -240,6 +289,7 @@ def apply(state: dict, receipt: Path) -> None:
         replace_env(receipt.parent / "new.env")
         compose(state, "up", "-d", "--no-deps", "--force-recreate", "worker", "web")
         verify(state)
+        edge(state, receipt)
         runtime("apply")
         if runtime("inspect")["menu"] != state["telegram"]["menu"]:
             raise CutoverError("Launch menu unexpectedly changed")  # noqa: TRY301
@@ -261,6 +311,7 @@ def restore(state: dict, receipt: Path) -> None:
     replace_env(receipt.parent / "old.env")
     compose(state, "up", "-d", "--no-deps", "--force-recreate", "worker", "web")
     verify(state)
+    edge(state, receipt, old=True)
     runtime("restore", state["telegram"])
     state["phase"] = "rolled_back"
     save(receipt, state)
@@ -290,6 +341,17 @@ def prepare() -> Path:
     validate(state)
     verify(state)
     state["telegram"] = runtime("inspect")
+    nginx = inspect("nginx")
+    if not any(
+        m.get("Source") == str(NGINX_FILE.parent) and m.get("Destination") == "/etc/nginx/conf.d"
+        for m in nginx["Mounts"]
+    ):
+        raise CutoverError("Nginx mount mismatch")
+    if NGINX_FILE.is_symlink() or NGINX_FILE.stat().st_uid != 0:
+        raise CutoverError("Nginx file is not root-owned regular input")
+    run("docker", "exec", "nginx", "nginx", "-t")
+    old_nginx = NGINX_FILE.read_bytes()
+    new_nginx = nginx_content(old_nginx.decode())
     directory = ROOT / "shared" / "releases" / f"telegram-{uuid4().hex}"
     directory.mkdir(mode=0o700)
     original = ENV_FILE.read_bytes()
@@ -297,12 +359,19 @@ def prepare() -> Path:
     new = environment_content(
         original.decode(), values.get("TELEGRAM_WEBHOOK_SECRET") or secrets.token_urlsafe(48)
     )
-    for name, content in (("old.env", original), ("new.env", new)):
+    for name, content in (
+        ("old.env", original),
+        ("new.env", new),
+        ("old.nginx", old_nginx),
+        ("new.nginx", new_nginx),
+    ):
         with (directory / name).open("xb") as stream:
             (directory / name).chmod(0o600)
             stream.write(content)
     receipt = directory / "receipt.json"
     state["new_env_sha256"] = digest(directory / "new.env")
+    state["nginx_sha256"] = digest(directory / "old.nginx")
+    state["new_nginx_sha256"] = digest(directory / "new.nginx")
     save(receipt, state)
     return receipt
 

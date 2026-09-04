@@ -21,7 +21,7 @@ def test_environment_changes_only_scoped_values() -> None:
     compile(activation.RUNTIME, "runtime-probe", "exec")
 
 
-@pytest.mark.parametrize("failure", [None, "recreate", "verify", "apply"])
+@pytest.mark.parametrize("failure", [None, "recreate", "verify", "edge", "apply"])
 def test_activation_recovers_configuration_and_menu(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -62,12 +62,29 @@ def test_activation_recovers_configuration_and_menu(
     monkeypatch.setattr(activation, "replace_env", lambda path: event(path.name))
     monkeypatch.setattr(activation, "compose", lambda *_: event("recreate"))
     monkeypatch.setattr(activation, "verify", lambda _: event("verify"))
+    monkeypatch.setattr(
+        activation,
+        "edge",
+        lambda *_, **kwargs: event("edge_restore" if kwargs.get("old") else "edge"),
+    )
     if failure:
         with pytest.raises(activation.CutoverError, match="injected"):
             activation.apply(state, tmp_path / "receipt.json")
-        assert events[-4:] == ["old.env", "recreate", "verify", "restore"]
+        assert events[-5:] == ["old.env", "recreate", "verify", "edge_restore", "restore"]
         assert state["phase"] == "rolled_back"
     else:
         activation.apply(state, tmp_path / "receipt.json")
         assert state["phase"] == "ready"
         assert "restore" not in events
+
+
+def test_nginx_adds_only_exact_webhook_and_is_idempotent() -> None:
+    original = (
+        "server {\n    server_name allo.godmodetools.com;\n"
+        "    location /api/v1/ {\n    }\n    location / { return 404; }\n}\n"
+    )
+    changed = activation.nginx_content(original).decode()
+    assert changed.replace(activation.WEBHOOK_LOCATION, "") == original
+    assert activation.nginx_content(changed).decode() == changed
+    with pytest.raises(activation.CutoverError, match="Ambiguous nginx"):
+        activation.nginx_content(original + original)
