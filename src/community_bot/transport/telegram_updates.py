@@ -517,7 +517,7 @@ class TelegramUpdates:
                 buttons.append(
                     [
                         InlineKeyboardButton(
-                            text="Точка входа в чат",
+                            text="Онбординг",
                             url=topic_message_url(
                                 self.settings.community_telegram_chat_id,
                                 None,
@@ -526,11 +526,19 @@ class TelegramUpdates:
                         )
                     ]
                 )
+            if self.settings.community_telegram_join_url is not None:
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text="Открыть чат и все темы",
+                            url=self.settings.community_telegram_join_url,
+                        )
+                    ]
+                )
             buttons.extend(
                 [
                     [navigation("Что за активности?", "help")],
                     [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")],
-                    [InlineKeyboardButton(text="Готово", callback_data="onboarding:done")],
                 ]
             )
         await self._edit_or_send(

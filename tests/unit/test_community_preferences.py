@@ -317,13 +317,15 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
         "☑ Офлайн ивенты",
         "☐ Крипта",
     ]
-    assert [row[0].text for row in buttons[-3:]] == [
+    assert [row[0].text for row in buttons[-2:]] == [
         "Что за активности?",
         "Зачем мне вообще открывать приложение?",
-        "Готово",
     ]
-    assert buttons[-4][0].text == "Точка входа в чат"
+    assert buttons[-4][0].text == "Онбординг"
     assert buttons[-4][0].url == "https://t.me/c/2237685639/13579"
+    assert buttons[-3][0].text == "Открыть чат и все темы"
+    assert buttons[-3][0].url == "https://t.me/+example"
+    assert all(button.callback_data != "onboarding:done" for row in buttons for button in row)
     cast("AsyncMock", handler.bot).delete_message.assert_awaited_once_with(
         chat_id=456, message_id=777
     )
@@ -356,15 +358,13 @@ async def test_chat_join_resumes_only_explicit_bot_onboarding(*, started: bool) 
     replies = cast("AsyncMock", handler.bot).send_message.call_args_list
     assert "Профиль уже создан" in replies[0].kwargs["text"]
     buttons = replies[1].kwargs["reply_markup"].inline_keyboard
-    assert buttons[-3][0].text == "Что за активности?"
-    assert buttons[-3][0].callback_data == "activities:help"
-    assert buttons[-2][0].text == "Зачем мне вообще открывать приложение?"
-    assert buttons[-1][0].text == "Готово"
-    assert buttons[-1][0].callback_data == "onboarding:done"
+    assert buttons[-2][0].text == "Что за активности?"
+    assert buttons[-2][0].callback_data == "activities:help"
+    assert buttons[-1][0].text == "Зачем мне вообще открывать приложение?"
 
 
 @pytest.mark.asyncio
-async def test_onboarding_finishes_without_forcing_the_app() -> None:
+async def test_legacy_done_button_returns_to_the_current_home() -> None:
     handler, store, _ = _handler()
     store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
     callback = {
@@ -383,11 +383,10 @@ async def test_onboarding_finishes_without_forcing_the_app() -> None:
         for button in row
         if button.url is not None
     ]
-    assert [button.text for button in linked] == ["Точка входа в чат"]
-    assert [row[0].text for row in reply["reply_markup"].inline_keyboard[-3:]] == [
+    assert [button.text for button in linked] == ["Онбординг", "Открыть чат и все темы"]
+    assert [row[0].text for row in reply["reply_markup"].inline_keyboard[-2:]] == [
         "Что за активности?",
         "Зачем мне вообще открывать приложение?",
-        "Готово",
     ]
 
 
