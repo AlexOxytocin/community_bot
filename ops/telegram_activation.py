@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -33,6 +34,7 @@ import asyncio, json, sys, urllib.request, urllib.error
 from aiogram import Bot
 from aiogram.types import BotCommand
 from community_bot.bootstrap.settings import get_settings
+diagnostic = {'step':'settings'}
 async def main():
     s = get_settings()
     async with Bot(token=s.bot_token.get_secret_value()) as bot:
@@ -59,6 +61,7 @@ async def main():
                 'url':url, 'menu':(await bot.get_chat_menu_button()).model_dump(mode='json')}))
         elif action == "apply":
             from community_bot.bootstrap.telegram_features import configure
+            diagnostic['step'] = 'configure_bot'
             await configure(apply=True)
             # Verify the actual public ingress without inventing a user message.
             url = s.mini_app_origin.rstrip('/') + '/api/telegram/webhook'
@@ -68,7 +71,10 @@ async def main():
                 try:
                     with urllib.request.urlopen(req, timeout=10) as r: return r.status
                 except urllib.error.HTTPError as e: return e.code
-            if request('invalid-secret') != 403 or request(s.telegram_webhook_secret.get_secret_value()) != 200:
+            diagnostic['step'] = 'public_ingress'
+            diagnostic['invalid_status'] = request('invalid-secret')
+            diagnostic['valid_status'] = request(s.telegram_webhook_secret.get_secret_value())
+            if diagnostic['invalid_status'] != 403 or diagnostic['valid_status'] != 200:
                 raise ValueError('Public ingress verification failed')
             commands = {x.command for x in await bot.get_my_commands()}
             if not {'start','notifications'} <= commands:
@@ -88,24 +94,36 @@ async def main():
                 raise ValueError('Webhook rollback verification failed')
             print(json.dumps({'restored':True}))
         else: raise ValueError('Unknown runtime action')
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except Exception as error:
+    print(json.dumps({'diagnostic':diagnostic,'error_type':type(error).__name__}))
+    sys.exit(1)
 """
 
 
 def runtime(action: str, data: dict | None = None) -> dict:
     """Capture transport diagnostics privately; never print tokens or webhook URLs."""
-    output = run(
-        "docker",
-        "exec",
-        "-i",
-        WEB,
-        "python",
-        "-c",
-        RUNTIME,
-        action,
+    result = subprocess.run(
+        ["docker", "exec", "-i", WEB, "python", "-c", RUNTIME, action],
         input=json.dumps(data).encode() if data is not None else b"",
+        capture_output=True,
+        check=False,
     )
-    return json.loads(output)
+    if result.returncode:
+        # Only this program's allowlisted diagnostics may reach the operator.
+        try:
+            error = json.loads(result.stdout)
+        except (ValueError, UnicodeDecodeError):
+            error = {}
+        diagnostic = error.get("diagnostic", {})
+        safe = {
+            key: diagnostic[key]
+            for key in ("step", "invalid_status", "valid_status")
+            if key in diagnostic
+        }
+        raise CutoverError(f"Runtime {action} failed: {json.dumps(safe)}")
+    return json.loads(result.stdout)
 
 
 def environment_content(original: str, secret: str) -> bytes:
@@ -292,7 +310,7 @@ def prepare() -> Path:
 def main() -> None:
     """Run explicit prepare/apply, never on application startup."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "apply", "recover"))
+    parser.add_argument("mode", choices=("prepare", "apply", "recover", "status"))
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
     if os.name != "posix" or os.geteuid() != 0:
@@ -307,6 +325,13 @@ def main() -> None:
                 raise CutoverError("Receipt required")
             validate_environment_file(args.receipt)
             state = json.loads(args.receipt.read_text())
+            if args.mode == "status":
+                print(
+                    json.dumps(
+                        {key: state[key] for key in ("phase", "release", "image", "config", "head")}
+                    )
+                )
+                return
             if args.mode == "recover" and state["phase"] == "activating":
                 restore(state, args.receipt)
             elif args.mode == "apply" and state["phase"] == "prepared":
@@ -324,5 +349,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:  # noqa: BLE001 - do not disclose transport secrets.
-        print(f"Activation stopped: {type(error).__name__}", file=sys.stderr)
+        detail = str(error) if isinstance(error, CutoverError) else type(error).__name__
+        print(f"Activation stopped: {detail}", file=sys.stderr)
         raise SystemExit(1) from None
