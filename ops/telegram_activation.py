@@ -70,6 +70,18 @@ async def main():
                 raise ValueError("Command list full")
             print(json.dumps({'webhook':w.model_dump(mode='json'), 'commands':commands,
                 'url':url, 'menu':(await bot.get_chat_menu_button()).model_dump(mode='json')}))
+        elif action == "probe":
+            results = {}
+            for name, base in [('public',s.mini_app_origin),('internal','http://127.0.0.1:8000')]:
+                req = urllib.request.Request(base.rstrip('/')+'/api/telegram/webhook', data=b'{"update_id":0}',
+                    headers={'Content-Type':'application/json','X-Telegram-Bot-Api-Secret-Token':'invalid-secret'})
+                try:
+                    r = urllib.request.urlopen(req,timeout=10)
+                except urllib.error.HTTPError as e: r = e
+                with r:
+                    results[name] = {'status':r.status,'type':r.headers.get('Content-Type'),
+                        'server':r.headers.get('Server'),'mitigated':r.headers.get('cf-mitigated')}
+            print(json.dumps(results))
         elif action == "apply":
             from community_bot.bootstrap.telegram_features import configure
             diagnostic['step'] = 'configure_bot'
@@ -379,7 +391,7 @@ def prepare() -> Path:
 def main() -> None:
     """Run explicit prepare/apply, never on application startup."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "apply", "recover", "status"))
+    parser.add_argument("mode", choices=("prepare", "apply", "recover", "status", "probe"))
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
     if os.name != "posix" or os.geteuid() != 0:
@@ -387,7 +399,9 @@ def main() -> None:
     with (ROOT / "shared" / "releases" / "dev-deploy.lock").open("a") as lock:
         fcntl = importlib.import_module("fcntl")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if args.mode == "prepare":
+        if args.mode == "probe":
+            print(json.dumps(runtime("probe")))
+        elif args.mode == "prepare":
             print(json.dumps({"prepared_receipt": str(prepare())}))
         else:
             if args.receipt is None:
