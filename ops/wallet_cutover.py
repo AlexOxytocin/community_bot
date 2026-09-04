@@ -338,9 +338,12 @@ class Host:
         """Check exact schema and conserved economic data."""
         if self.head(database) != head or self.fingerprint(database) != self.receipt["fingerprint"]:
             raise CutoverError("Snapshot/schema invariant failed.")
-        if head == "0036" and self.sql(ACTIVITY_INVARIANT_SQL, database) != "true":
+        if head == self.to_head == "0036" and self.sql(ACTIVITY_INVARIANT_SQL, database) != "true":
             raise CutoverError("Activity subscriptions or retired queue invariant failed.")
-        if head == "0038" and self.sql(ONBOARDING_INVARIANT_SQL, database) != "true":
+        if (
+            head == self.to_head == "0038"
+            and self.sql(ONBOARDING_INVARIANT_SQL, database) != "true"
+        ):
             raise CutoverError("Crypto defaults or onboarding journal invariant failed.")
 
     def start(self, *, old: bool = False, maintenance: bool = False) -> None:
