@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect, sync_playwright
 
+from community_bot.application.community_stats import CommunityStatsService
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -5443,6 +5445,64 @@ def test_moderation_disputes_detail_confirm_retry_conflict_and_back_focus(  # no
         assert requests
         assert all(method == "GET" for method, _url in requests)
         assert registration_requests == []
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [320, 390])
+def test_new_achievement_filters_use_supported_backend_metrics(
+    mini_app_url: str, width: int
+) -> None:
+    def leaderboard_route(route: Route) -> None:
+        query = parse_qs(urlsplit(route.request.url).query)
+        metric = query["metric"][0]
+        if metric.startswith("achievement:"):
+            assert query["period"] == ["all"]
+        try:
+            CommunityStatsService.validate_metric(metric, period="all", topic_id=None)
+        except ValueError:
+            route.fulfill(status=422, json={"code": "invalid_request"})
+            return
+        route.fulfill(
+            json={
+                "items": [
+                    {
+                        "member_id": "00000000-0000-0000-0000-000000000068",
+                        "display_name": f"Лидер {metric}",
+                        "rank": 1,
+                        "value": 2,
+                    }
+                ],
+                "tracking_started_at": "2026-08-28T00:00:00Z",
+                "calculated_at": "2026-09-04T12:00:00Z",
+            }
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": width, "height": 812})
+        page.route(
+            "**/api/v1/**", lambda route: route.fulfill(status=403, json={"code": "forbidden"})
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route("**/api/v1/community-stats/leaderboard?*", leaderboard_route)
+        page.goto(mini_app_url + "?theme=light#/members?view_state=p05")
+        page.get_by_text("Лидер experience", exact=True).wait_for()
+        for label, code in (
+            ("Будильник", "wake_up"),
+            ("Хлеб-соль", "bread_and_salt"),
+            ("Онбордист", "onboarder"),
+        ):
+            page.locator(".leaderboard-filter-trigger").click()
+            page.get_by_role("dialog", name="Рейтинг по").get_by_role(
+                "radio",
+                name=label,
+                exact=True,
+            ).click()
+            page.get_by_text(f"Лидер achievement:{code}", exact=True).wait_for()
+            assert page.get_by_text("Статистика временно недоступна.", exact=False).count() == 0
+            assert not page.get_by_role("button", name="Неделя", exact=True).is_enabled()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
         browser.close()
 
 

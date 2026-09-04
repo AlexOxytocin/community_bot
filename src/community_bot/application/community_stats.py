@@ -36,6 +36,9 @@ STATS_ACHIEVEMENT_CODES = frozenset(
         "explorer",
         "streak",
         "dialog",
+        "wake_up",
+        "bread_and_salt",
+        "onboarder",
     }
 )
 BOT_ACHIEVEMENT_THRESHOLDS: dict[BotAchievementCode, tuple[int, ...]] = {
