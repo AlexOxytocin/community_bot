@@ -338,7 +338,7 @@ async def registration_mode(session: AsyncSession) -> str:
 
 
 def _new_member_preferences(member_id: UUID, now: datetime) -> MemberNotificationPreferencesModel:
-    """Initialize new profiles only; never overwrite a returning member's choices."""
+    """Subscribe every new community member from the confirmed join time."""
     return MemberNotificationPreferencesModel(
         member_id=member_id,
         tasks=True,
@@ -347,6 +347,12 @@ def _new_member_preferences(member_id: UUID, now: datetime) -> MemberNotificatio
         nomad_since=now,
         important=True,
         important_since=now,
+        online=True,
+        online_since=now,
+        offline=True,
+        offline_since=now,
+        crypto=True,
+        crypto_since=now,
         task_updates=True,
         task_updates_since=now,
         task_reminders=True,

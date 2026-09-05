@@ -125,6 +125,24 @@ class CommunityPreferencesStore:
                 return
             previous_status = member.status
             member.status = target_status
+            if joined:
+                preferences = await session.get(
+                    MemberNotificationPreferencesModel,
+                    member.id,
+                    with_for_update=True,
+                )
+                now = datetime.datetime.now(datetime.UTC)
+                if preferences is None:
+                    preferences = MemberNotificationPreferencesModel(
+                        member_id=member.id,
+                        revision=0,
+                    )
+                    session.add(preferences)
+                else:
+                    preferences.revision += 1
+                for category in NOTIFICATION_CATEGORIES:
+                    setattr(preferences, category, True)
+                    setattr(preferences, f"{category}_since", now)
             row = await session.get(BotOnboardingModel, telegram_user_id, with_for_update=True)
             if row is None:
                 row = BotOnboardingModel(

@@ -205,13 +205,7 @@ async def _concurrent_bot_and_web_entry(db: Database) -> None:
         assert web_response.status_code == 204
         preferences = await client.get("/api/v1/notification-preferences")
         assert preferences.json() == {
-            **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
-            "important": True,
-            "nomad": True,
-            "tasks": True,
-            "task_updates": True,
-            "task_reminders": True,
-            "disputes": True,
+            **dict.fromkeys(NOTIFICATION_CATEGORIES, True),
             "revision": 0,
         }
 
@@ -286,7 +280,9 @@ async def test_chat_departure_blocks_access_but_rejoin_preserves_member_data(
         joined=True,
     )
 
-    assert (await store.preferences(reader.id))["important"] is True
+    restored_preferences = await store.preferences(reader.id)
+    assert all(restored_preferences[category] is True for category in NOTIFICATION_CATEGORIES)
+    assert restored_preferences["revision"] == 2
     assert await store.onboarding_started(reader.telegram_user_id)
     await store.complete_onboarding(reader.telegram_user_id)
     assert not await store.onboarding_started(reader.telegram_user_id)
