@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from aiogram import Bot
+    from aiogram.types import InlineKeyboardMarkup
 
 
 def test_retry_policy_is_bounded_and_deterministic() -> None:
@@ -248,8 +249,7 @@ async def test_telegram_sender_uses_allowlisted_message() -> None:
     await sender.send(claim)
 
     assert bot.sent == [(42, "Опубликовано новое задание в сообществе.")]
-    markup = bot.markups[0]
-    assert markup is not None
+    markup = cast("InlineKeyboardMarkup", bot.markups[0])
     assert markup.inline_keyboard[-1][0].text == "К подпискам"
     assert markup.inline_keyboard[-1][0].callback_data == "activities:all"
 
