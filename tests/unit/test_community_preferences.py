@@ -33,6 +33,7 @@ from community_bot.transport.telegram_updates import (
     NOTIFICATIONS_BUTTON,
     ONBOARDING_BUTTON,
     ONBOARDING_INTRO,
+    RESTART_BUTTON,
     START_BUTTON,
     TelegramUpdates,
 )
@@ -327,13 +328,15 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
         "☑ Офлайн ивенты",
         "☐ Крипта",
     ]
-    assert [row[0].text for row in buttons[-3:]] == [
+    assert [row[0].text for row in buttons[-4:]] == [
         APP_BUTTON,
         ONBOARDING_BUTTON,
         CHAT_BUTTON,
+        RESTART_BUTTON,
     ]
-    assert buttons[-2][0].url == "https://t.me/c/2237685639/13579"
-    assert buttons[-1][0].url == "https://t.me/+example"
+    assert buttons[-3][0].url == "https://t.me/c/2237685639/13579"
+    assert buttons[-2][0].url == "https://t.me/+example"
+    assert buttons[-1][0].callback_data == "bot:restart"
     assert all(button.callback_data != "onboarding:done" for row in buttons for button in row)
     cast("AsyncMock", handler.bot).delete_message.assert_awaited_once_with(
         chat_id=456, message_id=777
@@ -447,8 +450,12 @@ async def test_chat_join_resumes_only_explicit_bot_onboarding(*, started: bool) 
     buttons = replies[1].kwargs["reply_markup"].inline_keyboard
     assert buttons[0][0].text == ACTIVITY_HELP_BUTTON
     assert buttons[0][0].callback_data == "activities:help"
-    assert buttons[-3][0].text == APP_BUTTON
-    assert [row[0].text for row in buttons[-2:]] == [ONBOARDING_BUTTON, CHAT_BUTTON]
+    assert buttons[-4][0].text == APP_BUTTON
+    assert [row[0].text for row in buttons[-3:]] == [
+        ONBOARDING_BUTTON,
+        CHAT_BUTTON,
+        RESTART_BUTTON,
+    ]
 
 
 @pytest.mark.asyncio
@@ -474,7 +481,33 @@ async def test_legacy_done_button_returns_to_the_current_home() -> None:
     assert [button.text for button in linked] == [ONBOARDING_BUTTON, CHAT_BUTTON]
     buttons = reply["reply_markup"].inline_keyboard
     assert buttons[0][0].text == ACTIVITY_HELP_BUTTON
-    assert buttons[-3][0].text == APP_BUTTON
+    assert buttons[-4][0].text == APP_BUTTON
+    assert buttons[-1][0].text == RESTART_BUTTON
+
+
+@pytest.mark.asyncio
+async def test_restart_button_runs_the_current_start_flow() -> None:
+    handler, store, registration = _handler()
+    member_id = uuid4()
+    store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="active")
+    callback = {
+        "id": "restart",
+        "chat_instance": "test",
+        "from": _post()["from"],
+        "data": "bot:restart",
+        "message": {**_post(), "chat": {"id": 456, "type": "private"}},
+    }
+
+    await handler.handle(json.dumps({"update_id": 27, "callback_query": callback}).encode())
+
+    registration.start.assert_not_awaited()
+    cast("AsyncMock", handler.membership).is_member.assert_awaited_once_with(
+        chat_id=CHAT_ID, telegram_user_id=456
+    )
+    replies = cast("AsyncMock", handler.bot).send_message.call_args_list
+    buttons = replies[-1].kwargs["reply_markup"].inline_keyboard
+    assert buttons[-1][0].text == RESTART_BUTTON
+    assert buttons[-1][0].callback_data == "bot:restart"
 
 
 @pytest.mark.asyncio

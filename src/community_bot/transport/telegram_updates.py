@@ -52,6 +52,7 @@ HELP_BUTTON = "Справка"
 ACTIVITY_HELP_BUTTON = "Что за активности у нас есть?"
 ONBOARDING_BUTTON = "С чего начать"
 CHAT_BUTTON = "Открыть чат и все темы"
+RESTART_BUTTON = "Перезапустить бота"
 ONBOARDING_INTRO = (
     "👋 Добро пожаловать!\n\n"
     "Это бот сообщества «Алло, Нейросеточная» — пространства, где участники "
@@ -481,7 +482,7 @@ class TelegramUpdates:
         )
         return buttons
 
-    async def _callback(  # noqa: C901, PLR0911 - explicit linear navigation gates.
+    async def _callback(  # noqa: C901, PLR0911, PLR0912 - explicit linear navigation gates.
         self, update_id: int, callback: CallbackQuery
     ) -> None:
         # Ignore inline/forwarded keyboards and callbacks from outside the bot's private dialog.
@@ -503,6 +504,14 @@ class TelegramUpdates:
                     "/start",
                     membership_verified=True,
                 )
+            return
+        if callback.data == "bot:restart":
+            await self._private_command(
+                update_id,
+                callback.from_user,
+                "/start",
+                "/start",
+            )
             return
         if not (callback.data or "").startswith(
             ("activities:", "subscription:", "notifications:", "nomad:", "help:", "onboarding:")
@@ -608,6 +617,7 @@ class TelegramUpdates:
                         )
                     ]
                 )
+            buttons.append([InlineKeyboardButton(text=RESTART_BUTTON, callback_data="bot:restart")])
         await self._edit_or_send(
             user_id,
             note + text,
