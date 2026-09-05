@@ -1339,7 +1339,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   flex: 0 0 var(--person-avatar-size);
   border: 1px solid color-mix(in srgb, var(--app-brand-secondary) 68%, var(--app-border));
   border-radius: 50%;
-  background: linear-gradient(145deg, var(--app-brand-secondary), var(--app-accent));
+  background: var(--app-task-find-background);
   color: var(--app-accent-text);
   font-size: var(--person-avatar-font-size);
   font-weight: 800;

@@ -4851,6 +4851,63 @@ def test_task_home_find_uses_theme_specific_deep_gradient(
 
 
 @pytest.mark.parametrize(
+    ("preset", "theme", "gradient"),
+    [
+        (
+            "acid",
+            "light",
+            "linear-gradient(145deg, rgb(227, 255, 92), rgb(154, 214, 0) 60%, rgb(118, 169, 0))",
+        ),
+        (
+            "acid",
+            "dark",
+            "linear-gradient(145deg, rgb(242, 255, 138), rgb(201, 255, 50) 60%, rgb(174, 230, 0))",
+        ),
+        (
+            "neon",
+            "light",
+            "linear-gradient(122deg, rgb(96, 64, 255) 0%, rgb(25, 205, 242) 68%)",
+        ),
+        (
+            "neon",
+            "dark",
+            (
+                "linear-gradient(122deg, rgb(154, 134, 255) 0%, "
+                "rgb(154, 134, 255) 30%, rgb(63, 224, 255) 100%)"
+            ),
+        ),
+    ],
+)
+def test_person_avatar_fallback_uses_task_home_theme_gradient(
+    mini_app_url: str,
+    preset: str,
+    theme: str,
+    gradient: str,
+) -> None:
+    me, member = _cache_profile(f"fallback-{preset}-{theme}")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
+        page.route("**/api/v1/members/*", lambda route: route.fulfill(json=member))
+        page.route(
+            "**/api/v1/members/*/avatar",
+            lambda route: route.fulfill(status=404, json={"code": "not_found"}),
+        )
+
+        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/profile")
+        avatar = page.locator(".profile-identity-card .person-avatar")
+        avatar.wait_for()
+
+        assert avatar.evaluate("node => getComputedStyle(node).backgroundImage") == gradient
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+        browser.close()
+
+
+@pytest.mark.parametrize(
     ("preset", "theme"),
     [("acid", "light"), ("acid", "dark"), ("neon", "light"), ("neon", "dark")],
 )
