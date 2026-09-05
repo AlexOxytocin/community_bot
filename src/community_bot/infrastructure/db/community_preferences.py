@@ -103,6 +103,52 @@ class CommunityPreferencesStore:
             if row is not None:
                 row.state = "completed"
 
+    async def record_chat_membership(
+        self,
+        telegram_user_id: int,
+        telegram_username: str | None,
+        display_name: str,
+        *,
+        joined: bool,
+    ) -> None:
+        """Suspend a departed member and restore only a confirmed returning member."""
+        async with self.sessions() as session, session.begin():
+            member = await session.scalar(
+                select(MemberModel)
+                .where(MemberModel.telegram_user_id == telegram_user_id)
+                .with_for_update()
+            )
+            if member is None or member.status not in {"active", "left"}:
+                return
+            target_status = "active" if joined else "left"
+            if member.status == target_status:
+                return
+            previous_status = member.status
+            member.status = target_status
+            row = await session.get(BotOnboardingModel, telegram_user_id, with_for_update=True)
+            if row is None:
+                row = BotOnboardingModel(
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=telegram_username,
+                    telegram_display_name=display_name,
+                )
+                session.add(row)
+            else:
+                row.telegram_username = telegram_username
+                row.telegram_display_name = display_name
+            row.state = "waiting_for_chat"
+            session.add(
+                AuditEventModel(
+                    actor_member_id=member.id,
+                    action="community_chat_membership_changed",
+                    entity_type="member",
+                    entity_id=str(member.id),
+                    before_json={"status": previous_status},
+                    after_json={"status": target_status},
+                    reason="telegram_chat_member",
+                )
+            )
+
     async def preferences(self, member_id: uuid.UUID) -> dict[str, object]:
         """Read active member settings without opt-in side effects."""
         async with self.sessions() as session:

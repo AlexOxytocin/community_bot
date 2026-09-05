@@ -32,6 +32,7 @@ from community_bot.transport.telegram_updates import (
     NOMAD_SUBSCRIBED_BUTTON,
     NOTIFICATIONS_BUTTON,
     ONBOARDING_BUTTON,
+    ONBOARDING_INTRO,
     START_BUTTON,
     TelegramUpdates,
 )
@@ -145,6 +146,8 @@ def _handler() -> tuple[TelegramUpdates, AsyncMock, AsyncMock]:
     store = AsyncMock(
         publish_nomad=AsyncMock(),
         member_for_telegram=AsyncMock(return_value=None),
+        onboarding_started=AsyncMock(return_value=False),
+        record_chat_membership=AsyncMock(),
         preferences=AsyncMock(return_value={"tasks": False, "nomad": False, "revision": 0}),
         set_preference=AsyncMock(),
     )
@@ -306,7 +309,9 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     await handler.handle(json.dumps({"update_id": 23, "message": message}).encode())
 
     registration.start.assert_not_awaited()
-    cast("AsyncMock", handler.membership).is_member.assert_not_awaited()
+    cast("AsyncMock", handler.membership).is_member.assert_awaited_once_with(
+        chat_id=CHAT_ID, telegram_user_id=456
+    )
     sent = cast("AsyncMock", handler.bot).send_message
     assert sent.await_count == 2
     assert sent.call_args_list[0].kwargs["reply_markup"].remove_keyboard is True
@@ -333,6 +338,84 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     cast("AsyncMock", handler.bot).delete_message.assert_awaited_once_with(
         chat_id=456, message_id=777
     )
+
+
+@pytest.mark.asyncio
+async def test_returning_start_reopens_onboarding_after_chat_departure() -> None:
+    handler, store, registration = _handler()
+    member_id = uuid4()
+    store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="active")
+    cast("AsyncMock", handler.membership).is_member.return_value = False
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": "/start"}
+
+    await handler.handle(json.dumps({"update_id": 24, "message": message}).encode())
+
+    store.record_chat_membership.assert_awaited_once_with(
+        456,
+        None,
+        "Alex",
+        joined=False,
+    )
+    registration.start.assert_not_awaited()
+    store.preferences.assert_not_awaited()
+    reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
+    assert reply["text"] == ONBOARDING_INTRO
+    assert [row[0].text for row in reply["reply_markup"].inline_keyboard] == [
+        "Вступить в сообщество →",
+        "Я уже вступил — проверить",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_returning_start_restores_confirmed_member_before_continuing() -> None:
+    handler, store, registration = _handler()
+    member_id = uuid4()
+    store.member_for_telegram.return_value = SimpleNamespace(id=member_id, status="left")
+    message = {**_post(), "chat": {"id": 456, "type": "private"}, "text": "/start"}
+
+    await handler.handle(json.dumps({"update_id": 26, "message": message}).encode())
+
+    store.record_chat_membership.assert_awaited_once_with(
+        456,
+        None,
+        "Alex",
+        joined=True,
+    )
+    registration.start.assert_not_awaited()
+    store.preferences.assert_not_awaited()
+    reply = cast("AsyncMock", handler.bot).send_message.call_args.kwargs
+    assert reply["text"] == ONBOARDING_INTRO
+    assert reply["reply_markup"].inline_keyboard[0][0].callback_data == "onboarding:continue"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["left", "kicked"])
+async def test_chat_departure_marks_active_member_for_reonboarding(status: str) -> None:
+    handler, store, registration = _handler()
+    store.member_for_telegram.return_value = SimpleNamespace(id=uuid4(), status="active")
+    user = {"id": 456, "is_bot": False, "first_name": "Alex"}
+    event = {
+        "chat": {"id": CHAT_ID, "type": "supergroup", "title": "Community"},
+        "from": {"id": 999, "is_bot": False, "first_name": "Admin"},
+        "date": _post()["date"],
+        "old_chat_member": {"status": "member", "user": user},
+        "new_chat_member": {
+            "status": status,
+            "user": user,
+            **({"until_date": 0} if status == "kicked" else {}),
+        },
+    }
+
+    await handler.handle(json.dumps({"update_id": 25, "chat_member": event}).encode())
+
+    store.record_chat_membership.assert_awaited_once_with(
+        456,
+        None,
+        "Alex",
+        joined=False,
+    )
+    registration.start.assert_not_awaited()
+    cast("AsyncMock", handler.bot).send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

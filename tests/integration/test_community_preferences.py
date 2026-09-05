@@ -253,6 +253,67 @@ async def test_bot_onboarding_marker_is_durable_and_does_not_reopen_after_comple
     assert not await store.onboarding_started(telegram_user_id)
 
 
+async def test_chat_departure_blocks_access_but_rejoin_preserves_member_data(
+    community: CommunityFixture,
+) -> None:
+    db, store, _, reader = community
+    await store.begin_onboarding(reader.telegram_user_id, "reader", reader.display_name)
+    await store.complete_onboarding(reader.telegram_user_id)
+    await store.set_preference(reader.id, "important", enabled=True, expected_revision=0)
+
+    await store.record_chat_membership(
+        reader.telegram_user_id,
+        "reader",
+        reader.display_name,
+        joined=False,
+    )
+
+    async with db.session_factory() as session:
+        departed = await session.get(MemberModel, reader.id)
+        preferences = await session.get(MemberNotificationPreferencesModel, reader.id)
+        assert departed is not None
+        assert departed.status == "left"
+        assert preferences is not None
+        assert preferences.important
+    assert await store.onboarding_started(reader.telegram_user_id)
+    with pytest.raises(PermissionError):
+        await store.preferences(reader.id)
+
+    await store.record_chat_membership(
+        reader.telegram_user_id,
+        "reader",
+        reader.display_name,
+        joined=True,
+    )
+
+    assert (await store.preferences(reader.id))["important"] is True
+    assert await store.onboarding_started(reader.telegram_user_id)
+    await store.complete_onboarding(reader.telegram_user_id)
+    assert not await store.onboarding_started(reader.telegram_user_id)
+    async with db.session_factory() as session:
+        restored = await session.get(MemberModel, reader.id)
+        audits = (
+            await session.scalars(
+                select(AuditEventModel)
+                .where(AuditEventModel.action == "community_chat_membership_changed")
+                .order_by(AuditEventModel.created_at, AuditEventModel.id)
+            )
+        ).all()
+        assert restored is not None
+        assert restored.status == "active"
+        transitions = []
+        for item in audits:
+            before = item.before_json
+            after = item.after_json
+            assert before is not None
+            assert after is not None
+            transitions.append((before["status"], after["status"]))
+        assert transitions == [
+            ("active", "left"),
+            ("left", "active"),
+        ]
+
+
 async def test_task_notifications_require_opt_in_and_saved_choices_survive(
     community: CommunityFixture,
 ) -> None:

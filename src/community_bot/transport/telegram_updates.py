@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from aiogram import Bot
-    from aiogram.types import CallbackQuery, Message, User
+    from aiogram.types import CallbackQuery, ChatMemberUpdated, Message, User
 
     from community_bot.application.membership import TelegramMembershipChecker
     from community_bot.application.registration import RegistrationService
@@ -135,22 +135,11 @@ class TelegramUpdates:
         self.registration, self.membership = registration, membership
         self.publications = ActivityPublicationStore(store.sessions)
 
-    async def handle(self, body: bytes) -> None:  # noqa: C901, PLR0911
+    async def handle(self, body: bytes) -> None:  # noqa: PLR0911
         """Process allowlisted update kinds without retaining private message bodies."""
         update = Update.model_validate_json(body)
         if update.chat_member is not None:
-            event = update.chat_member
-            joined = event.new_chat_member
-            user = joined.user
-            if (
-                event.chat.id == self.settings.community_telegram_chat_id
-                and joined.status in {"member", "administrator", "creator"}
-                and not user.is_bot
-                and await self.store.onboarding_started(user.id)
-            ):
-                await self._private_command(
-                    update.update_id, user, "/onboarding", "/start", membership_verified=True
-                )
+            await self._chat_membership(update.update_id, update.chat_member)
             return
         if update.callback_query is not None:
             await self._callback(update.update_id, update.callback_query)
@@ -237,6 +226,33 @@ class TelegramUpdates:
             or message.poll
         )
 
+    async def _chat_membership(self, update_id: int, event: ChatMemberUpdated) -> None:
+        """Persist departures and resume onboarding only for confirmed joins."""
+        joined = event.new_chat_member
+        user = joined.user
+        if event.chat.id != self.settings.community_telegram_chat_id or user.is_bot:
+            return
+        if joined.status in {"left", "kicked"}:
+            await self.store.record_chat_membership(
+                user.id,
+                user.username,
+                user.full_name,
+                joined=False,
+            )
+            return
+        if joined.status not in {"member", "administrator", "creator"}:
+            return
+        await self.store.record_chat_membership(
+            user.id,
+            user.username,
+            user.full_name,
+            joined=True,
+        )
+        if await self.store.onboarding_started(user.id):
+            await self._private_command(
+                update_id, user, "/onboarding", "/start", membership_verified=True
+            )
+
     async def _member_gate(self, user_id: int) -> bool:
         chat_id = self.settings.community_telegram_chat_id
         if chat_id is None:
@@ -290,9 +306,14 @@ class TelegramUpdates:
         membership_verified: bool = False,
     ) -> None:
         existing = await self.store.member_for_telegram(user.id)
-        if existing is not None and existing.status not in {"active", "pending"}:
-            await self._send(user.id, "Доступ к приложению ограничен. Обратитесь к администратору.")
-            return
+        if membership_verified and existing is not None and existing.status == "left":
+            await self.store.record_chat_membership(
+                user.id,
+                user.username,
+                user.full_name,
+                joined=True,
+            )
+            existing = await self.store.member_for_telegram(user.id)
         if command == "/start" and existing is None:
             await self.store.begin_onboarding(user.id, user.username, user.full_name)
             chat_id = self.settings.community_telegram_chat_id
@@ -304,39 +325,17 @@ class TelegramUpdates:
             except MembershipCheckUnavailableError:
                 await self._send(user.id, "Не удалось проверить участие. Попробуй позже.")
                 return
-            buttons = (
-                [
-                    [
-                        InlineKeyboardButton(
-                            text="Продолжить настройку", callback_data="onboarding:continue"
-                        )
-                    ]
-                ]
-                if joined
-                else [
-                    *(
-                        [
-                            [
-                                InlineKeyboardButton(
-                                    text="Вступить в сообщество →",
-                                    url=self.settings.community_telegram_join_url,
-                                )
-                            ]
-                        ]
-                        if self.settings.community_telegram_join_url
-                        else []
-                    ),
-                    [
-                        InlineKeyboardButton(
-                            text="Я уже вступил — проверить", callback_data="community:check"
-                        )
-                    ],
-                ]
+            await self._send(
+                user.id,
+                ONBOARDING_INTRO,
+                self._onboarding_buttons(joined=joined),
             )
-            await self._send(user.id, ONBOARDING_INTRO, buttons)
             return
-        if command == "/start" and existing is not None and existing.status == "active":
-            await self._show_preferences(user.id, existing.id, remove_reply_keyboard=True)
+        if command == "/start" and existing is not None and existing.status in {"active", "left"}:
+            await self._returning_start(user, existing.id, existing.status)
+            return
+        if existing is not None and existing.status not in {"active", "pending"}:
+            await self._send(user.id, "Доступ к приложению ограничен. Обратитесь к администратору.")
             return
         if not membership_verified and not await self._member_gate(user.id):
             return
@@ -414,6 +413,73 @@ class TelegramUpdates:
                 )
             ]
         ]
+
+    async def _returning_start(self, user: User, member_id: UUID, status: str) -> None:
+        """Recheck a saved member before exposing any private bot navigation."""
+        chat_id = self.settings.community_telegram_chat_id
+        if chat_id is None:
+            await self._send(user.id, "Онбординг временно недоступен. Попробуй позже.")
+            return
+        try:
+            joined = await self.membership.is_member(chat_id=chat_id, telegram_user_id=user.id)
+        except MembershipCheckUnavailableError:
+            await self._send(user.id, "Не удалось проверить участие. Попробуй позже.")
+            return
+        if not joined:
+            await self.store.record_chat_membership(
+                user.id,
+                user.username,
+                user.full_name,
+                joined=False,
+            )
+            await self._send(
+                user.id,
+                ONBOARDING_INTRO,
+                self._onboarding_buttons(joined=False),
+            )
+            return
+        if status == "left" or await self.store.onboarding_started(user.id):
+            await self.store.record_chat_membership(
+                user.id,
+                user.username,
+                user.full_name,
+                joined=True,
+            )
+            await self._send(
+                user.id,
+                ONBOARDING_INTRO,
+                self._onboarding_buttons(joined=True),
+            )
+            return
+        await self._show_preferences(user.id, member_id, remove_reply_keyboard=True)
+
+    def _onboarding_buttons(self, *, joined: bool) -> list:
+        if joined:
+            return [
+                [
+                    InlineKeyboardButton(
+                        text="Продолжить настройку", callback_data="onboarding:continue"
+                    )
+                ]
+            ]
+        buttons = []
+        if self.settings.community_telegram_join_url:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text="Вступить в сообщество →",
+                        url=self.settings.community_telegram_join_url,
+                    )
+                ]
+            )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="Я уже вступил — проверить", callback_data="community:check"
+                )
+            ]
+        )
+        return buttons
 
     async def _callback(  # noqa: C901, PLR0911 - explicit linear navigation gates.
         self, update_id: int, callback: CallbackQuery
