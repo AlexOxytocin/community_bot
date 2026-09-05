@@ -74,6 +74,25 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
     assert detail[0][0].callback_data == "subscription:important:1:3"
 
 
+def test_activity_help_explains_current_formats_in_product_order() -> None:
+    text, buttons = activity_panel({"revision": 0}, "help")
+    headings = [
+        "Эксперименты с ИИ",
+        "Сейчас проходит «Цифровой кочевник»",
+        "Живое общение",
+        "Ивенты взаимопомощи",
+        "Криптотехнологии",
+        "Офлайн-встречи",
+        "Онлайн-встречи",
+    ]
+    positions = [text.index(heading) for heading in headings]
+    assert text.startswith("Что за активности у нас есть?")
+    assert positions == sorted(positions)
+    assert "в разных городах" not in text
+    assert len(text) < 4096
+    assert buttons[0][0].text == "К подпискам"
+
+
 def test_mutual_help_is_one_direct_toggle_including_legacy_pages() -> None:
     preferences: dict[str, object] = {"revision": 0}
     _, overview = activity_panel(preferences)

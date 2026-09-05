@@ -41,13 +41,17 @@ if TYPE_CHECKING:
     from community_bot.infrastructure.db.community_preferences import CommunityPreferencesStore
 
 START_BUTTON = "Начать"
-APP_BUTTON = "Зачем мне вообще открывать приложение?"
+APP_BUTTON = "Зачем мне тогда открывать приложение?"
+PREVIOUS_APP_BUTTON = "Зачем мне вообще открывать приложение?"
 LEGACY_APP_BUTTON = "Зачем мне приложение?"
 NOTIFICATIONS_BUTTON = "🔔 Уведомления"
 NOMAD_SUBSCRIBE_BUTTON = "🔔 Подписаться: Цифровой кочевник"
 NOMAD_SUBSCRIBED_BUTTON = "✓ Вы подписаны: Цифровой кочевник"
 ACTIVITIES_BUTTON = "Активности и подписки"
 HELP_BUTTON = "Справка"
+ACTIVITY_HELP_BUTTON = "Что за активности у нас есть?"
+ONBOARDING_BUTTON = "С чего начать"
+CHAT_BUTTON = "Открыть чат и все темы"
 ONBOARDING_INTRO = (
     "👋 Добро пожаловать!\n\n"
     "Это бот сообщества «Алло, Нейросеточная» — пространства, где участники "
@@ -164,6 +168,7 @@ class TelegramUpdates:
             aliases = {
                 START_BUTTON: "/start",
                 APP_BUTTON: "/app",
+                PREVIOUS_APP_BUTTON: "/app",
                 LEGACY_APP_BUTTON: "/app",
                 "📱 Приложение": "/app",
                 NOTIFICATIONS_BUTTON: "/notifications",
@@ -491,7 +496,7 @@ class TelegramUpdates:
             user_id,
             "Справка\n\nЧто хочешь узнать?",
             [
-                [navigation("Об активностях и подписках", "help")],
+                [navigation(ACTIVITY_HELP_BUTTON, "help")],
                 [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:app")],
             ],
             message_id,
@@ -510,6 +515,8 @@ class TelegramUpdates:
         preferences = await self.store.preferences(member_id)
         text, buttons = activity_panel(preferences, page)
         if page == "all":
+            buttons.insert(0, [navigation(ACTIVITY_HELP_BUTTON, "help")])
+            buttons.append([InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")])
             if (
                 self.settings.community_telegram_chat_id is not None
                 and self.settings.community_entry_topic_id is not None
@@ -517,7 +524,7 @@ class TelegramUpdates:
                 buttons.append(
                     [
                         InlineKeyboardButton(
-                            text="Онбординг",
+                            text=ONBOARDING_BUTTON,
                             url=topic_message_url(
                                 self.settings.community_telegram_chat_id,
                                 None,
@@ -530,17 +537,11 @@ class TelegramUpdates:
                 buttons.append(
                     [
                         InlineKeyboardButton(
-                            text="Открыть чат и все темы",
+                            text=CHAT_BUTTON,
                             url=self.settings.community_telegram_join_url,
                         )
                     ]
                 )
-            buttons.extend(
-                [
-                    [navigation("Что за активности?", "help")],
-                    [InlineKeyboardButton(text=APP_BUTTON, callback_data="help:why_app")],
-                ]
-            )
         await self._edit_or_send(
             user_id,
             note + text,

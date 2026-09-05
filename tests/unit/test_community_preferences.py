@@ -25,10 +25,13 @@ from community_bot.infrastructure.db.community_preferences import active_superad
 from community_bot.infrastructure.db.models import MemberModel
 from community_bot.transport.community_settings import install_community_settings_routes
 from community_bot.transport.telegram_updates import (
+    ACTIVITY_HELP_BUTTON,
     APP_BUTTON,
+    CHAT_BUTTON,
     NOMAD_SUBSCRIBE_BUTTON,
     NOMAD_SUBSCRIBED_BUTTON,
     NOTIFICATIONS_BUTTON,
+    ONBOARDING_BUTTON,
     START_BUTTON,
     TelegramUpdates,
 )
@@ -309,7 +312,9 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     assert sent.call_args_list[0].kwargs["reply_markup"].remove_keyboard is True
     assert sent.call_args_list[1].kwargs["text"].startswith("Активности и подписки")
     buttons = sent.call_args_list[1].kwargs["reply_markup"].inline_keyboard
-    assert [row[0].text for row in buttons[:6]] == [
+    assert buttons[0][0].text == ACTIVITY_HELP_BUTTON
+    assert buttons[0][0].callback_data == "activities:help"
+    assert [row[0].text for row in buttons[1:7]] == [
         "☑ Важные обновления чата",
         "☐ Цифровой кочевник",
         "☑ Взаимопомощь",
@@ -317,14 +322,13 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
         "☑ Офлайн ивенты",
         "☐ Крипта",
     ]
-    assert [row[0].text for row in buttons[-2:]] == [
-        "Что за активности?",
-        "Зачем мне вообще открывать приложение?",
+    assert [row[0].text for row in buttons[-3:]] == [
+        APP_BUTTON,
+        ONBOARDING_BUTTON,
+        CHAT_BUTTON,
     ]
-    assert buttons[-4][0].text == "Онбординг"
-    assert buttons[-4][0].url == "https://t.me/c/2237685639/13579"
-    assert buttons[-3][0].text == "Открыть чат и все темы"
-    assert buttons[-3][0].url == "https://t.me/+example"
+    assert buttons[-2][0].url == "https://t.me/c/2237685639/13579"
+    assert buttons[-1][0].url == "https://t.me/+example"
     assert all(button.callback_data != "onboarding:done" for row in buttons for button in row)
     cast("AsyncMock", handler.bot).delete_message.assert_awaited_once_with(
         chat_id=456, message_id=777
@@ -358,9 +362,10 @@ async def test_chat_join_resumes_only_explicit_bot_onboarding(*, started: bool) 
     replies = cast("AsyncMock", handler.bot).send_message.call_args_list
     assert "Профиль уже создан" in replies[0].kwargs["text"]
     buttons = replies[1].kwargs["reply_markup"].inline_keyboard
-    assert buttons[-2][0].text == "Что за активности?"
-    assert buttons[-2][0].callback_data == "activities:help"
-    assert buttons[-1][0].text == "Зачем мне вообще открывать приложение?"
+    assert buttons[0][0].text == ACTIVITY_HELP_BUTTON
+    assert buttons[0][0].callback_data == "activities:help"
+    assert buttons[-3][0].text == APP_BUTTON
+    assert [row[0].text for row in buttons[-2:]] == [ONBOARDING_BUTTON, CHAT_BUTTON]
 
 
 @pytest.mark.asyncio
@@ -383,11 +388,10 @@ async def test_legacy_done_button_returns_to_the_current_home() -> None:
         for button in row
         if button.url is not None
     ]
-    assert [button.text for button in linked] == ["Онбординг", "Открыть чат и все темы"]
-    assert [row[0].text for row in reply["reply_markup"].inline_keyboard[-2:]] == [
-        "Что за активности?",
-        "Зачем мне вообще открывать приложение?",
-    ]
+    assert [button.text for button in linked] == [ONBOARDING_BUTTON, CHAT_BUTTON]
+    buttons = reply["reply_markup"].inline_keyboard
+    assert buttons[0][0].text == ACTIVITY_HELP_BUTTON
+    assert buttons[-3][0].text == APP_BUTTON
 
 
 @pytest.mark.asyncio
@@ -489,7 +493,7 @@ async def test_nomad_subscribe_conflict_displays_actual_state() -> None:
     await handler.handle(json.dumps({"update_id": 16, "callback_query": callback}).encode())
     reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
     assert "актуальное состояние" in reply["text"]
-    assert reply["reply_markup"].inline_keyboard[1][0].text == "☐ Цифровой кочевник"
+    assert reply["reply_markup"].inline_keyboard[2][0].text == "☐ Цифровой кочевник"
 
 
 @pytest.mark.asyncio
@@ -516,7 +520,7 @@ async def test_nomad_unsubscribe_edits_panel_without_extra_messages(prefix: str)
     store.set_preference.assert_awaited_once_with(member_id, "nomad", False, 1)  # noqa: FBT003
     cast("AsyncMock", handler.bot).send_message.assert_not_awaited()
     reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
-    assert reply["reply_markup"].inline_keyboard[1][0].text == "☐ Цифровой кочевник"
+    assert reply["reply_markup"].inline_keyboard[2][0].text == "☐ Цифровой кочевник"
     cast("AsyncMock", handler.bot).edit_message_text.assert_awaited_once()
 
 
@@ -567,7 +571,8 @@ async def test_bottom_menu_buttons_need_no_typed_command(label: str) -> None:
         )
     else:
         assert "Активности и подписки" in reply["text"]
-        assert reply["reply_markup"].inline_keyboard[0][0].text == "☐ Важные обновления чата"
+        assert reply["reply_markup"].inline_keyboard[0][0].text == ACTIVITY_HELP_BUTTON
+        assert reply["reply_markup"].inline_keyboard[1][0].text == "☐ Важные обновления чата"
     store.set_preference.assert_not_awaited()
 
 
