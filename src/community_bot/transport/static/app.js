@@ -4639,32 +4639,100 @@ function loadParticipants(view = "pulse", period = "week", metric = "experience"
   switchParticipantsView(state, revision, view);
 }
 
-function memberActivityDetails(pulse) {
+function memberActivityDetails(state, revision) {
   const activity = element("section", undefined, "profile-card member-activity-card");
   const heading = element("div", undefined, "community-section-heading");
-  heading.append(element("h3", "Активность за неделю"));
+  heading.append(element("h3", "Активность"));
+  const periods = element("div", undefined, "segmented period-tabs member-period-tabs");
+  periods.setAttribute("aria-label", "Период активности участника");
+  for (const [period, label] of communityStatPeriods) {
+    const button = element("button", label);
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(state.activityPeriod === period));
+    button.addEventListener("click", () => selectMemberActivityPeriod(state, revision, period));
+    periods.append(button);
+  }
+  activity.append(heading, periods);
+  const pulse = state.pulses[state.activityPeriod];
+  if (!pulse) {
+    activity.append(
+      element(
+        "p",
+        state.pulseError ? "Статистика пока недоступна." : "Загружаем активность…",
+        "status muted member-activity-status",
+      ),
+    );
+    return activity;
+  }
   const metrics = element("div", undefined, "pulse-metrics compact");
   metrics.append(
     statMetric(pulse.summary.messages, "сообщений"),
     statMetric(pulse.summary.reactions_received, "получено реакций"),
     statMetric(pulse.summary.reactions_given, "поставлено реакций"),
   );
-  const progress = pulse.achievements.find((item) => item.unlocked && item.code === "magnet")
-    || pulse.achievements.find((item) => item.unlocked);
-  activity.append(heading, metrics);
-  if (progress) {
-    const definition = communityAchievementCatalog.find((item) => item.code === progress.code);
-    const highlight = element("div", undefined, "member-achievement-highlight");
-    highlight.append(
-      element("span", definition?.icon || "◈", "achievement-icon"),
-      element("span", `${definition?.title || progress.code} · ур. ${progress.level}`),
-    );
-    activity.append(highlight);
-  }
+  activity.append(metrics);
   return activity;
 }
 
-function safeMemberDetails(member, pulse = null) {
+function memberAchievementDetails(pulse) {
+  const achievements = element(
+    "section",
+    undefined,
+    "profile-card member-achievements-card",
+  );
+  const heading = element("div", undefined, "community-section-heading");
+  const copy = element("div");
+  copy.append(
+    element("h3", "Достижения"),
+    element("p", "За всё время", "muted"),
+  );
+  heading.append(copy);
+  const byCode = new Map((pulse?.achievements || []).map((item) => [item.code, item]));
+  const grid = element("div", undefined, "achievement-grid member-achievement-grid");
+  for (const definition of communityAchievementCatalog) {
+    const progress = byCode.get(definition.code) || {
+      level: 0,
+      current: 0,
+      unlocked: false,
+    };
+    const isRecord = definition.record === true;
+    const tile = element(
+      "article",
+      undefined,
+      `achievement-tile member-achievement-tile${
+        isRecord
+          ? ` is-record${progress.unlocked ? " is-unlocked" : ""}`
+          : progress.unlocked
+            ? " is-unlocked"
+            : " is-locked"
+      }`,
+    );
+    tile.setAttribute(
+      "aria-label",
+      isRecord
+        ? `${definition.title}, личный рекорд ${progress.current} ${definition.recordAriaUnit}`
+        : `${definition.title}, ${progress.unlocked ? `уровень ${progress.level}` : "не открыто"}`,
+    );
+    tile.append(
+      element("span", isRecord || progress.unlocked ? definition.icon : "◈", "achievement-icon"),
+      element("strong", definition.title),
+      element(
+        "span",
+        isRecord
+          ? `${progress.current} ${definition.recordUnit}`
+          : progress.unlocked
+            ? `Ур. ${progress.level}`
+            : "Закрыто",
+        "achievement-level",
+      ),
+    );
+    grid.append(tile);
+  }
+  achievements.append(heading, grid);
+  return achievements;
+}
+
+function safeMemberDetails(member, state, revision) {
   const card = element("article", undefined, "foreign-profile");
   const identity = element("section", undefined, "profile-card profile-identity-card");
   const copy = element("div", undefined, "identity-copy");
@@ -4703,8 +4771,30 @@ function safeMemberDetails(member, pulse = null) {
     member.profile_links.forEach((link) => links.append(publicLinkRow(link)));
     card.append(links);
   }
-  if (pulse) card.append(memberActivityDetails(pulse));
+  card.append(memberActivityDetails(state, revision));
+  if (state.achievementPulse) card.append(memberAchievementDetails(state.achievementPulse));
   return card;
+}
+
+async function selectMemberActivityPeriod(state, revision, period) {
+  if (revision !== screenRevision || state.activityPeriod === period) return;
+  state.activityPeriod = period;
+  state.pulseError = false;
+  showMemberState(state, revision);
+  if (state.pulses[period]) return;
+  const request = ++state.pulseRequest;
+  try {
+    const pulse = await getJson(
+      `/api/v1/community-stats/pulse?period=${period}&member_id=${encodeURIComponent(state.member.member_id)}`,
+    );
+    if (revision !== screenRevision || request !== state.pulseRequest) return;
+    state.pulses[period] = pulse;
+    if (period === "all") state.achievementPulse = pulse;
+  } catch {
+    if (revision !== screenRevision || request !== state.pulseRequest) return;
+    state.pulseError = true;
+  }
+  showMemberState(state, revision);
 }
 
 async function karmaCommand(memberId, draft, action, body) {
@@ -4903,7 +4993,7 @@ function showMemberState(state, revision) {
   if (!state.member) {
     return replaceContent(element("p", "Загружаем профиль…", "status muted"));
   }
-  const details = safeMemberDetails(state.member, state.pulse);
+  const details = safeMemberDetails(state.member, state, revision);
   const nodes = [details];
   if (state.message) nodes.push(element("p", state.message, "status success"));
   if (state.member.can_rate_karma) {
@@ -4917,7 +5007,17 @@ function showMemberState(state, revision) {
 
 async function showMemberProfile(memberId, push = true) {
   const revision = ++screenRevision;
-  const state = { member: null, pulse: null, error: false, karma: null, message: "" };
+  const state = {
+    member: null,
+    pulses: {},
+    achievementPulse: null,
+    activityPeriod: "week",
+    pulseRequest: 0,
+    pulseError: false,
+    error: false,
+    karma: null,
+    message: "",
+  };
   if (push) history.pushState({ screen: "member-profile", memberId }, "", `#/members/${encodeURIComponent(memberId)}`);
   activeProfileState = null;
   memberProfileHasInternalHistory = push;
@@ -4931,14 +5031,22 @@ async function showMemberProfile(memberId, push = true) {
   showMemberState(state, revision);
   back.focus({ preventScroll: true });
   try {
-    const [member, pulse] = await Promise.all([
+    const [member, weeklyPulse, allTimePulse] = await Promise.all([
       getJson("/api/v1/members/" + encodeURIComponent(memberId)),
       getJson(
         `/api/v1/community-stats/pulse?period=week&member_id=${encodeURIComponent(memberId)}`,
       ).catch(() => null),
+      getJson(
+        `/api/v1/community-stats/pulse?period=all&member_id=${encodeURIComponent(memberId)}`,
+      ).catch(() => null),
     ]);
     state.member = member;
-    state.pulse = pulse;
+    if (weeklyPulse) state.pulses.week = weeklyPulse;
+    if (allTimePulse) {
+      state.pulses.all = allTimePulse;
+      state.achievementPulse = allTimePulse;
+    }
+    state.pulseError = weeklyPulse === null;
   } catch {
     state.error = true;
   }
@@ -8719,7 +8827,7 @@ async function telegramInitData() {
   return null;
 }
 
-const invitationStartParameter = (initData) => {
+const telegramStartParameter = (initData) => {
   const signedValue = typeof initData === "string"
     ? new URLSearchParams(initData).get("start_param")
     : null;
@@ -8727,6 +8835,23 @@ const invitationStartParameter = (initData) => {
   const unsafeValue = globalThis.Telegram?.WebApp?.initDataUnsafe?.start_param;
   if (typeof unsafeValue === "string" && unsafeValue) return unsafeValue;
   return new URLSearchParams(globalThis.location?.search || "").get("tgWebAppStartParam");
+};
+
+const notificationStartLocation = (initData) => {
+  const value = telegramStartParameter(initData);
+  if (value === "ac") return `${presentationLocationFor("M09")}&scope=archive`;
+  if (value === "ap") return `${presentationLocationFor("M09")}&scope=archive&archive_view=performed`;
+  if (value === "mod") return presentationLocationFor("S01");
+  const target = value?.match(
+    /^([tarm])_([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
+  );
+  if (!target) return null;
+  return presentationLocationFor({ t: "T03", a: "M03", r: "M11", m: "S02" }[target[1].toLowerCase()], target[2]);
+};
+
+const invitationStartParameter = (initData) => {
+  const value = telegramStartParameter(initData);
+  return notificationStartLocation(initData) ? null : value;
 };
 
 
@@ -9761,7 +9886,13 @@ async function bootstrapTaskHome(authAttempted = false) {
     currentMemberId = profile.member_id;
     setMemberTimezone(profile.timezone || "UTC");
     void configureRoleNavigation();
+    const notificationLocation = notificationStartLocation(
+      globalThis.Telegram?.WebApp?.initData,
+    );
+    if (notificationLocation) history.replaceState(null, "", notificationLocation);
     const initialHash = location.hash;
+    const restoredTelegramTaskHome = initialHash === "#/tasks"
+      && Boolean(globalThis.Telegram?.WebApp?.initData);
     const presentation = presentationFromLocation();
     const presentationId = presentation?.screen.id;
     const resourceId = presentation?.resourceId;
@@ -9889,7 +10020,7 @@ async function bootstrapTaskHome(authAttempted = false) {
         );
       }
       showModerationCase(resourceId, false);
-    } else if (!initialHash || initialHash === "#") {
+    } else if (!initialHash || initialHash === "#" || restoredTelegramTaskHome) {
       loadParticipants();
     } else {
       await loadTaskHome(false);

@@ -168,6 +168,11 @@ class PostgresNotificationQueue:
                     if isinstance(rejection_comment, str):
                         safe_payload["rejection_comment"] = rejection_comment
             for recipient in recipients:
+                start_parameter = await self._mini_app_start_parameter(
+                    session,
+                    event,
+                    recipient.member_id,
+                )
                 occurred_at = (
                     datetime.datetime.fromisoformat(str(safe_payload["occurred_at"]))
                     if event.event_type == "nomad.published"
@@ -197,6 +202,7 @@ class PostgresNotificationQueue:
                         "event_type": event.event_type,
                         "aggregate_type": event.aggregate_type,
                         "aggregate_id": str(event.aggregate_id),
+                        **({"mini_app_start": start_parameter} if start_parameter else {}),
                         **safe_payload,
                     },
                     scheduled_at=scheduled_at,
@@ -579,6 +585,68 @@ class PostgresNotificationQueue:
         ).all()
         return tuple(_Recipient(member_id=item.id, timezone=item.timezone) for item in members)
 
+    async def _mini_app_start_parameter(  # noqa: C901, PLR0911, PLR0912 - explicit event routes.
+        self,
+        session: AsyncSession,
+        event: OutboxEventModel,
+        recipient_id: UUID,
+    ) -> str | None:
+        """Resolve a privacy-minimal Telegram Mini App destination for one recipient."""
+        if event.aggregate_type == "task":
+            task = await session.get(TaskModel, event.aggregate_id)
+            if task is None:
+                return None
+            if task.status in {"expired", "partially_completed", "completed", "cancelled"}:
+                return "ac" if task.creator_id == recipient_id else "ap"
+            return f"t_{task.id}"
+        if event.aggregate_type == "assignment":
+            assignment = await session.get(AssignmentModel, event.aggregate_id)
+            if assignment is None:
+                return None
+            task = await session.get(TaskModel, assignment.task_id)
+            if assignment.status not in _ACTIVE_ASSIGNMENT_STATUSES:
+                return "ap" if assignment.performer_id == recipient_id else "ac"
+            if assignment.performer_id == recipient_id:
+                return f"a_{assignment.id}"
+            if event.event_type == "assignment_submitted":
+                return f"r_{assignment.id}"
+            if event.event_type == "assignment_disputed":
+                member = await session.get(MemberModel, recipient_id)
+                if member is not None and member.role in {"moderator", "administrator"}:
+                    case_id = await session.scalar(
+                        select(ModerationCaseModel.id).where(
+                            ModerationCaseModel.assignment_id == assignment.id
+                        )
+                    )
+                    if case_id is not None:
+                        return f"m_{case_id}"
+            return f"t_{task.id}" if task is not None else None
+        if event.aggregate_type == "task_cancellation_response":
+            response = await session.get(TaskCancellationResponseModel, event.aggregate_id)
+            return None if response is None else f"a_{response.assignment_id}"
+        if event.aggregate_type == "task_cancellation_request":
+            request = await session.get(TaskCancellationRequestModel, event.aggregate_id)
+            return None if request is None else f"t_{request.task_id}"
+        if event.aggregate_type == "moderation_case":
+            case = await session.get(ModerationCaseModel, event.aggregate_id)
+            if case is None:
+                return None
+            member = await session.get(MemberModel, recipient_id)
+            if member is not None and member.role in {"moderator", "administrator"}:
+                return f"m_{case.id}"
+            assignment = await session.get(AssignmentModel, case.assignment_id)
+            if assignment is None:
+                return None
+            if assignment.status not in _ACTIVE_ASSIGNMENT_STATUSES:
+                return "ap" if assignment.performer_id == recipient_id else "ac"
+            if assignment.performer_id == recipient_id:
+                return f"a_{assignment.id}"
+            task = await session.get(TaskModel, assignment.task_id)
+            return f"t_{task.id}" if task is not None else None
+        if event.aggregate_type == "interaction_alert":
+            return "mod"
+        return None
+
     async def _review_recipients(
         self,
         session: AsyncSession,
@@ -721,7 +789,15 @@ class PostgresNotificationQueue:
             session,
             member_id=member.id,
             notification_type=notification_type,
-            payload={"aggregate_id": str(aggregate_id), "deadline_at": deadline.isoformat()},
+            payload={
+                "aggregate_id": str(aggregate_id),
+                "deadline_at": deadline.isoformat(),
+                "mini_app_start": (
+                    f"a_{aggregate_id}"
+                    if notification_type == "task_deadline_reminder"
+                    else f"r_{aggregate_id}"
+                ),
+            },
             scheduled_at=scheduled_at,
             deduplication_key=(f"reminder:{notification_type}:{aggregate_id}:{member.id}:{suffix}"),
             status=status,

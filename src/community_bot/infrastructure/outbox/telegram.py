@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -61,6 +62,28 @@ _RATE_LIMITED = "telegram_rate_limited"
 _TEMPORARILY_UNAVAILABLE = "telegram_temporarily_unavailable"
 _INVALID_NOTIFICATION_PAYLOAD = "invalid_notification_payload"
 _NOTIFICATION_DISABLED = "notification_disabled"
+_BOT_USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
+_MINI_APP_START = re.compile(
+    r"(?:[tarm]_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|ac|ap|mod)",
+    re.IGNORECASE,
+)
+
+
+def _mini_app_button_label(notification_type: str) -> str:
+    if notification_type == "task.published":
+        return "Открыть задание"
+    if notification_type in {"assignment_submitted", "review_reminder_24h", "review_reminder_48h"}:
+        return "Проверить результат"
+    if notification_type in {"assignment_disputed", "moderation_case_resolved"}:
+        return "Открыть спор"
+    if notification_type in {
+        "task.cancelled",
+        "task.cancellation_requested",
+        "task.cancellation_declined",
+        "assignment_cancelled",
+    }:
+        return "Открыть отмену"
+    return "Открыть в приложении"
 
 
 def _notification_text(claim: DeliveryClaim) -> str:
@@ -116,10 +139,14 @@ class TelegramNotificationSender:
         bot: Bot,
         *,
         allow_delivery: Callable[[DeliveryClaim], Awaitable[bool]] | None = None,
+        bot_username: str | None = None,
     ) -> None:
         """Use one process-owned aiogram bot client."""
         self._bot = bot
         self._allow_delivery = allow_delivery
+        self._bot_username = (
+            bot_username if bot_username and _BOT_USERNAME.fullmatch(bot_username) else None
+        )
 
     async def send(self, claim: DeliveryClaim) -> None:
         """Map Telegram failures to safe retry categories."""
@@ -127,6 +154,23 @@ class TelegramNotificationSender:
         if self._allow_delivery is not None and not await self._allow_delivery(claim):
             raise NotificationProcessingError(_NOTIFICATION_DISABLED, permanent=True)
         buttons: list[list[InlineKeyboardButton]] = []
+        start_parameter = claim.payload.get("mini_app_start")
+        if (
+            self._bot_username is not None
+            and isinstance(start_parameter, str)
+            and _MINI_APP_START.fullmatch(start_parameter)
+        ):
+            launch_url = (
+                f"https://t.me/{self._bot_username}?{urlencode({'startapp': start_parameter})}"
+            )
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=_mini_app_button_label(claim.notification_type),
+                        url=launch_url,
+                    )
+                ]
+            )
         if claim.notification_type in {"nomad.published", "activity.published"}:
             url = claim.payload.get("message_url")
             if not isinstance(url, str) or not re.fullmatch(

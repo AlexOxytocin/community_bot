@@ -356,7 +356,9 @@ async def test_two_workers_materialize_and_deliver_one_privacy_minimal_notificat
         "event_type",
         "aggregate_type",
         "aggregate_id",
+        "mini_app_start",
     }
+    assert notifications[0].payload_json["mini_app_start"] == f"t_{task.id}"
     assert "must-not-be-copied" not in str(notifications[0].payload_json)
 
     sender = _Sender()
@@ -530,6 +532,7 @@ async def test_cancellation_request_materializes_actions_and_becomes_obsolete(  
     assert notification.member_id == performer.id
     assert notification.payload_json["aggregate_id"] == str(response_id)
     assert notification.payload_json["title"] == task.title
+    assert notification.payload_json["mini_app_start"] == f"a_{assignment.id}"
     assert "private" not in notification.payload_json
 
     async with sessions.begin() as session:

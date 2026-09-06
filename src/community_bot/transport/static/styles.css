@@ -642,8 +642,14 @@ label:has(#assignment-cancellation-reason) + .primary { border-color: var(--app-
 .pulse-unavailable h2, .pulse-unavailable p { margin: 0; }
 .member-activity-card { gap: 11px; }
 .member-activity-card .pulse-metric { min-height: 58px; }
-.member-achievement-highlight { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 12px; background: var(--app-surface-raised); color: var(--app-text-muted); font-size: 11px; font-weight: 800; }
-.member-achievement-highlight .achievement-icon { width: 30px; height: 30px; border-radius: 9px; font-size: 17px; }
+.member-period-tabs { width: 100%; }
+.member-period-tabs button { min-height: 32px; font-size: 11px; }
+.member-activity-status { margin: 0; padding: 8px 0 2px; }
+.member-achievements-card { gap: 9px; }
+.member-achievement-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.member-achievement-tile { height: 66px; min-height: 66px; cursor: default; }
+.member-achievement-tile .achievement-icon { width: 28px; height: 28px; border-radius: 9px; font-size: 16px; }
+.member-achievement-tile strong { font-size: 10px; }
 .history-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border: 1px solid var(--app-border); border-radius: 16px; background: var(--app-surface); }
 .history-list li { display: grid; gap: 4px; padding: 14px; }
 .history-list li + li { border-top: 1px solid var(--app-border); }

@@ -4522,6 +4522,15 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
 ) -> None:
     invitation = "first-launch-invitation"
     init_data = f"query_id=AAE&user=%7B%22id%22%3A1%7D&start_param={invitation}&hash=proof"
+    pulse = {
+        "member_id": "00000000-0000-0000-0000-000000000001",
+        "tracking_started_at": "2026-08-01T00:00:00Z",
+        "calculated_at": "2026-08-29T12:00:00Z",
+        "summary": {"messages": 0, "reactions_given": 0, "reactions_received": 0},
+        "series": [],
+        "reaction_breakdown": [],
+        "achievements": [],
+    }
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
 
@@ -4561,8 +4570,11 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             "**/api/v1/task-home",
             lambda route: route.fulfill(json=_task_home_payload(empty=True)),
         )
+        page.route("**/api/v1/community-stats/pulse?*", lambda route: route.fulfill(json=pulse))
         page.goto(mini_app_url + "#/tasks")
-        page.get_by_role("heading", name="Задания").wait_for()
+        page.locator('[data-screen-id="P08"]').wait_for()
+        assert page.get_by_role("button", name="Пульс").get_attribute("aria-pressed") == "true"
+        assert page.url.endswith("#/members?view_state=p08")
         assert me_calls == 2
         assert len(requests) == 1
         assert requests[0].post_data == init_data
@@ -4596,8 +4608,10 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             "**/api/v1/tasks",
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
+        existing.route("**/api/v1/community-stats/pulse?*", lambda route: route.fulfill(json=pulse))
         existing.goto(mini_app_url)
-        existing.get_by_role("heading", name="Задания").wait_for()
+        existing.locator('[data-screen-id="P08"]').wait_for()
+        assert existing.get_by_role("button", name="Пульс").get_attribute("aria-pressed") == "true"
         assert auth_calls == 0
 
         invalid = _new_page(
@@ -4654,6 +4668,45 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             exact=True,
         ).wait_for()
         assert outside_auth_calls == task_calls == 0
+        browser.close()
+
+
+@pytest.mark.browser_smoke
+def test_notification_start_parameter_opens_the_target_task(mini_app_url: str) -> None:
+    task_id = "00000000-0000-4000-8000-000000000097"
+    init_data = f"query_id=AAE&user=%7B%22id%22%3A1%7D&start_param=t_{task_id}&hash=proof"
+    task = {
+        "id": task_id,
+        "title": "Проверить уведомление",
+        "description": "Открыто прямо из сообщения бота.",
+        "completion_criteria": "Открылась нужная карточка.",
+        "performer_instructions": "Проверить заголовок.",
+        "public_input": {},
+        "materials": {},
+        "author_display_name": "Сообщество",
+        "format": "online",
+        "credit_reward_per_performer": 5,
+        "performer_slots": 1,
+        "deadline_at": "2026-09-21T20:00:00Z",
+        "origin": "community",
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(
+            browser,
+            bridge=f'globalThis.Telegram = {{WebApp: {{initData: "{init_data}"}}}};',
+        )
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route(
+            "**/api/v1/tasks",
+            lambda route: route.fulfill(json={"items": [task], "next_cursor": None}),
+        )
+
+        page.goto(mini_app_url + "#/tasks")
+
+        page.locator('[data-screen-id="T03"]').wait_for()
+        assert page.get_by_role("heading", name="Проверить уведомление").count() == 1
+        assert page.url.endswith(f"#/tasks/{task_id}?view_state=t03")
         browser.close()
 
 
@@ -5667,6 +5720,90 @@ def test_new_achievement_filters_use_supported_backend_metrics(
             assert page.get_by_text("Статистика временно недоступна.", exact=False).count() == 0
             assert not page.get_by_role("button", name="Неделя", exact=True).is_enabled()
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
+        browser.close()
+
+
+@pytest.mark.browser_smoke
+def test_member_profile_has_period_activity_and_all_time_achievement_tiles(
+    mini_app_url: str,
+) -> None:
+    member_id = "00000000-0000-0000-0000-000000000068"
+    member = {
+        "member_id": member_id,
+        "telegram_username": "maria",
+        "display_name": "Мария",
+        "city": "Москва",
+        "short_bio": None,
+        "skill_tags": [],
+        "profile_links": [],
+        "experience_total": 12,
+        "level_number": 2,
+        "karma": {"score": 3, "count": 4},
+        "can_rate_karma": False,
+    }
+    target_periods: list[str] = []
+
+    def pulse_route(route: Route) -> None:
+        query = parse_qs(urlsplit(route.request.url).query)
+        period = query["period"][0]
+        if query.get("member_id") == [member_id]:
+            target_periods.append(period)
+        multiplier = {"week": 1, "month": 2, "year": 3, "all": 4}[period]
+        route.fulfill(
+            json={
+                "member_id": member_id,
+                "tracking_started_at": "2026-01-01T00:00:00Z",
+                "calculated_at": "2026-09-06T12:00:00Z",
+                "summary": {
+                    "messages": 10 * multiplier,
+                    "reactions_given": 3 * multiplier,
+                    "reactions_received": 5 * multiplier,
+                },
+                "series": [],
+                "reaction_breakdown": [],
+                "achievements": [
+                    {
+                        "code": "speaker",
+                        "level": 2,
+                        "current": 40,
+                        "next_level_at": 60,
+                        "unlocked": True,
+                        "message_url": None,
+                    }
+                ],
+            }
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": 320, "height": 812})
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.route("**/api/v1/community-stats/pulse?*", pulse_route)
+        page.route("**/api/v1/members?*", lambda route: route.fulfill(json={"items": [member]}))
+        page.route(f"**/api/v1/members/{member_id}", lambda route: route.fulfill(json=member))
+
+        page.goto(mini_app_url)
+        page.get_by_role("button", name="Люди", exact=True).click()
+        page.get_by_role("button", name=re.compile("Мария")).click()
+        page.locator('[data-screen-id="P02"]').wait_for()
+
+        assert target_periods[:2] == ["week", "all"]
+        assert page.get_by_role("heading", name="Активность", exact=True).count() == 1
+        assert page.get_by_text("За всё время", exact=True).count() == 1  # noqa: RUF001
+        assert page.locator(".member-achievement-tile").count() == 18
+        assert page.locator('.member-achievement-tile[aria-label="Спикер, уровень 2"]').count() == 1
+        assert page.get_by_text("10", exact=True).count() >= 1
+
+        page.get_by_role("button", name="Месяц", exact=True).click()
+        page.get_by_text("20", exact=True).wait_for()
+        page.get_by_role("button", name="Год", exact=True).click()
+        page.get_by_text("30", exact=True).wait_for()
+        page.get_by_role("button", name="Всё время", exact=True).click()
+        page.get_by_text("40", exact=True).wait_for()
+
+        assert target_periods == ["week", "all", "month", "year"]
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
         browser.close()
 
 

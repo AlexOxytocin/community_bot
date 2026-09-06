@@ -235,13 +235,14 @@ async def test_wallet_notice_is_credit_only_and_does_not_leak_comment() -> None:
 async def test_telegram_sender_uses_allowlisted_message() -> None:
     """Delivery ignores persisted payload and sends only allowlisted text."""
     bot = _TelegramBotStub()
-    sender = TelegramNotificationSender(cast("Bot", bot))
+    sender = TelegramNotificationSender(cast("Bot", bot), bot_username="community_test_bot")
+    task_id = uuid4()
     claim = DeliveryClaim(
         id=uuid4(),
         member_id=uuid4(),
         telegram_user_id=42,
         notification_type="task.published",
-        payload={"private": "must not be sent"},
+        payload={"private": "must not be sent", "mini_app_start": f"t_{task_id}"},
         attempt_count=1,
         lease_token=uuid4(),
     )
@@ -250,6 +251,10 @@ async def test_telegram_sender_uses_allowlisted_message() -> None:
 
     assert bot.sent == [(42, "Опубликовано новое задание в сообществе.")]
     markup = cast("InlineKeyboardMarkup", bot.markups[0])
+    assert markup.inline_keyboard[0][0].text == "Открыть задание"
+    assert (
+        markup.inline_keyboard[0][0].url == f"https://t.me/community_test_bot?startapp=t_{task_id}"
+    )
     assert markup.inline_keyboard[-1][0].text == "К подпискам"
     assert markup.inline_keyboard[-1][0].callback_data == "activities:all"
 

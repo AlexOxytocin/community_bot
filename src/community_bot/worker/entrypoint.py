@@ -99,7 +99,11 @@ async def _run(*, once: bool, window: DeliveryWindow) -> None:
 
     worker = NotificationWorker(
         queue,
-        TelegramNotificationSender(bot, allow_delivery=allow_delivery),
+        TelegramNotificationSender(
+            bot,
+            allow_delivery=allow_delivery,
+            bot_username=settings.telegram_bot_username,
+        ),
         delivery_window=window,
         batch_size=settings.worker_batch_size,
         lease_duration=datetime.timedelta(seconds=settings.worker_lease_seconds),
