@@ -9890,7 +9890,7 @@ async function bootstrapTaskHome(authAttempted = false) {
       }
       showModerationCase(resourceId, false);
     } else {
-      await loadTaskHome(false);
+      loadParticipants();
     }
   } catch {
     setNavigation("task-home", false);

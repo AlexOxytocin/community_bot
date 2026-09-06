@@ -1417,12 +1417,8 @@ def test_bootstrap_waits_for_late_telegram_desktop_init_data(
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.route(
-            "**/api/v1/task-home",
-            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
-        )
-        page.route(
-            "**/api/v1/task-home",
-            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+            "**/api/v1/community-stats/pulse?*",
+            lambda route: route.fulfill(status=503, json={"code": "stats_unavailable"}),
         )
         page.route(
             "**/api/v1/moderation/cases?*",
@@ -1430,8 +1426,15 @@ def test_bootstrap_waits_for_late_telegram_desktop_init_data(
         )
 
         page.goto(mini_app_url)
-        page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
+        page.locator('[data-screen-id="P08"]').wait_for()
         assert page.locator('[data-screen-id="UX01"]').count() == 0
+        assert page.url.endswith("#/members?view_state=p08")
+        expect(page.get_by_role("button", name="Пульс", exact=True)).to_have_attribute(
+            "aria-pressed", "true"
+        )
+        assert page.get_by_role("navigation", name="Основное меню").get_by_role(
+            "button"
+        ).all_inner_texts() == ["Комьюнити", "Задания", "Кошелёк", "Параметры"]
         assert calls == 2
         browser.close()
 
@@ -1963,7 +1966,7 @@ def test_ui_next_settings_opens_profile_and_selects_theme(  # noqa: PLR0915
         page.get_by_role("button", name="Параметры", exact=True).click()
         page.locator(".settings-list").wait_for()
 
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
         page.get_by_role("heading", name="Задания", exact=True).wait_for()
         assert page.get_by_role("button", name="Параметры", exact=True).is_visible()
         assert page.get_by_role("button", name="Профиль", exact=True).count() == 0
@@ -4246,14 +4249,19 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
                 "**/api/v1/task-home",
                 lambda route: route.fulfill(json=_task_home_payload()),
             )
+            page.route(
+                "**/api/v1/community-stats/pulse?*",
+                lambda route: route.fulfill(status=503, json={"code": "stats_unavailable"}),
+            )
             page.goto(mini_app_url)
-            page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
+            page.locator('[data-screen-id="P08"]').wait_for()
             page.get_by_role("button", name="Модерация").wait_for()
             assert page.get_by_role("navigation", name="Основное меню").get_by_role(
                 "button"
             ).all_inner_texts() == [
-                "Задания",
                 "Комьюнити",
+                "Задания",
+                "Кошелёк",
                 "Параметры",
                 "Модерация",
             ]
@@ -4283,7 +4291,7 @@ def test_connected_concept_shell_and_legacy_absence(mini_app_url: str) -> None:
                 "border": "1px",
                 "overflow": "hidden",
                 "navBorder": "1px",
-                "icons": 4,
+                "icons": 5,
                 "overflowX": 0,
             }
             assert abs(geometry["shellBottom"] - geometry["navBottom"]) <= 1
@@ -4553,7 +4561,7 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             "**/api/v1/task-home",
             lambda route: route.fulfill(json=_task_home_payload(empty=True)),
         )
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
         page.get_by_role("heading", name="Задания").wait_for()
         assert me_calls == 2
         assert len(requests) == 1
@@ -5803,7 +5811,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "**/api/v1/tasks",
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
         page.get_by_role("heading", name="Задания").wait_for()
 
         capture_requests = True
@@ -6211,8 +6219,8 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
 
             page.route("**/api/v1/community-stats/leaderboard?*", leaderboard_route)
             page.goto(mini_app_url)
-            page.get_by_role("button", name="Комьюнити", exact=True).click()
             page.locator('[data-screen-id="P08"][data-state="content"]').wait_for()
+            assert page.url.endswith("#/members?view_state=p08")
             expect(page.get_by_role("button", name="Пульс", exact=True)).to_have_attribute(
                 "aria-pressed", "true"
             )
@@ -6583,7 +6591,7 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                 assert page.get_by_role("button", name=active_period, exact=True).is_enabled()
 
             page.get_by_role("button", name="Параметры", exact=True).click()
-            page.locator(".settings-link-row:not(.settings-theme-row)").click()
+            page.get_by_role("button", name=re.compile("^Профиль")).click()
             page.locator(".profile-overview").wait_for()
             assert page.url.endswith("#/profile")
             heading_box = page.locator("#screen-title").bounding_box()
@@ -6732,7 +6740,6 @@ def test_karma_vote_retries_one_action_and_refreshes_safe_profile(  # noqa: PLR0
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         page.goto(mini_app_url)
-        page.get_by_role("button", name="Комьюнити", exact=True).click()
         page.get_by_role("button", name="Лидерборд").click()
         page.locator(".leaderboard-row", has_text="Мария").click()
         page.locator('[data-screen-id="P02"]').wait_for()
@@ -7568,7 +7575,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
                 }
             ),
         )
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
         _open_blank_task_creation(page)
         assert actions == []
         assert page.locator('[data-screen-id="T04B"]').count() == 0
@@ -7666,7 +7673,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert title_dialog.get_by_text(f"{len(local_title)} / 80", exact=True).is_visible()
         title_dialog.get_by_role("button", name="Готово", exact=True).click()
         page.get_by_text("Сохранено на устройстве", exact=True).wait_for()
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
         _open_blank_task_creation(page)
         assert page.get_by_label("Название *", exact=True).input_value() == local_title
         page.get_by_role("button", name="Редактировать что нужно сделать", exact=True).click()
@@ -7984,7 +7991,7 @@ def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noq
         )
         page.route("**/api/v1/task-home", lambda route: route.fulfill(json=_task_home_payload()))
         page.route("**/api/v1/task-creation", creation)
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
         page.locator('[data-home-action="create"]').click()
         page.get_by_text("Сохранённое задание", exact=True).wait_for()
         assert page.get_by_text("Предпросмотр устарел", exact=False).count() == 1
@@ -8060,7 +8067,7 @@ def test_deadline_dialog_keeps_done_visible_on_short_desktop(mini_app_url: str) 
             lambda route: route.fulfill(json=_task_home_payload()),
         )
         page.route("**/api/v1/task-creation", creation)
-        page.goto(mini_app_url)
+        page.goto(mini_app_url + "#/tasks")
 
         _open_blank_task_creation(page)
         page.get_by_role("button", name="Выбрать срок", exact=True).click()
@@ -8149,7 +8156,7 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(  # noqa: P
                 lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
             )
             page.route("**/api/v1/task-creation", creation)
-            page.goto(mini_app_url)
+            page.goto(mini_app_url + "#/tasks")
 
             _open_blank_task_creation(page)
             deadline = page.get_by_label("Срок *", exact=True)
