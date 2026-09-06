@@ -9889,8 +9889,10 @@ async function bootstrapTaskHome(authAttempted = false) {
         );
       }
       showModerationCase(resourceId, false);
-    } else {
+    } else if (!initialHash || initialHash === "#") {
       loadParticipants();
+    } else {
+      await loadTaskHome(false);
     }
   } catch {
     setNavigation("task-home", false);
