@@ -6,6 +6,15 @@ const PLATFORM_INSET_EVENTS = Object.freeze([
   "viewportChanged",
 ]);
 let viewportListenersInstalled = false;
+const MOBILE_TELEGRAM_PLATFORMS = new Set(["android", "android_x", "ios"]);
+const DESKTOP_TELEGRAM_PLATFORMS = new Set([
+  "macos",
+  "tdesktop",
+  "unigram",
+  "web",
+  "weba",
+  "webk",
+]);
 
 const insetValue = (inset, edge) => {
   const value = Number(inset?.[edge]);
@@ -62,12 +71,22 @@ function installVisualViewportListeners() {
   syncVisualViewport();
 }
 
-export function getFullscreenPreference() {
+function defaultFullscreenPreference(webApp) {
+  const platform = typeof webApp?.platform === "string" ? webApp.platform.toLowerCase() : "";
+  if (MOBILE_TELEGRAM_PLATFORMS.has(platform)) return true;
+  if (DESKTOP_TELEGRAM_PLATFORMS.has(platform)) return false;
+  return globalThis.matchMedia?.("(pointer: coarse)")?.matches === true;
+}
+
+export function getFullscreenPreference(webApp = globalThis.Telegram?.WebApp) {
   try {
-    return localStorage.getItem(FULLSCREEN_STORAGE_KEY) !== "false";
+    const stored = localStorage.getItem(FULLSCREEN_STORAGE_KEY);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
   } catch {
-    return true;
+    // Fall through to the platform default when storage is unavailable.
   }
+  return defaultFullscreenPreference(webApp);
 }
 
 function applyFullscreenMode(enabled, webApp) {
@@ -99,7 +118,7 @@ export function applyPlatformTheme(webApp = globalThis.Telegram?.WebApp) {
   for (const event of PLATFORM_INSET_EVENTS) {
     webApp?.onEvent?.(event, () => syncPlatformInsets(webApp));
   }
-  applyFullscreenMode(getFullscreenPreference(), webApp);
+  applyFullscreenMode(getFullscreenPreference(webApp), webApp);
 }
 
 const THEME_STORAGE_KEY = "community_bot_ui_theme";

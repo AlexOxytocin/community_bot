@@ -1657,6 +1657,58 @@ def test_personal_invitation_finishes_without_moderation_wait(mini_app_url: str)
         browser.close()
 
 
+@pytest.mark.parametrize(
+    ("platform", "viewport", "enabled", "calls"),
+    [
+        ("ios", (390, 844), "true", ["enter"]),
+        ("tdesktop", (1024, 768), "false", []),
+    ],
+)
+def test_fullscreen_default_follows_telegram_platform_and_keeps_manual_choice(
+    mini_app_url: str,
+    platform: str,
+    viewport: tuple[int, int],
+    enabled: str,
+    calls: list[str],
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(
+            browser,
+            bridge=f"""
+            globalThis.fullscreenCalls = [];
+            globalThis.Telegram = {{WebApp: {{
+              platform: '{platform}', isFullscreen: false,
+              ready() {{}}, expand() {{}},
+              requestFullscreen() {{
+                this.isFullscreen = true;
+                globalThis.fullscreenCalls.push('enter');
+              }},
+              exitFullscreen() {{
+                this.isFullscreen = false;
+                globalThis.fullscreenCalls.push('exit');
+              }}
+            }}}};
+            """,
+        )
+        page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+        page.route("**/api/v1/**", lambda route: route.fulfill(status=403, json={}))
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=_cache_profile()[0]))
+        page.goto(mini_app_url + "#/settings")
+        toggle = page.get_by_role("switch", name="Полноэкранный режим", exact=True)
+        expect(toggle).to_have_attribute("aria-checked", enabled)
+        assert page.evaluate("globalThis.fullscreenCalls") == calls
+        assert page.evaluate("localStorage.getItem('community_bot_fullscreen_enabled')") is None
+        if platform == "tdesktop":
+            toggle.click()
+            expect(toggle).to_have_attribute("aria-checked", "true")
+            assert page.evaluate("globalThis.fullscreenCalls") == ["enter"]
+            assert (
+                page.evaluate("localStorage.getItem('community_bot_fullscreen_enabled')") == "true"
+            )
+        browser.close()
+
+
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
 def test_ui_next_settings_opens_profile_and_selects_theme(  # noqa: PLR0915
     mini_app_url: str,
@@ -1701,6 +1753,7 @@ def test_ui_next_settings_opens_profile_and_selects_theme(  # noqa: PLR0915
             bridge="""
             globalThis.fullscreenCalls = [];
             globalThis.Telegram = {WebApp: {
+              platform: 'ios',
               isFullscreen: false,
               ready() {}, expand() {},
               requestFullscreen() {
@@ -4626,6 +4679,7 @@ def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str
               }
             });
             globalThis.Telegram = {WebApp: {
+              platform: "android",
               colorScheme: "light",
               isFullscreen: false,
               safeAreaInset: {top: 24, right: 0, bottom: 8, left: 0},
