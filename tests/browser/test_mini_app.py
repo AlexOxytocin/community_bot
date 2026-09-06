@@ -824,7 +824,7 @@ def test_clean_mini_app_url_only_starts_current_runtime(
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
         page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
         assert page.locator('[data-screen-id="UX01"]').count() == 0
         assert page.evaluate("document.documentElement.dataset.uiThemeScope") == "next"
@@ -1469,7 +1469,7 @@ def test_ui_next_system_theme_tracks_telegram_and_syncs_chrome(mini_app_url: str
             "**/api/v1/moderation/cases?*",
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
-        page.goto(mini_app_url + "?theme=system#/tasks")
+        page.goto(mini_app_url + "?theme=system#/tasks?view_state=ux02")
         page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
         assert page.evaluate("document.documentElement.dataset.themePreference") == "system"
         assert page.evaluate("document.documentElement.dataset.themePreset") == "acid"
@@ -1553,7 +1553,7 @@ def test_ui_next_onboarding_starts_light_and_confirms_catalog_city(mini_app_url:
             ),
         )
 
-        page.goto(mini_app_url + "?theme=dark#/tasks")
+        page.goto(mini_app_url + "?theme=dark#/tasks?view_state=ux02")
         page.get_by_role(
             "heading",
             name="В каком городе вы живёте?",  # noqa: RUF001
@@ -1966,7 +1966,7 @@ def test_ui_next_settings_opens_profile_and_selects_theme(  # noqa: PLR0915
         page.get_by_role("button", name="Параметры", exact=True).click()
         page.locator(".settings-list").wait_for()
 
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
         page.get_by_role("heading", name="Задания", exact=True).wait_for()
         assert page.get_by_role("button", name="Параметры", exact=True).is_visible()
         assert page.get_by_role("button", name="Профиль", exact=True).count() == 0
@@ -2057,7 +2057,7 @@ def test_ui_next_member_profile_returns_to_participants(  # noqa: PLR0915
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "?theme=light#/tasks")
+        page.goto(mini_app_url + "?theme=light#/tasks?view_state=ux02")
         page.get_by_role("button", name="Комьюнити", exact=True).click()
         page.get_by_role("button", name="Люди", exact=True).click()
         page.locator(".member-row").click()
@@ -2151,7 +2151,7 @@ def test_ui_next_task_creation_uses_medium_navigation_title(mini_app_url: str) -
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "?theme=dark#/tasks")
+        page.goto(mini_app_url + "?theme=dark#/tasks?view_state=ux02")
         page.locator('[data-home-action="create"]').click()
         page.locator('[data-screen-id="T05"]').wait_for()
         assert page.locator("#screen-title").text_content() == "Новое задание"
@@ -2223,7 +2223,7 @@ def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(  # 
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "?theme=dark#/tasks")
+        page.goto(mini_app_url + "?theme=dark#/tasks?view_state=ux02")
         boundary = page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]')
         boundary.wait_for()
         assert boundary.get_by_text("Требуются ваши действия", exact=True).is_visible()
@@ -2263,7 +2263,7 @@ def test_ui_next_task_home_uses_server_projection_and_stable_theme_geometry(  # 
         assert page.locator(".task-home-attention").bounding_box()["height"] == attention_height
         dark_boxes = boxes(page)
 
-        page.goto(mini_app_url + "?theme=light#/tasks")
+        page.goto(mini_app_url + "?theme=light#/tasks?view_state=ux02")
         boundary.wait_for()
         assert page.evaluate("document.documentElement.dataset.theme") == "light"
         assert boxes(page) == dark_boxes
@@ -2310,7 +2310,7 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(  # 
             lambda route: route.fulfill(json={"items": [_task_home_task()], "next_cursor": None}),
         )
 
-        page.goto(mini_app_url + "?theme=dark#/tasks")
+        page.goto(mini_app_url + "?theme=dark#/tasks?view_state=ux02")
         page.locator('[data-screen-id="UX02"][data-state="content"]').wait_for()
         assert page.get_by_text("Всё под контролем", exact=True).is_visible()
         assert page.locator(".task-home-new").count() == 0
@@ -2382,7 +2382,7 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(  # 
         }
         catalog_back.click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
         page.locator('[data-home-action="find"]').click()
         page.locator('[data-screen-id="T01"]').wait_for()
         catalog_url = page.url
@@ -2415,7 +2415,7 @@ def test_ui_next_task_home_empty_partial_error_and_existing_flow_transition(  # 
         page.locator('[data-screen-id="T01"]').wait_for()
         page.locator("#catalog-nav").click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
 
         mode["value"] = "error"
         page.evaluate("localStorage.clear()")
@@ -2483,7 +2483,7 @@ def test_task_home_action_count_opens_one_card_or_a_choice_sheet(  # noqa: PLR09
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "?theme=dark#/tasks")
+        page.goto(mini_app_url + "?theme=dark#/tasks?view_state=ux02")
         page.get_by_role("button", name="Сдать результат 2", exact=True).click()
         chooser = page.get_by_role("dialog", name="Сдать результат", exact=True)
         chooser.wait_for()
@@ -2524,9 +2524,9 @@ def test_task_home_action_count_opens_one_card_or_a_choice_sheet(  # noqa: PLR09
         assert all(item["width"] >= 135 and item["height"] >= 44 for item in action_geometry)
         page.get_by_role("button", name="Назад к заданиям", exact=True).click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
 
-        page.goto(mini_app_url + "?theme=dark&review=single-action#/tasks")
+        page.goto(mini_app_url + "?theme=dark&review=single-action#/tasks?view_state=ux02")
         page.get_by_role("button", name="Проверить работу 2", exact=True).click()
         review_chooser = page.get_by_role("dialog", name="Проверить работу", exact=True)
         review_chooser.wait_for()
@@ -2549,7 +2549,7 @@ def test_task_home_action_count_opens_one_card_or_a_choice_sheet(  # noqa: PLR09
         assert page.get_by_role("dialog").count() == 0
         page.get_by_role("button", name="Назад к заданиям", exact=True).click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
         browser.close()
 
 
@@ -2696,7 +2696,7 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "?theme=dark&review=compact-actions#/tasks")
+        page.goto(mini_app_url + "?theme=dark&review=compact-actions#/tasks?view_state=ux02")
         page.get_by_role("button", name="Сдать результат 2", exact=True).click()
         page.get_by_role("dialog", name="Сдать результат", exact=True).get_by_role(
             "button", name="Подготовить результат проверки"
@@ -2738,11 +2738,11 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         )
         submission_sheet.get_by_role("button", name="Отправить результат", exact=True).click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
         assert saved_results[0]["payload"] == {"result": "Готовый результат для проверки"}
 
         current_detail["value"] = accepted_detail
-        page.goto(mini_app_url + "?theme=dark&review=compact-cancel#/tasks")
+        page.goto(mini_app_url + "?theme=dark&review=compact-cancel#/tasks?view_state=ux02")
         page.get_by_role("button", name="Сдать результат 2", exact=True).click()
         page.get_by_role("dialog", name="Сдать результат", exact=True).get_by_role(
             "button", name="Подготовить результат проверки"
@@ -2765,11 +2765,11 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         cancel_sheet.get_by_label("Причина отказа", exact=True).fill(cancel_reason)
         cancel_sheet.get_by_role("button", name="Подтвердить отказ", exact=True).click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
         assert cancellations == [{"reason": cancel_reason}]
 
         current_detail["value"] = rejected_detail
-        page.goto(mini_app_url + "?theme=dark&review=compact-dispute#/tasks")
+        page.goto(mini_app_url + "?theme=dark&review=compact-dispute#/tasks?view_state=ux02")
         page.get_by_role("button", name="Сдать результат 2", exact=True).click()
         page.get_by_role("dialog", name="Сдать результат", exact=True).get_by_role(
             "button", name="Подготовить результат проверки"
@@ -2793,10 +2793,10 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         dispute_comment.fill(reason)
         dispute_sheet.get_by_role("button", name="Подать спор", exact=True).click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
         assert disputes == [{"comment": reason}]
 
-        page.goto(mini_app_url + "?theme=dark&review=compact-review#/tasks")
+        page.goto(mini_app_url + "?theme=dark&review=compact-review#/tasks?view_state=ux02")
         page.get_by_role("button", name="Проверить работу 1", exact=True).click()
         page.locator('[data-screen-id="M11"]').wait_for()
         assert page.locator(".assignment-review-detail").is_visible()
@@ -2826,7 +2826,7 @@ def test_ui_next_assignment_actions_use_compact_sheets_and_review_is_compact(  #
         assert reject_confirm.is_enabled()
         reject_confirm.click()
         page.locator('[data-screen-id="UX02"]').wait_for()
-        assert page.url.endswith("#/tasks")
+        assert page.url.endswith("#/tasks?view_state=ux02")
         assert decisions == [
             {
                 "decision": "reject",
@@ -2916,7 +2916,7 @@ def test_ui_next_accepted_task_returns_to_taken_assignments(mini_app_url: str) -
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(mini_app_url + "?theme=dark&review=accept-return#/tasks")
+        page.goto(mini_app_url + "?theme=dark&review=accept-return#/tasks?view_state=ux02")
         page.get_by_role("button", name=re.compile("Найти задание")).click()
         page.get_by_role("button", name=re.compile(task["title"])).click()
         page.get_by_role("button", name="Принять задание", exact=True).click()
@@ -2997,7 +2997,7 @@ def test_ui_next_catalog_supports_full_filters_sorting_and_reset(  # noqa: PLR09
             lambda route: route.fulfill(json={"items": catalog_tasks, "next_cursor": None}),
         )
 
-        page.goto(mini_app_url + "?theme=light#/tasks")
+        page.goto(mini_app_url + "?theme=light#/tasks?view_state=ux02")
         page.locator('[data-screen-id="UX02"]').wait_for()
         page.locator('[data-home-action="find"]').click()
         catalog = page.locator('[data-screen-id="T01"][data-state="content"]')
@@ -3281,7 +3281,7 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
             ),
         )
 
-        page.goto(mini_app_url + "?theme=light#/tasks")
+        page.goto(mini_app_url + "?theme=light#/tasks?view_state=ux02")
         page.locator('[data-home-action="taken"]').click()
         taken = page.locator('[data-screen-id="M01"][data-ui-engine="next-work-list"]')
         taken.wait_for()
@@ -4609,7 +4609,7 @@ def test_fresh_telegram_session_handshake_is_exact_and_fail_closed(  # noqa: PLR
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
         existing.route("**/api/v1/community-stats/pulse?*", lambda route: route.fulfill(json=pulse))
-        existing.goto(mini_app_url)
+        existing.goto(mini_app_url + "#/membership")
         existing.locator('[data-screen-id="P08"]').wait_for()
         assert existing.get_by_role("button", name="Пульс").get_attribute("aria-pressed") == "true"
         assert auth_calls == 0
@@ -4702,7 +4702,7 @@ def test_notification_start_parameter_opens_the_target_task(mini_app_url: str) -
             lambda route: route.fulfill(json={"items": [task], "next_cursor": None}),
         )
 
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
 
         page.locator('[data-screen-id="T03"]').wait_for()
         assert page.get_by_role("heading", name="Проверить уведомление").count() == 1
@@ -5016,7 +5016,7 @@ def test_task_home_find_uses_theme_specific_deep_gradient(
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/tasks")
+        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/tasks?view_state=ux02")
         find_action = page.locator('[data-home-action="find"]')
         find_action.wait_for()
 
@@ -5108,7 +5108,7 @@ def test_placeholders_use_one_subdued_token_in_every_theme(
             lambda route: route.fulfill(status=403, json={"code": "forbidden"}),
         )
 
-        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/tasks")
+        page.goto(f"{mini_app_url}?preset={preset}&theme={theme}#/tasks?view_state=ux02")
         page.locator('[data-screen-id="UX02"]').wait_for()
         page.locator("#content").evaluate(
             r"""node => {
@@ -6000,7 +6000,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
             "**/api/v1/tasks",
             lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
         )
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
         page.get_by_role("heading", name="Задания").wait_for()
 
         capture_requests = True
@@ -7764,7 +7764,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
                 }
             ),
         )
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
         _open_blank_task_creation(page)
         assert actions == []
         assert page.locator('[data-screen-id="T04B"]').count() == 0
@@ -7862,7 +7862,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert title_dialog.get_by_text(f"{len(local_title)} / 80", exact=True).is_visible()
         title_dialog.get_by_role("button", name="Готово", exact=True).click()
         page.get_by_text("Сохранено на устройстве", exact=True).wait_for()
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
         _open_blank_task_creation(page)
         assert page.get_by_label("Название *", exact=True).input_value() == local_title
         page.get_by_role("button", name="Редактировать что нужно сделать", exact=True).click()
@@ -8180,7 +8180,7 @@ def test_task_creation_entry_recovers_or_starts_new_without_dead_screens(  # noq
         )
         page.route("**/api/v1/task-home", lambda route: route.fulfill(json=_task_home_payload()))
         page.route("**/api/v1/task-creation", creation)
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
         page.locator('[data-home-action="create"]').click()
         page.get_by_text("Сохранённое задание", exact=True).wait_for()
         assert page.get_by_text("Предпросмотр устарел", exact=False).count() == 1
@@ -8256,7 +8256,7 @@ def test_deadline_dialog_keeps_done_visible_on_short_desktop(mini_app_url: str) 
             lambda route: route.fulfill(json=_task_home_payload()),
         )
         page.route("**/api/v1/task-creation", creation)
-        page.goto(mini_app_url + "#/tasks")
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
 
         _open_blank_task_creation(page)
         page.get_by_role("button", name="Выбрать срок", exact=True).click()
@@ -8345,7 +8345,7 @@ def test_expired_task_draft_and_secondary_action_keep_ui_ready_truth(  # noqa: P
                 lambda route: route.fulfill(json={"items": [], "next_cursor": None}),
             )
             page.route("**/api/v1/task-creation", creation)
-            page.goto(mini_app_url + "#/tasks")
+            page.goto(mini_app_url + "#/tasks?view_state=ux02")
 
             _open_blank_task_creation(page)
             deadline = page.get_by_label("Срок *", exact=True)

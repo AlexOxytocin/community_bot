@@ -157,8 +157,10 @@ T01 T02 T03 T03A T04B T05 T06 T08
 P01 P02 P03 P04 P05 P06 P07 P08
 M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15
 S01 S02 S03 S04
+UX02
 `.trim().split(/\s+/));
 const productRouteFor = (id) => {
+  if (id === "UX02") return "#/tasks";
   if (["T01", "T02"].includes(id)) return "#/catalog";
   if (["T03", "T03A"].includes(id)) return "#/tasks/:task_id";
   if (id.startsWith("T")) return "#/compose/tasks/:draft_id?";
@@ -9214,8 +9216,12 @@ async function loadTaskHome(push = true) {
   const revision = ++screenRevision;
   const path = "/api/v1/task-home";
   const cached = cachedJson(path);
-  if (push || !location.hash.startsWith("#/tasks")) {
-    history.replaceState({ screen: "task-home" }, "", "#/tasks");
+  if (push || location.hash !== presentationLocationFor("UX02")) {
+    history.replaceState(
+      { screen: "task-home" },
+      "",
+      presentationLocationFor("UX02"),
+    );
   }
   if (cached) showTaskHome(cached, revision);
   else {
@@ -9891,8 +9897,6 @@ async function bootstrapTaskHome(authAttempted = false) {
     );
     if (notificationLocation) history.replaceState(null, "", notificationLocation);
     const initialHash = location.hash;
-    const restoredTelegramTaskHome = initialHash === "#/tasks"
-      && Boolean(globalThis.Telegram?.WebApp?.initData);
     const presentation = presentationFromLocation();
     const presentationId = presentation?.screen.id;
     const resourceId = presentation?.resourceId;
@@ -9960,6 +9964,8 @@ async function bootstrapTaskHome(authAttempted = false) {
         initialHash,
       );
       showAdministratorRights(directAdministration[2], false, null, false);
+    } else if (presentationId === "UX02") {
+      await loadTaskHome(false);
     } else if (presentationId === "T01" || presentationId === "T02") {
       history.replaceState({ screen: "catalog" }, "", initialHash);
       await loadCatalog(false);
@@ -10020,10 +10026,16 @@ async function bootstrapTaskHome(authAttempted = false) {
         );
       }
       showModerationCase(resourceId, false);
-    } else if (!initialHash || initialHash === "#" || restoredTelegramTaskHome) {
+    } else if (
+      !initialHash
+      || initialHash === "#"
+      || initialHash === "#/tasks"
+      || initialHash === "#/membership"
+      || initialHash === "#/onboarding"
+    ) {
       loadParticipants();
     } else {
-      await loadTaskHome(false);
+      loadParticipants();
     }
   } catch {
     setNavigation("task-home", false);
