@@ -691,6 +691,10 @@ class MemberNotificationPreferencesModel(Base):
     offline: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     important: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     important_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    digest: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    digest_since: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     crypto: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     crypto_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     task_updates: Mapped[bool] = mapped_column(

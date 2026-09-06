@@ -188,11 +188,15 @@ class CommunityPreferencesStore:
         async with self.sessions() as session, session.begin():
             await self._require_member(session, member_id, lock=True)
             row = await session.get(MemberNotificationPreferencesModel, member_id)
+            now = datetime.datetime.now(datetime.UTC)
             if row is None:
+                defaults = dict.fromkeys(NOTIFICATION_CATEGORIES, False)
+                defaults["digest"] = True
                 row = MemberNotificationPreferencesModel(
                     member_id=member_id,
                     revision=0,
-                    **dict.fromkeys(NOTIFICATION_CATEGORIES, False),
+                    digest_since=now,
+                    **defaults,
                 )
                 session.add(row)
             if row.revision != expected_revision:
@@ -200,7 +204,6 @@ class CommunityPreferencesStore:
                 raise PreferencesConflictError(message)
             categories = TASK_CATEGORIES if category in TASK_CATEGORIES else (category,)
             changed = False
-            now = datetime.datetime.now(datetime.UTC)
             for key in categories:
                 if getattr(row, key) != enabled:
                     setattr(row, key, enabled)

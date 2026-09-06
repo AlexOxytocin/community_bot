@@ -26,7 +26,7 @@ async def test_activity_sends_source_link_and_does_not_retry_uncertain_delivery(
         telegram_user_id=42,
         notification_type="activity.published",
         payload={
-            "categories": ["online", "offline", "important", "crypto"],
+            "categories": ["online", "offline", "important", "digest", "crypto"],
             "message_url": "https://t.me/c/2237685639/24962/24968",
         },
         attempt_count=1,
@@ -39,6 +39,7 @@ async def test_activity_sends_source_link_and_does_not_retry_uncertain_delivery(
     assert sent["reply_markup"].inline_keyboard[1][0].callback_data == "activities:all"
     assert "Онлайн ивенты" in sent["text"]
     assert "Важные обновления чата" in sent["text"]
+    assert "Еженедельный дайджест" in sent["text"]
     assert "Крипта" in sent["text"]
     bot.send_message.side_effect = TelegramNetworkError(
         method=SendMessage(chat_id=42, text="test"),
@@ -61,6 +62,7 @@ def test_panel_excludes_chat_activity_and_offers_explicit_subscription() -> None
     assert callbacks == [
         "subscription:important:1:3",
         "subscription:nomad:1:3",
+        "subscription:digest:1:3",
         "subscription:tasks:1:3",
         "subscription:online:1:3",
         "subscription:offline:1:3",
@@ -79,6 +81,7 @@ def test_activity_help_explains_current_formats_in_product_order() -> None:
     headings = [
         "Эксперименты с ИИ",
         "Сейчас проходит «Цифровой кочевник»",
+        "Еженедельный дайджест",
         "Живое общение",
         "Ивенты взаимопомощи",
         "Криптотехнологии",
@@ -96,11 +99,11 @@ def test_activity_help_explains_current_formats_in_product_order() -> None:
 def test_mutual_help_is_one_direct_toggle_including_legacy_pages() -> None:
     preferences: dict[str, object] = {"revision": 0}
     _, overview = activity_panel(preferences)
-    assert overview[2][0].text == "☐ Взаимопомощь"
-    assert overview[2][0].callback_data == "subscription:tasks:1:0"
+    assert overview[3][0].text == "☐ Взаимопомощь"
+    assert overview[3][0].callback_data == "subscription:tasks:1:0"
     for page in ("tasks_group", "tasks", "disputes", "task_updates", "task_reminders"):
         assert activity_panel(preferences, page)[1] == overview
     preferences["disputes"] = True
     _, overview = activity_panel(preferences)
-    assert overview[2][0].text == "☑ Взаимопомощь"
-    assert overview[2][0].callback_data == "subscription:tasks:0:0"
+    assert overview[3][0].text == "☑ Взаимопомощь"
+    assert overview[3][0].callback_data == "subscription:tasks:0:0"

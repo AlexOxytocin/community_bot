@@ -347,6 +347,8 @@ def _new_member_preferences(member_id: UUID, now: datetime) -> MemberNotificatio
         nomad_since=now,
         important=True,
         important_since=now,
+        digest=True,
+        digest_since=now,
         online=True,
         online_since=now,
         offline=True,

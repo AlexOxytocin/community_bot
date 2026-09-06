@@ -33,6 +33,7 @@ TRANSITIONS = {
     "0033-0034": ("0033", "0034"),
     "0034-0036": ("0034", "0036"),
     "0036-0038": ("0036", "0038"),
+    "0038-0039": ("0038", "0039"),
 }
 
 # Only economic data: maintenance heartbeats must not invalidate this invariant.
@@ -84,6 +85,20 @@ ONBOARDING_INVARIANT_SQL = """SELECT (
  NOT EXISTS (SELECT 1 FROM member_notification_preferences
    WHERE crypto OR crypto_since IS NOT NULL)
  AND NOT EXISTS (SELECT 1 FROM bot_onboardings)
+)::text"""
+
+# Schema 0039 adds default-on digest consent and intentionally advances every
+# preference revision. Compare all previous preference values except revision.
+DIGEST_FINGERPRINT_SQL = FINGERPRINT_SQL.replace(
+    "FROM member_notification_preferences p",
+    "FROM (SELECT member_id,tasks,nomad,tasks_since,nomad_since,online,offline,"
+    "important,important_since,crypto,crypto_since,task_updates,task_reminders,disputes,"
+    "online_since,offline_since,task_updates_since,task_reminders_since,disputes_since "
+    "FROM member_notification_preferences) p",
+)
+DIGEST_INVARIANT_SQL = """SELECT (
+ NOT EXISTS (SELECT 1 FROM member_notification_preferences
+   WHERE NOT digest OR digest_since IS NULL)
 )::text"""
 
 
@@ -219,6 +234,8 @@ class Host:
             sql = ACTIVITY_FINGERPRINT_SQL
         elif self.to_head == "0038":
             sql = ONBOARDING_FINGERPRINT_SQL
+        elif self.to_head == "0039":
+            sql = DIGEST_FINGERPRINT_SQL
         else:
             sql = FINGERPRINT_SQL
         return json.loads(self.sql(sql, database))
@@ -345,6 +362,8 @@ class Host:
             and self.sql(ONBOARDING_INVARIANT_SQL, database) != "true"
         ):
             raise CutoverError("Crypto defaults or onboarding journal invariant failed.")
+        if head == self.to_head == "0039" and self.sql(DIGEST_INVARIANT_SQL, database) != "true":
+            raise CutoverError("Digest subscription default invariant failed.")
 
     def start(self, *, old: bool = False, maintenance: bool = False) -> None:
         """Recreate exact services; maintenance writes only liveness heartbeats."""

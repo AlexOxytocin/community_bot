@@ -9,6 +9,7 @@ NotificationCategory = Literal[
     "offline",
     "nomad",
     "important",
+    "digest",
     "crypto",
     "tasks",
     "task_updates",
@@ -20,13 +21,14 @@ NOTIFICATION_CATEGORIES: tuple[NotificationCategory, ...] = (
     "offline",
     "nomad",
     "important",
+    "digest",
     "crypto",
     "tasks",
     "task_updates",
     "task_reminders",
     "disputes",
 )
-PUBLICATION_CATEGORIES = frozenset({"online", "offline", "nomad", "important", "crypto"})
+PUBLICATION_CATEGORIES = frozenset({"online", "offline", "nomad", "important", "digest", "crypto"})
 TASK_CATEGORIES: tuple[NotificationCategory, ...] = (
     "tasks",
     "task_updates",

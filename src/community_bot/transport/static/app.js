@@ -5263,7 +5263,7 @@ function showSettings(push = true) {
   const notifications = element("button", undefined, "settings-row settings-link-row");
   notifications.type = "button";
   const notificationsCopy = element("span", undefined, "settings-row-copy");
-  notificationsCopy.append(element("strong", "Активности и подписки"), element("span", "Встречи, кочевник, крипта и взаимопомощь"));
+  notificationsCopy.append(element("strong", "Активности и подписки"), element("span", "Дайджест, встречи, кочевник и взаимопомощь"));
   const notificationsIcon = settingsRowIcon("notifications");
   notificationsIcon.classList.add("settings-row-icon");
   notifications.append(notificationsIcon, notificationsCopy, element("span", "›", "settings-chevron"));
@@ -7631,6 +7631,7 @@ async function loadCommunityPreferences(kind, push = true) {
     ] : [
       ["important", "Важные обновления чата", "Объявления и изменения от администраторов с тегом #important."],
       ["nomad", "Цифровой кочевник", "Публикации администраторов с тегом #nomad."],
+      ["digest", "Еженедельный дайджест", "Агрегированный и сгруппированный по темам обзор обсуждений чата с тегом #digest."],
       ["tasks", "Взаимопомощь", "Новые задания, изменения по твоим заданиям, напоминания и споры."],
       ["online", "Онлайн ивенты", "Анонсы администраторов с тегом #online."],
       ["offline", "Офлайн ивенты", "Ивенты вживую: публикации с тегом #offline."],

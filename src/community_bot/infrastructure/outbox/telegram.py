@@ -70,6 +70,7 @@ def _notification_text(claim: DeliveryClaim) -> str:
             "offline": "📍 Офлайн ивенты",
             "nomad": "🌍 Цифровой кочевник",
             "important": "📌 Важные обновления чата",
+            "digest": "🗞 Еженедельный дайджест",
             "crypto": "🪙 Крипта",
         }
         categories = claim.payload.get("categories")

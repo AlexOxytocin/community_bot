@@ -181,6 +181,7 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(  # noqa: P
         "online": False,
         "offline": False,
         "important": False,
+        "digest": True,
         "crypto": False,
         "task_updates": False,
         "task_reminders": False,
@@ -210,11 +211,12 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(  # noqa: P
         page.route("**/api/v1/notification-preferences", preferences)
         page.goto(mini_app_url + "#/settings")
         page.get_by_role(
-            "button", name="Активности и подписки Встречи, кочевник, крипта и взаимопомощь"
+            "button", name="Активности и подписки Дайджест, встречи, кочевник и взаимопомощь"
         ).click()
         assert page.locator(".preference-copy strong").all_text_contents() == [
             "Важные обновления чата",
             "Цифровой кочевник",
+            "Еженедельный дайджест",
             "Взаимопомощь",
             "Онлайн ивенты",
             "Офлайн ивенты",
@@ -222,7 +224,10 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(  # noqa: P
         ]
         mutual_help = page.get_by_role("checkbox", name="Взаимопомощь", exact=True)
         expect(mutual_help).not_to_be_checked()
-        expect(page.get_by_role("checkbox")).to_have_count(6)
+        expect(page.get_by_role("checkbox")).to_have_count(7)
+        expect(
+            page.get_by_role("checkbox", name="Еженедельный дайджест", exact=True)
+        ).to_be_checked()
         mutual_help.check()
         expect(page.get_by_role("status")).to_have_text("Сохранено")
         mutual_help.uncheck()
@@ -252,7 +257,7 @@ def test_notification_preferences_tiles_save_restore_and_fail_safely(  # noqa: P
         page.get_by_role("button", name="Назад", exact=True).click()
         expect(
             page.get_by_role(
-                "button", name="Активности и подписки Встречи, кочевник, крипта и взаимопомощь"
+                "button", name="Активности и подписки Дайджест, встречи, кочевник и взаимопомощь"
             )
         ).to_be_visible()
         page.goto(mini_app_url + "#/settings/notifications")

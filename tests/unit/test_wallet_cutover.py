@@ -228,3 +228,29 @@ def test_onboarding_cutover_accepts_live_source_subscriptions(
 
     host.check_snapshot("source-copy", "0036")
     assert statements == [cutover.ONBOARDING_FINGERPRINT_SQL]
+
+
+def test_digest_cutover_uses_compatible_fingerprint_and_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = object.__new__(cutover.Host)
+    host.receipt = {"from_head": "0038", "to_head": "0039"}
+    statements: list[tuple[str, str | None]] = []
+
+    def sql(statement: str, database: str | None = None) -> str:
+        statements.append((statement, database))
+        if statement == cutover.DIGEST_FINGERPRINT_SQL:
+            return '{"members": 2}'
+        return "true"
+
+    monkeypatch.setattr(host, "sql", sql)
+    monkeypatch.setattr(host, "head", lambda _database=None: "0039")
+
+    assert host.fingerprint("copy") == {"members": 2}
+    host.receipt["fingerprint"] = {"members": 2}
+    host.check_snapshot("copy", "0039")
+    assert statements == [
+        (cutover.DIGEST_FINGERPRINT_SQL, "copy"),
+        (cutover.DIGEST_FINGERPRINT_SQL, "copy"),
+        (cutover.DIGEST_INVARIANT_SQL, "copy"),
+    ]

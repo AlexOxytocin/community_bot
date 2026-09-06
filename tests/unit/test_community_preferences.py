@@ -110,12 +110,13 @@ async def test_caption_hashtags_use_utf16_offsets_and_ignore_plain_text() -> Non
         **_post(),
         "text": None,
         "entities": [],
-        "caption": "🌍 #OFFLINE #online #IMPORTANT #CRYPTO #nomad #other",
+        "caption": "🌍 #OFFLINE #online #IMPORTANT #CRYPTO #DIGEST #nomad #other",
         "caption_entities": [
             {"type": "hashtag", "offset": 3, "length": 8},
             {"type": "hashtag", "offset": 12, "length": 7},
             {"type": "hashtag", "offset": 20, "length": 10},
             {"type": "hashtag", "offset": 31, "length": 7},
+            {"type": "hashtag", "offset": 39, "length": 7},
         ],
         "photo": [{"file_id": "x", "file_unique_id": "x", "width": 10, "height": 10}],
     }
@@ -126,6 +127,7 @@ async def test_caption_hashtags_use_utf16_offsets_and_ignore_plain_text() -> Non
         "online",
         "important",
         "crypto",
+        "digest",
     }
     publications.observe.reset_mock()
     message["forward_origin"] = {
@@ -296,6 +298,7 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     store.preferences.return_value = {
         "important": True,
         "nomad": False,
+        "digest": True,
         "tasks": True,
         "task_updates": True,
         "task_reminders": True,
@@ -320,9 +323,10 @@ async def test_returning_start_is_the_saved_subscription_home_and_removes_old_me
     buttons = sent.call_args_list[1].kwargs["reply_markup"].inline_keyboard
     assert buttons[0][0].text == ACTIVITY_HELP_BUTTON
     assert buttons[0][0].callback_data == "activities:help"
-    assert [row[0].text for row in buttons[1:7]] == [
+    assert [row[0].text for row in buttons[1:8]] == [
         "☑ Важные обновления чата",
         "☐ Цифровой кочевник",
+        "☑ Еженедельный дайджест",
         "☑ Взаимопомощь",
         "☐ Онлайн ивенты",
         "☑ Офлайн ивенты",
@@ -532,7 +536,7 @@ async def test_optional_app_explanation_keeps_return_to_subscriptions() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "category", ["tasks", "disputes", "task_updates", "task_reminders", "crypto"]
+    "category", ["tasks", "disputes", "task_updates", "task_reminders", "crypto", "digest"]
 )
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_subscription_toggle_is_immediate_without_confirmation(
@@ -550,7 +554,7 @@ async def test_subscription_toggle_is_immediate_without_confirmation(
     }
     await handler.handle(json.dumps({"update_id": 18, "callback_query": callback}).encode())
     store.set_preference.assert_awaited_once_with(
-        member_id, "crypto" if category == "crypto" else "tasks", enabled, 0
+        member_id, category if category in {"crypto", "digest"} else "tasks", enabled, 0
     )
     reply = cast("AsyncMock", handler.bot).edit_message_text.call_args.kwargs
     assert reply["text"].startswith("Активности и подписки")

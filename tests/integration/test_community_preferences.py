@@ -370,13 +370,15 @@ async def test_mutual_help_updates_all_categories_once_and_preserves_legacy_cons
     assert await CommunityPreferencesStore(db.session_factory).preferences(reader.id) == disabled
 
 
-@pytest.mark.parametrize("category", ["nomad", "important", "crypto"])
+@pytest.mark.parametrize("category", ["nomad", "important", "digest", "crypto"])
 async def test_activity_outbox_dedup_and_unsubscribe_before_send(
     community: CommunityFixture,
     category: NotificationCategory,
 ) -> None:
     db, store, owner, reader = community
-    await store.set_preference(reader.id, category, enabled=True, expected_revision=0)
+    enabled = await store.set_preference(reader.id, category, enabled=True, expected_revision=0)
+    enabled_revision = enabled["revision"]
+    assert isinstance(enabled_revision, int)
     now = datetime.datetime.now(datetime.UTC)
     publications = ActivityPublicationStore(db.session_factory)
     post: dict[str, Any] = dict(  # noqa: C408 - named Telegram event fields.
@@ -414,9 +416,13 @@ async def test_activity_outbox_dedup_and_unsubscribe_before_send(
     )
     assert len(deliveries) == 1
     assert await store.allows_delivery(deliveries[0].id)
-    await store.set_preference(reader.id, category, enabled=False, expected_revision=1)
+    await store.set_preference(
+        reader.id, category, enabled=False, expected_revision=enabled_revision
+    )
     assert not await store.allows_delivery(deliveries[0].id)
-    await store.set_preference(reader.id, category, enabled=True, expected_revision=2)
+    await store.set_preference(
+        reader.id, category, enabled=True, expected_revision=enabled_revision + 1
+    )
     assert not await store.allows_delivery(deliveries[0].id)
     reclaimed = await queue.claim_notifications(
         now=now + datetime.timedelta(days=2), limit=10, lease_duration=datetime.timedelta(minutes=2)

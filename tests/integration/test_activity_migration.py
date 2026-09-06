@@ -34,6 +34,55 @@ def _migration(name: str, filename: str):  # noqa: ANN202
     return migration
 
 
+async def test_digest_migration_enables_current_members_from_cutover_time(
+    database_url: str,
+) -> None:
+    migration = _migration("digest_subscription_migration", "0039_digest_subscription.py")
+    db = Database(database_url)
+
+    def verify(connection: Connection) -> None:
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.downgrade()
+            member_id = uuid4()
+            connection.execute(
+                text("""INSERT INTO members
+                (id, telegram_user_id, display_name, timezone, status, role, level_number)
+                VALUES (:id, 8804, 'Digest migration test', 'UTC', 'active', 'member', 1)"""),
+                {"id": member_id},
+            )
+            connection.execute(
+                text("""INSERT INTO member_notification_preferences
+                (member_id, important, important_since, revision)
+                VALUES (:id, false, NULL, 4)"""),
+                {"id": member_id},
+            )
+            before = connection.scalar(
+                text("""SELECT to_jsonb(p)
+                FROM member_notification_preferences p WHERE member_id=:id"""),
+                {"id": member_id},
+            )
+            migration.upgrade()
+            after = connection.scalar(
+                text("""SELECT to_jsonb(p) - 'digest' - 'digest_since'
+                FROM member_notification_preferences p WHERE member_id=:id"""),
+                {"id": member_id},
+            )
+            assert after == {**before, "revision": 5}
+            assert connection.execute(
+                text("""SELECT digest, digest_since IS NOT NULL
+                FROM member_notification_preferences WHERE member_id=:id"""),
+                {"id": member_id},
+            ).one() == (True, True)
+            migration.downgrade()
+            migration.upgrade()
+
+    try:
+        async with db.engine.begin() as connection:
+            await connection.run_sync(verify)
+    finally:
+        await db.dispose()
+
+
 async def test_onboarding_cutover_preserves_schema_0036_data(database_url: str) -> None:
     crypto = _migration("crypto_cutover_migration", "0037_crypto_subscription.py")
     onboarding = _migration("onboarding_cutover_migration", "0038_bot_onboarding.py")
