@@ -10378,8 +10378,28 @@ async function loadWallet(route = "", push = true) {
   }
 }
 
+let telegramResumePending = false;
+const markTelegramDeactivated = () => {
+  if (globalThis.Telegram?.WebApp?.initData) telegramResumePending = true;
+};
+const restoreTelegramStartScreen = () => {
+  if (!telegramResumePending || !currentMemberId) return;
+  telegramResumePending = false;
+  if (location.hash !== presentationLocationFor("P08")) loadParticipants();
+};
+const telegramWebApp = globalThis.Telegram?.WebApp;
+if (typeof telegramWebApp?.onEvent === "function") {
+  telegramWebApp.onEvent("deactivated", markTelegramDeactivated);
+  telegramWebApp.onEvent("activated", restoreTelegramStartScreen);
+}
+
 catalogNav.addEventListener("click", () => void loadTaskHome());
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    markTelegramDeactivated();
+    return;
+  }
+  if (document.visibilityState === "visible") restoreTelegramStartScreen();
   if (document.visibilityState === "visible" && location.hash === "#/settings/notifications"
       && !content.querySelector("input:disabled")) {
     void loadCommunityPreferences("notifications", false);

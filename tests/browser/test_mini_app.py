@@ -4710,6 +4710,58 @@ def test_notification_start_parameter_opens_the_target_task(mini_app_url: str) -
         browser.close()
 
 
+@pytest.mark.browser_smoke
+def test_resumed_telegram_webview_returns_to_community_pulse(mini_app_url: str) -> None:
+    init_data = "query_id=AAE&user=%7B%22id%22%3A1%7D&hash=proof"
+    pulse = {
+        "member_id": "00000000-0000-0000-0000-000000000001",
+        "tracking_started_at": "2026-08-01T00:00:00Z",
+        "calculated_at": "2026-08-29T12:00:00Z",
+        "summary": {"messages": 0, "reactions_given": 0, "reactions_received": 0},
+        "series": [],
+        "reaction_breakdown": [],
+        "achievements": [],
+    }
+    bridge = f"""
+      globalThis.__telegramHandlers = {{}};
+      globalThis.Telegram = {{WebApp: {{
+        initData: "{init_data}",
+        onEvent: (name, handler) => {{ globalThis.__telegramHandlers[name] = handler; }},
+      }}}};
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser, bridge=bridge)
+        page.route(
+            "**/api/v1/me",
+            lambda route: route.fulfill(
+                json={
+                    "member_id": "00000000-0000-0000-0000-000000000001",
+                    "display_name": "Алекс",
+                    "timezone": "UTC",
+                }
+            ),
+        )
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+        )
+        page.route("**/api/v1/community-stats/pulse?*", lambda route: route.fulfill(json=pulse))
+
+        page.goto(mini_app_url)
+        page.locator('[data-screen-id="P08"]').wait_for()
+        page.locator("#catalog-nav").click()
+        page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
+
+        page.evaluate("globalThis.__telegramHandlers.deactivated()")
+        page.evaluate("globalThis.__telegramHandlers.activated()")
+
+        page.locator('[data-screen-id="P08"]').wait_for()
+        assert page.get_by_role("button", name="Пульс").get_attribute("aria-pressed") == "true"
+        assert page.url.endswith("#/members?view_state=p08")
+        browser.close()
+
+
 def test_form_controls_keep_branded_theme_after_telegram_ready(mini_app_url: str) -> None:
     def contrast_ratio(foreground: str, background: str) -> float:
         def luminance(color: str) -> float:
