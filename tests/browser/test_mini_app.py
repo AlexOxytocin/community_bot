@@ -335,7 +335,7 @@ def test_wallet_guide_links_open_catalog_and_creation(mini_app_url: str) -> None
         )
         page.goto(f"{mini_app_url}#/wallet")
         expect(page.get_by_role("link", name="Выполняй", exact=True)).to_have_attribute(
-            "href", "#/catalog?view_state=t01"
+            "href", "#/catalog?view_state=t01&from=wallet"
         )
         expect(page.get_by_role("link", name="Создавай", exact=True)).to_have_attribute(
             "href", "#/compose/tasks?view_state=t04b"
@@ -343,7 +343,9 @@ def test_wallet_guide_links_open_catalog_and_creation(mini_app_url: str) -> None
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         page.get_by_role("link", name="Выполняй", exact=True).click()
         page.locator('[data-screen-id="T01"]').wait_for()
-        page.go_back()
+        page.get_by_role("button", name="Назад в кошелёк", exact=True).click()
+        expect(page).to_have_url(re.compile(r"#/wallet$"))
+        expect(page.get_by_role("heading", name="Как использовать кредиты")).to_be_visible()
         page.get_by_role("link", name="Создавай", exact=True).click()
         page.locator('[data-screen-id="T05"]').wait_for()
         expect(page.locator("#screen-title")).to_have_text("Новое задание")

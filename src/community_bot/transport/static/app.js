@@ -953,8 +953,13 @@ function showCatalog(revision = ++screenRevision) {
   filterTrigger.addEventListener("click", () => showCatalogFilterSheet(filterTrigger));
   const catalogBack = element("button", "‹", "secondary catalog-back-button");
   catalogBack.type = "button";
-  catalogBack.setAttribute("aria-label", "Назад к заданиям");
-  catalogBack.addEventListener("click", () => void loadTaskHome());
+  const returnToWallet = history.state?.returnTo === "wallet"
+    || new URLSearchParams(location.hash.split("?", 2)[1] || "").get("from") === "wallet";
+  catalogBack.setAttribute("aria-label", returnToWallet ? "Назад в кошелёк" : "Назад к заданиям");
+  catalogBack.addEventListener("click", () => {
+    if (returnToWallet) void loadWallet("", false);
+    else void loadTaskHome();
+  });
   const search = element("label", undefined, "catalog-search");
   const searchInput = element("input");
   searchInput.type = "search";
@@ -10042,12 +10047,14 @@ async function loadWallet(route = "", push = true) {
         ]) {
           const row = element("p", undefined, "wallet-credit-guide-row");
           const link = element("a", verb, "wallet-guide-link");
-          link.href = presentationLocationFor(destination);
+          link.href = destination === "T01"
+            ? `${presentationLocationFor(destination)}&from=wallet`
+            : presentationLocationFor(destination);
           link.addEventListener("click", event => {
             if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
             event.preventDefault();
             if (destination === "T01") {
-              history.pushState({ screen: "catalog" }, "", link.href);
+              history.pushState({ screen: "catalog", returnTo: "wallet" }, "", link.href);
               void loadCatalog(false);
             } else beginTaskCreationFlow();
           });
