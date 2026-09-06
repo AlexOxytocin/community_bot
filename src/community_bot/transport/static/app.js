@@ -4014,9 +4014,13 @@ function achievementDetailSheet(state, achievement, originButton) {
     originButton.focus({ preventScroll: true });
   };
   const isRecord = achievement.record === true;
+  const hasNextLevel = Number.isFinite(achievement.next_level_at)
+    && achievement.next_level_at > 0;
   const progress = achievement.next_level_at === null
     ? 100
-    : Math.min(100, Math.round(achievement.current / achievement.next_level_at * 100));
+    : hasNextLevel
+      ? Math.min(100, Math.round(achievement.current / achievement.next_level_at * 100))
+      : 0;
   const dialog = element("article", undefined, "achievement-detail-sheet");
   dialog.setAttribute("role", "dialog");
   dialog.setAttribute("aria-modal", "true");
@@ -4079,7 +4083,9 @@ function achievementDetailSheet(state, achievement, originButton) {
         "span",
         achievement.next_level_at === null
           ? "Максимальный уровень"
-          : `${achievement.current} из ${achievement.next_level_at}`,
+          : hasNextLevel
+            ? `${achievement.current} из ${achievement.next_level_at}`
+            : "Пока нет прогресса",
         "achievement-progress-copy",
       ),
     );
@@ -4676,7 +4682,7 @@ function memberActivityDetails(state, revision) {
   return activity;
 }
 
-function memberAchievementDetails(pulse) {
+function memberAchievementDetails(state, pulse) {
   const achievements = element(
     "section",
     undefined,
@@ -4697,9 +4703,10 @@ function memberAchievementDetails(pulse) {
       current: 0,
       unlocked: false,
     };
+    const achievement = { ...definition, ...progress };
     const isRecord = definition.record === true;
     const tile = element(
-      "article",
+      "button",
       undefined,
       `achievement-tile member-achievement-tile${
         isRecord
@@ -4709,6 +4716,9 @@ function memberAchievementDetails(pulse) {
             : " is-locked"
       }`,
     );
+    tile.type = "button";
+    tile.dataset.achievementCode = definition.code;
+    tile.setAttribute("aria-pressed", "false");
     tile.setAttribute(
       "aria-label",
       isRecord
@@ -4728,6 +4738,14 @@ function memberAchievementDetails(pulse) {
         "achievement-level",
       ),
     );
+    tile.addEventListener("click", () => {
+      state.selectedAchievement = achievement.code;
+      state.achievementOpen = true;
+      tile.classList.add("is-selected");
+      tile.setAttribute("aria-pressed", "true");
+      content.querySelector(".achievement-detail-backdrop")?.remove();
+      content.append(achievementDetailSheet(state, achievement, tile));
+    });
     grid.append(tile);
   }
   achievements.append(heading, grid);
@@ -4774,7 +4792,9 @@ function safeMemberDetails(member, state, revision) {
     card.append(links);
   }
   card.append(memberActivityDetails(state, revision));
-  if (state.achievementPulse) card.append(memberAchievementDetails(state.achievementPulse));
+  if (state.achievementPulse) {
+    card.append(memberAchievementDetails(state, state.achievementPulse));
+  }
   return card;
 }
 
@@ -5016,6 +5036,8 @@ async function showMemberProfile(memberId, push = true) {
     activityPeriod: "week",
     pulseRequest: 0,
     pulseError: false,
+    selectedAchievement: null,
+    achievementOpen: false,
     error: false,
     karma: null,
     message: "",

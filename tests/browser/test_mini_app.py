@@ -5775,6 +5775,28 @@ def test_new_achievement_filters_use_supported_backend_metrics(
         browser.close()
 
 
+def _assert_member_achievement_details(page: Page) -> None:
+    speaker = page.get_by_role("button", name="Спикер, уровень 2", exact=True)
+    speaker.click()
+    detail = page.locator(".achievement-detail-sheet")
+    detail.wait_for()
+    assert detail.get_by_text("Уровень 2", exact=True).count() == 1
+    assert detail.get_by_text("Как получить", exact=True).count() == 1
+    detail.get_by_role("button", name="Закрыть достижение").click()
+    expect(speaker).to_be_focused()
+
+    locked = page.get_by_role("button", name="Магнит, не открыто", exact=True)
+    locked.click()
+    detail = page.locator(".achievement-detail-sheet")
+    detail.get_by_text("Пока нет прогресса", exact=True).wait_for()
+    progress = detail.locator(".achievement-progress-fill").evaluate(
+        "node => node.style.getPropertyValue('--achievement-progress')"
+    )
+    assert progress == "0%"
+    detail.get_by_role("button", name="Закрыть достижение").click()
+    expect(locked).to_be_focused()
+
+
 @pytest.mark.browser_smoke
 def test_member_profile_has_period_activity_and_all_time_achievement_tiles(
     mini_app_url: str,
@@ -5846,6 +5868,8 @@ def test_member_profile_has_period_activity_and_all_time_achievement_tiles(
         assert page.locator(".member-achievement-tile").count() == 18
         assert page.locator('.member-achievement-tile[aria-label="Спикер, уровень 2"]').count() == 1
         assert page.get_by_text("10", exact=True).count() >= 1
+
+        _assert_member_achievement_details(page)
 
         page.get_by_role("button", name="Месяц", exact=True).click()
         page.get_by_text("20", exact=True).wait_for()
