@@ -174,6 +174,7 @@ async def materialize_activity(
     window: DeliveryWindow,
 ) -> None:
     """Fan out once per member, including overlapping tags and album revisions."""
+    del window  # Tagged publications are immediate; quiet hours apply to personal reminders.
     post = await session.get(ActivityPublicationModel, event.aggregate_id, with_for_update=True)
     if post is None or not post.categories_json:
         return
@@ -207,9 +208,7 @@ async def materialize_activity(
             "message_url": post.message_url,
             "revision": post.revision,
         }
-        scheduled = window.schedule(
-            candidate=now + datetime.timedelta(seconds=3), timezone_name=member.timezone
-        )
+        scheduled = now + datetime.timedelta(seconds=3)
         statement = insert(NotificationModel).values(
             id=uuid.uuid4(),
             member_id=member.id,

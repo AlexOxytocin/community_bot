@@ -313,16 +313,25 @@ class PostgresNotificationQueue:
     ) -> Sequence[DeliveryClaim]:
         """Claim due addressable notifications and return minimal delivery DTOs."""
         now = _utc(now)
+        legacy_deferred_activity = and_(
+            NotificationModel.notification_type == "activity.published",
+            NotificationModel.status == "pending",
+            NotificationModel.attempt_count == 0,
+            NotificationModel.scheduled_at > now + datetime.timedelta(seconds=30),
+        )
         async with self._sessions() as session, session.begin():
             rows = (
                 await session.scalars(
                     select(NotificationModel)
                     .where(
-                        NotificationModel.scheduled_at <= now,
+                        or_(NotificationModel.scheduled_at <= now, legacy_deferred_activity),
                         or_(
                             and_(
                                 NotificationModel.status == "pending",
-                                NotificationModel.next_attempt_at <= now,
+                                or_(
+                                    NotificationModel.next_attempt_at <= now,
+                                    legacy_deferred_activity,
+                                ),
                             ),
                             and_(
                                 NotificationModel.status == "processing",

@@ -379,7 +379,8 @@ async def test_activity_outbox_dedup_and_unsubscribe_before_send(
     enabled = await store.set_preference(reader.id, category, enabled=True, expected_revision=0)
     enabled_revision = enabled["revision"]
     assert isinstance(enabled_revision, int)
-    now = datetime.datetime.now(datetime.UTC)
+    # Outside the normal 09:00-21:00 delivery window: tagged publications are immediate.
+    now = datetime.datetime(2026, 9, 8, 3, 57, tzinfo=datetime.UTC)
     publications = ActivityPublicationStore(db.session_factory)
     post: dict[str, Any] = dict(  # noqa: C408 - named Telegram event fields.
         author_id=owner.telegram_user_id,
@@ -411,8 +412,16 @@ async def test_activity_outbox_dedup_and_unsubscribe_before_send(
         assert len(rows) == 1
         assert rows[0].member_id == reader.id
         assert rows[0].payload_json["message_url"] == "https://t.me/c/2237685639/24962/24968"
+        assert rows[0].scheduled_at == now + datetime.timedelta(seconds=4)
+    # Rows made under the old quiet-hours logic are still pending and must be released once.
+    async with db.session_factory.begin() as session:
+        queued = (await session.scalars(select(NotificationModel))).one()
+        queued.scheduled_at = now + datetime.timedelta(days=1)
+        queued.next_attempt_at = now + datetime.timedelta(days=1)
     deliveries = await queue.claim_notifications(
-        now=now + datetime.timedelta(days=1), limit=10, lease_duration=datetime.timedelta(minutes=2)
+        now=now + datetime.timedelta(seconds=5),
+        limit=10,
+        lease_duration=datetime.timedelta(minutes=2),
     )
     assert len(deliveries) == 1
     assert await store.allows_delivery(deliveries[0].id)
