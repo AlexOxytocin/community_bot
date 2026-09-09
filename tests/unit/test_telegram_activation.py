@@ -23,6 +23,26 @@ def test_environment_changes_only_scoped_values() -> None:
     compile(activation.RUNTIME, "runtime-probe", "exec")
 
 
+def test_environment_replaces_only_the_community_join_url() -> None:
+    before = "BOT_TOKEN=private\nCOMMUNITY_TELEGRAM_JOIN_URL=https://t.me/+old\nUNRELATED=x\n"
+    after = activation.environment_content(
+        before,
+        "existing-secret",
+        join_url="https://t.me/+EBb67ZPMeB9jYWEy",
+    ).decode()
+
+    assert "BOT_TOKEN=private\n" in after
+    assert "UNRELATED=x\n" in after
+    assert "https://t.me/+old" not in after
+    assert after.count("COMMUNITY_TELEGRAM_JOIN_URL=") == 1
+    assert "COMMUNITY_TELEGRAM_JOIN_URL=https://t.me/+EBb67ZPMeB9jYWEy" in after
+
+
+def test_environment_rejects_a_non_invite_join_url() -> None:
+    with pytest.raises(activation.CutoverError, match="Telegram invite link"):
+        activation.environment_content("", "secret", join_url="https://example.test/chat")
+
+
 @pytest.mark.parametrize("failure", [None, "recreate", "verify", "edge", "apply"])
 def test_activation_recovers_configuration_and_menu(
     monkeypatch: pytest.MonkeyPatch,

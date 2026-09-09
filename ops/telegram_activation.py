@@ -11,6 +11,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from ops.wallet_cutover import ROOT, SERVICES, CutoverError, digest, inspect, ru
 WEB = "community-mini-app-core-web-1"
 WORKER = "community-mini-app-core-worker-1"
 ENV_FILE = ROOT / "shared" / ".env"
+EXPECTED_HEAD = "0039"
 CHAT, TOPIC, ENTRY_TOPIC = -1002237685639, 24962, 21568
 NGINX_FILE = Path("/opt/app/nginx/conf.d/default.conf")
 WEBHOOK_LOCATION = """    location = /api/telegram/webhook {
@@ -154,7 +156,7 @@ def runtime(action: str, data: dict | None = None) -> dict:
     return json.loads(result.stdout)
 
 
-def environment_content(original: str, secret: str) -> bytes:
+def environment_content(original: str, secret: str, *, join_url: str | None = None) -> bytes:
     """Change only the explicitly scoped Telegram settings; preserve other content."""
     changes = {
         "TELEGRAM_WEBHOOK_SECRET": secret,
@@ -162,6 +164,10 @@ def environment_content(original: str, secret: str) -> bytes:
         "NOMAD_TELEGRAM_TOPIC_ID": str(TOPIC),
         "COMMUNITY_ENTRY_TOPIC_ID": str(ENTRY_TOPIC),
     }
+    if join_url is not None:
+        if re.fullmatch(r"https://t\.me/\+[A-Za-z0-9_-]+", join_url) is None:
+            raise CutoverError("Community join URL must be a Telegram invite link")
+        changes["COMMUNITY_TELEGRAM_JOIN_URL"] = join_url
     lines = [
         line for line in original.splitlines() if line.partition("=")[0].strip() not in changes
     ]
@@ -254,8 +260,8 @@ def validate(state: dict) -> None:
         "-Atc",
         "SELECT version_num FROM alembic_version",
     )
-    if head != "0033":
-        raise CutoverError("Expected schema 0033")
+    if head != EXPECTED_HEAD:
+        raise CutoverError(f"Expected schema {EXPECTED_HEAD}")
 
 
 def verify(state: dict) -> None:
@@ -335,7 +341,7 @@ def restore(state: dict, receipt: Path) -> None:
     save(receipt, state)
 
 
-def prepare() -> Path:
+def prepare(*, join_url: str | None = None) -> Path:
     """Measure a ready deployment and save private reversible activation inputs."""
     web = inspect(WEB)
     labels = web["Config"]["Labels"]
@@ -354,7 +360,7 @@ def prepare() -> Path:
         "config_sha256": digest(config),
         "env_sha256": digest(ENV_FILE),
         "phase": "prepared",
-        "head": "0033",
+        "head": EXPECTED_HEAD,
     }
     validate(state)
     verify(state)
@@ -375,7 +381,9 @@ def prepare() -> Path:
     original = ENV_FILE.read_bytes()
     values = read_dotenv(ENV_FILE)
     new = environment_content(
-        original.decode(), values.get("TELEGRAM_WEBHOOK_SECRET") or secrets.token_urlsafe(48)
+        original.decode(),
+        values.get("TELEGRAM_WEBHOOK_SECRET") or secrets.token_urlsafe(48),
+        join_url=join_url,
     )
     for name, content in (
         ("old.env", original),
@@ -399,6 +407,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("prepare", "apply", "recover", "status", "probe"))
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--join-url")
     args = parser.parse_args()
     if os.name != "posix" or os.geteuid() != 0:
         raise CutoverError("Requires Linux root")
@@ -408,8 +417,10 @@ def main() -> None:
         if args.mode == "probe":
             print(json.dumps(runtime("probe")))
         elif args.mode == "prepare":
-            print(json.dumps({"prepared_receipt": str(prepare())}))
+            print(json.dumps({"prepared_receipt": str(prepare(join_url=args.join_url))}))
         else:
+            if args.join_url is not None:
+                raise CutoverError("Join URL is accepted only during prepare")
             if args.receipt is None:
                 raise CutoverError("Receipt required")
             validate_environment_file(args.receipt)
