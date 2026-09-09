@@ -10019,13 +10019,11 @@ async function bootstrapTaskHome(authAttempted = false) {
         archiveRole === "performed" ? "performed" : "created",
       );
     } else if (["T03", "T03A"].includes(presentationId) && resourceId) {
-      if (presentationId === "T03A") {
-        history.replaceState(
-          { screen: "task", taskId: resourceId },
-          "",
-          presentationLocationFor("T03", resourceId),
-        );
-      }
+      history.replaceState(
+        { screen: "task", taskId: resourceId, returnTo: "task-home" },
+        "",
+        presentationLocationFor("T03", resourceId),
+      );
       const page = await getJson("/api/v1/tasks");
       tasks = page.items;
       const task = tasks.find((item) => item.id === resourceId);
@@ -10477,6 +10475,8 @@ back.addEventListener("click", () => {
   } else if (history.state?.screen === "participants" && history.state.view === "leaderboard") {
     returnFocusLeaderboardTab = true;
     loadParticipants("members");
+  } else if (history.state?.screen === "task" && history.state.returnTo === "task-home") {
+    void loadTaskHome();
   } else {
     history.back();
   }

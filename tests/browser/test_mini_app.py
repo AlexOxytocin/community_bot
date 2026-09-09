@@ -4701,12 +4701,19 @@ def test_notification_start_parameter_opens_the_target_task(mini_app_url: str) -
             "**/api/v1/tasks",
             lambda route: route.fulfill(json={"items": [task], "next_cursor": None}),
         )
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+        )
 
         page.goto(mini_app_url + "#/tasks?view_state=ux02")
 
         page.locator('[data-screen-id="T03"]').wait_for()
         assert page.get_by_role("heading", name="Проверить уведомление").count() == 1
         assert page.url.endswith(f"#/tasks/{task_id}?view_state=t03")
+        page.get_by_role("button", name="Назад к заданиям", exact=True).click()
+        page.locator('[data-screen-id="UX02"]').wait_for()
+        assert page.url.endswith("#/tasks?view_state=ux02")
         browser.close()
 
 
