@@ -105,10 +105,12 @@ from community_bot.application.reputation import (
     ReputationError as ReputationApplicationError,
 )
 from community_bot.application.tasks import (
+    EditPublishedTaskCommand,
     OwnedTaskCard,
     PublishedTask,
     PublishTaskCommand,
     SaveWebTaskDraftCommand,
+    TaskCategoryOption,
     TaskDraft,
     TaskPreview,
     TaskService,
@@ -200,6 +202,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "insufficient_balance",
         "idempotency_conflict",
         "task_catalog_unavailable",
+        "task_edit_unavailable",
         "unauthorized",
     }
 )
@@ -626,6 +629,7 @@ class OwnedTaskDto(_Dto):
     assignees: tuple[OwnedTaskAssigneeDto, ...]
     cancellation_status: str | None
     cancellation_action: Literal["cancel", "request"] | None
+    can_edit: bool = False
 
 
 class OwnedTaskCancellationDto(_Dto):
@@ -852,6 +856,11 @@ class TaskCreationRequest(_Dto):
     draft_id: UUID | None = None
     expected_revision: int | None = Field(default=None, ge=0, strict=True)
     form: TaskFormRequest | None = None
+
+
+class TaskEditRequest(_Dto):
+    expected_updated_at: datetime.datetime
+    form: TaskFormRequest
 
 
 class LeaderboardItemDto(_Dto):
@@ -2566,6 +2575,78 @@ def create_web_app(  # noqa: PLR0913 - injectable external Telegram boundaries f
             return _error_response(409, "task_catalog_unavailable")
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
+    @app.get("/api/v1/owned-tasks/{task_id}/edit")
+    async def task_edit_state(
+        task_id: UUID,
+        actor: ActorContext = Depends(current_actor),
+    ) -> JSONResponse:
+        try:
+            categories, task = await tasks.web_edit_state(actor=actor, task_id=task_id)
+            profile = await registration.own_profile(actor)
+        except LookupError:
+            return _error_response(404, "not_found")
+        except PermissionError:
+            return _error_response(403, "task_edit_unavailable")
+        except TaskError:
+            return _error_response(409, "task_edit_unavailable")
+        return _json_response(
+            _task_edit_state_json(
+                task,
+                categories=categories,
+                credit_balance=profile.credit_balance + task.reserved_credit_total,
+            )
+        )
+
+    @app.put("/api/v1/owned-tasks/{task_id}/edit")
+    async def edit_owned_task(task_id: UUID, request: Request) -> JSONResponse:
+        _require_origin(request, origin)
+        if request.headers.get("content-type", "").lower() != "application/json":
+            return _error_response(422, "invalid_request")
+        actor = await current_actor(request)
+        operation_key = _idempotency_key(request)
+        try:
+            raw = await _bounded_body(request, limit=_SUBMISSION_BODY_MAX_BYTES)
+            payload = TaskEditRequest.model_validate_json(raw)
+        except (OverflowError, ValueError, ValidationError):
+            return _error_response(422, "invalid_request")
+        form_payload = payload.form.model_dump(mode="json")
+        fingerprint = _submission_fingerprint(
+            "edit",
+            payload={
+                "expected_updated_at": payload.expected_updated_at.isoformat(),
+                "form": form_payload,
+            },
+        )
+        update_id = _submission_update_id(
+            actor.member_id,
+            task_id,
+            "edit",
+            operation_key,
+            namespace=b"task-edit-v1",
+        )
+        try:
+            task = await tasks.edit_published(
+                EditPublishedTaskCommand(
+                    update_id=update_id,
+                    actor_member_id=actor.member_id,
+                    task_id=task_id,
+                    expected_updated_at=payload.expected_updated_at,
+                    replay_fingerprint=fingerprint,
+                    **payload.form.model_dump(),
+                )
+            )
+        except TaskCityError:
+            return _error_response(422, "invalid_task_city")
+        except InsufficientBalanceError:
+            return _error_response(409, "insufficient_balance")
+        except LookupError:
+            return _error_response(404, "not_found")
+        except PermissionError:
+            return _error_response(403, "task_edit_unavailable")
+        except TaskError:
+            return _error_response(409, "task_edit_unavailable")
+        return _json_response({"task": _task_edit_json(task)})
+
     @app.get("/api/v1/owned-tasks", response_model=OwnedTasksDto)
     async def owned_tasks(
         actor: ActorContext = Depends(current_actor),
@@ -3456,6 +3537,66 @@ def _task_draft_json(draft: TaskDraft) -> dict[str, object]:
     }
 
 
+def _task_edit_json(task: PublishedTask) -> dict[str, object]:
+    return {
+        "id": str(task.id),
+        "updated_at": task.updated_at,
+        "values": {
+            "category_id": str(task.category_id),
+            "task_kind": None if task.task_kind is None else task.task_kind.value,
+            "time_size": None if task.time_size is None else task.time_size.value,
+            "title": task.title,
+            "description": task.description,
+            "completion_criteria": task.completion_criteria,
+            "credit_reward_per_performer": task.credit_reward_per_performer,
+            "deadline_at": task.deadline_at,
+            "format": task.format.value,
+            "city": task.city,
+            "materials": task.materials,
+            "performer_slots": task.performer_slots,
+        },
+    }
+
+
+def _task_edit_state_json(
+    task: PublishedTask,
+    *,
+    categories: tuple[TaskCategoryOption, ...],
+    credit_balance: int,
+) -> dict[str, object]:
+    return {
+        "categories": [
+            {
+                "id": str(item.id),
+                "code": item.code,
+                "name": item.name,
+                "description": item.description,
+                "icon": item.icon,
+            }
+            for item in categories
+        ],
+        "credit_balance": credit_balance,
+        "community_reward_max": 10,
+        "time_sizes": [
+            {
+                "value": size.value,
+                "label": spec.label,
+                "reward_options": spec.reward_options,
+                "minimum_reward": spec.minimum_reward,
+            }
+            for size, spec in TASK_TIME_SIZE_SPECS.items()
+        ],
+        "draft": {
+            "id": str(task.id),
+            "revision": task.updated_at.isoformat(),
+            "origin": task.origin,
+            "values": _task_edit_json(task)["values"],
+        },
+        "preview": None,
+        "needs_edit": False,
+    }
+
+
 def _task_preview_json(preview: TaskPreview) -> dict[str, object]:
     return {
         "title": preview.draft.title,
@@ -3886,6 +4027,15 @@ def _owned_task_dto(
         ),
         cancellation_status=card.cancellation_status,
         cancellation_action=None if archive_role == "performed" else card.cancellation_action,
+        can_edit=(
+            archive_role == "created"
+            and card.task.origin == "member"
+            and card.task.creator_id == actor_id
+            and card.task.template_id is None
+            and card.task.status.value == "published"
+            and card.task.deadline_at > datetime.datetime.now(datetime.UTC)
+            and not card.assignees
+        ),
     )
 
 

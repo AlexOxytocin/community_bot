@@ -126,6 +126,7 @@ class PublishedTask:
     author_display_name: str
     template_id: UUID | None
     template_version: int | None
+    category_id: UUID
     category_name: str | None
     category_icon: str | None
     task_kind: TaskKind | None
@@ -288,6 +289,29 @@ class SaveWebTaskDraftCommand:
     replay_fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class EditPublishedTaskCommand:
+    """Atomically replace one still-unclaimed member task."""
+
+    update_id: int
+    actor_member_id: UUID
+    task_id: UUID
+    expected_updated_at: datetime.datetime
+    category_id: UUID
+    task_kind: TaskKind
+    time_size: TaskTimeSize
+    title: str
+    description: str
+    completion_criteria: str
+    credit_reward_per_performer: int
+    deadline_at: datetime.datetime
+    format: TaskFormat
+    city: str | None
+    materials: Mapping[str, object]
+    performer_slots: int
+    replay_fingerprint: str
+
+
 class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract.
     """Caller-owned transaction contract for task workflows."""
 
@@ -357,6 +381,14 @@ class TaskUnitOfWork(Protocol):  # pragma: no cover - structural typing contract
         self, task_id: UUID, *, for_update: bool = False
     ) -> tuple[Assignment, ...]: ...
     async def save_task_status(self, *, task_id: UUID, status: TaskStatus) -> PublishedTask: ...
+    async def save_published_task(
+        self,
+        *,
+        task_id: UUID,
+        draft: TaskDraft,
+        category: TaskCategoryOption,
+        reserved_credit_total: int,
+    ) -> PublishedTask: ...
     async def close_task_for_new_performers(
         self, *, task_id: UUID, now: datetime.datetime
     ) -> PublishedTask: ...
@@ -679,6 +711,150 @@ class TaskService:
                 command.update_id,
                 actor,
                 f"web_task_draft:{saved.id}:{command.replay_fingerprint}",
+            )
+            return saved
+
+    async def web_edit_state(
+        self,
+        *,
+        actor: ActorContext,
+        task_id: UUID,
+    ) -> tuple[tuple[TaskCategoryOption, ...], PublishedTask]:
+        """Return one editable published task and the current form choices."""
+        async with self._unit_of_work_factory() as uow:
+            member = await _active_context_actor(uow, actor)
+            task = await uow.get_task(task_id)
+            if task is None:
+                raise LookupError("Task does not exist.")
+            await uow.ensure_task_test_access(task_id=task.id, member_id=member.id)
+            assignments = await uow.list_task_assignments(task.id)
+            _require_editable_member_task(task, member, assignments)
+            categories = _categories_for_actor(
+                await uow.list_task_categories(actor_role=member.role), member
+            )
+            if not any(category.id == task.category_id for category in categories):
+                raise TaskError("Task category is no longer editable.")
+            return categories, task
+
+    async def edit_published(self, command: EditPublishedTaskCommand) -> PublishedTask:
+        """Validate and atomically edit an unclaimed published member task."""
+        async with self._unit_of_work_factory() as uow:
+            actor = await _active_context_actor(uow, command.actor_member_id)
+            await uow.acquire_task_identity_gate(actor.telegram_user_id)
+            replay = await _begin_update(uow, command.update_id)
+            if replay is not None:
+                return await _web_task_edit_replay(
+                    uow,
+                    replay,
+                    actor.id,
+                    command.task_id,
+                    command.replay_fingerprint,
+                )
+            await uow.ensure_moderation_action_allowed(actor.id, RestrictedAction.CREATE_TASK)
+            preliminary = await uow.get_task(command.task_id)
+            if preliminary is None:
+                raise LookupError("Task does not exist.")
+            await uow.ensure_task_test_access(task_id=preliminary.id, member_id=actor.id)
+            await uow.acquire_assignment_task_gate(command.task_id)
+            await uow.acquire_task_command_gate(command.task_id)
+            await uow.acquire_catalog_mutation_gate()
+            task = await uow.lock_task(command.task_id)
+            if task is None:
+                raise LookupError("Task does not exist.")
+            assignments = await uow.list_task_assignments(task.id, for_update=True)
+            _require_editable_member_task(task, actor, assignments)
+            if _utc(command.expected_updated_at) != _utc(task.updated_at):
+                raise StaleTaskDraftError("Published task changed while it was being edited.")
+            category = await uow.task_category_for_creation(
+                category_id=command.category_id,
+                actor_role=actor.role,
+            )
+            category = _category_for_actor(category, actor)
+            if category is None or category.code == _COMMUNITY_CATEGORY_CODE:
+                raise PermissionError("Task category is unavailable.")
+            requested_city = (
+                canonical_task_city(command.city) if command.format is TaskFormat.OFFLINE else None
+            )
+            task_format, city = validate_task_format(
+                command.format,
+                template_format=TaskFormat.ANY,
+                city=requested_city,
+            )
+            candidate = TaskDraft(
+                id=task.id,
+                creator_id=actor.id,
+                origin="member",
+                reviewer_admin_id=None,
+                community_approval_requested_at=None,
+                community_approved_by_admin_id=None,
+                community_approved_at=None,
+                template_id=None,
+                category_id=category.id,
+                task_kind=command.task_kind,
+                time_size=command.time_size,
+                title=validate_freeform_text(command.title, field="title"),
+                description=validate_freeform_text(command.description, field="description"),
+                completion_criteria=validate_freeform_text(
+                    command.completion_criteria,
+                    field="completion_criteria",
+                ),
+                credit_reward_per_performer=command.credit_reward_per_performer,
+                estimated_minutes=TASK_TIME_SIZE_SPECS[command.time_size].estimated_minutes,
+                input_payload={"description": command.description},
+                deadline_at=validate_deadline(command.deadline_at, now=_utc_now()),
+                format=task_format,
+                city=city,
+                materials=validate_freeform_materials(command.materials),
+                performer_slots=command.performer_slots,
+                current_step=TaskDraftStep.PREVIEW,
+                revision=0,
+                is_current=False,
+                publish_command_id=task.publish_command_id,
+                test_run_id=task.test_run_id,
+            )
+            _validate_freeform_publishable(candidate, category)
+            reserved_credit_total = (
+                command.credit_reward_per_performer * command.performer_slots
+            )
+            reserve_delta = reserved_credit_total - task.reserved_credit_total
+            prepared = None
+            if reserve_delta:
+                mutation = (
+                    reserve_reward(
+                        member_id=actor.id,
+                        amount=reserve_delta,
+                        idempotency_key=f"task_edit:{task.id}:{command.update_id}:reserve",
+                    )
+                    if reserve_delta > 0
+                    else refund_reward(
+                        member_id=actor.id,
+                        amount=-reserve_delta,
+                        idempotency_key=f"task_edit:{task.id}:{command.update_id}:refund",
+                        task_id=task.id,
+                    )
+                )
+                prepared = await uow.economy.prepare_batch((mutation,))
+                actor = prepared.members[actor.id]
+                _require_active(actor)
+                await prepared.apply()
+            saved = await uow.save_published_task(
+                task_id=task.id,
+                draft=candidate,
+                category=category,
+                reserved_credit_total=reserved_credit_total,
+            )
+            await uow.append_audit_event(
+                actor_member_id=actor.id,
+                action="task_edited",
+                entity_type="task",
+                entity_id=str(saved.id),
+                reason=None,
+            )
+            await _finish_receipt(
+                uow,
+                command.update_id,
+                actor,
+                f"web_task_edit:{saved.id}:{command.replay_fingerprint}",
             )
             return saved
 
@@ -2432,6 +2608,23 @@ async def _web_publication_replay(
     return task
 
 
+async def _web_task_edit_replay(
+    uow: TaskUnitOfWork,
+    outcome: str,
+    actor_id: UUID,
+    task_id: UUID,
+    fingerprint: str,
+) -> PublishedTask:
+    marker, raw_task, stored = outcome.split(":", 2)
+    if marker != "web_task_edit" or raw_task != str(task_id) or stored != fingerprint:
+        raise TaskError("Stored task edit outcome does not match command.")
+    task = await uow.get_task(task_id)
+    if task is None or task.creator_id != actor_id:
+        raise PermissionError("Task editing is unavailable.")
+    await uow.ensure_task_test_access(task_id=task.id, member_id=actor_id)
+    return task
+
+
 def _web_task_outcome(task_id: UUID, draft_id: UUID, fingerprint: str | None) -> str:
     return (
         f"task:{task_id}" if fingerprint is None else f"web_task:{task_id}:{draft_id}:{fingerprint}"
@@ -2458,6 +2651,25 @@ async def _task_from_outcome(uow: TaskUnitOfWork, outcome: str) -> PublishedTask
 
 def _utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def _utc(value: datetime.datetime) -> datetime.datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise TaskError("Task edit revision must include a timezone.")
+    return value.astimezone(datetime.UTC)
+
+
+def _require_editable_member_task(
+    task: PublishedTask,
+    actor: Member,
+    assignments: Sequence[Assignment],
+) -> None:
+    if task.creator_id != actor.id or task.origin != "member" or task.template_id is not None:
+        raise PermissionError("Only the member task creator can edit this task.")
+    if task.status is not TaskStatus.PUBLISHED or _utc_now() >= task.deadline_at:
+        raise TaskError("Task cannot be edited from its current state.")
+    if any(assignment.status is not AssignmentStatus.CANCELLED for assignment in assignments):
+        raise TaskError("Task already has a performer.")
 
 
 def _latest_slot_assignments(assignments: Sequence[Assignment]) -> tuple[Assignment, ...]:

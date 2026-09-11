@@ -976,6 +976,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .owned-task-dispute-chip { border-color: color-mix(in srgb, var(--app-accent) 68%, var(--app-border)); color: var(--app-accent); }
 .owned-task-dispute-note { margin: 0; padding: 10px 11px; border-left: 3px solid var(--app-accent); border-radius: 0 10px 10px 0; background: color-mix(in srgb, var(--app-accent) 8%, var(--app-surface)); color: var(--app-text-muted); font-size: 11px; line-height: 1.35; }
 .owned-task-empty { margin: 0; padding: 10px 2px; font-size: 12px; }
+.owned-task-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; }
+.owned-task-actions > button { min-height: 44px; margin: 0; }
 
 :root[data-ui-theme-scope="next"][data-theme-preset="neon"] body {
   background:

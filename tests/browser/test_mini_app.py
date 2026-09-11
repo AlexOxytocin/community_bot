@@ -3414,6 +3414,141 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         browser.close()
 
 
+@pytest.mark.browser_smoke
+@pytest.mark.parametrize("width", [320, 390])
+def test_unclaimed_owned_task_reuses_creation_form_for_editing(
+    mini_app_url: str,
+    width: int,
+) -> None:
+    task_id = "00000000-0000-0000-0000-000000000351"
+    category_id = "00000000-0000-0000-0000-000000000352"
+    owned = {
+        "id": task_id,
+        "title": "Проверить исходный сценарий",
+        "status": "published",
+        "created_at": "2026-09-10T10:00:00Z",
+        "category_name": "Практическая помощь",
+        "task_kind": "solo",
+        "time_size": "s",
+        "format": "online",
+        "city": None,
+        "credit_reward_per_performer": 3,
+        "minimum_level": 1,
+        "performer_slots": 1,
+        "deadline_at": "2099-09-20T20:00:00Z",
+        "archived_at": None,
+        "archive_role": "created",
+        "performed_status": None,
+        "assignees": [],
+        "cancellation_status": None,
+        "cancellation_action": "cancel",
+        "can_edit": True,
+    }
+    values = {
+        "category_id": category_id,
+        "task_kind": "solo",
+        "time_size": "s",
+        "title": owned["title"],
+        "description": "Нужно пройти исходный сценарий.",
+        "completion_criteria": "Есть проверяемый результат.",
+        "credit_reward_per_performer": 3,
+        "deadline_at": owned["deadline_at"],
+        "format": "online",
+        "city": None,
+        "materials": {"text": "Исходные материалы"},
+        "performer_slots": 1,
+    }
+    submitted: list[dict[str, Any]] = []
+
+    def edit_route(route: Route) -> None:
+        if route.request.method == "GET":
+            route.fulfill(
+                json={
+                    "categories": [
+                        {
+                            "id": category_id,
+                            "code": "practical_help",
+                            "name": "Практическая помощь",
+                            "description": "Помочь руками в конкретном действии.",
+                            "icon": "🤝",
+                        }
+                    ],
+                    "credit_balance": 20,
+                    "community_reward_max": 10,
+                    "time_sizes": [
+                        {
+                            "value": "s",
+                            "label": "15-40 минут",
+                            "reward_options": [2, 3, 4],
+                            "minimum_reward": 2,
+                        }
+                    ],
+                    "draft": {
+                        "id": task_id,
+                        "revision": "2026-09-10T10:00:00+00:00",
+                        "origin": "member",
+                        "values": values,
+                    },
+                    "preview": None,
+                    "needs_edit": False,
+                }
+            )
+            return
+        payload = route.request.post_data_json
+        assert isinstance(payload, dict)
+        submitted.append(payload)
+        updated_values = {**values, "title": "Проверить обновлённый сценарий"}
+        route.fulfill(
+            json={
+                "task": {
+                    "id": task_id,
+                    "updated_at": "2026-09-11T10:00:00Z",
+                    "values": updated_values,
+                }
+            }
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = _new_page(browser)
+        page.set_viewport_size({"width": width, "height": 812})
+        profile, _ = _cache_profile()
+        page.route("**/api/v1/me", lambda route: route.fulfill(json=profile))
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload(empty=True)),
+        )
+        page.route("**/api/v1/owned-tasks", lambda route: route.fulfill(json={"items": [owned]}))
+        page.route("**/api/v1/assignment-reviews", lambda route: route.fulfill(json={"items": []}))
+        page.route(f"**/api/v1/owned-tasks/{task_id}/edit", edit_route)
+
+        page.goto(mini_app_url + "#/tasks?view_state=ux02")
+        page.locator('[data-home-action="created"]').click()
+        page.get_by_role("button", name=re.compile("Проверить исходный сценарий")).click()
+        page.get_by_role("button", name="Редактировать", exact=True).click()
+        page.locator("[data-screen-id='T05']").wait_for()
+        assert page.get_by_label("Название *", exact=True).input_value() == owned["title"]
+        assert (
+            page.get_by_label("Что нужно сделать *", exact=True).input_value()
+            == values["description"]
+        )
+        assert page.get_by_role("button", name="Сохранить изменения", exact=True).is_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth") is True
+
+        _fill_creation_content(
+            page,
+            trigger="Редактировать название",
+            dialog="Название",
+            value="Проверить обновлённый сценарий",
+        )
+        page.get_by_role("button", name="Сохранить изменения", exact=True).click()
+        page.get_by_text("Изменения сохранены.", exact=True).wait_for()
+        assert submitted[0]["expected_updated_at"] == "2026-09-10T10:00:00+00:00"
+        assert submitted[0]["form"]["title"] == "Проверить обновлённый сценарий"
+        assert page.get_by_text("Проверить обновлённый сценарий", exact=True).is_visible()
+        browser.close()
+
+
 @pytest.mark.parametrize("viewport", [(375, 812), (430, 932)])
 def test_get_cache_navigation_ttl_dedup_and_invalidation(  # noqa: PLR0915
     mini_app_url: str,

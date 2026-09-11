@@ -428,6 +428,63 @@ async def save_task_status(
     return _task(model)
 
 
+async def save_published_task(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    draft: TaskDraft,
+    category: TaskCategoryOption,
+    reserved_credit_total: int,
+) -> PublishedTask:
+    """Replace creator-editable fields on one locked member task."""
+    model = await session.get(TaskModel, task_id)
+    if model is None:
+        raise LookupError("Task does not exist.")
+    if (
+        draft.category_id is None
+        or draft.task_kind is None
+        or draft.time_size is None
+        or draft.title is None
+        or draft.description is None
+        or draft.completion_criteria is None
+        or draft.credit_reward_per_performer is None
+        or draft.estimated_minutes is None
+        or draft.deadline_at is None
+        or draft.format is None
+        or draft.materials is None
+        or draft.performer_slots is None
+    ):
+        raise TaskError("Task edit is incomplete.")
+    model.category_id = draft.category_id
+    model.time_size = draft.time_size.value
+    model.title = draft.title
+    model.description = draft.description
+    model.completion_criteria = draft.completion_criteria
+    model.materials_json = dict(draft.materials)
+    model.input_payload_json = {"description": draft.description}
+    model.credit_reward_per_performer = draft.credit_reward_per_performer
+    model.performer_slots = draft.performer_slots
+    model.reserved_credit_total = reserved_credit_total
+    model.estimated_minutes = draft.estimated_minutes
+    model.format = draft.format.value
+    model.city = draft.city
+    model.deadline_at = draft.deadline_at
+    model.safety_snapshot_json = {
+        **model.safety_snapshot_json,
+        "task_kind": draft.task_kind.value,
+        "time_size": draft.time_size.value,
+        "category_code": category.code,
+        "category_name": category.name,
+        "category_icon": category.icon,
+        "performer_instructions": "Следуйте описанию задания и критериям результата.",
+        "public_input_keys": ["description"],
+        "moderation_required": False,
+    }
+    model.updated_at = datetime.datetime.now(datetime.UTC)
+    await session.flush()
+    return _task(model)
+
+
 async def close_task_for_new_performers(
     session: AsyncSession,
     *,
@@ -654,6 +711,7 @@ def _task(model: TaskModel) -> PublishedTask:
         author_display_name=model.author_display_name,
         template_id=model.template_id,
         template_version=model.template_version,
+        category_id=model.category_id,
         category_name=(
             str(model.safety_snapshot_json["category_name"])
             if "category_name" in model.safety_snapshot_json

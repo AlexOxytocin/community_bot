@@ -30,6 +30,7 @@ from community_bot.application.economy import (
 from community_bot.application.identity import ActorContext
 from community_bot.application.tasks import (
     AdvanceDraftCommand,
+    EditPublishedTaskCommand,
     PublishedTask,
     PublishTaskCommand,
     SaveWebTaskDraftCommand,
@@ -554,6 +555,115 @@ async def test_group_intake_close_blocks_new_accepts_and_keeps_submission_right(
         stored_assignment = await session.get(AssignmentModel, assignment.id)
     assert stored_assignment is not None
     assert stored_assignment.status == "submitted"
+    await database.dispose()
+
+
+async def test_author_can_edit_unclaimed_task_and_reserve_changes_atomically(
+    database_url: str,
+) -> None:
+    database = Database(database_url)
+    author = await prepare_member(database, telegram_user_id=19_720)
+    performer = await add_member(database, telegram_user_id=19_721)
+    task_service = TaskService(database.unit_of_work)
+    assignment_service = AssignmentService(database.unit_of_work)
+    selected_category = await category_id(database, "promotion")
+    draft_id, revision = await complete_freeform_preview(
+        task_service,
+        member=author,
+        selected_category_id=selected_category,
+        update_base=19_720,
+        reward=3,
+    )
+    task = await task_service.publish(
+        PublishTaskCommand(19_820, author.telegram_user_id, draft_id, revision)
+    )
+    categories, editable = await task_service.web_edit_state(
+        actor=actor_context(author),
+        task_id=task.id,
+    )
+    assert selected_category in {item.id for item in categories}
+
+    edit_command = EditPublishedTaskCommand(
+        update_id=19_821,
+        actor_member_id=author.id,
+        task_id=task.id,
+        expected_updated_at=editable.updated_at,
+        category_id=selected_category,
+        task_kind=TaskKind.GROUP,
+        time_size=TaskTimeSize.S,
+        title="Проверить обновлённый сценарий",
+        description="Нужно пройти обновлённый сценарий и записать наблюдения.",
+        completion_criteria="Есть список наблюдений и проверяемый итог.",
+        credit_reward_per_performer=4,
+        deadline_at=datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2),
+        format=TaskFormat.ONLINE,
+        city=None,
+        materials={"text": "Новая версия материалов"},
+        performer_slots=2,
+        replay_fingerprint="edit-up",
+    )
+    edited = await task_service.edit_published(edit_command)
+    replay = await task_service.edit_published(edit_command)
+    assert replay.id == edited.id
+    assert edited.title == "Проверить обновлённый сценарий"
+    assert edited.reserved_credit_total == 8
+    assert edited.performer_slots == 2
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        stored_author = await session.get(MemberModel, author.id)
+        edit_audits = await session.scalar(
+            select(func.count(AuditEventModel.id)).where(
+                AuditEventModel.action == "task_edited",
+                AuditEventModel.entity_id == str(task.id),
+            )
+        )
+    assert stored_author is not None
+    assert stored_author.credit_balance_cached == 12
+    assert edit_audits == 1
+
+    with pytest.raises(InsufficientBalanceError):
+        await task_service.edit_published(
+            replace(
+                edit_command,
+                update_id=19_824,
+                expected_updated_at=edited.updated_at,
+                performer_slots=6,
+                replay_fingerprint="edit-insufficient",
+            )
+        )
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        unchanged_task = await session.get(TaskModel, task.id)
+        unchanged_author = await session.get(MemberModel, author.id)
+    assert unchanged_task is not None
+    assert unchanged_task.performer_slots == 2
+    assert unchanged_task.reserved_credit_total == 8
+    assert unchanged_author is not None
+    assert unchanged_author.credit_balance_cached == 12
+
+    await assignment_service.accept(
+        AcceptAssignmentCommand(19_822, performer.telegram_user_id, task.id)
+    )
+    with pytest.raises(TaskError, match="performer"):
+        await task_service.edit_published(
+            EditPublishedTaskCommand(
+                update_id=19_823,
+                actor_member_id=author.id,
+                task_id=task.id,
+                expected_updated_at=edited.updated_at,
+                category_id=selected_category,
+                task_kind=TaskKind.GROUP,
+                time_size=TaskTimeSize.S,
+                title=edited.title,
+                description=edited.description,
+                completion_criteria=edited.completion_criteria,
+                credit_reward_per_performer=4,
+                deadline_at=edited.deadline_at,
+                format=TaskFormat.ONLINE,
+                city=None,
+                materials=edited.materials,
+                performer_slots=2,
+                replay_fingerprint="edit-blocked",
+            )
+        )
     await database.dispose()
 
 

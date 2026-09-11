@@ -86,6 +86,7 @@ const catalogSortOptions = [
 ];
 const pendingAcceptKeys = new Map();
 let pendingTaskCreation = null;
+let pendingTaskEdit = null;
 let returnFocusTaskId = null;
 let returnFocusAssignmentId = null;
 let returnFocusReviewId = null;
@@ -1079,9 +1080,33 @@ async function taskCreationCommand(body) {
   }
 }
 
-function showTaskCreation(state, forceEdit = false) {
+async function taskEditCommand(taskId, body) {
+  const serialized = JSON.stringify(body);
+  if (!pendingTaskEdit || pendingTaskEdit.taskId !== taskId || pendingTaskEdit.body !== serialized) {
+    pendingTaskEdit = { taskId, key: newOperationKey(), body: serialized };
+  }
+  const response = await apiFetch(`/api/v1/owned-tasks/${encodeURIComponent(taskId)}/edit`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": pendingTaskEdit.key,
+    },
+    credentials: "same-origin",
+    body: pendingTaskEdit.body,
+  });
+  try {
+    const result = await submissionResponse(response);
+    pendingTaskEdit = null;
+    return result;
+  } catch (error) {
+    if (!retryableSubmissionError(error)) pendingTaskEdit = null;
+    throw error;
+  }
+}
+
+function showTaskCreation(state, forceEdit = false, editContext = null) {
   let draft = state.draft || { id: null, revision: 0, values: {} };
-  if (!forceEdit && state.preview && !state.needs_edit) {
+  if (!editContext && !forceEdit && state.preview && !state.needs_edit) {
     const values = draft.values;
     const category = state.categories.find((item) => item.id === values.category_id);
     const card = taskListCard({
@@ -1121,7 +1146,7 @@ function showTaskCreation(state, forceEdit = false) {
     return replaceContent(connectedBoundary("T06", "content", card));
   }
   const localDraftKey = (draftId = draft.id) => (
-    `community-bot:task-form:${currentMemberId || "current"}:${draftId || "new"}`
+    `community-bot:${editContext ? "task-edit" : "task-form"}:${currentMemberId || "current"}:${draftId || "new"}`
   );
   const localDraftKeys = new Set([localDraftKey()]);
   const readLocalDraft = () => {
@@ -1390,9 +1415,13 @@ function showTaskCreation(state, forceEdit = false) {
   };
   syncDeadlinePresentation();
   form.performer_slots.value = values.performer_slots || 1;
-  const submit = element("button", "Предварительный просмотр", "primary");
+  const submit = element(
+    "button",
+    editContext ? "Сохранить изменения" : "Предварительный просмотр",
+    "primary",
+  );
   submit.type = "submit";
-  submit.setAttribute("aria-label", "Предварительный просмотр");
+  submit.setAttribute("aria-label", editContext ? "Сохранить изменения" : "Предварительный просмотр");
   const reserve = form.querySelector("[data-reserve]");
   const reserveFormula = form.querySelector("[data-reserve-formula]");
   const reserveSummary = form.querySelector("[data-reserve-summary]");
@@ -2453,6 +2482,34 @@ function showTaskCreation(state, forceEdit = false) {
       }
       const deadline = memberWallTimeToDate(value.deadline_at);
       if (!deadline) throw new Error("invalid_deadline");
+      if (editContext) {
+        const result = await taskEditCommand(editContext.task.id, {
+          expected_updated_at: draft.revision,
+          form: {
+            ...value,
+            credit_reward_per_performer: Number(value.credit_reward_per_performer),
+            performer_slots: Number(value.performer_slots),
+            deadline_at: deadline.toISOString(),
+            materials,
+          },
+        });
+        clearLocalDraft();
+        const category = state.categories.find((item) => item.id === value.category_id);
+        Object.assign(editContext.task, result.task.values, {
+          updated_at: result.task.updated_at,
+          category_name: category?.name || editContext.task.category_name,
+        });
+        history.replaceState(
+          { screen: "owned-task", task: editContext.task },
+          "",
+          presentationLocationFor("M10", editContext.task.id),
+        );
+        showOwnedTask(editContext.task, false);
+        content.querySelector(".owned-task-detail")?.append(
+          element("p", "Изменения сохранены.", "status success"),
+        );
+        return;
+      }
       await taskCreationCommand({ action: "save", draft_id: target.id, expected_revision: target.revision, form: { ...value, credit_reward_per_performer: Number(value.credit_reward_per_performer), performer_slots: Number(value.performer_slots), deadline_at: deadline.toISOString(), materials } });
       clearLocalDraft();
       history.pushState(
@@ -2471,6 +2528,10 @@ function showTaskCreation(state, forceEdit = false) {
         ? "Выберите город из списка."
         : error.message === "invalid_deadline"
           ? "Выберите корректные дату и время для вашего часового пояса."
+          : error.message === "insufficient_balance"
+            ? "Недостаточно кредитов для нового размера резерва."
+            : error.message === "task_edit_unavailable"
+              ? "Редактирование больше недоступно: задание уже взяли или его состояние изменилось."
           : "Не удалось сохранить задание. Проверьте данные и попробуйте снова.";
       saveStatus.classList.remove("hidden");
       submit.disabled = false;
@@ -5868,6 +5929,13 @@ function showOwnedTask(task, push = true) {
       "owned-task-dispute-note",
     ));
   }
+  const actions = element("div", undefined, "owned-task-actions");
+  if (!performedArchive && task.can_edit) {
+    const edit = element("button", "Редактировать", "secondary");
+    edit.type = "button";
+    edit.addEventListener("click", () => void openOwnedTaskEdit(task));
+    actions.append(edit);
+  }
   if (!performedArchive && task.cancellation_action) {
     const cancel = element(
       "button",
@@ -5876,12 +5944,49 @@ function showOwnedTask(task, push = true) {
     );
     cancel.type = "button";
     cancel.addEventListener("click", () => confirmOwnedTaskCancellation(task));
-    detail.append(cancel);
+    actions.append(cancel);
   } else if (task.cancellation_status === "pending") {
     detail.append(element("p", "Запрос на отмену ожидает ответа исполнителей.", "status muted"));
   }
+  if (actions.childElementCount) detail.append(actions);
   replaceContent(connectedBoundary("M10", "content", detail));
   back.focus({ preventScroll: true });
+}
+
+async function openOwnedTaskEdit(task, push = true) {
+  screenRevision += 1;
+  setNavigation("", true);
+  title.textContent = "Редактирование";
+  shell.classList.add("task-creation-screen");
+  const editLocation = `${presentationLocationFor("M10", task.id)}&mode=edit`;
+  if (push) history.pushState({ screen: "owned-task-edit", task }, "", editLocation);
+  else history.replaceState({ screen: "owned-task-edit", task }, "", editLocation);
+  setHeaderControl("back", {
+    label: "Назад к заданию",
+    screenLabel: "Редактирование задания",
+    onBack: () => {
+      pendingTaskEdit = null;
+      history.replaceState(
+        { screen: "owned-task", task },
+        "",
+        presentationLocationFor("M10", task.id),
+      );
+      showOwnedTask(task, false);
+    },
+  });
+  replaceContent(element("p", "Загружаем задание…", "status muted"));
+  try {
+    const state = await getJson(`/api/v1/owned-tasks/${encodeURIComponent(task.id)}/edit`);
+    showTaskCreation(state, true, { task });
+  } catch (error) {
+    const message = error?.status === 409 || error?.status === 403
+      ? "Редактирование больше недоступно: задание уже взяли или его состояние изменилось."
+      : "Не удалось открыть редактирование. Повторите запрос.";
+    const retry = element("button", "Повторить", "secondary");
+    retry.type = "button";
+    retry.addEventListener("click", () => void openOwnedTaskEdit(task, false));
+    replaceContent(connectedBoundary("M10", "error", element("p", message, "status"), retry));
+  }
 }
 
 function confirmOwnedTaskCancellation(task) {
@@ -10513,6 +10618,10 @@ globalThis.addEventListener("popstate", (event) => {
       event.state.scope || "active",
       event.state.archiveRole || "created",
     );
+  } else if (event.state?.screen === "owned-task") {
+    showOwnedTask(event.state.task, false);
+  } else if (event.state?.screen === "owned-task-edit") {
+    void openOwnedTaskEdit(event.state.task, false);
   } else if (event.state?.screen === "assignment-review") {
     showCreatedReview(event.state.assignmentId, false, event.state.returnTo || null);
   } else if (event.state?.screen === "assignment") {

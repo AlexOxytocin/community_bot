@@ -435,6 +435,8 @@ def test_web_config_and_route_set_are_closed() -> None:
         ("/api/v1/tasks", ("GET",)),
         ("/api/v1/task-home", ("GET",)),
         ("/api/v1/owned-tasks", ("GET",)),
+        ("/api/v1/owned-tasks/{task_id}/edit", ("GET",)),
+        ("/api/v1/owned-tasks/{task_id}/edit", ("PUT",)),
         ("/api/v1/owned-tasks/{task_id}/cancellation", ("POST",)),
         ("/api/v1/task-cities", ("GET",)),
         ("/api/v1/task-creation", ("GET",)),

@@ -817,6 +817,23 @@ class SqlAlchemyUnitOfWork(FoundationUnitOfWork):
             self._require_session(), task_id=task_id, status=status
         )
 
+    async def save_published_task(
+        self,
+        *,
+        task_id: UUID,
+        draft: TaskDraft,
+        category: TaskCategoryOption,
+        reserved_credit_total: int,
+    ) -> PublishedTask:
+        """Persist validated creator edits to one locked published task."""
+        return await task_store.save_published_task(
+            self._require_session(),
+            task_id=task_id,
+            draft=draft,
+            category=category,
+            reserved_credit_total=reserved_credit_total,
+        )
+
     async def close_task_for_new_performers(
         self, *, task_id: UUID, now: datetime.datetime
     ) -> PublishedTask:
