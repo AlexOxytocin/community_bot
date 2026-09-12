@@ -5899,7 +5899,9 @@ function showOwnedTask(task, push = true) {
   );
   if (activeDisputes > 0) attention.classList.add("is-attention");
   summary.append(assigneeCount, attention);
-  detail.append(detailHeader, summary);
+  const description = section("Описание", task.description);
+  description.classList.add("owned-task-description");
+  detail.append(detailHeader, description, summary);
 
   const assigneesBlock = element("section", undefined, "owned-task-assignees");
   assigneesBlock.append(element("h3", "Исполнители", "owned-task-section-title"));
@@ -6529,7 +6531,9 @@ async function showCreatedReview(assignmentId, push = true, returnTo = null) {
     );
     const result = section("Результат", review.result);
     result.classList.add("assignment-detail-section", "assignment-review-result");
-    detailContent.append(performer, result);
+    const description = section("Описание", review.task_description);
+    description.classList.add("assignment-detail-section", "assignment-review-description");
+    detailContent.append(description, performer, result);
     detail.append(detailHeader, detailContent);
     const decisionActions = element("div", undefined, "assignment-review-actions");
     for (const decision of review.available_decisions) {

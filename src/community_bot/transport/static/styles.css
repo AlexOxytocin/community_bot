@@ -297,6 +297,7 @@ button.card:hover { background: var(--app-surface-raised); }
   box-shadow: 0 10px 28px var(--app-shadow-card);
 }
 .assignment-review-result p { white-space: pre-wrap; }
+.assignment-review-description p { overflow-wrap: anywhere; white-space: pre-wrap; }
 .assignment-review-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .assignment-review-actions button { min-width: 0; min-height: 44px; padding: 8px 10px; font-size: 12px; line-height: 1.15; }
 .assignment-review-action-full { grid-column: 1 / -1; }
@@ -960,6 +961,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .owned-task-eyebrow { color: var(--app-text-muted); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .owned-task-heading-copy h2 { margin: 0; overflow-wrap: anywhere; font-size: 20px; line-height: 1.08; }
 .owned-task-status-chip { flex: 0 0 auto; border-color: color-mix(in srgb, var(--app-accent) 55%, var(--app-border)); color: var(--app-accent); }
+.owned-task-description { gap: 3px; padding: 10px 11px; border: 1px solid var(--app-border); border-radius: 13px; background: var(--app-surface-raised); }
+.owned-task-description h3 { color: var(--app-text-muted); font-size: 10px; line-height: 1.2; letter-spacing: .055em; text-transform: uppercase; }
+.owned-task-description p { margin: 0; overflow-wrap: anywhere; color: var(--app-text); font-size: 12px; line-height: 1.4; white-space: pre-wrap; }
 .owned-task-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .owned-task-metric { display: grid; min-height: 64px; align-content: center; gap: 2px; padding: 9px 11px; border: 1px solid var(--app-border); border-radius: 13px; background: color-mix(in srgb, var(--app-surface-raised) 78%, transparent); }
 .owned-task-metric strong { font-size: 22px; line-height: 1; }

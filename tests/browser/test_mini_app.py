@@ -3157,6 +3157,7 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
     active_owned = {
         "id": "00000000-0000-0000-0000-000000000303",
         "title": "Созданное активное задание",
+        "description": "Отдельное описание созданного задания для автора.",
         "status": "published",
         "created_at": "2026-08-21T10:00:00Z",
         "category_name": "Практическая помощь",
@@ -3227,6 +3228,7 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         "id": "00000000-0000-0000-0000-000000000305",
         "task_id": active_owned["id"],
         "task_title": "Проверить результат исполнителя",
+        "task_description": "Отдельное описание задания для проверки результата.",
         "performer_display_name": "Мария",
         "submitted_at": "2026-08-26T11:00:00Z",
         "review_deadline_at": "2026-08-27T11:00:00Z",
@@ -3268,6 +3270,10 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         page.route(
             "**/api/v1/assignment-reviews",
             lambda route: route.fulfill(json={"items": [review]}),
+        )
+        page.route(
+            f"**/api/v1/assignment-reviews/{review['id']}",
+            lambda route: route.fulfill(json=review),
         )
         page.route(
             "**/api/v1/moderation/cases?*",
@@ -3357,13 +3363,34 @@ def test_ui_next_work_lists_replace_legacy_hubs_with_catalog_pattern(  # noqa: P
         assert created.get_by_text("Проверить результат исполнителя", exact=True).is_visible()
 
         created_search.fill("Созданное активное")
+        page.set_viewport_size({"width": 320, "height": 812})
         created.locator(".owned-work-card").click()
         page.locator(".owned-task-assignee .person-avatar-photo").wait_for()
+        assert (
+            page.locator(".owned-task-description")
+            .get_by_text(active_owned["description"], exact=True)
+            .is_visible()
+        )
+        assert page.evaluate("document.documentElement.scrollWidth - innerWidth") == 0
         assert page.get_by_role(
             "button", name="Назад к созданным заданиям", exact=True
         ).is_visible()
         assert page.get_by_role("button", name="Закрыть карточку задания").count() == 0
         page.get_by_role("button", name="Назад к созданным заданиям", exact=True).click()
+        created.wait_for()
+
+        page.set_viewport_size({"width": 390, "height": 812})
+        created_search.fill("Мария")
+        created.locator(".work-review-card").click()
+        review_detail = page.locator('[data-screen-id="M11"]')
+        review_detail.wait_for()
+        assert (
+            review_detail.locator(".assignment-review-description")
+            .get_by_text(review["task_description"], exact=True)
+            .is_visible()
+        )
+        assert page.evaluate("document.documentElement.scrollWidth - innerWidth") == 0
+        page.get_by_role("button", name="Назад", exact=True).click()
         created.wait_for()
 
         created.get_by_role("button", name="Назад к заданиям", exact=True).click()

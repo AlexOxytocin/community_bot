@@ -813,9 +813,7 @@ class TaskService:
                 test_run_id=task.test_run_id,
             )
             _validate_freeform_publishable(candidate, category)
-            reserved_credit_total = (
-                command.credit_reward_per_performer * command.performer_slots
-            )
+            reserved_credit_total = command.credit_reward_per_performer * command.performer_slots
             reserve_delta = reserved_credit_total - task.reserved_credit_total
             prepared = None
             if reserve_delta:

@@ -1,9 +1,9 @@
-# Релиз кошелька: 0031 → 0032
+# Миграционный релиз: 0039 → 0040
 
 Используется `ops/wallet_cutover.py` из точного чистого checkout `origin/main`.
 `deploy_dev.py` и `release_contract.py` не подходят для этого перехода.
 Production host/package определяются по labels работающих контейнеров, не по
-`active.json`. Скрипт применим только к неизменённому Compose package и head 0031.
+`active.json`. Скрипт применим только к неизменённому Compose package и head 0039.
 
 ## Подготовка
 
@@ -15,7 +15,7 @@ Production host/package определяются по labels работающи�
    checkout полного SHA из `AlexOxytocin/community_bot`. Перед запуском проверить
    наличие и SHA-256 скрипта и `ops/_runtime.py`, затем syntax check.
 3. Из этого checkout выполнить `python3 -B -m ops.wallet_cutover prepare
-   --source <checkout> --target <full-sha>`.
+   --source <checkout> --target <full-sha> --transition 0039-0040`.
    Это проверяет текущий healthy runtime, services, config/head, строит image,
    проверяет его revision/head и создаёт root-private receipt. Сервисы не
    останавливаются. До runtime mutation сверить напечатанные source/target,
@@ -29,7 +29,7 @@ Production host/package определяются по labels работающи�
 - Остановить web/worker; проверить отсутствие оставшихся DB clients.
 - Создать свежий backup после остановки записи; сохранить digest.
 - Восстановить его в уникальную БД, проверить head и экономические hashes/counts.
-  На копии выполнить `0031→0032→0031`, повторить проверки. Копия остаётся
+  На копии выполнить `0039→0040→0039`, повторить проверки. Копия остаётся
   готовой для немедленного возврата старой схемы.
 - Мигрировать рабочую БД, проверить неизменность экономических данных.
 - Запустить target web/worker с `RELEASE_MAINTENANCE=true`: API возвращает 503,

@@ -3243,6 +3243,7 @@ async def test_owned_tasks_api_is_creator_scoped_and_actor_native(database_url: 
         response = await client.get("/api/v1/owned-tasks", params={"member_id": str(performer.id)})
         assert response.status_code == 200, response.text
         cards = {item["id"]: item for item in response.json()["items"]}
+        assert cards[str(owned.id)]["description"] == owned.description
         assert cards[str(owned.id)]["cancellation_action"] == "request"
         assert cards[str(owned.id)]["archived_at"] is None
         assert cards[str(owned.id)]["assignees"][0]["member_id"] == str(performer.id)
@@ -4044,6 +4045,7 @@ async def test_creator_review_api_is_private_exact_and_domain_owned(database_url
         assert items[assignment.id]["result"] == "Literal creator review result."
         detail = await client.get(f"/api/v1/assignment-reviews/{assignment.id}")
         assert detail.status_code == 200
+        assert detail.json()["task_description"] == task.description
         for row in (rows[0], rows[-2]):
             hidden = await client.get(f"/api/v1/assignment-reviews/{row.id}")
             assert hidden.status_code == 404

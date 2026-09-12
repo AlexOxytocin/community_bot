@@ -664,6 +664,13 @@ async def test_author_can_edit_unclaimed_task_and_reserve_changes_atomically(
                 replay_fingerprint="edit-blocked",
             )
         )
+    async with async_sessionmaker(database.engine, expire_on_commit=False)() as session:
+        assigned_task = await session.get(TaskModel, task.id)
+        assert assigned_task is not None
+        assigned_task.description = "Эта запись уже не должна меняться."
+        with pytest.raises(DBAPIError, match="published task snapshot is immutable"):
+            await session.flush()
+        await session.rollback()
     await database.dispose()
 
 

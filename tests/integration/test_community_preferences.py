@@ -379,8 +379,9 @@ async def test_activity_outbox_dedup_and_unsubscribe_before_send(
     enabled = await store.set_preference(reader.id, category, enabled=True, expected_revision=0)
     enabled_revision = enabled["revision"]
     assert isinstance(enabled_revision, int)
-    # Outside the normal 09:00-21:00 delivery window: tagged publications are immediate.
-    now = datetime.datetime(2026, 9, 8, 3, 57, tzinfo=datetime.UTC)
+    # Tagged publications are immediate, so claim against the actual database clock
+    # instead of a fixed date that eventually falls behind server-side defaults.
+    now = datetime.datetime.now(datetime.UTC)
     publications = ActivityPublicationStore(db.session_factory)
     post: dict[str, Any] = dict(  # noqa: C408 - named Telegram event fields.
         author_id=owner.telegram_user_id,

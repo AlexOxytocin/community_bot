@@ -612,6 +612,7 @@ class OwnedTaskAssigneeDto(_Dto):
 class OwnedTaskDto(_Dto):
     id: UUID
     title: str
+    description: str
     status: str
     created_at: datetime.datetime
     category_name: str | None
@@ -685,6 +686,7 @@ class AssignmentReviewDto(_Dto):
     id: UUID
     task_id: UUID
     task_title: str
+    task_description: str
     performer_id: UUID
     performer_display_name: str
     submitted_at: datetime.datetime
@@ -4000,6 +4002,7 @@ def _owned_task_dto(
     return OwnedTaskDto(
         id=card.task.id,
         title=card.task.title,
+        description=card.task.description,
         status=card.task.status.value,
         created_at=card.task.created_at,
         category_name=card.task.category_name,
@@ -4096,6 +4099,7 @@ def _assignment_review_dto(card: AssignmentCard) -> AssignmentReviewDto:
         id=card.assignment.id,
         task_id=card.assignment.task_id,
         task_title=card.task_title,
+        task_description=card.task.description,
         performer_id=card.assignment.performer_id,
         performer_display_name=card.performer_display_name,
         submitted_at=card.assignment.submitted_at,

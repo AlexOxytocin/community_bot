@@ -34,6 +34,7 @@ TRANSITIONS = {
     "0034-0036": ("0034", "0036"),
     "0036-0038": ("0036", "0038"),
     "0038-0039": ("0038", "0039"),
+    "0039-0040": ("0039", "0040"),
 }
 
 # Only economic data: maintenance heartbeats must not invalidate this invariant.

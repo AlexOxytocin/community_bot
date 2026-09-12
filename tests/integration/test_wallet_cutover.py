@@ -19,10 +19,13 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize(("from_head", "to_head"), [("0033", "0034"), ("0039", "0040")])
 def test_postgres_wallet_restore_and_failed_migration_recovery(
     database_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    from_head: str,
+    to_head: str,
 ) -> None:
     url = make_url(database_url)
     assert url.database is not None
@@ -42,6 +45,8 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
         "restore_db": f"wallet_restore_{suffix}",
         "drill_db": f"schema_drill_{suffix}",
         "failed_db": f"wallet_failed_{suffix}",
+        "from_head": from_head,
+        "to_head": to_head,
     }
     events: list[str] = []
     monkeypatch.setattr(host, "stopped", lambda: None)
@@ -58,7 +63,7 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
                 "-m",
                 "alembic",
                 "downgrade" if downgrade else "upgrade",
-                cutover.FROM_HEAD if downgrade else cutover.TO_HEAD,
+                host.from_head if downgrade else host.to_head,
             ],
             env=env,
             capture_output=True,
@@ -86,18 +91,18 @@ def test_postgres_wallet_restore_and_failed_migration_recovery(
     try:
         host.backup_restore()
         assert host.receipt["restore_verified"]
-        assert host.head() == cutover.FROM_HEAD
-        assert host.head(host.receipt["restore_db"]) == cutover.FROM_HEAD
+        assert host.head() == host.from_head
+        assert host.head(host.receipt["restore_db"]) == host.from_head
         migrate()
-        assert host.head() == cutover.TO_HEAD
+        assert host.head() == host.to_head
         host.rollback()
-        assert host.head() == cutover.FROM_HEAD
-        assert host.head(host.receipt["failed_db"]) == cutover.TO_HEAD
+        assert host.head() == host.from_head
+        assert host.head(host.receipt["failed_db"]) == host.to_head
         assert host.fingerprint() == host.receipt["fingerprint"]
         assert events == ["stopped", "old_started", "old_verified"]
         # Crash/retry after the atomic rename is safe: restored DB remains live.
         host.rollback()
-        assert host.head() == cutover.FROM_HEAD
+        assert host.head() == host.from_head
     finally:
         for name in (
             host.receipt["restore_db"],
