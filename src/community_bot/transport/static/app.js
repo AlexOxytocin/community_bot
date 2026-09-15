@@ -384,6 +384,8 @@ const showActionConfirmation = ({
 };
 
 const GET_CACHE_TTL_MS = 60_000;
+const MEMBER_PAGE_SIZE = 50;
+const MEMBER_SEARCH_DEBOUNCE_MS = 250;
 const jsonCache = new Map();
 const jsonRequests = new Map();
 let jsonCacheGeneration = 0;
@@ -1120,6 +1122,17 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
       origin: state.preview.origin,
     }, { preview: true });
     card.append(section("Критерии", state.preview.completion_criteria));
+    const actions = element("div", undefined, "preview-task-actions");
+    const edit = element("button", "Редактировать", "secondary");
+    edit.type = "button";
+    edit.addEventListener("click", () => {
+      history.pushState(
+        { screen: "task-creation", draftId: draft.id },
+        "",
+        presentationLocationFor("T05", draft.id),
+      );
+      showTaskCreation(state, true);
+    });
     const publish = element("button", "Опубликовать", "primary");
     publish.type = "button";
     markTransition(publish, "PE-021", "publish_task");
@@ -1142,7 +1155,8 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
         publish.disabled = false;
       }
     });
-    card.append(publish, status);
+    actions.append(edit, publish);
+    card.append(actions, status);
     return replaceContent(connectedBoundary("T06", "content", card));
   }
   const localDraftKey = (draftId = draft.id) => (
@@ -4390,6 +4404,7 @@ function showParticipantsState(state, revision) {
   back.classList.add("hidden");
   title.textContent = "Комьюнити";
   const boundary = element("section", undefined, "state-view participants-view");
+  let memberSearchInput = null;
   boundary.dataset.screenId = state.view === "leaderboard" ? "P05" : state.view === "pulse" ? "P08" : "P01";
   boundary.dataset.uiEngine = "concept-05";
   boundary.dataset.state = state.loading ? "loading" : state.error ? "error" : "content";
@@ -4416,13 +4431,28 @@ function showParticipantsState(state, revision) {
     const search = element("form", undefined, "participant-search");
     search.setAttribute("role", "search");
     const input = element("input");
+    memberSearchInput = input;
     input.type = "search";
     input.placeholder = "Найти участника";
     input.setAttribute("aria-label", "Найти участника");
     input.value = state.query;
+    input.addEventListener("focus", () => {
+      state.searchFocused = true;
+    });
+    input.addEventListener("input", () => {
+      state.searchFocused = true;
+      state.searchCaret = input.selectionStart ?? input.value.length;
+      state.query = input.value;
+      clearTimeout(state.memberSearchTimer);
+      state.memberSearchTimer = setTimeout(
+        () => void loadMembers(state, revision),
+        MEMBER_SEARCH_DEBOUNCE_MS,
+      );
+    });
     search.addEventListener("submit", (event) => {
       event.preventDefault();
-      state.query = input.value.trim();
+      clearTimeout(state.memberSearchTimer);
+      state.query = input.value;
       void loadMembers(state, revision);
     });
     search.append(searchIcon(), input);
@@ -4492,9 +4522,26 @@ function showParticipantsState(state, revision) {
     boundary.append(pulseDetails(state, revision));
   } else {
     boundary.append(memberListDetails(state.members || []));
+    if (state.memberLoadError) {
+      const retry = element("button", "Повторить загрузку", "secondary");
+      retry.type = "button";
+      retry.addEventListener("click", () => void loadMembers(state, revision));
+      boundary.append(
+        element("p", "Не удалось загрузить полный список.", "status"),
+        retry,
+      );
+    }
   }
+  const restoreSearchFocus = state.view === "members" && state.searchFocused;
   replaceContent(boundary);
-  if (state.restoreLeaderboardFilterFocus && state.view === "leaderboard") {
+  if (restoreSearchFocus && memberSearchInput) {
+    const caret = Math.min(
+      state.searchCaret ?? memberSearchInput.value.length,
+      memberSearchInput.value.length,
+    );
+    memberSearchInput.focus({ preventScroll: true });
+    memberSearchInput.setSelectionRange(caret, caret);
+  } else if (state.restoreLeaderboardFilterFocus && state.view === "leaderboard") {
     content.querySelector(".leaderboard-filter-trigger")?.focus({ preventScroll: true });
   } else if (state.focusHeading) {
     state.focusHeading = false;
@@ -4507,28 +4554,52 @@ function showParticipantsState(state, revision) {
 }
 
 async function loadMembers(state, revision) {
-  const query = state.query ? "&query=" + encodeURIComponent(state.query) : "";
-  const path = "/api/v1/members?limit=30" + query;
-  const cached = cachedJson(path);
-  if (cached) state.members = cached.items;
-  state.loading = !cached;
+  const request = ++state.memberRequest;
+  const query = state.query.trim();
+  const queryParameter = query ? "&query=" + encodeURIComponent(query) : "";
+  let cursor = null;
+  let members = [];
+  const seen = new Set();
+  state.members = null;
+  state.loading = true;
+  state.memberLoadError = false;
   state.error = false;
   showParticipantsState(state, revision);
   try {
-    const page = await getJson(path, (refreshed) => {
-      if (revision !== screenRevision || state.view !== "members") return;
-      state.members = refreshed.items;
-      state.loading = false;
-      state.error = false;
-      showParticipantsState(state, revision);
-    });
-    if (revision !== screenRevision) return;
-    if (cached) return;
-    state.members = page.items;
+    do {
+      const cursorParameter = cursor
+        ? "&cursor_member_id=" + encodeURIComponent(cursor)
+        : "";
+      const path = `/api/v1/members?limit=${MEMBER_PAGE_SIZE}${queryParameter}${cursorParameter}`;
+      const page = await getJson(path);
+      if (
+        revision !== screenRevision
+        || request !== state.memberRequest
+        || state.view !== "members"
+        || query !== state.query.trim()
+      ) return;
+      const previousCount = members.length;
+      for (const member of page.items || []) {
+        if (seen.has(member.member_id)) continue;
+        seen.add(member.member_id);
+        members.push(member);
+      }
+      cursor = page.next_cursor_member_id || null;
+      if (cursor && members.length === previousCount) {
+        state.memberLoadError = true;
+        cursor = null;
+      }
+    } while (cursor);
   } catch {
-    if (revision !== screenRevision) return;
-    state.error = !cached;
+    if (
+      revision !== screenRevision
+      || request !== state.memberRequest
+      || query !== state.query.trim()
+    ) return;
+    state.error = members.length === 0;
+    state.memberLoadError = members.length > 0;
   }
+  state.members = members;
   state.loading = false;
   showParticipantsState(state, revision);
 }
@@ -4655,6 +4726,11 @@ function selectLeaderboardMetric(state, revision, metric) {
 
 function switchParticipantsView(state, revision, view) {
   state.restoreLeaderboardFilterFocus = false;
+  if (view !== "members") {
+    clearTimeout(state.memberSearchTimer);
+    state.memberRequest += 1;
+    state.searchFocused = false;
+  }
   const previousView = state.view;
   if (view === "leaderboard" && state.metric.startsWith("achievement:")) {
     if (state.period !== "all") state.activityPeriod = state.period;
@@ -4692,6 +4768,11 @@ function loadParticipants(view = "pulse", period = "week", metric = "experience"
     view,
     query: "",
     members: null,
+    memberRequest: 0,
+    memberSearchTimer: null,
+    memberLoadError: false,
+    searchFocused: false,
+    searchCaret: 0,
     period: achievementMetric && view === "leaderboard" ? "all" : period,
     activityPeriod: achievementMetric ? "week" : period,
     metric,

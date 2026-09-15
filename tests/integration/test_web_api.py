@@ -2690,6 +2690,30 @@ async def test_session_restart_reads_privacy_authority_and_concurrent_logout(
 ) -> None:
     database = Database(database_url)
     member = await active_member(database, 52_001)
+    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add_all(
+            (
+                MemberModel(
+                    id=uuid4(),
+                    telegram_user_id=52_002,
+                    telegram_username="alpha_member",
+                    display_name="Alpha Member",
+                    timezone="UTC",
+                    role=MemberRole.MEMBER.value,
+                    status=MemberStatus.ACTIVE.value,
+                ),
+                MemberModel(
+                    id=uuid4(),
+                    telegram_user_id=52_003,
+                    telegram_username="omega_member",
+                    display_name="Omega Member",
+                    timezone="UTC",
+                    role=MemberRole.MEMBER.value,
+                    status=MemberStatus.ACTIVE.value,
+                ),
+            )
+        )
     settings = Settings(bot_token=BOT_TOKEN, mini_app_origin=ORIGIN, database_url=database_url)
     app = create_web_app(settings=settings, database=database)
 
@@ -2724,6 +2748,23 @@ async def test_session_restart_reads_privacy_authority_and_concurrent_logout(
         assert (await client.get("/api/v1/members", params={"query": "a"})).status_code == 200
         assert (await client.get("/api/v1/members", params={"query": "   "})).status_code == 200
         assert (await client.get("/api/v1/members", params={"query": "@"})).status_code == 200
+        first_members = (await client.get("/api/v1/members", params={"limit": 2})).json()
+        assert len(first_members["items"]) == 2
+        assert first_members["next_cursor_member_id"] == first_members["items"][-1]["member_id"]
+        second_members = (
+            await client.get(
+                "/api/v1/members",
+                params={
+                    "limit": 2,
+                    "cursor_member_id": first_members["next_cursor_member_id"],
+                },
+            )
+        ).json()
+        assert len(second_members["items"]) == 1
+        assert second_members["next_cursor_member_id"] is None
+        assert {item["member_id"] for item in first_members["items"]}.isdisjoint(
+            item["member_id"] for item in second_members["items"]
+        )
         assert (
             await client.get("/api/v1/leaderboard", params={"period": "week"})
         ).status_code == 200
@@ -2731,7 +2772,6 @@ async def test_session_restart_reads_privacy_authority_and_concurrent_logout(
             await client.get("/api/v1/leaderboard", params={"period": "quarter"})
         ).status_code == 422
 
-    sessions = async_sessionmaker(database.engine, expire_on_commit=False)
     async with sessions() as session:
         stored = (await session.scalars(select(WebSessionModel))).one()
         assert (

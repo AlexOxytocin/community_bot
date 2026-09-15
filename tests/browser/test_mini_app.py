@@ -6371,7 +6371,7 @@ def test_profile_and_leaderboard_are_safe_retryable_and_stale_safe(  # noqa: C90
         browser.close()
 
 
-def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PLR0915
+def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:
     member_ids = [f"00000000-0000-0000-0000-{index:012d}" for index in range(101, 107)]
@@ -6463,10 +6463,28 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
                     }
                 ),
             )
-            page.route(
-                "**/api/v1/members?*",
-                lambda route: route.fulfill(json={"items": members}),
-            )
+
+            def members_route(route: Route) -> None:
+                parameters = parse_qs(urlsplit(route.request.url).query)
+                query = parameters.get("query", [""])[0]
+                cursor = parameters.get("cursor_member_id", [None])[0]
+                if query:
+                    page_items = members
+                    next_cursor = None
+                elif cursor:
+                    page_items = members[3:]
+                    next_cursor = None
+                else:
+                    page_items = members[:3]
+                    next_cursor = members[2]["member_id"]
+                route.fulfill(
+                    json={
+                        "items": page_items,
+                        "next_cursor_member_id": next_cursor,
+                    }
+                )
+
+            page.route("**/api/v1/members?*", members_route)
             page.route(
                 "**/api/v1/members/*",
                 lambda route: route.fulfill(
@@ -6641,9 +6659,9 @@ def test_participants_density_and_leaderboard_periods_are_race_safe(  # noqa: PL
             assert page.get_by_role("button", name="Найти", exact=True).count() == 0
             search = page.get_by_placeholder("Найти участника")
             assert search.get_attribute("aria-label") == "Найти участника"
-            search.fill(" \u0430 ")
             with page.expect_request(lambda request: "query=%D0%B0" in request.url):
-                search.press("Enter")
+                search.fill(" \u0430 ")
+            expect(search).to_be_focused()
             assert page.get_by_text("Минимум", exact=False).count() == 0
 
             page.locator(".member-row").first.click()
@@ -7942,6 +7960,10 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         page.route(
             "**/api/v1/tasks", lambda route: route.fulfill(json={"items": [], "next_cursor": None})
         )
+        page.route(
+            "**/api/v1/task-home",
+            lambda route: route.fulfill(json=_task_home_payload()),
+        )
         page.route("**/api/v1/task-creation", creation)
         page.route(
             "**/api/v1/task-cities?*",
@@ -8239,8 +8261,19 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert isinstance(preview_form, dict)
         assert preview_form["deadline_at"] == "2099-08-22T23:00:00.000Z"
         publish = page.get_by_role("button", name="Опубликовать", exact=True)
-        assert publish.evaluate("node => node.parentElement.matches('.preview-task-card')")
+        edit_preview = page.get_by_role("button", name="Редактировать", exact=True)
+        assert publish.evaluate("node => node.parentElement.matches('.preview-task-actions')")
+        assert edit_preview.evaluate("node => node.parentElement.matches('.preview-task-actions')")
         assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
+        edit_preview.click()
+        page.locator('[data-screen-id="T05"]').wait_for()
+        assert page.get_by_label("Название *", exact=True).input_value() == state["values"]["title"]
+        assert (
+            page.get_by_label("Что нужно сделать *", exact=True).input_value()
+            == (state["values"]["description"])
+        )
+        page.go_back()
+        page.locator('[data-screen-id="T06"]').wait_for()
         state["values"]["materials"] = {"url": "https://legacy.example/material"}
         page.reload()
         page.locator('[data-screen-id="T06"]').wait_for()
@@ -8263,7 +8296,7 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         assert len(commands) == commands_before + 2
         assert page.evaluate("globalThis.pwned") is None
         page.get_by_role("button", name="К заданиям").click()  # noqa: RUF001
-        page.get_by_role("button", name="+ Создать", exact=True).wait_for()
+        page.locator('[data-screen-id="T01"]').wait_for()
         assert actions == ["start", "start", "save", "save", "save", "publish", "publish"]
         assert commands[0][1:] == commands[1][1:]
         assert commands[2][2] == commands[3][2]

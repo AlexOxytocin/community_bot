@@ -349,6 +349,7 @@ class KarmaActionDto(_Dto):
 
 class MembersDto(_Dto):
     items: tuple[MemberDto, ...]
+    next_cursor_member_id: UUID | None = None
 
 
 AdministratorPermission = Literal[
@@ -1574,13 +1575,26 @@ def create_web_app(  # noqa: PLR0913 - injectable external Telegram boundaries f
         actor: ActorContext = Depends(current_actor),
         query: str | None = None,
         limit: Annotated[int, Query(ge=1, le=50)] = 30,
+        cursor_member_id: UUID | None = None,
     ) -> JSONResponse:
         normalized = _member_query(query)
         try:
-            page = await reputation.members(actor=actor, query=normalized, limit=limit)
+            page = await reputation.members(
+                actor=actor,
+                query=normalized,
+                limit=limit,
+                cursor_member_id=cursor_member_id,
+            )
         except ProfileUnavailableError as error:
             raise HTTPException(status_code=403, detail="profile_unavailable") from error
-        return _json_response(MembersDto(items=tuple(_member_dto(item) for item in page.items)))
+        return _json_response(
+            MembersDto(
+                items=tuple(_member_dto(item) for item in page.items),
+                next_cursor_member_id=(
+                    page.next_cursor.member_id if page.next_cursor is not None else None
+                ),
+            )
+        )
 
     @app.get("/api/v1/members/{member_id}", response_model=MemberDetailDto)
     async def member_detail(

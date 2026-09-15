@@ -1324,6 +1324,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .preview-task-card > .section { gap: 3px; padding-top: 8px; border-top: 1px solid var(--app-border); }
 .preview-task-card > .section h3 { font-size: 12px; }
 .preview-task-card > .section p { margin: 0; font-size: 12px; line-height: 1.35; }
+.preview-task-actions { display: grid; grid-template-columns: minmax(0, .78fr) minmax(0, 1.22fr); gap: 8px; }
+.preview-task-actions button { min-width: 0; min-height: 46px; padding-inline: 10px; }
 .task-detail { gap: 9px; padding: 12px; box-shadow: none; }
 .task-detail-title { font-size: 17px; line-height: 1.25; }
 .task-detail .card-chips { flex-wrap: nowrap; overflow: hidden; }
