@@ -4880,8 +4880,9 @@ def test_notification_start_parameter_opens_the_target_task(mini_app_url: str) -
 
 
 @pytest.mark.browser_smoke
-def test_resumed_telegram_webview_returns_to_community_pulse(mini_app_url: str) -> None:
+def test_resumed_telegram_webview_preserves_task_draft(mini_app_url: str) -> None:
     init_data = "query_id=AAE&user=%7B%22id%22%3A1%7D&hash=proof"
+    category_id = "00000000-0000-0000-0000-000000000119"
     pulse = {
         "member_id": "00000000-0000-0000-0000-000000000001",
         "tracking_started_at": "2026-08-01T00:00:00Z",
@@ -4915,19 +4916,53 @@ def test_resumed_telegram_webview_returns_to_community_pulse(mini_app_url: str) 
             "**/api/v1/task-home",
             lambda route: route.fulfill(json=_task_home_payload(empty=True)),
         )
+        page.route(
+            "**/api/v1/task-creation",
+            lambda route: route.fulfill(
+                json={
+                    "categories": [
+                        {"id": category_id, "name": "Практическая помощь", "icon": "⭐"}
+                    ],
+                    "time_sizes": [
+                        {
+                            "value": "s",
+                            "label": "15-40 минут",
+                            "reward_options": [2, 3, 4],
+                            "minimum_reward": 2,
+                        }
+                    ],
+                    "draft": None,
+                    "preview": None,
+                    "needs_edit": False,
+                }
+            ),
+        )
         page.route("**/api/v1/community-stats/pulse?*", lambda route: route.fulfill(json=pulse))
 
         page.goto(mini_app_url)
         page.locator('[data-screen-id="P08"]').wait_for()
         page.locator("#catalog-nav").click()
         page.locator('[data-screen-id="UX02"][data-ui-engine="next-tasks-home"]').wait_for()
+        page.locator('[data-home-action="create"]').click()
+        page.locator('[data-screen-id="T05"]').wait_for()
+        page.get_by_role("button", name="Редактировать название", exact=True).click()
+        editor = page.get_by_role("dialog", name="Название", exact=True).get_by_label(
+            "Название: текст", exact=True
+        )
+        editor.fill("Черновик после сворачивания")
 
         page.evaluate("globalThis.__telegramHandlers.deactivated()")
-        page.evaluate("globalThis.__telegramHandlers.activated()")
+        page.evaluate("globalThis.__telegramHandlers.activated?.()")
 
-        page.locator('[data-screen-id="P08"]').wait_for()
-        assert page.get_by_role("button", name="Пульс").get_attribute("aria-pressed") == "true"
-        assert page.url.endswith("#/members?view_state=p08")
+        page.locator('[data-screen-id="T05"]').wait_for()
+        assert editor.input_value() == "Черновик после сворачивания"
+        assert page.url.endswith("#/compose/tasks?view_state=t05")
+
+        page.reload()
+        page.locator('[data-screen-id="T05"]').wait_for()
+        assert page.get_by_label("Название *", exact=True).input_value() == (
+            "Черновик после сворачивания"
+        )
         browser.close()
 
 

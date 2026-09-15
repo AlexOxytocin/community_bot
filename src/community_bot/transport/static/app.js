@@ -99,6 +99,7 @@ let screenRevision = 0;
 let currentMemberId = null;
 let currentMemberTimezone = "UTC";
 let activeProfileState = null;
+let activeTaskDraftPersistence = null;
 let memberProfileHasInternalHistory = false;
 let headerBackAction = null;
 let canGrantCredits = false;
@@ -1173,6 +1174,7 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
   };
   const localValues = readLocalDraft();
   const values = { ...draft.values };
+  let activeContentEditor = null;
   if (localValues) {
     for (const [name, value] of Object.entries(localValues)) {
       if (!["material_text", "materials_expanded", "city_input"].includes(name)) values[name] = value;
@@ -2129,6 +2131,7 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
       resize();
     };
     const dismiss = () => {
+      if (activeContentEditor?.editor === editor) activeContentEditor = null;
       backdrop.remove();
       trigger.focus({ preventScroll: true });
     };
@@ -2141,6 +2144,7 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
       source.setAttribute("aria-invalid", "false");
       trigger.setAttribute("aria-invalid", "false");
       form.querySelector(`[data-content-error="${name}"]`).classList.add("hidden");
+      activeContentEditor = null;
       persistDraft();
       dismiss();
     });
@@ -2169,6 +2173,7 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
     dialog.append(header, hint, editor, counter, done);
     backdrop.append(dialog);
     shell.append(backdrop);
+    activeContentEditor = { name, editor };
     sync();
     queueMicrotask(() => {
       editor.focus({ preventScroll: true });
@@ -2428,21 +2433,26 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
     syncFormat();
   });
   persistDraft = () => {
+    const contentValue = (name) => (
+      activeContentEditor?.name === name && activeContentEditor.editor.isConnected
+        ? activeContentEditor.editor.value
+        : form[name].value
+    );
     const snapshot = {
       task_kind: form.task_kind.value,
       performer_slots: form.task_kind.value === "solo" ? "1" : form.performer_slots.value,
       format: form.format.value,
       category_id: form.category_id.value,
-      title: form.title.value,
-      description: form.description.value,
-      completion_criteria: form.completion_criteria.value,
+      title: contentValue("title"),
+      description: contentValue("description"),
+      completion_criteria: contentValue("completion_criteria"),
       time_size: form.time_size.value,
       credit_reward_per_performer: form.credit_reward_per_performer.value,
       deadline_at: form.deadline_at.value,
       city: selectedCity,
       city_input: selectedCityLabel,
       city_timezone: selectedCityTimezone,
-      material_text: form.material_text.value,
+      material_text: contentValue("material_text"),
     };
     const key = localDraftKey();
     localDraftKeys.add(key);
@@ -2454,6 +2464,9 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
       localSaveStatus.textContent = "Автосохранение недоступно";
       localSaveStatus.classList.add("is-error");
     }
+  };
+  activeTaskDraftPersistence = () => {
+    if (form.isConnected) persistDraft();
   };
   const clearLocalDraft = () => {
     for (const key of localDraftKeys) {
@@ -2788,6 +2801,7 @@ const refreshMemberPhoto = async (memberId) => {
   for (const avatar of document.querySelectorAll(selector)) applyMemberPhoto(avatar, key, photoUrl);
 };
 
+globalThis.addEventListener("pagehide", () => activeTaskDraftPersistence?.());
 globalThis.addEventListener("pagehide", () => {
   for (const objectUrl of memberPhotoObjectUrls.values()) URL.revokeObjectURL(objectUrl);
   memberPhotoObjectUrls.clear();
@@ -10600,19 +10614,12 @@ async function loadWallet(route = "", push = true) {
   }
 }
 
-let telegramResumePending = false;
 const markTelegramDeactivated = () => {
-  if (globalThis.Telegram?.WebApp?.initData) telegramResumePending = true;
-};
-const restoreTelegramStartScreen = () => {
-  if (!telegramResumePending || !currentMemberId) return;
-  telegramResumePending = false;
-  if (location.hash !== presentationLocationFor("P08")) loadParticipants();
+  if (globalThis.Telegram?.WebApp?.initData) activeTaskDraftPersistence?.();
 };
 const telegramWebApp = globalThis.Telegram?.WebApp;
 if (typeof telegramWebApp?.onEvent === "function") {
   telegramWebApp.onEvent("deactivated", markTelegramDeactivated);
-  telegramWebApp.onEvent("activated", restoreTelegramStartScreen);
 }
 
 catalogNav.addEventListener("click", () => void loadTaskHome());
@@ -10621,7 +10628,6 @@ document.addEventListener("visibilitychange", () => {
     markTelegramDeactivated();
     return;
   }
-  if (document.visibilityState === "visible") restoreTelegramStartScreen();
   if (document.visibilityState === "visible" && location.hash === "#/settings/notifications"
       && !content.querySelector("input:disabled")) {
     void loadCommunityPreferences("notifications", false);
