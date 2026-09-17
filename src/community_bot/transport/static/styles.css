@@ -1324,8 +1324,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .preview-task-card > .section { gap: 3px; padding-top: 8px; border-top: 1px solid var(--app-border); }
 .preview-task-card > .section h3 { font-size: 12px; }
 .preview-task-card > .section p { margin: 0; font-size: 12px; line-height: 1.35; }
-.preview-task-actions { display: grid; grid-template-columns: minmax(0, .78fr) minmax(0, 1.22fr); gap: 8px; }
-.preview-task-actions button { min-width: 0; min-height: 46px; padding-inline: 10px; }
+.preview-task-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.preview-task-actions button { min-width: 0; min-height: 46px; padding: 8px 9px; font-size: 12px; line-height: 1.15; white-space: normal; }
 .task-detail { gap: 9px; padding: 12px; box-shadow: none; }
 .task-detail-title { font-size: 17px; line-height: 1.25; }
 .task-detail .card-chips { flex-wrap: nowrap; overflow: hidden; }
@@ -1336,6 +1336,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .task-detail > .section { gap: 3px; }
 .task-detail > .section h3 { font-size: 12px; }
 .task-detail > .section p { margin: 0; font-size: 12px; line-height: 1.35; }
+.task-material-link { min-width: 0; color: var(--app-accent); font-size: 12px; font-weight: 750; line-height: 1.35; overflow-wrap: anywhere; text-underline-offset: 2px; }
+.assignment-detail-section > .task-material-link { color: var(--app-accent); font-size: 12px; line-height: 1.35; }
 .task-detail > .status.hidden { display: none; }
 .task-detail-screen .screen { gap: 9px; padding-top: 12px; }
 .task-detail-screen .screen-heading { gap: 8px; }

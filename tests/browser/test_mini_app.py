@@ -5356,6 +5356,8 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
     other_assignment_id = "00000000-0000-0000-0000-000000000056"
     assignment_title = "Помочь с планом"  # noqa: RUF001
     other_assignment_title = "Проверить другой план"
+    safe_material_text = "example.com/material"
+    safe_material_url = "https://example.com/material"
     deadline = "2026-08-21T20:00:00Z"
     private_value = "PRIVATE-REVIEWER-42"
     with sync_playwright() as playwright:
@@ -5367,6 +5369,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         page.on("request", lambda request: requests.append(request.url))
         page.add_init_script(
             """
+            globalThis.openedLinks = [];
             globalThis.Telegram = {WebApp: {
               colorScheme: "light",
               themeParams: {
@@ -5374,7 +5377,8 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                 text_color: "invalid", hint_color: "#444444",
                 button_color: "#555555", button_text_color: "#666666"
               },
-              ready() {}, expand() {}
+              ready() {}, expand() {},
+              openLink(value) { globalThis.openedLinks.push(value); }
             }};
             """
         )
@@ -5414,7 +5418,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                         {
                             "id": other_task_id,
                             "origin": "community",
-                            "author_display_name": "Сообщество",
+                            "author_display_name": "Кристина",
                             "category_name": None,
                             "category_icon": None,
                             "task_kind": None,
@@ -5423,7 +5427,7 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                             "description": "Вторая карточка",
                             "completion_criteria": "План проверен",
                             "performer_instructions": "Сверить шаги",
-                            "materials": {},
+                            "materials": {"text": safe_material_text},
                             "public_input": {},
                             "credit_reward_per_performer": 2,
                             "performer_slots": 1,
@@ -5509,6 +5513,15 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
                     "description": "Собрать план",
                     "performer_instructions": "Проверить шаги",
                     "completion_criteria": "План понятен",
+                    "materials": (
+                        {"text": safe_material_text}
+                        if is_other
+                        else {"url": javascript_url, "text": malicious}
+                    ),
+                    "task_creator_id": (
+                        "00000000-0000-0000-0000-000000000098" if is_other else None
+                    ),
+                    "task_author_display_name": "Кристина" if is_other else "Мария",
                     "reward_per_performer": 3,
                     "format": "online",
                     "city": None,
@@ -5594,16 +5607,25 @@ def test_catalog_detail_accept_is_literal_and_confirmed(  # noqa: PLR0915
         page.locator('[data-screen-id="T01"]').wait_for()
         page.get_by_role("button", name=other_assignment_title).click()
         other_detail = page.locator("article.detail")
-        assert other_detail.get_by_text("Сообщество", exact=True).count() == 1
+        assert other_detail.get_by_text("Кристина", exact=True).count() == 1
         assert other_detail.get_by_text("Онлайн", exact=True).count() == 1
         assert other_detail.locator(".card-chips .chip").all_inner_texts() == ["Онлайн"]
         assert other_detail.locator(".task-detail-meta dt", has_text="Город").count() == 0
+        material_link = other_detail.get_by_role("link", name=safe_material_text, exact=True)
+        assert material_link.get_attribute("href") == safe_material_url
+        material_link.click()
+        assert page.evaluate("globalThis.openedLinks") == [safe_material_url]
         assert "undefined" not in other_detail.inner_text()
         assert "null" not in other_detail.inner_text()
         accepted_before = len(accepted_tasks)
         page.get_by_role("button", name="Принять задание").click()
         _connected_control(page, "PE-024", "authoritative_accept_success").click()
         page.get_by_role("heading", name=other_assignment_title).wait_for()
+        assignment_detail = page.locator("article.assignment-detail")
+        assert assignment_detail.get_by_text("Кристина", exact=True).count() == 1
+        assert assignment_detail.get_by_role(
+            "link", name=safe_material_text, exact=True
+        ).is_visible()
         assert len(accepted_tasks) == accepted_before + 1
         page.get_by_role("button", name="Назад").click()
         page.locator('[data-screen-id="M01"]').wait_for()
@@ -7885,7 +7907,7 @@ def test_context_transitions_reset_both_scroll_axes_at_supported_viewports(
         browser.close()
 
 
-def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR0915
+def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: C901, PLR0915
     mini_app_url: str,
 ) -> None:
     draft_id = "00000000-0000-0000-0000-000000000070"
@@ -8283,6 +8305,12 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         deadline_dialog.get_by_label("Время срока", exact=True).fill("20:00")
         deadline_dialog.get_by_role("button", name="Готово", exact=True).click()
         assert page.get_by_label("Срок *", exact=True).input_value() == "2099-08-22T20:00"
+        _fill_creation_content(
+            page,
+            trigger="Редактировать материалы",
+            dialog="Материалы",
+            value="example.com/source",
+        )
         assert page.locator("#app").evaluate("node => node.scrollTop === 0")
         page.locator(".screen").evaluate("node => node.scrollTo({ top: 0, behavior: 'instant' })")
         assert page.locator(".screen-heading").evaluate(
@@ -8295,10 +8323,28 @@ def test_task_creation_recovers_preview_and_back_never_restarts(  # noqa: PLR091
         preview_form = commands[-1][2]["form"]
         assert isinstance(preview_form, dict)
         assert preview_form["deadline_at"] == "2099-08-22T23:00:00.000Z"
+        assert preview_form["materials"] == {"url": "https://example.com/source"}
+        assert page.get_by_role("link", name="https://example.com/source", exact=True).is_visible()
         publish = page.get_by_role("button", name="Опубликовать", exact=True)
         edit_preview = page.get_by_role("button", name="Редактировать", exact=True)
         assert publish.evaluate("node => node.parentElement.matches('.preview-task-actions')")
         assert edit_preview.evaluate("node => node.parentElement.matches('.preview-task-actions')")
+        for width in (320, 375, 390):
+            page.set_viewport_size({"width": width, "height": 812})
+            geometry = page.locator(".preview-task-actions").evaluate(
+                """node => {
+                  const [edit, publish] = node.querySelectorAll('button');
+                  const parent = node.getBoundingClientRect();
+                  const left = edit.getBoundingClientRect();
+                  const right = publish.getBoundingClientRect();
+                  return {
+                    separated: left.right <= right.left,
+                    contained: left.left >= parent.left && right.right <= parent.right,
+                  };
+                }"""
+            )
+            assert geometry == {"separated": True, "contained": True}
+        page.set_viewport_size({"width": 375, "height": 812})
         assert page.url.endswith(f"#/compose/tasks/{draft_id}?view_state=t06")
         edit_preview.click()
         page.locator('[data-screen-id="T05"]').wait_for()

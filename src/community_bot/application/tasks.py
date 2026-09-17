@@ -1201,11 +1201,7 @@ class TaskService:
                 raise TaskError("Task preview is incomplete.")
             return TaskPreview(
                 draft,
-                (
-                    "Сообщество"
-                    if draft.origin == "community"
-                    else await uow.member_display_name(draft.creator_id)
-                ),
+                await uow.member_display_name(draft.creator_id),
                 None,
                 None,
                 None,
@@ -2384,11 +2380,7 @@ async def _freeform_preview(
     _validate_freeform_publishable(draft, category)
     return TaskPreview(
         draft,
-        (
-            "Сообщество"
-            if draft.origin == "community"
-            else await uow.member_display_name(draft.creator_id)
-        ),
+        await uow.member_display_name(draft.creator_id),
         category.name if category else None,
         category.icon if category else None,
         draft.task_kind,

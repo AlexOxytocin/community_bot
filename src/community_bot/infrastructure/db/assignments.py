@@ -249,7 +249,10 @@ async def _cards(
         )
         .join(TaskModel, TaskModel.id == AssignmentModel.task_id)
         .join(performer, performer.id == AssignmentModel.performer_id)
-        .outerjoin(creator, creator.id == TaskModel.creator_id)
+        .outerjoin(
+            creator,
+            creator.id == func.coalesce(TaskModel.creator_id, TaskModel.created_by_admin_id),
+        )
         .outerjoin(
             ModerationCaseModel,
             ModerationCaseModel.assignment_id == AssignmentModel.id,
@@ -289,7 +292,7 @@ async def _cards(
                 task=published_task_from_model(task),
                 task_title=task.title,
                 task_origin=task.origin,
-                task_creator_id=task.creator_id,
+                task_creator_id=task.creator_id or task.created_by_admin_id,
                 task_creator_display_name=(
                     None if creator_display_name is None else str(creator_display_name)
                 ),

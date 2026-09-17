@@ -330,7 +330,7 @@ async def insert_published_task(
         community_approved_by_admin_id=(
             draft.community_approved_by_admin_id if community else None
         ),
-        author_display_name="Сообщество" if community else creator.display_name,
+        author_display_name=creator.display_name,
         category_id=category_id,
         time_size=None if draft.time_size is None else draft.time_size.value,
         title=title,
@@ -357,8 +357,18 @@ async def insert_published_task(
 
 async def get_task(session: AsyncSession, task_id: uuid.UUID) -> PublishedTask | None:
     """Read one published task."""
-    model = await session.get(TaskModel, task_id)
-    return None if model is None else _task(model)
+    author = aliased(MemberModel)
+    row = (
+        await session.execute(
+            select(TaskModel, author.display_name)
+            .outerjoin(
+                author,
+                author.id == func.coalesce(TaskModel.creator_id, TaskModel.created_by_admin_id),
+            )
+            .where(TaskModel.id == task_id)
+        )
+    ).one_or_none()
+    return None if row is None else _task(row[0], author_display_name=row[1])
 
 
 async def member_display_name(session: AsyncSession, member_id: uuid.UUID) -> str:
@@ -601,7 +611,15 @@ async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inp
         ~already_assigned,
         test_scope,
     )
-    statement = select(TaskModel).where(*availability)
+    author = aliased(MemberModel)
+    statement = (
+        select(TaskModel, author.display_name)
+        .outerjoin(
+            author,
+            author.id == func.coalesce(TaskModel.creator_id, TaskModel.created_by_admin_id),
+        )
+        .where(*availability)
+    )
     if cursor_task_id is not None:
         cursor = await session.scalar(
             select(TaskModel).where(TaskModel.id == cursor_task_id, *availability)
@@ -610,12 +628,12 @@ async def list_available_tasks(  # noqa: PLR0913 - explicit discovery policy inp
             statement = statement.where(
                 tuple_(TaskModel.created_at, TaskModel.id) < (cursor.created_at, cursor.id)
             )
-    models = (
-        await session.scalars(
+    rows = (
+        await session.execute(
             statement.order_by(TaskModel.created_at.desc(), TaskModel.id.desc()).limit(limit)
         )
     ).all()
-    return tuple(_task(model) for model in models)
+    return tuple(_task(model, author_display_name=name) for model, name in rows)
 
 
 async def add_task_outbox(
@@ -690,7 +708,7 @@ def _draft(model: TaskCreationDraftModel) -> TaskDraft:
     )
 
 
-def _task(model: TaskModel) -> PublishedTask:
+def _task(model: TaskModel, *, author_display_name: str | None = None) -> PublishedTask:
     stored_public_keys = model.safety_snapshot_json.get("public_input_keys")
     public_input_keys = (
         tuple(stored_public_keys)
@@ -708,7 +726,7 @@ def _task(model: TaskModel) -> PublishedTask:
         created_by_admin_id=model.created_by_admin_id,
         reviewer_admin_id=model.reviewer_admin_id,
         origin=model.origin,
-        author_display_name=model.author_display_name,
+        author_display_name=author_display_name or model.author_display_name,
         template_id=model.template_id,
         template_version=model.template_version,
         category_id=model.category_id,

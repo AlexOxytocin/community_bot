@@ -805,6 +805,7 @@ class AssignmentDetailDto(AssignmentCardDto):
     description: str
     performer_instructions: str
     completion_criteria: str
+    materials: dict[str, str]
     reward_per_performer: int
     format: str
     city: str | None
@@ -4098,6 +4099,11 @@ def _assignment_detail_dto(card: AssignmentCard) -> AssignmentDetailDto:
         description=task.description,
         performer_instructions=task.performer_instructions,
         completion_criteria=task.completion_criteria,
+        materials={
+            key: value
+            for key in ("text", "url")
+            if isinstance((value := task.materials.get(key)), str)
+        },
         reward_per_performer=task.credit_reward_per_performer,
         submission_contract=cast('Literal["freeform_result_v1"] | None', card.submission_contract),
         can_submit=card.can_submit,

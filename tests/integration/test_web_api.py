@@ -1943,7 +1943,7 @@ async def test_community_task_creation_and_moderation_are_permission_scoped(
         preview = (await creator_client.get("/api/v1/task-creation")).json()
         assert preview["draft"]["origin"] == "community"
         assert preview["preview"]["origin"] == "community"
-        assert preview["preview"]["author_display_name"] == "Сообщество"
+        assert preview["preview"]["author_display_name"] == creator.display_name
         assert preview["preview"]["reward_total"] == 0
         published = await creator_client.post(
             "/api/v1/task-creation",
@@ -1994,7 +1994,7 @@ async def test_community_task_creation_and_moderation_are_permission_scoped(
             task.community_approved_by_admin_id,
             task.author_display_name,
             task.reserved_credit_total,
-        ) == ("community", None, creator.id, None, creator.id, "Сообщество", 0)
+        ) == ("community", None, creator.id, None, creator.id, creator.display_name, 0)
         assignment = AssignmentModel(
             task_id=task.id,
             performer_id=performer.id,
@@ -3629,6 +3629,14 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         first_assignment: AssignmentModel | None = None
         for index in range(52):
             task = task_row(f"Active assignment {index:02d}")
+            if index == 0:
+                task.origin = "community"
+                task.template_id = None
+                task.creator_id = None
+                task.created_by_admin_id = _author.id
+                task.community_approved_by_admin_id = _author.id
+                task.author_display_name = "Сообщество"
+                task.reserved_credit_total = 0
             session.add(task)
             await session.flush()
             assignment = AssignmentModel(
@@ -3794,6 +3802,7 @@ async def test_active_assignment_api_paginates_privately_without_effects(
             "description",
             "performer_instructions",
             "completion_criteria",
+            "materials",
             "reward_per_performer",
             "format",
             "city",
@@ -3806,6 +3815,9 @@ async def test_active_assignment_api_paginates_privately_without_effects(
         }
         assert detail.json()["result_summary"] == "Visible result"
         assert detail.json()["case_status"] == "open"
+        assert detail.json()["materials"] == {"text": "Visible material"}
+        assert detail.json()["task_creator_id"] == str(_author.id)
+        assert detail.json()["task_author_display_name"] == _author.display_name
         assert not any(
             marker in first.text + second.text + detail.text
             for marker in (

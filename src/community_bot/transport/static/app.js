@@ -221,6 +221,68 @@ const section = (heading, value) => {
   return node;
 };
 
+const safeExternalLink = (value) => {
+  const label = typeof value === "string" ? value.trim() : "";
+  if (!label) return null;
+  let candidate = label;
+  if (/^@[A-Za-z0-9_]{5,32}$/.test(label)) {
+    candidate = `https://t.me/${label.slice(1)}`;
+  } else if (!/^https?:\/\//i.test(label)) {
+    const webAddress = /^(?:www\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}(?::\d{1,5})?(?:[/?#]\S*)?$/;
+    if (!webAddress.test(label)) return null;
+    candidate = `https://${label}`;
+  }
+  try {
+    const parsed = new URL(candidate);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+      return null;
+    }
+    return { href: parsed.href, label, telegram: parsed.hostname === "t.me" };
+  } catch {
+    return null;
+  }
+};
+
+const materialPayload = (value) => {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  if (!candidate) return {};
+  const link = safeExternalLink(candidate);
+  return link ? { url: link.href } : { text: candidate };
+};
+
+const materialSection = (value) => {
+  const linkTarget = safeExternalLink(value);
+  if (!linkTarget) return section("Материал", String(value));
+  const node = element("section", undefined, "section");
+  const link = element("a", linkTarget.label, "task-material-link");
+  link.href = linkTarget.href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.addEventListener("click", (event) => {
+    if (
+      linkTarget.telegram
+      && typeof globalThis.Telegram?.WebApp?.openTelegramLink === "function"
+    ) {
+      event.preventDefault();
+      globalThis.Telegram.WebApp.openTelegramLink(linkTarget.href);
+    } else if (typeof globalThis.Telegram?.WebApp?.openLink === "function") {
+      event.preventDefault();
+      globalThis.Telegram.WebApp.openLink(linkTarget.href);
+    }
+  });
+  node.append(element("h3", "Материал"), link);
+  return node;
+};
+
+const appendTaskMaterials = (parent, materials, sectionClass = null) => {
+  const values = Object.values(materials || {}).filter((value) => typeof value === "string");
+  for (const value of new Set(values)) {
+    const node = materialSection(value);
+    if (sectionClass) node.classList.add(sectionClass);
+    parent.append(node);
+  }
+};
+
 const memberProfileButton = (memberId, displayName, role) => {
   const button = element("button", displayName, "assignment-detail-person-button");
   button.type = "button";
@@ -1123,6 +1185,7 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
       origin: state.preview.origin,
     }, { preview: true });
     card.append(section("Критерии", state.preview.completion_criteria));
+    appendTaskMaterials(card, values.materials);
     const actions = element("div", undefined, "preview-task-actions");
     const edit = element("button", "Редактировать", "secondary");
     edit.type = "button";
@@ -2495,7 +2558,7 @@ function showTaskCreation(state, forceEdit = false, editContext = null) {
     value.performer_slots = form.task_kind.value === "solo" ? "1" : form.performer_slots.value;
     if (form.format.value === "offline") value.city = selectedCity;
     else delete value.city;
-    const materials = value.material_text ? { text: value.material_text } : {};
+    const materials = materialPayload(value.material_text);
     delete value.material_text;
     try {
       let target = draft;
@@ -5619,9 +5682,7 @@ function showTaskDetail(task, push = true) {
   for (const [key, value] of Object.entries(task.public_input)) {
     detail.append(section(key, String(value)));
   }
-  for (const value of Object.values(task.materials)) {
-    detail.append(section("Материал", value));
-  }
+  appendTaskMaterials(detail, task.materials);
   replaceContent(connectedBoundary("T03", "content", detail));
   back.focus({ preventScroll: true });
 }
@@ -7328,6 +7389,7 @@ async function showAssignmentDetail(assignmentId, push = true, returnTo = null) 
       compactSection("Критерии приёмки", assignment.completion_criteria),
       compactSection("Как выполнить", assignment.performer_instructions),
     );
+    appendTaskMaterials(detailContent, assignment.materials, "assignment-detail-section");
     if (assignment.result_summary) {
       detailContent.append(compactSection("Последний результат", assignment.result_summary));
     }
