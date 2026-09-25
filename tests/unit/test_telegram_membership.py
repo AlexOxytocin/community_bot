@@ -7,9 +7,55 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.exceptions import TelegramRetryAfter, TelegramUnauthorizedError
 from aiogram.methods import GetChatMember
+from aiogram.types import ChatMemberRestricted, User
 
 from community_bot.application.membership import MembershipCheckUnavailableError
 from community_bot.infrastructure.telegram_membership import AiogramTelegramMembershipChecker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_member", [True, False])
+async def test_restricted_membership_uses_telegram_membership_flag(*, is_member: bool) -> None:
+    # Real aiogram response models carry a string status, not an enum singleton.
+    member = ChatMemberRestricted.model_validate(
+        {
+            "status": "restricted",
+            "user": User(id=42, is_bot=False, first_name="Alex"),
+            "is_member": is_member,
+            "until_date": 0,
+            **{
+                field: False
+                for field in ChatMemberRestricted.model_fields
+                if field.startswith("can_")
+            },
+        },
+    )
+    checker = object.__new__(AiogramTelegramMembershipChecker)
+    bot = AsyncMock()
+    bot.get_chat_member.return_value = member
+    checker._bot = bot  # noqa: SLF001
+
+    assert await checker.is_member(chat_id=-100123, telegram_user_id=42) is is_member
+    bot.get_chat_member.assert_awaited_once_with(chat_id=-100123, user_id=42)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("creator", True),
+        ("administrator", True),
+        ("member", True),
+        ("left", False),
+        ("kicked", False),
+    ],
+)
+async def test_other_membership_statuses(status: str, *, expected: bool) -> None:
+    checker = object.__new__(AiogramTelegramMembershipChecker)
+    bot = AsyncMock()
+    bot.get_chat_member.return_value = SimpleNamespace(status=status)
+    checker._bot = bot  # noqa: SLF001
+    assert await checker.is_member(chat_id=-100123, telegram_user_id=42) is expected
 
 
 @pytest.mark.asyncio
