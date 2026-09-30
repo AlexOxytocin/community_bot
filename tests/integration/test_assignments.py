@@ -8,6 +8,8 @@ import datetime
 from uuid import uuid4
 
 import pytest
+from ops.cancel_unpaid_community_task import ACTION as CANCEL_TEST_ACTION
+from ops.cancel_unpaid_community_task import cancel as cancel_unpaid_community_task
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -919,6 +921,108 @@ async def test_deadline_worker_settles_review_before_task_deadline(database_url:
         0
     ].status is AssignmentStatus.APPROVED
     await database.dispose()
+
+
+async def test_unpaid_community_test_cancellation_is_atomic_neutral_and_idempotent(
+    database_url: str,
+) -> None:
+    """Administrative cleanup preserves balances/history and records one neutral terminal fact."""
+    database = Database(database_url)
+    try:
+        owner, task_id = await _community_task(database, update_base=4165)
+        performer = await prepare_member(database, telegram_user_id=4166)
+        async with database.session_factory.begin() as session:
+            admin = await session.get(MemberModel, owner.id)
+            assert admin is not None
+            admin.permissions_json = ["superadministrator"]
+        service = AssignmentService(database.unit_of_work)
+        assignment = await service.accept(
+            AcceptAssignmentCommand(416_500, performer.telegram_user_id, task_id)
+        )
+        await service.submit(
+            SubmitResultCommand(
+                416_501,
+                performer.telegram_user_id,
+                assignment.id,
+                uuid4(),
+                {
+                    "summary": "Verified the task link and sent a screenshot.",
+                    "findings": ["The material link opens correctly."],
+                    "evidence": [],
+                },
+            )
+        )
+        submitted = (await service.list_owned(performer.telegram_user_id))[0]
+        assert submitted.review_deadline_at is not None
+        waiting = await service.finalize_review(
+            assignment_id=assignment.id,
+            command_id=uuid4(),
+            now=submitted.review_deadline_at,
+        )
+        assert waiting.status is AssignmentStatus.REVIEWER_REQUIRED
+        async with database.session_factory() as session:
+            member_before = await session.get(MemberModel, performer.id)
+            assert member_before is not None
+            balance_before = member_before.credit_balance_cached
+        arguments = {"task_id": task_id, "expected_title": "Задание сообщества"}
+        preview = await cancel_unpaid_community_task(database, **arguments, apply=False)
+        assert preview["status"] == "dry_run"
+        assert preview["ledger_entries"] == 0
+        assert (await service.list_owned(performer.telegram_user_id))[
+            0
+        ].status is AssignmentStatus.REVIEWER_REQUIRED
+        async with database.session_factory.begin() as session:
+            stored = await session.get(AssignmentModel, assignment.id)
+            assert stored is not None
+            stored.slot_ever_paid = True
+        with pytest.raises(ValueError, match="economic history"):
+            await cancel_unpaid_community_task(database, **arguments, apply=True)
+        async with database.session_factory.begin() as session:
+            stored = await session.get(AssignmentModel, assignment.id)
+            assert stored is not None
+            stored.slot_ever_paid = False
+        first, replay = await asyncio.gather(
+            cancel_unpaid_community_task(database, **arguments, apply=True),
+            cancel_unpaid_community_task(database, **arguments, apply=True),
+        )
+        assert {first["status"], replay["status"]} == {"cancelled", "already_cancelled"}
+        async with database.session_factory() as session:
+            task = await session.get(TaskModel, task_id)
+            stored = await session.get(AssignmentModel, assignment.id)
+            member = await session.get(MemberModel, performer.id)
+            assert task is not None
+            assert task.status == "cancelled"
+            assert stored is not None
+            assert stored.status == "cancelled"
+            assert member is not None
+            assert member.credit_balance_cached == balance_before
+            assert (
+                await session.scalar(
+                    select(func.count(AccountTransactionModel.id)).where(
+                        AccountTransactionModel.task_id == task_id,
+                    )
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    select(func.count(AuditEventModel.id)).where(
+                        AuditEventModel.action == CANCEL_TEST_ACTION,
+                        AuditEventModel.entity_id == str(task_id),
+                    )
+                )
+                == 1
+            )
+            facts = (
+                await session.scalars(
+                    select(ReliabilityEventModel.event_type).where(
+                        ReliabilityEventModel.assignment_id == assignment.id,
+                    )
+                )
+            ).all()
+            assert sorted(facts) == ["accepted", "cancelled_creator"]
+    finally:
+        await database.dispose()
 
 
 async def test_deadline_worker_refunds_rejection_once_and_preserves_dispute(
