@@ -211,6 +211,7 @@ async def complete_freeform_preview(  # noqa: PLR0913
     time_size: TaskTimeSize = TaskTimeSize.S,
     performer_slots: int = 1,
     reward: int = 3,
+    deadline_at: datetime.datetime | None = None,
 ) -> tuple[UUID, int]:
     draft = await service.start(
         update_id=update_base,
@@ -240,7 +241,7 @@ async def complete_freeform_preview(  # noqa: PLR0913
             (TaskDraftStep.MATERIALS, {"text": "Дополнительные материалы не требуются"}),
             (
                 TaskDraftStep.DEADLINE,
-                datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1),
+                deadline_at or datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1),
             ),
             (TaskDraftStep.FORMAT, (TaskFormat.ONLINE, None)),
         ]

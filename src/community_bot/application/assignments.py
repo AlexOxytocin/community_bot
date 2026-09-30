@@ -355,9 +355,11 @@ class AssignmentUnitOfWorkFactory(Protocol):  # pragma: no cover - structural ty
 
 
 class AssignmentDeadlineSource(Protocol):  # pragma: no cover - structural typing contract.
-    """List bounded tasks whose deadline has arrived."""
+    """List bounded batches for each independent lifecycle deadline."""
 
     async def due_task_ids(self, *, now: datetime.datetime, limit: int) -> Sequence[UUID]: ...
+    async def due_review_ids(self, *, now: datetime.datetime, limit: int) -> Sequence[UUID]: ...
+    async def due_rejection_ids(self, *, now: datetime.datetime, limit: int) -> Sequence[UUID]: ...
 
 
 class AssignmentDeadlineWorker:
@@ -375,7 +377,7 @@ class AssignmentDeadlineWorker:
         self._batch_size = batch_size
 
     async def tick(self, *, now: datetime.datetime) -> int:
-        """Finalize one bounded due-task batch and return its task count."""
+        """Process up to batch_size per deadline kind; return attempted finalizations."""
         task_ids = await self._source.due_task_ids(now=now, limit=self._batch_size)
         for task_id in task_ids:
             await self._service.finalize_deadline(
@@ -383,7 +385,21 @@ class AssignmentDeadlineWorker:
                 command_id=UUID(int=task_id.int ^ int(now.timestamp())),
                 now=now,
             )
-        return len(task_ids)
+        review_ids = await self._source.due_review_ids(now=now, limit=self._batch_size)
+        for assignment_id in review_ids:
+            await self._service.finalize_review(
+                assignment_id=assignment_id,
+                command_id=UUID(int=assignment_id.int ^ int(now.timestamp())),
+                now=now,
+            )
+        rejection_ids = await self._source.due_rejection_ids(now=now, limit=self._batch_size)
+        for assignment_id in rejection_ids:
+            await self._service.finalize_rejection(
+                assignment_id=assignment_id,
+                command_id=UUID(int=assignment_id.int ^ int(now.timestamp())),
+                now=now,
+            )
+        return len(task_ids) + len(review_ids) + len(rejection_ids)
 
 
 class AssignmentService:

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from community_bot.application.assignments import (
     AcceptAssignmentCommand,
+    AssignmentDeadlineWorker,
     AssignmentService,
     BeginSubmissionCommand,
     ConfirmSubmissionDraftCommand,
@@ -30,6 +31,7 @@ from community_bot.domain.assignments import (
     SubmissionDraft,
 )
 from community_bot.domain.members import MemberRole
+from community_bot.domain.tasks import TaskKind
 from community_bot.infrastructure.db.assignment_deadlines import (
     PostgresAssignmentDeadlineSource,
 )
@@ -80,7 +82,13 @@ async def _published_task(database: Database, *, update_base: int, performer_slo
     return author, task
 
 
-async def _freeform_task(database: Database, *, update_base: int):  # noqa: ANN202
+async def _freeform_task(  # noqa: ANN202
+    database: Database,
+    *,
+    update_base: int,
+    performer_slots: int = 1,
+    deadline_at: datetime.datetime | None = None,
+):
     author = await prepare_member(database, telegram_user_id=update_base)
     service = TaskService(database.unit_of_work)
     draft_id, revision = await complete_freeform_preview(
@@ -88,6 +96,9 @@ async def _freeform_task(database: Database, *, update_base: int):  # noqa: ANN2
         member=author,
         selected_category_id=await category_id(database, "evaluation_testing"),
         update_base=update_base * 10,
+        kind=TaskKind.GROUP if performer_slots > 1 else TaskKind.SOLO,
+        performer_slots=performer_slots,
+        deadline_at=deadline_at,
     )
     return author, await service.publish(
         PublishTaskCommand(update_base * 10 + 20, author.telegram_user_id, draft_id, revision)
@@ -739,7 +750,7 @@ async def test_reject_then_dispute_persists_private_handoff(database_url: str) -
 
 
 async def test_review_and_deadline_finalizers_are_idempotent(database_url: str) -> None:
-    """Scheduler boundaries settle submitted and no-show slots exactly once."""
+    """Worker recovers overdue reviews without duplicate rewards or no-show penalties."""
     database = Database(database_url)
     _author, task = await _published_task(database, update_base=3800)
     performer = await prepare_member(database, telegram_user_id=3900)
@@ -757,19 +768,54 @@ async def test_review_and_deadline_finalizers_are_idempotent(database_url: str) 
     )
     stored = (await service.list_owned(performer.telegram_user_id))[0]
     assert stored.review_deadline_at is not None
-    command_id = uuid4()
-    approved = await service.finalize_review(
-        assignment_id=assignment.id,
-        command_id=command_id,
-        now=stored.review_deadline_at,
+    source = PostgresAssignmentDeadlineSource(database.session_factory)
+    worker = AssignmentDeadlineWorker(source, service)
+    before = stored.review_deadline_at - datetime.timedelta(microseconds=1)
+    assert await source.due_review_ids(now=before, limit=25) == ()
+    assert await source.due_review_ids(now=stored.review_deadline_at, limit=25) == (assignment.id,)
+    # Task deadline passes first: a submitted result must survive without no_show.
+    await worker.tick(now=before)
+    pending_review = (await service.list_owned(performer.telegram_user_id))[0]
+    assert pending_review.status is AssignmentStatus.SUBMITTED
+    await asyncio.gather(
+        worker.tick(now=stored.review_deadline_at),
+        worker.tick(now=stored.review_deadline_at),
     )
-    replay = await service.finalize_review(
-        assignment_id=assignment.id,
-        command_id=command_id,
-        now=stored.review_deadline_at,
-    )
-    assert approved.status is AssignmentStatus.APPROVED
-    assert replay.status is AssignmentStatus.APPROVED
+    assert await worker.tick(now=stored.review_deadline_at + datetime.timedelta(days=10)) == 0
+    async with database.session_factory() as session:
+        approved = await session.get(AssignmentModel, assignment.id)
+        completed = await session.get(TaskModel, task.id)
+        assert approved is not None
+        assert approved.status == "approved"
+        assert approved.terminal_outcome == "autoconfirmed"
+        assert completed is not None
+        assert completed.status == "completed"
+        assert (
+            await session.scalar(
+                select(func.count(AccountTransactionModel.id)).where(
+                    AccountTransactionModel.assignment_id == assignment.id,
+                    AccountTransactionModel.transaction_type == "task_reward_earned",
+                    AccountTransactionModel.credit_delta == task.credit_reward_per_performer,
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(OutboxEventModel.id)).where(
+                    OutboxEventModel.business_key == f"assignment:{assignment.id}:approved",
+                )
+            )
+            == 1
+        )
+        reliability = (
+            await session.scalars(
+                select(ReliabilityEventModel.event_type).where(
+                    ReliabilityEventModel.assignment_id == assignment.id,
+                )
+            )
+        ).all()
+        assert sorted(reliability) == ["accepted", "approved"]
 
     _other_author, other_task = await _published_task(database, update_base=4000)
     other = await prepare_member(database, telegram_user_id=4100)
@@ -839,6 +885,128 @@ async def test_deadline_worker_expires_unclaimed_task_and_refunds_reserve(
     assert refunds[0].credit_delta == task.reserved_credit_total
     assert refunds[0].task_id == task.id
     assert await source.due_task_ids(now=task.deadline_at, limit=25) == ()
+    await database.dispose()
+
+
+async def test_deadline_worker_settles_review_before_task_deadline(database_url: str) -> None:
+    """A long task deadline must not delay the independent 72-hour review window."""
+    database = Database(database_url)
+    _author, task = await _freeform_task(
+        database,
+        update_base=4160,
+        deadline_at=datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=14),
+    )
+    performer = await prepare_member(database, telegram_user_id=4161)
+    service = AssignmentService(database.unit_of_work)
+    assignment = await service.accept(
+        AcceptAssignmentCommand(416_100, performer.telegram_user_id, task.id)
+    )
+    await service.submit(
+        SubmitResultCommand(
+            416_101,
+            performer.telegram_user_id,
+            assignment.id,
+            uuid4(),
+            {"result": "Verified the task material and reported the result."},
+        )
+    )
+    stored = (await service.list_owned(performer.telegram_user_id))[0]
+    assert stored.review_deadline_at is not None
+    source = PostgresAssignmentDeadlineSource(database.session_factory)
+    assert await source.due_task_ids(now=stored.review_deadline_at, limit=25) == ()
+    assert await AssignmentDeadlineWorker(source, service).tick(now=stored.review_deadline_at) == 1
+    assert (await service.list_owned(performer.telegram_user_id))[
+        0
+    ].status is AssignmentStatus.APPROVED
+    await database.dispose()
+
+
+async def test_deadline_worker_refunds_rejection_once_and_preserves_dispute(
+    database_url: str,
+) -> None:
+    """The 24-hour boundary refunds only an undisputed rejection, even on replay."""
+    database = Database(database_url)
+    author, task = await _freeform_task(database, update_base=4170, performer_slots=2)
+    service = AssignmentService(database.unit_of_work)
+    rejected = []
+    performers = []
+    for offset in range(2):
+        performer = await prepare_member(database, telegram_user_id=4171 + offset)
+        performers.append(performer)
+        assignment = await service.accept(
+            AcceptAssignmentCommand(417_100 + offset * 10, performer.telegram_user_id, task.id)
+        )
+        await service.submit(
+            SubmitResultCommand(
+                417_101 + offset * 10,
+                performer.telegram_user_id,
+                assignment.id,
+                uuid4(),
+                {
+                    "summary": "A sufficiently detailed result summary.",
+                    "findings": [],
+                    "evidence": [],
+                },
+            )
+        )
+        rejected.append(
+            await service.decide(
+                DecideAssignmentCommand(
+                    417_102 + offset * 10,
+                    author.telegram_user_id,
+                    assignment.id,
+                    uuid4(),
+                    AssignmentDecision.REJECT,
+                    rejection_reason=AssignmentRejectionReason.NOT_COMPLETED,
+                )
+            )
+        )
+    source = PostgresAssignmentDeadlineSource(database.session_factory)
+    both_due = rejected[1].reject_dispute_deadline_at
+    assert both_due is not None
+    assert await source.due_rejection_ids(now=both_due, limit=1) == (rejected[0].id,)
+    assert await source.due_rejection_ids(now=both_due, limit=2) == tuple(
+        item.id for item in rejected
+    )
+    await service.dispute(
+        update_id=417_120,
+        actor_telegram_user_id=performers[1].telegram_user_id,
+        assignment_id=rejected[1].id,
+        command_id=uuid4(),
+        comment="Please review the evidence.",
+    )
+    now = rejected[0].reject_dispute_deadline_at
+    assert now is not None
+    assert (
+        await source.due_rejection_ids(
+            now=now - datetime.timedelta(microseconds=1),
+            limit=25,
+        )
+        == ()
+    )
+    assert await source.due_rejection_ids(now=now, limit=25) == (rejected[0].id,)
+    worker = AssignmentDeadlineWorker(source, service)
+    await asyncio.gather(worker.tick(now=now), worker.tick(now=now))
+    assert await worker.tick(now=now + datetime.timedelta(days=10)) == 0
+    async with database.session_factory() as session:
+        rows = (
+            await session.scalars(select(AssignmentModel).where(AssignmentModel.task_id == task.id))
+        ).all()
+        assert {item.id: item.status for item in rows} == {
+            rejected[0].id: "rejected",
+            rejected[1].id: "disputed",
+        }
+        refunds = (
+            await session.scalars(
+                select(AccountTransactionModel).where(
+                    AccountTransactionModel.task_id == task.id,
+                    AccountTransactionModel.transaction_type == "task_reward_refunded",
+                )
+            )
+        ).all()
+        assert len(refunds) == 1
+        assert refunds[0].assignment_id == rejected[0].id
+        assert refunds[0].credit_delta == task.credit_reward_per_performer
     await database.dispose()
 
 

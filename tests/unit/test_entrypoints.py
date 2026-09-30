@@ -151,6 +151,7 @@ def _worker_settings() -> SimpleNamespace:
         environment="test",
         release="test",
         bot_token=token,
+        telegram_bot_username="community_test_bot",
         notification_window_start_local=datetime.time(9),
         notification_window_end_local=datetime.time(21),
         worker_batch_size=10,

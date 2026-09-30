@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class PostgresAssignmentDeadlineSource:
-    """List every due task; the application service owns locking and settlement."""
+    """List due lifecycles; the application service owns locking and settlement."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         """Use the process-owned async session factory."""
@@ -43,6 +43,34 @@ class PostgresAssignmentDeadlineSource:
                     ),
                 )
                 .order_by(TaskModel.deadline_at, TaskModel.id)
+                .limit(limit)
+            )
+            return tuple(values)
+
+    async def due_review_ids(self, *, now: datetime.datetime, limit: int) -> tuple[UUID, ...]:
+        """Select overdue submitted results independently of the task deadline."""
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(AssignmentModel.id)
+                .where(
+                    AssignmentModel.status == "submitted",
+                    AssignmentModel.review_deadline_at <= now,
+                )
+                .order_by(AssignmentModel.review_deadline_at, AssignmentModel.id)
+                .limit(limit)
+            )
+            return tuple(values)
+
+    async def due_rejection_ids(self, *, now: datetime.datetime, limit: int) -> tuple[UUID, ...]:
+        """Select rejections whose dispute window ended without an open dispute."""
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(AssignmentModel.id)
+                .where(
+                    AssignmentModel.status == "rejected_pending_dispute",
+                    AssignmentModel.reject_dispute_deadline_at <= now,
+                )
+                .order_by(AssignmentModel.reject_dispute_deadline_at, AssignmentModel.id)
                 .limit(limit)
             )
             return tuple(values)
