@@ -5099,10 +5099,10 @@ function karmaForm(state, revision) {
   value.append(new Option("−1 · отрицательно", "-1"));
   value.value = draft.value;
   valueLabel.append(value);
-  const commentLabel = element("label", "Комментарий (10–300 символов)");
+  const commentLabel = element("label", "Комментарий (5–300 символов)");
   const comment = element("textarea");
   comment.required = true;
-  comment.minLength = 10;
+  comment.minLength = 5;
   comment.maxLength = 300;
   comment.value = draft.comment;
   commentLabel.append(comment);
@@ -5181,7 +5181,7 @@ function karmaForm(state, revision) {
       if (revision !== screenRevision) return;
       if (!retryableSubmissionError(error)) resetPendingAction();
       actionStatus.textContent = error?.status === 422
-        ? "Комментарий должен содержать от 10 до 300 символов."
+        ? "Комментарий должен содержать от 5 до 300 символов."
         : error?.status === 409
           ? draft.stage === "begin"
             ? "Оценка сейчас недоступна. Повторите попытку."

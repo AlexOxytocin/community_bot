@@ -36,8 +36,21 @@ def test_karma_payload_normalizes_and_validates_private_comment() -> None:
     assert normalize_karma_vote(1, "  useful   and clear  ") == (1, "useful and clear")
     with pytest.raises(ValueError, match="must be"):
         normalize_karma_vote(2, "useful and clear")
-    with pytest.raises(ValueError, match="length"):
-        normalize_karma_vote(1, "short")
+
+
+@pytest.mark.parametrize("comment", ["Круто", "a" * 9, "a" * 300])
+def test_karma_comment_accepts_five_to_300_characters(comment: str) -> None:
+    assert normalize_karma_vote(1, comment) == (1, comment)
+
+
+def test_karma_comment_counts_characters_after_whitespace_normalization() -> None:
+    assert normalize_karma_vote(1, "  a   bcd  ") == (1, "a bcd")
+
+
+@pytest.mark.parametrize("comment", ["", "   ", "abcd", " a   bc  ", "a" * 301])
+def test_karma_comment_rejects_normalized_lengths_outside_limits(comment: str) -> None:
+    with pytest.raises(ValueError, match="between 5 and 300 characters"):
+        normalize_karma_vote(1, comment)
 
 
 def test_profile_and_raw_permissions_use_the_exact_status_cross_product() -> None:
