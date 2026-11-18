@@ -12,7 +12,7 @@ from community_bot.domain.members import Member, MemberRole, MemberStatus
 if TYPE_CHECKING:
     from uuid import UUID
 
-MIN_KARMA_COMMENT_LENGTH = 10
+MIN_KARMA_COMMENT_LENGTH = 5
 MAX_KARMA_COMMENT_LENGTH = 300
 MIN_RELIABILITY_SAMPLE = 5
 KARMA_REVIEW_PERMISSION = "karma_review"
@@ -63,7 +63,7 @@ def normalize_karma_vote(value: int, comment: str) -> tuple[int, str]:
         raise ReputationError(message)
     normalized = " ".join(comment.split())
     if not MIN_KARMA_COMMENT_LENGTH <= len(normalized) <= MAX_KARMA_COMMENT_LENGTH:
-        message = "Karma comment length must be between 10 and 300 characters."
+        message = "Karma comment length must be between 5 and 300 characters."
         raise ReputationError(message)
     return value, normalized
 

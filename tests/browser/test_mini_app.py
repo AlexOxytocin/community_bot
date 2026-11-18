@@ -2013,8 +2013,11 @@ def test_ui_next_profile_secondary_titles_are_visually_hidden(
         browser.close()
 
 
+@pytest.mark.browser_smoke
+@pytest.mark.parametrize("viewport_width", [320, 390])
 def test_ui_next_member_profile_returns_to_participants(  # noqa: PLR0915
     mini_app_url: str,
+    viewport_width: int,
 ) -> None:
     me, member = _cache_profile()
     me["member_id"] = "viewer"
@@ -2040,7 +2043,7 @@ def test_ui_next_member_profile_returns_to_participants(  # noqa: PLR0915
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = _new_page(browser)
-        page.set_viewport_size({"width": 375, "height": 812})
+        page.set_viewport_size({"width": viewport_width, "height": 812})
         page.route("**/api/v1/me", lambda route: route.fulfill(json=me))
         page.route("**/api/v1/task-home", lambda route: route.fulfill(json=_task_home_payload()))
         page.route(
@@ -2088,8 +2091,15 @@ def test_ui_next_member_profile_returns_to_participants(  # noqa: PLR0915
         assert page.locator("#screen-title").text_content() == "Оценка кармы"
         assert page.locator("#screen-title").is_hidden()
         assert page.locator(".screen").get_attribute("aria-label") == "Оценка кармы"
-        comment = page.get_by_label(re.compile("^Комментарий"))
-        comment.fill("Полезное и внимательное взаимодействие")
+        comment = page.get_by_label("Комментарий (5\u2013300 символов)")
+        expect(comment).to_have_attribute("minlength", "5")
+        expect(comment).to_have_attribute("maxlength", "300")
+        comment.press_sequentially("Мало")
+        page.get_by_role("button", name="Подтвердить оценку", exact=True).click()
+        assert comment.evaluate("node => node.validity.tooShort")
+        assert page.locator(".screen").get_attribute("aria-label") == "Оценка кармы"
+        comment.fill("Круто")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="Подтвердить оценку", exact=True).click()
         assert page.locator("#screen-title").text_content() == "Подтвердить оценку"
         assert page.locator("#screen-title").is_hidden()
@@ -2101,7 +2111,7 @@ def test_ui_next_member_profile_returns_to_participants(  # noqa: PLR0915
         )
         page.get_by_role("button", name="Назад", exact=True).click()
         page.get_by_role("heading", name="Оценить взаимодействие", exact=True).wait_for()
-        assert comment.input_value() == "Полезное и внимательное взаимодействие"
+        assert comment.input_value() == "Круто"
         page.get_by_role("button", name="Подтвердить оценку", exact=True).click()
         page.get_by_role("button", name="Сохранить оценку", exact=True).click()
         page.locator('[data-screen-id="P04"]').wait_for()
